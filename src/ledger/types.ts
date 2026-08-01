@@ -49,6 +49,22 @@ export interface OperationFailedEvent extends BaseEvent {
   reason: string;
 }
 
+/**
+ * An event as supplied by a caller, before the log stamps schema version, time
+ * and tool version onto it.
+ *
+ * Written out per member rather than as `Omit<LedgerEvent, ...>`: Omit over a
+ * union collapses to the keys the members share, which would silently reject
+ * every event-specific field.
+ */
+type Draft<T extends BaseEvent> = Omit<T, 'v' | 'ts' | 'toolVersion'> & { ts?: number };
+
+export type LedgerEventInput =
+  | Draft<AccountLabelledEvent>
+  | Draft<FosteredEvent>
+  | Draft<ReturnedEvent>
+  | Draft<OperationFailedEvent>;
+
 /** A fostering that is currently in place, derived by folding the log. */
 export interface ActiveFostering {
   originSessionId: string;

@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { VERSION } from '../version.js';
-import type { LedgerEvent } from './types.js';
+import type { LedgerEvent, LedgerEventInput } from './types.js';
 
 export function defaultLedgerPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.FOSTER_HOME ?? path.join(homedir(), '.foster');
@@ -24,7 +24,7 @@ export class Ledger {
    * Records an event before the corresponding filesystem operation runs, so an
    * interrupted run leaves a trace of what was attempted.
    */
-  append(event: Omit<LedgerEvent, 'v' | 'ts' | 'toolVersion'> & Partial<Pick<LedgerEvent, 'ts'>>) {
+  append(event: LedgerEventInput): LedgerEvent {
     const full = {
       v: 1 as const,
       ts: event.ts ?? Date.now(),
