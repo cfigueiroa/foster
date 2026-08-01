@@ -26,9 +26,15 @@ export function makeStore(): StoreLayout {
   return store;
 }
 
+/**
+ * Builds a session fixture. `sessionId` may be given bare; the `local_` prefix the
+ * app uses is applied here so overrides cannot accidentally produce a filename the
+ * scanner ignores.
+ */
 export function session(overrides: Partial<CodeSessionData> = {}): CodeSessionData {
+  const { sessionId, ...rest } = overrides;
+  const bare = sessionId ?? '00000000-0000-4000-8000-00000000000a';
   return {
-    sessionId: `local_${overrides.sessionId ?? '00000000-0000-4000-8000-00000000000a'}`,
     cliSessionId: '00000000-0000-4000-8000-00000000000b',
     cwd: '/workspace/project',
     originCwd: '/workspace/project',
@@ -40,7 +46,8 @@ export function session(overrides: Partial<CodeSessionData> = {}): CodeSessionDa
     model: 'claude-sonnet-5',
     isArchived: false,
     completedTurns: 3,
-    ...overrides,
+    ...rest,
+    sessionId: bare.startsWith('local_') ? bare : `local_${bare}`,
   };
 }
 
