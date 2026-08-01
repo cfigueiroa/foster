@@ -12,7 +12,11 @@ export interface StoreConfig {
   /** The account whose directory the sidebar is currently populated from. */
   lastKnownAccountUuid?: string;
   locale?: string;
-  appVersion?: string;
+  /**
+   * The release the app's updater last saw. Not necessarily the running build —
+   * after an update is staged but before relaunch it runs ahead of it.
+   */
+  updaterLastSeenVersion?: string;
 }
 
 /**
@@ -33,7 +37,7 @@ export function readConfig(store: StoreLayout): StoreConfig {
     if (typeof value !== 'string') continue;
     if (key === 'lastKnownAccountUuid') out.lastKnownAccountUuid = value;
     if (key === 'locale') out.locale = value;
-    if (key === 'updaterLastSeenVersion') out.appVersion = value;
+    if (key === 'updaterLastSeenVersion') out.updaterLastSeenVersion = value;
   }
   return out;
 }

@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { VERSION } from '../version.js';
+import { SESSION_ID_PREFIX } from './naming.js';
 import type { AccountRef, CodeSessionData, Unfosterable } from './types.js';
 
 /** Marks a session in the sidebar as living under an account that is not its origin. */
 export const DEFAULT_PREFIX = '↪ ';
-
-const SESSION_ID_PREFIX = 'local_';
 
 /**
  * Every copy gets an identifier the server has never issued. That is what makes

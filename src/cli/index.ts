@@ -2,14 +2,20 @@
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
-import { candidateStoreRoots, listAccountDirs, resolveStore } from '../domain/paths.js';
+import {
+  candidateStoreRoots,
+  layoutFor,
+  listAccountDirs,
+  listAgentAccountDirs,
+  resolveStore,
+} from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
-import { scanAccount, scanStore, summarise } from '../store/scanner.js';
+import { scanAccount, summarise } from '../store/scanner.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince, type SessionFilter } from './filters.js';
 import { formatDate, outcomeLine, restartNotice, sessionLine, shortId } from './render.js';
@@ -37,21 +43,72 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   return { store, ledger };
 }
 
-/** The account the app currently populates its sidebar from. */
-function currentAccount(store: StoreLayout): AccountRef | undefined {
-  const uuid = readConfig(store).lastKnownAccountUuid;
-  if (!uuid) return undefined;
-  return listAccountDirs(store).find((account) => account.accountUuid === uuid);
+/**
+ * The account the app currently populates its sidebar from.
+ *
+ * The organization is only discoverable from a directory name, so a brand-new
+ * account — which has a config entry but no session directory yet — falls back to
+ * the agent-mode tree the app creates before any Code session exists.
+ */
+function currentAccount(
+  store: StoreLayout,
+  accounts: AccountRef[],
+  organizationUuid?: string,
+): AccountRef | undefined {
+  const accountUuid = readConfig(store).lastKnownAccountUuid;
+  if (!accountUuid) return undefined;
+  if (organizationUuid) return { accountUuid, organizationUuid };
+
+  return (
+    accounts.find((account) => account.accountUuid === accountUuid) ??
+    listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
+  );
 }
 
-function requireCurrentAccount(store: StoreLayout): AccountRef {
-  const account = currentAccount(store);
-  if (!account) {
+function requireCurrentAccount(
+  store: StoreLayout,
+  accounts: AccountRef[],
+  organizationUuid?: string,
+): AccountRef {
+  const account = currentAccount(store, accounts, organizationUuid);
+  if (account) return account;
+
+  const accountUuid = readConfig(store).lastKnownAccountUuid;
+  if (!accountUuid) {
     throw new Error(
       'Could not determine the account currently signed in. Open Claude Desktop once, then try again.',
     );
   }
-  return account;
+  throw new Error(
+    `Found the signed-in account ${shortId(accountUuid)}, but not its organization: this account has no session directory yet.\n` +
+      'Create one session in Claude Desktop so the directory exists, or pass --org <organizationUuid>.',
+  );
+}
+
+/**
+ * Resolve --from against the accounts on disk.
+ *
+ * A bare prefix match would silently foster from every account sharing those
+ * leading characters, and a typo would be indistinguishable from an empty
+ * result, so both are reported instead.
+ */
+function resolveSources(accounts: AccountRef[], prefix: string | undefined): AccountRef[] {
+  if (prefix === undefined) return accounts;
+
+  const matches = accounts.filter((account) => account.accountUuid.startsWith(prefix));
+  const distinct = new Set(matches.map((account) => account.accountUuid));
+
+  if (distinct.size === 0) throw new Error(`No account matches --from "${prefix}".`);
+  if (distinct.size > 1) {
+    // Full identifiers, not shortened ones: accounts that collide on a prefix
+    // usually collide on their first characters too, so an abbreviation here
+    // would print the same string twice and help nobody.
+    const names = [...distinct].map((uuid) => `  ${uuid}`).join('\n');
+    throw new Error(
+      `--from "${prefix}" is ambiguous: it matches ${distinct.size} accounts.\n${names}`,
+    );
+  }
+  return matches;
 }
 
 function filterFrom(opts: {
@@ -72,12 +129,11 @@ function filterFrom(opts: {
   return filter;
 }
 
-function selectionOptions(command: Command): Command {
+function filterOptions(command: Command): Command {
   return command
     .option('--title <text>', 'only sessions whose title contains this text')
     .option('--cwd <text>', 'only sessions whose working directory contains this text')
-    .option('--since <age>', 'only sessions active within this window, e.g. 30d')
-    .option('--all', 'include sessions that cannot appear in the sidebar');
+    .option('--since <age>', 'only sessions active within this window, e.g. 30d');
 }
 
 program
@@ -93,15 +149,18 @@ program
       process.exitCode = 1;
       return;
     }
-    const store = resolveStore(opts.store);
+    // Reuse the roots already probed rather than walking the package directory twice.
+    const store = opts.store ? resolveStore(opts.store) : layoutFor(roots[0]!);
     console.log(`  ${store.root}`);
     if (roots.length > 1)
       console.log(pc.yellow(`  (${roots.length} candidates found, using the first)`));
 
     const config = readConfig(store);
     console.log(pc.bold('App'));
-    console.log(`  version   ${config.appVersion ?? 'unknown'}`);
-    console.log(`  account   ${config.lastKnownAccountUuid ?? 'unknown'}`);
+    // This is the release the updater last saw, which can run ahead of the
+    // installed build, so it is labelled for what it is.
+    console.log(`  updater sees  ${config.updaterLastSeenVersion ?? 'unknown'}`);
+    console.log(`  account       ${config.lastKnownAccountUuid ?? 'unknown'}`);
 
     const app = inspectApp(store);
     console.log(pc.bold('State'));
@@ -139,15 +198,21 @@ program
     }
   });
 
-selectionOptions(program.command('list').description('list sessions available to foster')).action(
-  function (this: Command) {
+filterOptions(program.command('list').description('list sessions available to foster'))
+  .option('--all', 'also show sessions that could never appear in the sidebar')
+  .action(function (this: Command) {
     const { store } = context(this);
-    const current = currentAccount(store);
+    const accounts = listAccountDirs(store);
+    const current = currentAccount(store, accounts);
     const filter = filterFrom(this.opts());
 
+    // Filter by account before reading files: the current account holds the most
+    // sessions and every one of them would be discarded straight afterwards.
     const candidates = byRecency(
       applyFilter(
-        scanStore(store).filter((s) => s.account.accountUuid !== current?.accountUuid),
+        accounts
+          .filter((account) => account.accountUuid !== current?.accountUuid)
+          .flatMap((account) => scanAccount(store, account)),
         filter,
       ),
     );
@@ -159,29 +224,41 @@ selectionOptions(program.command('list').description('list sessions available to
 
     for (const session of candidates) console.log(sessionLine(session));
     console.log(pc.bold(`\n${candidates.length} session(s)`));
-  },
-);
+  });
 
-selectionOptions(
+filterOptions(
   program
     .command('foster')
     .description('copy sessions from another account into the current one')
     .option('--from <accountUuid>', 'origin account (defaults to every non-current account)')
+    .option('--org <organizationUuid>', 'target organization, for an account with no sessions yet')
     .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
     .option('--yes', 'skip the confirmation and write')
     .option('--dry-run', 'show what would happen and write nothing'),
 ).action(function (this: Command) {
   const { store, ledger } = context(this);
-  const opts = this.opts<{ from?: string; prefix: string; yes?: boolean; dryRun?: boolean }>();
-  const target = requireCurrentAccount(store);
-  const filter = filterFrom(this.opts());
+  const opts = this.opts<{
+    title?: string;
+    cwd?: string;
+    since?: string;
+    from?: string;
+    org?: string;
+    prefix: string;
+    yes?: boolean;
+    dryRun?: boolean;
+  }>();
 
-  const sources = listAccountDirs(store).filter(
-    (account) =>
-      account.accountUuid !== target.accountUuid &&
-      (!opts.from || account.accountUuid.startsWith(opts.from)),
+  const accounts = listAccountDirs(store);
+  const target = requireCurrentAccount(store, accounts, opts.org);
+  const filter = filterFrom(opts);
+
+  const sources = resolveSources(
+    accounts.filter((account) => account.accountUuid !== target.accountUuid),
+    opts.from,
   );
 
+  // Sessions that can never appear in the sidebar are always excluded here:
+  // offering them would only produce copies the app silently never lists.
   const candidates = byRecency(
     applyFilter(
       sources.flatMap((account) => scanAccount(store, account)),

@@ -61,17 +61,22 @@ it. For development, clone the repo and use `npm run dev -- <command>`.
 ## Usage
 
 ```bash
-foster doctor    # environment check: store location, app state, app version
+foster doctor    # environment check: store location, app state, whether it is running
 foster scan      # read-only discovery of accounts, organizations and sessions
-foster list      # what is on disk, and what is currently fostered
+foster list      # sessions from other accounts that are available to foster
 foster label     # give the opaque account UUIDs human names
-foster plan      # dry run: exactly what would be written, and where
-foster foster    # create the copies (asks for confirmation)
+foster foster    # create the copies
 foster return    # remove fostered copies, restoring the previous state
-foster status    # summary of active fosterings
+foster status    # what is currently fostered
 ```
 
-Every mutating command defaults to a dry run and requires explicit confirmation.
+`foster` and `return` are dry runs unless you pass `--yes`: they print exactly what
+would be written or removed and touch nothing. (`label` only records a name in
+foster's own ledger, so it writes immediately.)
+
+Narrow what gets fostered with `--title`, `--cwd`, `--since 30d` or `--from <accountUuid>`.
+Sessions that could never appear in the sidebar — scheduled tasks, and sessions that
+were never opened — are always excluded; `list --all` shows them anyway.
 
 ## Safety model
 

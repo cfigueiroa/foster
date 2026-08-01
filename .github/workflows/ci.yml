@@ -36,19 +36,29 @@ jobs:
         run: |
           set -uo pipefail
           status=0
+          scope=(-- . ':(exclude).github/workflows/ci.yml')
 
-          # Windows user profile paths of the maintainer (any C:\Users\<name> literal is suspect).
-          if git grep -nIE 'C:\\\\Users\\\\[A-Za-z0-9._-]+' -- . ':(exclude).github/workflows/ci.yml'; then
+          # Windows user-profile paths, in both the single-backslash form used in
+          # prose and the doubled form used inside string literals, plus the
+          # forward-slash spelling.
+          if git grep -nIiE 'C:[\\/]+Users[\\/]+[A-Za-z0-9._-]+' "${scope[@]}"; then
             echo "::error::Found a literal C:\\Users\\<name> path. Use a placeholder or resolve at runtime."
             status=1
           fi
 
-          # Bare UUIDs: account/organization/session identifiers must be synthetic and clearly fake.
-          # Synthetic fixtures use the reserved 0000.../1111... style, which this pattern ignores.
-          if git grep -nIE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
-               -- . ':(exclude).github/workflows/ci.yml' \
-             | grep -vE '(0{4,}|1{4,}|2{4,}|a{4,}|f{4,}|deadbeef|cafe)'; then
+          # Account/organization/session identifiers must be obviously synthetic.
+          #
+          # Each UUID is judged on its own: filtering whole lines would let a real
+          # identifier through whenever a synthetic one shared the line, and the
+          # match is case-insensitive so an uppercase UUID cannot slip past.
+          # Exclusions are long runs of one hex digit, which no real UUID contains.
+          uuid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+          if git grep -hoIiE "$uuid" "${scope[@]}" \
+             | grep -viE '(0{4,}|1{4,}|2{4,}|a{4,}|f{4,}|deadbeef)' \
+             | sort -u | grep .; then
             echo "::error::Found a realistic UUID. Fixtures must use obviously synthetic identifiers."
+            echo "::error::Locations:"
+            git grep -nIiE "$uuid" "${scope[@]}" || true
             status=1
           fi
 

@@ -1,7 +1,11 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { isDirectory, safeReaddir } from '../util/fs.js';
+import { sessionFileName, tombstoneFileName } from './naming.js';
 import type { AccountRef, StoreLayout } from './types.js';
+
+export { sessionFileName } from './naming.js';
 
 const CODE_SESSIONS = 'claude-code-sessions';
 const AGENT_SESSIONS = 'local-agent-mode-sessions';
@@ -64,10 +68,6 @@ export function accountDir(store: StoreLayout, account: AccountRef): string {
   return path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid);
 }
 
-export function sessionFileName(sessionId: string): string {
-  return `${sessionId}.json`;
-}
-
 export function sessionPath(store: StoreLayout, account: AccountRef, sessionId: string): string {
   return path.join(accountDir(store, account), sessionFileName(sessionId));
 }
@@ -78,15 +78,14 @@ export function sessionPath(store: StoreLayout, account: AccountRef, sessionId: 
  * later re-foster (verified), but they are useful to recognise while scanning.
  */
 export function tombstonePath(store: StoreLayout, account: AccountRef, id: string): string {
-  const bare = id.startsWith('local_') ? id.slice('local_'.length) : id;
-  return path.join(accountDir(store, account), `deleted_${bare}`);
+  return path.join(accountDir(store, account), tombstoneFileName(id));
 }
 
-/** Directory names that are account/organization UUIDs rather than app-internal folders. */
-export function listAccountDirs(store: StoreLayout): AccountRef[] {
+/** Account/organization pairs under an arbitrary <base>/<accountUuid>/<organizationUuid> tree. */
+export function listAccountDirsIn(base: string): AccountRef[] {
   const out: AccountRef[] = [];
-  for (const accountUuid of safeReaddir(store.codeSessionsDir)) {
-    const accountPath = path.join(store.codeSessionsDir, accountUuid);
+  for (const accountUuid of safeReaddir(base)) {
+    const accountPath = path.join(base, accountUuid);
     if (!isDirectory(accountPath)) continue;
     for (const organizationUuid of safeReaddir(accountPath)) {
       if (!isDirectory(path.join(accountPath, organizationUuid))) continue;
@@ -96,18 +95,15 @@ export function listAccountDirs(store: StoreLayout): AccountRef[] {
   return out;
 }
 
-function safeReaddir(dir: string): string[] {
-  try {
-    return readdirSync(dir);
-  } catch {
-    return [];
-  }
+export function listAccountDirs(store: StoreLayout): AccountRef[] {
+  return listAccountDirsIn(store.codeSessionsDir);
 }
 
-function isDirectory(target: string): boolean {
-  try {
-    return statSync(target).isDirectory();
-  } catch {
-    return false;
-  }
+/**
+ * Cowork sandboxes are not fosterable, but the app creates this tree for an
+ * account before any Code session exists — which makes it the only local way to
+ * learn a brand-new account's organization.
+ */
+export function listAgentAccountDirs(store: StoreLayout): AccountRef[] {
+  return listAccountDirsIn(store.agentSessionsDir);
 }

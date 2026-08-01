@@ -1,10 +1,11 @@
 import { mkdirSync } from 'node:fs';
-import { buildFosterCopy, DEFAULT_PREFIX, stripPrefix } from '../domain/fostering.js';
+import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey, stripPrefix } from '../domain/fostering.js';
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { isFostered, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
+import { errorMessage } from '../util/fs.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
 import { assertAppClosed } from './safety.js';
 
@@ -49,9 +50,18 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   const state = project(ledger.read());
   const outcomes: Outcome[] = [];
+  // The projection is a snapshot, so keys minted during this batch are tracked
+  // here too: the same origin session can appear twice in one run when it exists
+  // under two account directories, and without this both would be copied while
+  // the ledger fold kept only the last one — orphaning the first file.
+  const mintedInBatch = new Set<string>();
 
-  if (!dryRun && sessions.length > 0) guard(store);
-  if (!dryRun) mkdirSync(accountDir(store, target), { recursive: true });
+  if (dryRun || sessions.length === 0) {
+    // Nothing is written, so neither the gate nor the directory is needed.
+  } else {
+    guard(store);
+    mkdirSync(accountDir(store, target), { recursive: true });
+  }
 
   for (const session of sessions) {
     const title = session.data.title ?? '(untitled)';
@@ -67,7 +77,8 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    if (isFostered(state, originId, target)) {
+    const key = fosteringKey(originId, target);
+    if (isFostered(state, originId, target) || mintedInBatch.has(key)) {
       outcomes.push({
         originSessionId: originId,
         title,
@@ -86,8 +97,15 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     }
 
     try {
-      // Record intent before touching the filesystem, so an interrupted run still
-      // leaves a trace of what was attempted.
+      // The write happens first, and only a completed write is recorded.
+      //
+      // Logging intent up-front would be nicer for forensics, but a failed write
+      // would then leave a "fostered" event that the fold still counts as active
+      // (a "failed" event does not cancel it), so the session would be skipped as
+      // already fostered on every later run, with no file on disk. The reverse
+      // order is self-healing instead: a crash between write and append leaves a
+      // copy that carries its own _foster marker, which the scanner recognises.
+      writeFileAtomic(copyPath, JSON.stringify(copy));
       ledger.append({
         kind: 'fostered',
         originSessionId: originId,
@@ -98,10 +116,10 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         originalTitle: stripPrefix(session.data.title ?? '', prefix),
         prefix,
       });
-      writeFileAtomic(copyPath, JSON.stringify(copy));
+      mintedInBatch.add(key);
       outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       ledger.append({ kind: 'failed', operation: 'foster', originSessionId: originId, reason });
       outcomes.push({ originSessionId: originId, title, status: 'failed', detail: reason });
     }
@@ -159,7 +177,7 @@ export function returnFosterings(fosterings: ActiveFostering[], options: ReturnO
         copyPath: fostering.copyPath,
       });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const reason = errorMessage(error);
       ledger.append({
         kind: 'failed',
         operation: 'return',

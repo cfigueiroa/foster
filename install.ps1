@@ -54,7 +54,14 @@ try {
   Invoke-WebRequest -Uri $bundleUrl -OutFile $bundle -UseBasicParsing
 
   Write-Host "  verifying checksum" -ForegroundColor DarkGray
-  $expected = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content.Trim().Split()[0]
+  # GitHub serves release assets as application/octet-stream, for which
+  # Invoke-WebRequest returns Content as a byte array rather than a string, so it
+  # is decoded explicitly instead of being treated as text.
+  $checksumContent = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content
+  if ($checksumContent -is [byte[]]) {
+    $checksumContent = [System.Text.Encoding]::UTF8.GetString($checksumContent)
+  }
+  $expected = ([string]$checksumContent).Trim().Split()[0]
   $actual = (Get-FileHash -Path $bundle -Algorithm SHA256).Hash
 
   if ($actual -ne $expected.ToUpperInvariant()) {

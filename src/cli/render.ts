@@ -1,4 +1,5 @@
 import pc from 'picocolors';
+import { bareSessionId } from '../domain/naming.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { DiscoveredSession } from '../domain/types.js';
 
@@ -8,8 +9,7 @@ export function formatDate(ms: number | undefined): string {
 }
 
 export function shortId(id: string): string {
-  const bare = id.startsWith('local_') ? id.slice('local_'.length) : id;
-  return bare.slice(0, 8);
+  return bareSessionId(id).slice(0, 8);
 }
 
 export function sessionLine(session: DiscoveredSession): string {
