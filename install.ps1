@@ -1,0 +1,86 @@
+<#
+.SYNOPSIS
+  Installs foster — brings Claude Desktop Code sessions from a previous local
+  account back into the current account's sidebar.
+
+.DESCRIPTION
+  Intended to be run as:
+
+      irm https://raw.githubusercontent.com/cfigueiroa/foster/<tag>/install.ps1 | iex
+
+  The bundle is downloaded from a tagged GitHub release, never from a moving
+  branch, and its SHA256 is verified against the checksum published alongside it
+  before anything is written to disk or executed.
+#>
+[CmdletBinding()]
+param(
+  # Release tag to install. Overridable so a specific version can be pinned.
+  [string]$Version = 'v0.1.0',
+  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'foster')
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$repo = 'cfigueiroa/foster'
+$base = "https://github.com/$repo/releases/download/$Version"
+$bundleUrl = "$base/foster.js"
+$checksumUrl = "$base/foster.js.sha256"
+
+function Test-NodeVersion {
+  $node = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $node) {
+    throw "Node.js 20 or newer is required but was not found on PATH. Install it from https://nodejs.org and run this again."
+  }
+  $raw = (& node --version).TrimStart('v')
+  $major = [int]($raw -split '\.')[0]
+  if ($major -lt 20) {
+    throw "Node.js 20 or newer is required, but $raw is installed."
+  }
+  Write-Host "  Node.js $raw" -ForegroundColor DarkGray
+}
+
+Write-Host "Installing foster $Version" -ForegroundColor Cyan
+Test-NodeVersion
+
+# Download to a temporary location first: nothing lands in the install directory
+# until the integrity of the payload has been confirmed.
+$temp = Join-Path ([System.IO.Path]::GetTempPath()) ("foster-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $temp -Force | Out-Null
+
+try {
+  $bundle = Join-Path $temp 'foster.js'
+  Write-Host "  downloading bundle" -ForegroundColor DarkGray
+  Invoke-WebRequest -Uri $bundleUrl -OutFile $bundle -UseBasicParsing
+
+  Write-Host "  verifying checksum" -ForegroundColor DarkGray
+  $expected = (Invoke-WebRequest -Uri $checksumUrl -UseBasicParsing).Content.Trim().Split()[0]
+  $actual = (Get-FileHash -Path $bundle -Algorithm SHA256).Hash
+
+  if ($actual -ne $expected.ToUpperInvariant()) {
+    throw "Checksum mismatch. Expected $expected but the download hashed to $actual. Nothing was installed."
+  }
+
+  New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+  Copy-Item -Path $bundle -Destination (Join-Path $InstallDir 'foster.js') -Force
+
+  # A small shim so `foster` works as a command rather than `node <path>`.
+  $shim = Join-Path $InstallDir 'foster.cmd'
+  Set-Content -Path $shim -Encoding ASCII -Value @"
+@echo off
+node "%~dp0foster.js" %*
+"@
+
+  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+  if ($userPath -notlike "*$InstallDir*") {
+    [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallDir", 'User')
+    Write-Host "  added $InstallDir to your PATH (restart your terminal)" -ForegroundColor DarkGray
+  }
+
+  Write-Host ""
+  Write-Host "Installed to $InstallDir" -ForegroundColor Green
+  Write-Host "Start with:  foster doctor"
+}
+finally {
+  Remove-Item -Path $temp -Recurse -Force -ErrorAction SilentlyContinue
+}
