@@ -1,0 +1,57 @@
+{
+  "name": "@cfigueiroa/foster",
+  "version": "0.1.0",
+  "description": "Bring Claude Desktop Code sessions from a previous local account back into your current account's sidebar — non-destructively and reversibly.",
+  "keywords": [
+    "claude",
+    "claude-desktop",
+    "claude-code",
+    "sessions",
+    "cli"
+  ],
+  "homepage": "https://github.com/cfigueiroa/foster#readme",
+  "bugs": "https://github.com/cfigueiroa/foster/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cfigueiroa/foster.git"
+  },
+  "license": "MIT",
+  "author": "Caio Figueirôa",
+  "type": "module",
+  "bin": {
+    "foster": "dist/foster.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.11.0",
+    "commander": "^14.0.1",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "^9.39.1",
+    "prettier": "^3.6.2",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.7",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vitest": "^3.2.4"
+  }
+}
