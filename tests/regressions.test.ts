@@ -34,7 +34,6 @@ describe('the same origin session appearing twice in one batch', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      guard: () => {},
     });
 
     // Without in-batch tracking both would be written, and the ledger fold would
@@ -96,7 +95,6 @@ describe('the recorded original title', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      guard: () => {},
     });
 
     const fostered = ledger.read().find((event) => event.kind === 'fostered');
@@ -114,7 +112,6 @@ describe('the recorded original title', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      guard: () => {},
     });
 
     // '' is not nullish, so recording it defeated every `?? fallback` downstream.

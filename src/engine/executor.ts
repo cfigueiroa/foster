@@ -7,14 +7,7 @@ import { isFostered, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { errorMessage } from '../util/fs.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
-import { assertAppClosed } from './safety.js';
-
-/**
- * Refuses to proceed while Claude Desktop is running. Injectable so tests can
- * drive a synthetic store without being blocked by a real app on the machine —
- * production callers always get the real gate by default.
- */
-export type Guard = (store: StoreLayout) => void;
+import { assertRemovable, type RemovalGuard } from './safety.js';
 
 export interface FosterOptions {
   store: StoreLayout;
@@ -23,7 +16,6 @@ export interface FosterOptions {
   prefix?: string;
   /** When true, compute the plan without writing anything. */
   dryRun?: boolean;
-  guard?: Guard;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -46,7 +38,7 @@ export interface Outcome {
  * keyed on the origin session rather than on a file (every copy gets a new id).
  */
 export function fosterSessions(sessions: DiscoveredSession[], options: FosterOptions): Outcome[] {
-  const { store, ledger, target, dryRun = false, guard = assertAppClosed } = options;
+  const { store, ledger, target, dryRun = false } = options;
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   const state = project(ledger.read());
   const outcomes: Outcome[] = [];
@@ -56,12 +48,11 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // the ledger fold kept only the last one — orphaning the first file.
   const mintedInBatch = new Set<string>();
 
-  if (dryRun || sessions.length === 0) {
-    // Nothing is written, so neither the gate nor the directory is needed.
-  } else {
-    guard(store);
-    mkdirSync(accountDir(store, target), { recursive: true });
-  }
+  // No gate here on purpose. Every copy gets a session id the app has never seen,
+  // so a running app neither reads nor writes the file: it is invisible to the
+  // app until the app next initialises, and cannot collide with anything the app
+  // holds. See safety.ts for why removal is the asymmetric case.
+  if (!dryRun && sessions.length > 0) mkdirSync(accountDir(store, target), { recursive: true });
 
   for (const session of sessions) {
     const title = session.data.title ?? '(untitled)';
@@ -136,7 +127,12 @@ export interface ReturnOptions {
   store: StoreLayout;
   ledger: Ledger;
   dryRun?: boolean;
-  guard?: Guard;
+  /**
+   * Refuses to delete copies a running app is holding in memory. Injectable so
+   * tests can drive a synthetic store without a real app on the machine deciding
+   * whether they pass; production callers always get the real gate.
+   */
+  guard?: RemovalGuard;
 }
 
 /**
@@ -147,10 +143,10 @@ export interface ReturnOptions {
  * shared cliSessionId, which is avoidable noise in the account directory.
  */
 export function returnFosterings(fosterings: ActiveFostering[], options: ReturnOptions): Outcome[] {
-  const { store, ledger, dryRun = false, guard = assertAppClosed } = options;
+  const { store, ledger, dryRun = false, guard = assertRemovable } = options;
   const outcomes: Outcome[] = [];
 
-  if (!dryRun && fosterings.length > 0) guard(store);
+  if (!dryRun && fosterings.length > 0) guard(store, fosterings);
 
   for (const fostering of fosterings) {
     const title = fostering.originalTitle ?? fostering.originSessionId;

@@ -23,9 +23,9 @@ function seed(overrides: Partial<CodeSessionData> = {}) {
   return scanAccount(store, OLD_ACCOUNT);
 }
 
-/** Tests drive a synthetic store, so the real app-running gate is not the thing under test. */
+/** Tests drive a synthetic store, so the real removal gate is not the thing under test. */
 const noGuard = () => {};
-const opts = () => ({ store, ledger, target: NEW_ACCOUNT, guard: noGuard });
+const opts = () => ({ store, ledger, target: NEW_ACCOUNT });
 
 describe('fosterSessions', () => {
   it('writes a copy into the target account and leaves the original untouched', () => {
@@ -80,27 +80,6 @@ describe('fosterSessions', () => {
 
     expect(skipped!.status).toBe('skipped');
     expect(skipped!.detail).toContain('scheduled-task');
-  });
-
-  it('refuses to write when the app-running gate objects', () => {
-    const sessions = seed();
-    const refuse = () => {
-      throw new Error('Claude Desktop appears to be running');
-    };
-
-    expect(() => fosterSessions(sessions, { ...opts(), guard: refuse })).toThrow(/running/);
-    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(0);
-  });
-
-  it('does not consult the gate for a dry run', () => {
-    const sessions = seed();
-    const refuse = () => {
-      throw new Error('should not be called');
-    };
-
-    expect(() =>
-      fosterSessions(sessions, { ...opts(), guard: refuse, dryRun: true }),
-    ).not.toThrow();
   });
 
   it('writes nothing on a dry run', () => {
@@ -173,5 +152,34 @@ describe('returnFosterings', () => {
     const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
 
     expect(again[0]!.status).toBe('fostered');
+  });
+
+  it('refuses when the gate objects, and removes nothing', () => {
+    const sessions = seed();
+    const [fostered] = fosterSessions(sessions, opts());
+    const active = listActive(project(ledger.read()));
+    const refuse = () => {
+      throw new Error('Claude Desktop is running');
+    };
+
+    expect(() => returnFosterings(active, { store, ledger, guard: refuse })).toThrow(/running/);
+    expect(existsSync(fostered!.copyPath!)).toBe(true);
+  });
+
+  it('does not consult the gate for a dry run', () => {
+    const sessions = seed();
+    fosterSessions(sessions, opts());
+    const refuse = () => {
+      throw new Error('should not be called');
+    };
+
+    expect(() =>
+      returnFosterings(listActive(project(ledger.read())), {
+        store,
+        ledger,
+        guard: refuse,
+        dryRun: true,
+      }),
+    ).not.toThrow();
   });
 });
