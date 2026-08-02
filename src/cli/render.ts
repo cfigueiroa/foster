@@ -15,6 +15,27 @@ export function shortId(id: string): string {
 }
 
 /**
+ * How long ago, in words.
+ *
+ * Account identifiers are opaque, and "last used 7 months ago" is often the only
+ * thing that tells someone which of two UUIDs is the account they left behind.
+ * An exact date does not do that nearly as well.
+ */
+export function formatAge(ms: number | undefined, now: number = Date.now()): string {
+  if (!ms) return 'never used';
+  const days = Math.floor((now - ms) / 86_400_000);
+  if (days < 0) return 'just now';
+  if (days === 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 30) return `${days} days ago`;
+
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months} month${months === 1 ? '' : 's'} ago`;
+  const years = Math.floor(days / 365);
+  return `${years} year${years === 1 ? '' : 's'} ago`;
+}
+
+/**
  * Renders accounts with their organizations nested underneath.
  *
  * The store nests them — <accountUuid>/<organizationUuid>/ — and showing both at

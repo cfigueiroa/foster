@@ -1,8 +1,15 @@
-import { cancel, confirm, intro, isCancel, log, note, outro, select, text } from '@clack/prompts';
+import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@clack/prompts';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import { listAccountDirs, listAgentAccountDirs, pickActiveOrganization } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
+import {
+  DesktopControlError,
+  inspectDesktop,
+  quitDesktop,
+  startDesktop,
+  type DesktopState,
+} from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
@@ -13,37 +20,15 @@ import { scanAccount, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
-import { accountTree, formatDate, groupByAccount, outcomeLine, shortId } from './render.js';
-
-/** Sentinel returned by a step the user backed out of, so callers can return to the menu. */
-const BACK = Symbol('back');
-type Maybe<T> = T | typeof BACK;
-
-function aborted<T>(value: T | symbol): value is symbol {
-  return isCancel(value) || value === BACK;
-}
-
-/** The value carried by the "Back" entry; never leaves this module. */
-const BACK_OPTION = '__back';
-
-/**
- * A select that always answers in the same currency.
- *
- * Backing out used to be a string in the option list but a symbol in the return
- * type, so every caller had to remember to check for both. One that checked only
- * the symbol passed the literal "__back" downstream, where it was used as a
- * lookup key and crashed. Converting here means callers only ever see BACK.
- */
-async function selectOrBack(
-  message: string,
-  options: { value: string; label: string; hint?: string }[],
-): Promise<Maybe<string>> {
-  const picked = await select({
-    message,
-    options: [...options, { value: BACK_OPTION, label: pc.dim('Back') }],
-  });
-  return isCancel(picked) || picked === BACK_OPTION ? BACK : picked;
-}
+import { aborted, askText, BACK, type Maybe, pickMany, selectOrBack } from './prompts.js';
+import {
+  accountTree,
+  formatAge,
+  formatDate,
+  groupByAccount,
+  outcomeLine,
+  shortId,
+} from './render.js';
 
 export async function runInteractive(store: StoreLayout, ledger: Ledger): Promise<void> {
   intro(`${pc.bgCyan(pc.black(' foster '))} ${pc.dim(VERSION)}`);
@@ -59,7 +44,7 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
     return;
   }
 
-  showEnvironment(store, target);
+  showEnvironment(store, ledger, target);
 
   const status = await update;
   if (status?.outdated) {
@@ -76,20 +61,25 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
       options: [
         {
           value: 'foster',
-          label: 'Foster sessions',
-          hint: 'bring another account’s sessions here',
+          label: 'Bring sessions here',
+          hint: "copy another account's sessions into this one",
         },
         {
           value: 'return',
-          label: 'Return fostered sessions',
-          hint: 'undo, restoring the previous state',
+          label: 'Send them back',
+          hint: 'remove the copies, restoring the previous state',
         },
-        { value: 'status', label: 'Status', hint: 'what is currently fostered' },
-        { value: 'browse', label: 'Browse accounts', hint: 'what is on disk' },
+        { value: 'status', label: 'What foster has done', hint: 'copies currently in place' },
         {
-          value: 'doctor',
-          label: 'Check environment',
-          hint: 'store, account, whether the app is running',
+          value: 'browse',
+          label: 'What is on disk',
+          hint: 'accounts, organizations and session counts',
+        },
+        { value: 'label', label: 'Name an account', hint: 'so you stop reading UUIDs' },
+        {
+          value: 'app',
+          label: 'Claude Desktop',
+          hint: 'restart it — and why that is what makes changes show up',
         },
         { value: 'quit', label: 'Quit' },
       ],
@@ -113,35 +103,74 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
       case 'browse':
         showAccounts(store, ledger, target);
         break;
-      case 'doctor':
-        showEnvironment(store, target);
+      case 'label':
+        await labelFlow(store, ledger, target);
         break;
+      case 'app':
+        await desktopFlow(store, target);
+        break;
+      default:
+        // Every known answer is handled above, so anything else means the prompt
+        // returned something this code does not understand. Looping on it would
+        // spin forever; leaving is the one safe response.
+        outro('Bye.');
+        return;
     }
   }
 }
 
-function resolveTarget(store: StoreLayout): AccountRef | undefined {
+/**
+ * The account and organization directory the sidebar is currently reading.
+ *
+ * The config records the account but not the organization. When foster is
+ * running inside a Code session the app spawned, the app has already put the
+ * answer in the environment; otherwise it falls back to the heuristic in
+ * pickActiveOrganization.
+ */
+function resolveTarget(
+  store: StoreLayout,
+  env: NodeJS.ProcessEnv = process.env,
+): AccountRef | undefined {
   const accountUuid = readConfig(store).lastKnownAccountUuid;
   if (!accountUuid) return undefined;
-  // An account can own several organizations; only one of them is the directory
-  // the sidebar reads, and the config does not say which.
+
+  const candidates = listAccountDirs(store).filter((a) => a.accountUuid === accountUuid);
+
+  // The app sets this from the organization it is actually using, so it beats
+  // guessing — but only for a directory that exists, so a stale value cannot
+  // point the copies at nothing.
+  const fromEnv = env.CLAUDE_CODE_ORGANIZATION_UUID;
+  const declared = fromEnv && candidates.find((a) => a.organizationUuid === fromEnv);
+  if (declared) return declared;
+
   return (
-    pickActiveOrganization(
-      listAccountDirs(store).filter((a) => a.accountUuid === accountUuid),
-      store,
-    ) ?? listAgentAccountDirs(store).find((a) => a.accountUuid === accountUuid)
+    pickActiveOrganization(candidates, store) ??
+    listAgentAccountDirs(store).find((a) => a.accountUuid === accountUuid)
   );
 }
 
-function showEnvironment(store: StoreLayout, target: AccountRef): void {
+function labelsOf(ledger: Ledger): Map<string, string> {
+  return project(ledger.read()).labels;
+}
+
+/** Account and organization, using a human label for the account when one exists. */
+function describeRef(labels: Map<string, string>, ref: AccountRef): string {
+  return `${labels.get(ref.accountUuid) ?? shortId(ref.accountUuid)} ${pc.dim('/ org')} ${shortId(
+    ref.organizationUuid,
+  )}`;
+}
+
+function showEnvironment(store: StoreLayout, ledger: Ledger, target: AccountRef): void {
   const app = inspectApp(store);
+  const active = listActive(project(ledger.read())).length;
   note(
     [
-      `store    ${store.root}`,
-      `account  ${shortId(target.accountUuid)} ${pc.dim(`org ${shortId(target.organizationUuid)}`)}`,
-      `app      ${app.running ? pc.yellow('running — quit it before writing') : pc.green('not running')}`,
+      `store       ${store.root}`,
+      `signed in   ${describeRef(labelsOf(ledger), target)}`,
+      `app         ${app.running ? pc.yellow('running') : pc.dim('not running')}`,
+      `fostered    ${active === 0 ? pc.dim('nothing yet') : `${active} session(s)`}`,
     ].join('\n'),
-    'Environment',
+    'Where you are',
   );
 }
 
@@ -163,34 +192,64 @@ function showStatus(ledger: Ledger): void {
 }
 
 function showAccounts(store: StoreLayout, ledger: Ledger, target: AccountRef): void {
-  const labels = project(ledger.read()).labels;
   const rows = listAccountDirs(store).map((account) =>
     summariseAccount(account, scanAccount(store, account), target.accountUuid),
   );
-  note(accountTree(groupByAccount(rows), labels), 'Accounts and their organizations');
+  note(accountTree(groupByAccount(rows), labelsOf(ledger)), 'Accounts and their organizations');
 }
 
 /**
- * Waits for the app to be closed instead of failing.
+ * Give an account a name.
  *
- * The one-shot commands can only refuse and exit; here the user can quit the app
- * and carry on without losing their selection.
+ * The command existed from the start and nobody found it: the one screen where
+ * the UUIDs are unreadable is the one that never mentioned there was a way to
+ * fix that. It is a menu entry now.
  */
-async function waitUntilAppClosed(store: StoreLayout): Promise<boolean> {
-  for (;;) {
-    const app = inspectApp(store);
-    if (!app.running) return true;
+async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef): Promise<void> {
+  const labels = labelsOf(ledger);
+  const accounts = [...new Set(listAccountDirs(store).map((ref) => ref.accountUuid))];
 
-    log.warn(`Claude Desktop is running (${app.evidence.join('; ')}).`);
-    log.message(pc.dim('Quit it completely — closing the window is not enough; use the app menu.'));
+  const picked = await selectOrBack(
+    'Which account?',
+    accounts.map((accountUuid) => ({
+      value: accountUuid,
+      label:
+        shortId(accountUuid) + (accountUuid === target.accountUuid ? pc.green(' (in use)') : ''),
+      hint: labels.get(accountUuid) ? `currently "${labels.get(accountUuid)}"` : 'unnamed',
+    })),
+  );
+  if (aborted(picked)) return;
 
-    const again = await confirm({
-      message: 'Check again?',
-      active: 'I have quit it',
-      inactive: 'Cancel',
-    });
-    if (isCancel(again) || !again) return false;
+  const name = await askText('Call it', {
+    ...(labels.get(picked) === undefined ? {} : { initialValue: labels.get(picked)! }),
+    placeholder: 'work',
+  });
+  if (aborted(name) || !name.trim()) {
+    log.info('Left as it was.');
+    return;
   }
+
+  ledger.append({ kind: 'account_labelled', accountUuid: picked, label: name.trim() });
+  log.success(`${shortId(picked)} is now "${name.trim()}".`);
+}
+
+interface SourceOption {
+  refs: AccountRef[];
+  label: string;
+  hint: string;
+}
+
+/** What a directory of sessions offers, as the picker needs to describe it. */
+function summariseSource(store: StoreLayout, ref: AccountRef) {
+  const sessions = scanAccount(store, ref);
+  // Counted with the same filter the next screen applies, so the number here is
+  // the number the user will actually be offered.
+  const fosterable = applyFilter(sessions, {});
+  const lastActivity = sessions.reduce(
+    (latest, s) => Math.max(latest, s.data.lastActivityAt ?? 0),
+    0,
+  );
+  return { fosterable: fosterable.length, lastActivity };
 }
 
 async function chooseSource(
@@ -198,7 +257,7 @@ async function chooseSource(
   ledger: Ledger,
   target: AccountRef,
 ): Promise<Maybe<AccountRef[]>> {
-  const labels = project(ledger.read()).labels;
+  const labels = labelsOf(ledger);
 
   // Only the exact directory the sidebar reads is excluded, not the whole
   // account. Another organization of the *same* account is just as invisible as
@@ -208,39 +267,52 @@ async function chooseSource(
     (ref) =>
       !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
   );
-  if (sources.length === 0) return BACK;
+  if (sources.length === 0) {
+    log.info('There is nothing to bring here: this is the only account on this machine.');
+    return BACK;
+  }
 
   const byAccount = new Map<string, AccountRef[]>();
   for (const ref of sources) {
     byAccount.set(ref.accountUuid, [...(byAccount.get(ref.accountUuid) ?? []), ref]);
   }
 
-  const count = (refs: AccountRef[]) =>
-    refs.reduce((total, ref) => total + scanAccount(store, ref).filter((s) => !s.isCopy).length, 0);
+  const stats = new Map(sources.map((ref) => [refKey(ref), summariseSource(store, ref)]));
+  const totals = (refs: AccountRef[]) =>
+    refs.reduce(
+      (sum, ref) => {
+        const stat = stats.get(refKey(ref))!;
+        return {
+          fosterable: sum.fosterable + stat.fosterable,
+          lastActivity: Math.max(sum.lastActivity, stat.lastActivity),
+        };
+      },
+      { fosterable: 0, lastActivity: 0 },
+    );
 
   // Organizations are offered individually, with a whole-account shortcut when
   // there is more than one: taking everything and taking one part are both
   // reasonable, and only the user knows which they meant.
-  const choices: { label: string; hint: string; refs: AccountRef[] }[] = [];
+  const choices: SourceOption[] = [];
 
   for (const [accountUuid, refs] of byAccount) {
     const name = labels.get(accountUuid) ?? shortId(accountUuid);
-    const isThisAccount = accountUuid === target.accountUuid;
-    const suffix = isThisAccount ? pc.green(' (this account)') : '';
+    const suffix = accountUuid === target.accountUuid ? pc.green(' (this account)') : '';
 
     if (refs.length > 1) {
+      const total = totals(refs);
       choices.push({
-        label: `${pc.bold(name)}${suffix} — all ${refs.length} organizations`,
-        hint: `${count(refs)} session(s)`,
         refs,
+        label: `${pc.bold(name)}${suffix} — everything, all ${refs.length} organizations`,
+        hint: describeStat(total),
       });
     }
     for (const ref of refs) {
-      const prefix = refs.length > 1 ? '   ' : '';
+      const indent = refs.length > 1 ? '   ' : '';
       choices.push({
-        label: `${prefix}${pc.bold(name)}${suffix} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`,
-        hint: `${count([ref])} session(s)`,
         refs: [ref],
+        label: `${indent}${pc.bold(name)}${suffix} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`,
+        hint: describeStat(stats.get(refKey(ref))!),
       });
     }
   }
@@ -258,13 +330,11 @@ async function chooseSource(
   return choices[Number(picked)]?.refs ?? BACK;
 }
 
-const refKey = (ref: AccountRef) => `${ref.accountUuid}/${ref.organizationUuid}`;
-
-/** Account and organization, using a human label for the account when one exists. */
-function describeRef(ledger: Ledger, ref: AccountRef): string {
-  const label = project(ledger.read()).labels.get(ref.accountUuid);
-  return `${label ?? shortId(ref.accountUuid)} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`;
+function describeStat(stat: { fosterable: number; lastActivity: number }): string {
+  return `${stat.fosterable} session(s) · last used ${formatAge(stat.lastActivity || undefined)}`;
 }
+
+const refKey = (ref: AccountRef) => `${ref.accountUuid}/${ref.organizationUuid}`;
 
 /**
  * Where the copies are written.
@@ -281,6 +351,7 @@ async function chooseTarget(
   current: AccountRef,
   sources: AccountRef[],
 ): Promise<Maybe<AccountRef>> {
+  const labels = labelsOf(ledger);
   const taken = new Set(sources.map(refKey));
 
   const others = listAccountDirs(store).filter(
@@ -294,13 +365,13 @@ async function chooseTarget(
   const picked = await selectOrBack('Where should the copies go?', [
     {
       value: refKey(current),
-      label: describeRef(ledger, current),
-      hint: 'the account in use — copies show up after a restart',
+      label: describeRef(labels, current),
+      hint: 'the account in use — they show up here after a restart',
     },
     ...others.map((ref) => ({
       value: refKey(ref),
-      label: describeRef(ledger, ref),
-      hint: 'not the account in use — copies appear only once you switch to it',
+      label: describeRef(labels, ref),
+      hint: 'a different account — they appear only once you switch to it',
     })),
   ]);
 
@@ -308,15 +379,20 @@ async function chooseTarget(
   return [current, ...others].find((ref) => refKey(ref) === picked) ?? BACK;
 }
 
-async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {
-  const how = await selectOrBack(`${sessions.length} session(s) available. Narrow them down?`, [
-    { value: 'all', label: 'Take all of them' },
+const PICK_LIMIT = 40;
+
+/** Which of the available sessions to take. */
+async function chooseSessions(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {
+  const how = await selectOrBack(`${sessions.length} session(s) available. Which ones?`, [
+    { value: 'all', label: 'All of them' },
+    { value: 'pick', label: 'Pick them from a list', hint: 'tick the ones you want' },
     { value: 'since', label: 'Only recent ones', hint: 'e.g. the last 30 days' },
-    { value: 'title', label: 'Match a title' },
-    { value: 'cwd', label: 'Match a working directory' },
+    { value: 'title', label: 'Matching a title' },
+    { value: 'cwd', label: 'Matching a working directory' },
   ]);
   if (aborted(how)) return BACK;
   if (how === 'all') return sessions;
+  if (how === 'pick') return pickSessions(sessions);
 
   const prompts = {
     since: { message: 'How far back?', placeholder: '30d' },
@@ -324,10 +400,11 @@ async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<Discov
     cwd: { message: 'Working directory contains', placeholder: 'my-project' },
   } as const;
 
-  const answer = await text(prompts[how as keyof typeof prompts]);
+  const prompt = prompts[how as keyof typeof prompts];
+  const answer = await askText(prompt.message, { placeholder: prompt.placeholder });
   if (aborted(answer)) return BACK;
 
-  const value = String(answer).trim();
+  const value = answer.trim();
   if (!value) return sessions;
 
   if (how === 'since') {
@@ -341,25 +418,70 @@ async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<Discov
   return applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value });
 }
 
+/**
+ * Tick individual sessions.
+ *
+ * Capped, and honest about the cap: a list of several hundred titles is not
+ * something anyone reads, and silently offering only part of it would look like
+ * the rest had gone missing.
+ */
+async function pickSessions(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {
+  const shown = sessions.slice(0, PICK_LIMIT);
+  if (sessions.length > shown.length) {
+    log.warn(
+      `Showing the ${PICK_LIMIT} most recently used of ${sessions.length}. ` +
+        'Narrow by title, directory or age to reach the rest.',
+    );
+  }
+
+  const picked = await pickMany(
+    'Space to tick, enter to accept',
+    shown.map((session, index) => ({
+      value: String(index),
+      label: session.data.title ?? '(untitled)',
+      hint: `${formatAge(session.data.lastActivityAt)}${session.data.cwd ? ` · ${session.data.cwd}` : ''}`,
+    })),
+  );
+  if (aborted(picked)) return BACK;
+  if (picked.length === 0) {
+    log.info('Nothing ticked.');
+    return BACK;
+  }
+  return picked.map((index) => shown[Number(index)]!);
+}
+
+/** Says what was left out and why, rather than quietly showing a smaller number. */
+function reportHidden(all: DiscoveredSession[], offered: DiscoveredSession[]): void {
+  const hidden = all.length - offered.length;
+  if (hidden <= 0) return;
+
+  const reasons = new Map<string, number>();
+  for (const session of all) {
+    if (session.reasons.length === 0 && !session.isCopy) continue;
+    const reason = session.isCopy ? 'already a copy' : session.reasons.join(', ');
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+  }
+  const detail = [...reasons].map(([reason, count]) => `${count} ${reason}`).join(', ');
+  log.info(pc.dim(`${hidden} not shown (${detail}) — they could never appear in the sidebar.`));
+}
+
 async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRef): Promise<void> {
   const sources = await chooseSource(store, ledger, current);
   if (aborted(sources)) return;
 
-  const available = byRecency(
-    applyFilter(
-      sources.flatMap((a) => scanAccount(store, a)),
-      {},
-    ),
-  );
+  const all = sources.flatMap((account) => scanAccount(store, account));
+  const available = byRecency(applyFilter(all, {}));
+  reportHidden(all, available);
+
   if (available.length === 0) {
-    log.info('That account has nothing that can be fostered.');
+    log.info('Nothing there can be fostered.');
     return;
   }
 
-  const selected = await chooseFilter(available);
+  const selected = await chooseSessions(available);
   if (aborted(selected)) return;
   if (selected.length === 0) {
-    log.info('Nothing matches that filter.');
+    log.info('Nothing matches that.');
     return;
   }
 
@@ -375,74 +497,94 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
         ? [pc.dim(`… and ${selected.length - preview.length} more`)]
         : []),
     ].join('\n'),
-    `${selected.length} session(s) would be fostered`,
+    `${selected.length} session(s) selected`,
   );
 
-  const prefix = await text({
-    message: 'Title prefix for the fostered copies',
-    initialValue: DEFAULT_PREFIX,
-    placeholder: DEFAULT_PREFIX,
-  });
-  if (aborted(prefix)) return;
+  await confirmAndWrite(store, ledger, current, sources, selected);
+}
 
-  // The destination is offered here rather than as its own step: writing into
-  // the account in use is what almost every run wants, and asking about it every
-  // time would tax that case to serve the occasional one. Naming it in the
-  // confirmation keeps it visible, and changing it is one keystroke away.
+/**
+ * The last screen before anything is written.
+ *
+ * Destination and prefix live here rather than as steps of their own: both have
+ * an answer that is right nearly every time, and asking about them separately
+ * taxed every run to serve the rare one. Naming them in the confirmation keeps
+ * them visible, and changing either is one keystroke away.
+ */
+async function confirmAndWrite(
+  store: StoreLayout,
+  ledger: Ledger,
+  current: AccountRef,
+  sources: AccountRef[],
+  selected: DiscoveredSession[],
+): Promise<void> {
   let target = current;
+  let prefix = DEFAULT_PREFIX;
+
   for (;;) {
+    const labels = labelsOf(ledger);
     const decision = await select({
-      message: `Foster ${selected.length} session(s) into ${describeRef(ledger, target)}?`,
+      message: `Foster ${selected.length} session(s) into ${describeRef(labels, target)}?`,
       options: [
         { value: 'go', label: 'Yes, foster them' },
         {
           value: 'elsewhere',
           label: 'Send them somewhere else',
-          hint: 'another account or organization',
+          hint: `now: ${describeRef(labels, target)}`,
+        },
+        {
+          value: 'prefix',
+          label: 'Change the title prefix',
+          hint: prefix ? `now: "${prefix}"` : 'now: none',
         },
         { value: 'cancel', label: 'Cancel' },
       ],
-      initialValue: 'cancel',
+      initialValue: 'go',
     });
 
-    if (isCancel(decision) || decision === 'cancel') {
+    // Anything other than the four known answers is treated as a refusal rather
+    // than looped on: writing is the irreversible direction.
+    if (isCancel(decision) || !['go', 'elsewhere', 'prefix'].includes(String(decision))) {
       log.info('Nothing written.');
       return;
     }
     if (decision === 'go') break;
 
-    const chosen = await chooseTarget(store, ledger, current, sources);
-    if (aborted(chosen)) continue;
-    target = chosen;
-  }
+    if (decision === 'prefix') {
+      const answer = await askText('Title prefix for the copies', {
+        initialValue: prefix,
+        placeholder: DEFAULT_PREFIX,
+      });
+      if (!aborted(answer)) prefix = answer;
+      continue;
+    }
 
-  if (!(await waitUntilAppClosed(store))) {
-    log.info('Nothing written.');
-    return;
+    const chosen = await chooseTarget(store, ledger, current, sources);
+    if (!aborted(chosen)) target = chosen;
   }
 
   try {
-    const outcomes = fosterSessions(selected, {
-      store,
-      ledger,
-      target,
-      prefix: String(prefix) || DEFAULT_PREFIX,
-    });
+    const outcomes = fosterSessions(selected, { store, ledger, target, prefix });
     const counts = summariseOutcomes(outcomes);
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
     if (outcomes.length > 10) log.message(pc.dim(`… and ${outcomes.length - 10} more`));
 
     log.success(`${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`);
-    note(
-      refKey(target) === refKey(current)
-        ? 'Restart Claude Desktop to see them in the sidebar.'
-        : `These went to ${shortId(target.accountUuid)} / org ${shortId(target.organizationUuid)}, which is not the account in use.\n` +
-            'They appear once you switch to it and restart Claude Desktop.',
-      'One more step',
+    if (counts.fostered === 0) return;
+
+    if (refKey(target) !== refKey(current)) {
+      note(
+        `These went to ${describeRef(labelsOf(ledger), target)}, which is not the account in use.\n` +
+          'They appear once you sign into that account.',
+        'One more step',
+      );
+      return;
+    }
+    await offerRestart(
+      store,
+      'The sidebar is built when the app starts, so it has not changed yet.',
     );
   } catch (error) {
-    // The engine rechecks immediately before writing, so the app can still have
-    // been reopened between the confirmation and the write.
     if (error instanceof AppRunningError) log.error(error.message);
     else throw error;
   }
@@ -455,38 +597,25 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
     return;
   }
 
-  const scope = await select({
-    message: `${active.length} fostered session(s). Return which?`,
-    options: [
-      { value: 'all', label: 'All of them' },
-      { value: 'title', label: 'Only those matching a title' },
-      { value: '__back', label: pc.dim('Back') },
-    ],
-  });
+  const scope = await selectOrBack(`${active.length} fostered session(s). Send back which?`, [
+    { value: 'all', label: 'All of them' },
+    { value: 'pick', label: 'Pick them from a list', hint: 'tick the ones you want' },
+    { value: 'title', label: 'Only those matching a title' },
+  ]);
   if (aborted(scope)) return;
 
-  let chosen: ActiveFostering[] = active;
-  if (scope === 'title') {
-    const needle = await text({ message: 'Original title contains' });
-    if (aborted(needle)) return;
-    const value = String(needle).trim().toLowerCase();
-    chosen = active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(value));
-    if (chosen.length === 0) {
-      log.info('Nothing matches.');
-      return;
-    }
+  const chosen = await narrowFosterings(active, scope);
+  if (aborted(chosen)) return;
+  if (chosen.length === 0) {
+    log.info('Nothing matches.');
+    return;
   }
 
   const go = await confirm({
     message: `Remove ${chosen.length} fostered cop${chosen.length === 1 ? 'y' : 'ies'}?`,
-    initialValue: false,
+    initialValue: true,
   });
   if (isCancel(go) || !go) {
-    log.info('Nothing removed.');
-    return;
-  }
-
-  if (!(await waitUntilAppClosed(store))) {
     log.info('Nothing removed.');
     return;
   }
@@ -495,11 +624,257 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
     const outcomes = returnFosterings(chosen, { store, ledger });
     const counts = summariseOutcomes(outcomes);
     log.success(`${counts.returned} returned, ${counts.failed} failed.`);
-    note('Restart Claude Desktop to see them disappear.', 'One more step');
+    await offerRestart(store, 'They are still in the sidebar until the app starts again.');
   } catch (error) {
-    if (error instanceof AppRunningError) log.error(error.message);
-    else throw error;
+    // The gate refuses only for copies the running app may be holding in memory,
+    // where deleting the file would simply make the app write it back.
+    if (error instanceof AppRunningError) {
+      log.error(error.message);
+      await offerRestart(store, 'Closing the app first is what makes this work.');
+    } else throw error;
   }
+}
+
+async function narrowFosterings(
+  active: ActiveFostering[],
+  scope: string,
+): Promise<Maybe<ActiveFostering[]>> {
+  if (scope === 'all') return active;
+
+  if (scope === 'pick') {
+    const picked = await pickMany(
+      'Space to tick, enter to accept',
+      active.slice(0, PICK_LIMIT).map((fostering, index) => ({
+        value: String(index),
+        label: fostering.originalTitle || shortId(fostering.originSessionId),
+        hint: `fostered ${formatAge(fostering.fosteredAt)}`,
+      })),
+    );
+    if (aborted(picked)) return BACK;
+    if (picked.length === 0) return BACK;
+    return picked.map((index) => active[Number(index)]!);
+  }
+
+  const needle = await askText('Original title contains');
+  if (aborted(needle)) return BACK;
+  const value = needle.trim().toLowerCase();
+  return active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(value));
+}
+
+/* ------------------------------------------------------------------ *
+ * Claude Desktop
+ * ------------------------------------------------------------------ */
+
+function describeDesktop(state: DesktopState): string {
+  if (!state.running) return 'not running';
+  const parts = [`running (pid ${state.mainPid})`];
+  if (state.codeSessions > 0) parts.push(`hosting ${state.codeSessions} Code session(s)`);
+  if (state.startedAt) parts.push(`started ${formatAge(state.startedAt)}`);
+  return parts.join(' · ');
+}
+
+async function desktopFlow(store: StoreLayout, target: AccountRef): Promise<void> {
+  for (;;) {
+    const state = inspectDesktop();
+    note(describeDesktop(state), 'Claude Desktop');
+
+    const choice = await selectOrBack('What about it?', [
+      state.running
+        ? { value: 'restart', label: 'Restart it', hint: 'quit, then start again' }
+        : { value: 'start', label: 'Start it' },
+      ...(state.running ? [{ value: 'quit', label: 'Quit it' }] : []),
+      {
+        value: 'why',
+        label: 'Why do changes need a restart?',
+        hint: 'and the one way around it',
+      },
+      { value: 'switch', label: 'Switching accounts', hint: 'what foster can and cannot do' },
+    ]);
+    if (aborted(choice)) return;
+
+    switch (choice) {
+      case 'restart':
+        await restartFlow(store, state);
+        break;
+      case 'quit':
+        await quitFlow(store, state);
+        break;
+      case 'start':
+        await startFlow(store);
+        break;
+      case 'why':
+        explainRefresh(store, target);
+        break;
+      case 'switch':
+        explainAccountSwitch();
+        break;
+      default:
+        return;
+    }
+  }
+}
+
+/**
+ * Confirms a shutdown, in the terms that matter: the work it interrupts.
+ *
+ * Returns false when foster must not do it at all — which is the case whenever
+ * foster is itself running inside the app.
+ */
+async function confirmShutdown(state: DesktopState, verb: string): Promise<boolean> {
+  if (state.selfHosted) {
+    log.error(
+      `foster is running inside Claude Desktop, so it cannot ${verb} it — that would kill this session.`,
+    );
+    log.message(pc.dim('Run foster from a terminal outside the app, or use the app menu.'));
+    return false;
+  }
+
+  if (state.codeSessions > 0) {
+    log.warn(
+      `${state.codeSessions} Claude Code session(s) are running in the app. Closing it interrupts them.`,
+    );
+  }
+
+  const go = await confirm({ message: `${verb} Claude Desktop?`, initialValue: false });
+  return !isCancel(go) && go;
+}
+
+async function quitFlow(store: StoreLayout, state: DesktopState): Promise<boolean> {
+  if (!(await confirmShutdown(state, 'Quit'))) return false;
+  return closeDesktop(store);
+}
+
+/** The quit half, shared by quit and restart. */
+async function closeDesktop(store: StoreLayout): Promise<boolean> {
+  log.message('Asking the app to close…');
+  try {
+    const result = await quitDesktop(store);
+    if (result.outcome !== 'still-running') {
+      log.success('Claude Desktop is closed.');
+      return true;
+    }
+
+    log.warn('It is still running. The app may be asking you to confirm — check its window.');
+    const force = await select({
+      message: 'What now?',
+      options: [
+        { value: 'wait', label: 'I answered it — check again' },
+        { value: 'force', label: 'Force it to close', hint: 'ends it without its own shutdown' },
+        { value: 'stop', label: 'Leave it running' },
+      ],
+      initialValue: 'wait',
+    });
+    if (isCancel(force) || force === 'stop') return false;
+
+    const second = await quitDesktop(store, { force: force === 'force' });
+    if (second.outcome === 'still-running') {
+      log.error('Could not close it. Quit it from the app menu and try again.');
+      return false;
+    }
+    log.success('Claude Desktop is closed.');
+    return true;
+  } catch (error) {
+    if (error instanceof DesktopControlError) {
+      log.error(error.message);
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function startFlow(store: StoreLayout): Promise<boolean> {
+  log.message('Starting Claude Desktop…');
+  try {
+    const started = await startDesktop(store);
+    if (started) log.success('Claude Desktop is up. The sidebar has been rebuilt.');
+    else log.warn('Started it, but it has not taken the store yet. Give it a moment.');
+    return started;
+  } catch (error) {
+    if (error instanceof DesktopControlError) {
+      log.error(error.message);
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function restartFlow(store: StoreLayout, state: DesktopState): Promise<void> {
+  if (state.running) {
+    if (!(await confirmShutdown(state, 'Restart'))) return;
+    if (!(await closeDesktop(store))) return;
+  }
+  await startFlow(store);
+}
+
+/**
+ * Offered after a write, where the change exists on disk but not yet on screen.
+ *
+ * The old code printed a note telling the user to restart the app themselves,
+ * which is a strange thing for a program that can do it.
+ */
+async function offerRestart(store: StoreLayout, why: string): Promise<void> {
+  const running = inspectApp(store).running;
+  note(why, 'Not visible yet');
+
+  const choice = await select({
+    message: running ? 'Restart Claude Desktop now?' : 'Start Claude Desktop now?',
+    options: [
+      { value: 'go', label: running ? 'Restart it' : 'Start it' },
+      { value: 'later', label: 'Not now' },
+    ],
+    initialValue: 'go',
+  });
+  if (isCancel(choice) || choice === 'later') return;
+
+  if (!running) {
+    await startFlow(store);
+    return;
+  }
+  await restartFlow(store, inspectDesktop());
+}
+
+function explainRefresh(store: StoreLayout, target: AccountRef): void {
+  const organizations = listAccountDirs(store).filter(
+    (ref) => ref.accountUuid === target.accountUuid,
+  ).length;
+
+  const lines = [
+    'Claude Desktop reads its session directory once, while it starts, and keeps',
+    'what it found in memory. Nothing watches the directory afterwards, so a file',
+    'that appears later is invisible until the app initialises again.',
+    '',
+    'Reloading the window (F5) does not help: the list it redraws comes from the',
+    'app itself, not from disk.',
+  ];
+
+  if (organizations > 1) {
+    lines.push(
+      '',
+      `This account has ${organizations} organizations, which gives you one way round it:`,
+      'switching organization makes the app re-read the directory, and switching back',
+      'reads it again. No restart needed — but it does end any session that is running.',
+    );
+  }
+
+  note(lines.join('\n'), 'Why a restart');
+}
+
+function explainAccountSwitch(): void {
+  note(
+    [
+      'foster cannot switch accounts, and will not try.',
+      '',
+      'Which account the app uses comes from the session you are signed into, not',
+      'from anything on disk — the account id in its config is only a cached copy of',
+      'the answer. Changing it changes nothing. Doing it properly would mean',
+      'handling credentials, which foster never touches.',
+      '',
+      'To switch: sign out and back in from the app. Copies foster wrote into that',
+      'account are waiting when you arrive — pick it as the destination under "Send',
+      'them somewhere else" to stage them before you go.',
+    ].join('\n'),
+    'Switching accounts',
+  );
 }
 
 export function abortInteractive(message = 'Cancelled.'): void {
