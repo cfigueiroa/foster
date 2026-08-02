@@ -6,6 +6,7 @@ import type { Ledger } from '../ledger/log.js';
 import { project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { errorMessage } from '../util/fs.js';
+import { scanAccount } from '../store/scanner.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
@@ -59,6 +60,16 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // under two account directories, and without this both would be copied while
   // the ledger fold kept only the last one — orphaning the first file.
   const mintedInBatch = new Set<string>();
+  // What the destination already shows, keyed by conversation rather than by
+  // session id. A conversation belongs to no account — it is one transcript that
+  // any account can hold a card for — so the destination can perfectly well have
+  // its own card for the very conversation being fostered, made when the same
+  // work was resumed under this account. The fostering key cannot see that: the
+  // origin is the *other* account's card, and it has never been fostered before.
+  // The result is two rows for one conversation, differing only in which account
+  // watched which part of it. Both are live, both are openable, and the sidebar
+  // gives no hint they are the same.
+  const conversationsHere = conversationsIn(store, target);
 
   // No gate here on purpose. Every copy gets a session id the app has never seen,
   // so a running app neither reads nor writes the file: it is invisible to the
@@ -103,6 +114,20 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       state.active.delete(key);
     }
 
+    // Asked after the ledger, which knows about foster's own copies, and about
+    // the destination rather than about anything foster has done: a conversation
+    // already showing here would gain a second row for the same work.
+    const cliSessionId = session.data.cliSessionId;
+    if (cliSessionId && conversationsHere.has(cliSessionId) && !explicit) {
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'skipped',
+        detail: conversationsHere.get(cliSessionId)!,
+      });
+      continue;
+    }
+
     const copy = buildFosterCopy(session.data, {
       origin: session.account,
       ...(options.sourceStore && options.sourceStore !== store.root
@@ -143,9 +168,18 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         // actually is. Without it, telling the user that a returned copy had
         // carried on would mean reading a file that has just been deleted.
         ...(session.data.cliSessionId ? { cliSessionId: session.data.cliSessionId } : {}),
+        ...(options.sourceStore && options.sourceStore !== store.root
+          ? { originStore: options.sourceStore }
+          : {}),
         prefix,
       });
       mintedInBatch.add(key);
+      // Tracked as a conversation too: a sweep across two source accounts that
+      // both hold a card for one conversation would otherwise pass this check
+      // twice and produce the pair itself, in a single run.
+      if (copy.cliSessionId) {
+        conversationsHere.set(copy.cliSessionId, 'this account already has that conversation');
+      }
       outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
     } catch (error) {
       const reason = errorMessage(error);
@@ -155,6 +189,31 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   }
 
   return outcomes;
+}
+
+/**
+ * The conversations the destination already shows, and how each got there.
+ *
+ * Archived counts as present: the row exists, and the answer to wanting it back
+ * is to unarchive rather than to add a second one. A tombstone does not — a
+ * deleted card is not a row, and bringing that conversation back is exactly what
+ * fostering (or `restore`) is for.
+ */
+function conversationsIn(store: StoreLayout, target: AccountRef): Map<string, string> {
+  const here = new Map<string, string>();
+
+  for (const session of scanAccount(store, target)) {
+    const id = session.data.cliSessionId;
+    if (!id) continue;
+    const how = session.isCopy
+      ? 'this account already has a copy of that conversation'
+      : session.data.isArchived
+        ? 'this account already has that conversation, archived'
+        : 'this account already has that conversation';
+    here.set(id, how);
+  }
+
+  return here;
 }
 
 /**
@@ -246,6 +305,21 @@ export function returnFosterings(fosterings: ActiveFostering[], options: ReturnO
         originSessionId: fostering.originSessionId,
         title,
         status: 'returned',
+        copyPath: fostering.copyPath,
+      });
+      continue;
+    }
+
+    // Absence is only success when the directory that should hold it says so.
+    // Without this, a profile on an unmounted drive read as "already gone": the
+    // ledger recorded a return that never happened, the file came back with the
+    // drive, and the copy was left in the sidebar with nothing tracking it.
+    if (inspectCopy(fostering).kind === 'unreachable') {
+      outcomes.push({
+        originSessionId: fostering.originSessionId,
+        title,
+        status: 'skipped',
+        detail: 'its installation is not reachable — nothing was removed or recorded',
         copyPath: fostering.copyPath,
       });
       continue;

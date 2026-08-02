@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
-import { samePath, sessionPath } from '../domain/paths.js';
+import { layoutFor, samePath, sessionPath } from '../domain/paths.js';
 import type { CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { indexTranscripts, transcriptRoots } from '../store/transcripts.js';
@@ -55,9 +55,9 @@ export function continuedSince(
     const file = transcripts.get(cliSessionId);
     if (!file) continue;
 
-    const card = readCard(sessionPath(store, fostering.origin, fostering.originSessionId));
-    // No card, nothing to be confused by: the original is not in this store, or
-    // was itself deleted, and either way there is no stale row to explain.
+    const card = readCard(originCard(store, fostering));
+    // No card, nothing to be confused by: the original was itself deleted, and
+    // there is no stale row left to explain.
     if (card?.lastActivityAt === undefined) continue;
 
     let transcriptAt: number;
@@ -80,12 +80,42 @@ function cliSessionIdOfCopy(copyPath: string): string | undefined {
   return readCard(copyPath)?.cliSessionId;
 }
 
+/**
+ * Where the original's card lives, which is not always the store being worked in.
+ *
+ * A copy fostered from another installation has its original over there, and
+ * looking for it here found nothing and said nothing — silence in exactly the
+ * two-profile arrangement that confuses most. The ledger records the origin store
+ * now; for entries written before it did, the copy carries the same fact.
+ */
+function originCard(store: StoreLayout, fostering: ActiveFostering): string {
+  const from = fostering.originStore ?? readCard(fostering.copyPath)?._foster?.originStore;
+  const owner = from ? layoutFor(from) : store;
+  return sessionPath(owner, fostering.origin, fostering.originSessionId);
+}
+
 function readCard(file: string): CodeSessionData | undefined {
   try {
     return JSON.parse(readFileSync(file, 'utf8')) as CodeSessionData;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * What to say about conversations that carried on, wherever it is being said.
+ *
+ * Shared rather than written twice: the menu is where most people undo a
+ * fostering, and the reassurance existing only in the command would leave the
+ * fright exactly where it happens.
+ */
+export function continuedNote(count: number): string {
+  const one = count === 1;
+  return [
+    `${count} of these carried on after being fostered. Nothing is lost: ${one ? 'it is' : 'they are'} the`,
+    `same conversation, and opening ${one ? 'it' : 'them'} in the original account brings everything back.`,
+    'Only the date and title on the row are the old ones, until you open it.',
+  ].join('\n');
 }
 
 /**

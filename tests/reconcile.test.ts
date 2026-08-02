@@ -207,3 +207,103 @@ describe('returning a copy that is already gone', () => {
     ).not.toThrow();
   });
 });
+
+describe('a conversation the destination already shows', () => {
+  /**
+   * A conversation belongs to no account: it is one transcript that any account
+   * can hold a card for. So the destination can perfectly well have its own card
+   * for the conversation being fostered, made when the same work was resumed
+   * under this account — and the fostering key cannot see it, because the origin
+   * is the *other* account's card and has never been fostered before. The result
+   * was two live rows for one conversation, which is what the sidebar showed.
+   */
+  const SHARED = '00000000-0000-4000-8000-0000000000e9';
+
+  function bothHaveIt(archived = false): { store: StoreLayout; ledger: Ledger } {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e1', cliSessionId: SHARED }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000e2',
+        cliSessionId: SHARED,
+        isArchived: archived,
+      }),
+    );
+    return { store, ledger: ledgerIn() };
+  }
+
+  it('is not fostered a second time', () => {
+    const { store, ledger } = bothHaveIt();
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+    });
+
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.detail).toMatch(/already has that conversation/);
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+  });
+
+  it('says so when the row it already has is archived', () => {
+    // The answer to wanting it back is to unarchive, not to add a second row.
+    const { store, ledger } = bothHaveIt(true);
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+    });
+
+    expect(outcome!.detail).toMatch(/archived/);
+  });
+
+  it('still does it when the session is named outright', () => {
+    const { store, ledger } = bothHaveIt();
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      explicit: true,
+    });
+
+    expect(outcome!.status).toBe('fostered');
+  });
+
+  it('does not build the pair itself out of two source accounts in one run', () => {
+    // Both source accounts hold a card for one conversation. Neither is in the
+    // destination yet, so a disk check alone passes twice and foster produces
+    // exactly the duplicate it is meant to prevent.
+    const store = makeStore();
+    const secondOrg = {
+      accountUuid: OLD_ACCOUNT.accountUuid,
+      organizationUuid: '00000000-0000-4000-8000-0000000000ef',
+    };
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e5', cliSessionId: SHARED }),
+    );
+    writeSession(
+      store,
+      secondOrg,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e6', cliSessionId: SHARED }),
+    );
+
+    const outcomes = fosterSessions(
+      [...scanAccount(store, OLD_ACCOUNT), ...scanAccount(store, secondOrg)],
+      { store, ledger: ledgerIn(), target: NEW_ACCOUNT },
+    );
+
+    expect(outcomes.filter((o) => o.status === 'fostered')).toHaveLength(1);
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
+  });
+});

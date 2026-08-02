@@ -24,12 +24,13 @@ import {
   startDesktop,
 } from '../engine/desktop.js';
 import {
+  continuedNote,
   continuedSince,
   TWO_SIDEBARS,
   twoLiveSidebars,
-  type ContinuedFostering,
 } from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
@@ -735,6 +736,7 @@ program
   .option('--title <text>', 'only fosterings whose original title contains this text')
   .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
   .option('--all-stores', 'include copies written into other installations')
+  .option('--duplicates', 'only copies of a conversation their account already had')
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually remove; without it nothing is removed')
   .addOption(new Option('--dry-run', 'show what would happen and remove nothing').conflicts('yes'))
@@ -744,6 +746,7 @@ program
       title?: string;
       session?: string[];
       allStores?: boolean;
+      duplicates?: boolean;
       restart?: boolean;
       yes?: boolean;
       dryRun?: boolean;
@@ -764,6 +767,10 @@ program
           ),
         );
       }
+    }
+    if (opts.duplicates) {
+      const duplicated = new Set(findDuplicates(store, active).copies.map((f) => f.copySessionId));
+      active = active.filter((f) => duplicated.has(f.copySessionId));
     }
     if (opts.title) {
       const needle = opts.title.toLowerCase();
@@ -801,30 +808,41 @@ program
     }
 
     console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
-    reportContinued(continued);
+    if (continued.length > 0)
+      console.log(
+        pc.dim(`
+${continuedNote(continued.length)}`),
+      );
     await finish(store, Boolean(opts.restart));
   });
 
 /**
- * Says out loud that a conversation carried on after it was fostered.
+ * Two rows for one conversation, and who put them there.
  *
- * The copy and the original are the same conversation, so nothing is lost when
- * the copy goes. But the card in the original account is frozen at the moment of
- * the foster, so the row comes back wearing an old date and an old title, which
- * reads exactly like work being rolled back. Better said than discovered.
+ * The distinction is the point: foster removes what foster wrote, and a pair the
+ * app made is reported so it is not blamed on the wrong tool, and so nobody goes
+ * looking for a foster command that would delete somebody else's file.
  */
-function reportContinued(continued: ContinuedFostering[]): void {
-  if (continued.length === 0) return;
-
-  const one = continued.length === 1;
-  console.log(
-    pc.dim(
-      `${continued.length} of these carried on after being fostered. Nothing is lost: ${one ? 'it is' : 'they are'}\n` +
-        `the same conversation, and opening ${one ? 'it' : 'them'} in the original account brings everything\n` +
-        'back. Only the date and title on the row are the old ones, and the app refreshes\n' +
-        'those as soon as you open it.',
-    ),
-  );
+function reportDuplicates(report: DuplicateReport): void {
+  if (report.copies.length > 0) {
+    const one = report.copies.length === 1;
+    console.log(
+      pc.yellow(
+        `${report.copies.length} of them duplicate${one ? 's' : ''} a conversation this account already had.` +
+          `\nRemove ${one ? 'it' : 'them'} with: foster return --duplicates`,
+      ),
+    );
+  }
+  if (report.appMade > 0) {
+    const one = report.appMade === 1;
+    console.log(
+      pc.dim(
+        `${report.appMade} conversation${one ? '' : 's'} here ${one ? 'has' : 'have'} more than one card the app itself made.` +
+          '\nfoster did not write those and will not remove them. Deleting one in the app is safe:' +
+          '\nthe conversation is not in the card.',
+      ),
+    );
+  }
 }
 
 /** Shared tail of the two writing commands: restart now, or say why it matters. */
@@ -886,6 +904,7 @@ program
       );
     }
     console.log(pc.bold(`\n${active.length} active fostering(s)`));
+    reportDuplicates(findDuplicates(store, active));
     if (elsewhere.length > 0) {
       console.log(
         pc.dim(

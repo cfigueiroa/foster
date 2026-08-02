@@ -17,8 +17,14 @@ import {
   startDesktop,
   type DesktopState,
 } from '../engine/desktop.js';
-import { continuedSince, TWO_SIDEBARS, twoLiveSidebars } from '../engine/continued.js';
+import {
+  continuedNote,
+  continuedSince,
+  TWO_SIDEBARS,
+  twoLiveSidebars,
+} from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import { findDuplicates } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
@@ -262,6 +268,22 @@ function showStatus(ledger: Ledger, store: StoreLayout): void {
   // row in the original account still shows the date it had that day, and left
   // unsaid the difference only surfaces as a scare after a return.
   const continued = new Set(continuedSince(store, active).map((c) => c.fostering.copySessionId));
+
+  const duplicates = findDuplicates(store, active);
+  if (duplicates.copies.length > 0) {
+    log.warn(
+      `${duplicates.copies.length} of these duplicate a conversation this account already had. ` +
+        '"Send them back" offers to remove just those.',
+    );
+  }
+  if (duplicates.appMade > 0) {
+    log.info(
+      pc.dim(
+        `${duplicates.appMade} conversation(s) here have more than one card the app itself made. ` +
+          'foster did not write those and will not remove them.',
+      ),
+    );
+  }
 
   note(
     active
@@ -914,14 +936,28 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
     log.info(pc.dim(`${elsewhere} more in another installation; switch to it to undo those.`));
   }
 
+  // Offered only when there is something to offer, and named by what it fixes
+  // rather than by how it works: this is the screen someone reaches after seeing
+  // the same conversation twice in the sidebar.
+  const duplicates = findDuplicates(store, active).copies;
+
   const scope = await selectOrBack(`${active.length} fostered session(s). Send back which?`, [
     { value: 'all', label: 'All of them' },
     { value: 'pick', label: 'Pick them from a list', hint: 'tick the ones you want' },
     { value: 'title', label: 'Only those matching a title' },
+    ...(duplicates.length > 0
+      ? [
+          {
+            value: 'duplicates',
+            label: 'Just the duplicates',
+            hint: `${duplicates.length} of a conversation this account already has`,
+          },
+        ]
+      : []),
   ]);
   if (aborted(scope)) return;
 
-  const chosen = await narrowFosterings(active, scope);
+  const chosen = await narrowFosterings(active, scope, duplicates);
   if (aborted(chosen)) return;
   if (chosen.length === 0) {
     log.info('Nothing matches.');
@@ -938,9 +974,15 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
   }
 
   try {
+    // Measured before the copies go: for entries written before the ledger kept
+    // the conversation id, the copy itself is where that id is read from. This is
+    // the screen the fright happens on — the row comes back in the original
+    // account wearing the date it had the day it was fostered.
+    const continued = continuedSince(store, chosen);
     const outcomes = returnFosterings(chosen, { store, ledger });
     const counts = summariseOutcomes(outcomes);
     log.success(`${counts.returned} returned, ${counts.failed} failed.`);
+    if (continued.length > 0) log.info(continuedNote(continued.length));
     await offerRestart(store, 'They are still in the sidebar until the app starts again.');
   } catch (error) {
     // The gate refuses only for copies the running app may be holding in memory,
@@ -955,8 +997,10 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
 async function narrowFosterings(
   active: ActiveFostering[],
   scope: string,
+  duplicates: ActiveFostering[] = [],
 ): Promise<Maybe<ActiveFostering[]>> {
   if (scope === 'all') return active;
+  if (scope === 'duplicates') return duplicates;
 
   if (scope === 'pick') {
     const picked = await pickMany(

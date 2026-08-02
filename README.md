@@ -334,6 +334,15 @@ worked in once never has to be typed again.
   starts again. A copy the app _did_ load is different: it may be written back at any time, which
   would recreate a file `foster` had just deleted. So `return` refuses for copies that already
   existed when the app started, and offers to close it for you.
+- **It will not put the same conversation in a sidebar twice.** An account can already have its own
+  card for the conversation being fostered — made when that work was resumed while signed into it —
+  and the fostering key cannot see that, because the origin is the _other_ account's card and has
+  never been fostered before. The result was two live rows for one conversation, differing only in
+  which account watched which part of it. Fostering now refuses, naming what is already there
+  (including when it is archived, where the answer is to unarchive rather than duplicate), and
+  `--session` still overrides. For pairs already on disk, `status` counts them and
+  `foster return --duplicates` removes the copies. Note that a `↪ ` in a title no longer proves a row
+  is foster's: the app carries the title over when it makes a card of its own from one.
 - **A copy is the same conversation, which is the point and the one hazard.** The copy carries the
   original's `cliSessionId`, so both rows open one transcript: work done under the other account is
   there when you open the original, and returning the copy loses none of it. What does not travel is

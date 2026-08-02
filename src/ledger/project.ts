@@ -30,6 +30,7 @@ export function project(events: LedgerEvent[]): LedgerState {
           copyPath: event.copyPath,
           originalTitle: event.originalTitle,
           cliSessionId: event.cliSessionId,
+          originStore: event.originStore,
           fosteredAt: event.ts,
         });
         break;

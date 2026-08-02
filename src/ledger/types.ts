@@ -39,6 +39,13 @@ export interface FosteredEvent extends BaseEvent {
    * Absent in entries written before this was kept.
    */
   cliSessionId?: string;
+  /**
+   * The installation the session was read from, when it was not the one written
+   * into. Without it nothing downstream can find the original's card, which is
+   * the card that goes stale — so the reassurance about a conversation that
+   * carried on stayed silent in exactly the arrangement that confuses most.
+   */
+  originStore?: string;
   prefix: string;
 }
 
@@ -89,5 +96,7 @@ export interface ActiveFostering {
   originalTitle?: string;
   /** The conversation behind both the copy and the original, when it was recorded. */
   cliSessionId?: string;
+  /** The installation the original lives in, when it is not the one holding the copy. */
+  originStore?: string;
   fosteredAt: number;
 }

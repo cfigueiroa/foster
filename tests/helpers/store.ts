@@ -35,7 +35,11 @@ export function session(overrides: Partial<CodeSessionData> = {}): CodeSessionDa
   const { sessionId, ...rest } = overrides;
   const bare = sessionId ?? '00000000-0000-4000-8000-00000000000a';
   return {
-    cliSessionId: '00000000-0000-4000-8000-00000000000b',
+    // Derived from the session id rather than fixed, because two sessions
+    // sharing a conversation is a real state with real consequences — the
+    // destination refuses a conversation it already shows — and a fixture that
+    // gave every session the same conversation made that state the default.
+    cliSessionId: bare.replace(/^local_/, ''),
     cwd: '/workspace/project',
     originCwd: '/workspace/project',
     title: 'Sample session',
