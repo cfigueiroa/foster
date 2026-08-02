@@ -22,6 +22,7 @@ import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
 import { aborted, askText, BACK, type Maybe, pickMany, selectOrBack } from './prompts.js';
 import {
+  abbreviate,
   accountTree,
   formatAge,
   formatDate,
@@ -30,12 +31,39 @@ import {
   shortId,
 } from './render.js';
 
+/**
+ * Abbreviations for every identifier in the store, computed once per run.
+ *
+ * Held here rather than threaded through a dozen signatures: it is derived from
+ * the store, which does not change under a single invocation, and every screen
+ * has to agree — an account that reads `9866b1e8` on one screen and `9866b1e8c4`
+ * on the next is the sort of detail that makes people doubt they are looking at
+ * the same thing.
+ */
+let names = new Map<string, string>();
+
+function short(id: string): string {
+  return names.get(id) ?? shortId(id);
+}
+
+function nameEverything(store: StoreLayout): void {
+  const refs = [...listAccountDirs(store), ...listAgentAccountDirs(store)];
+  // Accounts and organizations abbreviate independently: they are never compared
+  // with each other, so a collision across the two kinds should not lengthen both.
+  names = new Map([
+    ...abbreviate(refs.map((ref) => ref.accountUuid)),
+    ...abbreviate(refs.map((ref) => ref.organizationUuid)),
+  ]);
+}
+
 export async function runInteractive(store: StoreLayout, ledger: Ledger): Promise<void> {
   intro(`${pc.bgCyan(pc.black(' foster '))} ${pc.dim(VERSION)}`);
 
   // Started before the store work and awaited only when it is about to be shown,
   // so a slow or unreachable network never delays the menu.
   const update = checkForUpdate();
+
+  nameEverything(store);
 
   const target = resolveTarget(store);
   if (!target) {
@@ -155,7 +183,7 @@ function labelsOf(ledger: Ledger): Map<string, string> {
 
 /** Account and organization, using a human label for the account when one exists. */
 function describeRef(labels: Map<string, string>, ref: AccountRef): string {
-  return `${labels.get(ref.accountUuid) ?? shortId(ref.accountUuid)} ${pc.dim('/ org')} ${shortId(
+  return `${labels.get(ref.accountUuid) ?? short(ref.accountUuid)} ${pc.dim('/ org')} ${short(
     ref.organizationUuid,
   )}`;
 }
@@ -213,8 +241,7 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
     'Which account?',
     accounts.map((accountUuid) => ({
       value: accountUuid,
-      label:
-        shortId(accountUuid) + (accountUuid === target.accountUuid ? pc.green(' (in use)') : ''),
+      label: short(accountUuid) + (accountUuid === target.accountUuid ? pc.green(' (in use)') : ''),
       hint: labels.get(accountUuid) ? `currently "${labels.get(accountUuid)}"` : 'unnamed',
     })),
   );
@@ -230,7 +257,7 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
   }
 
   ledger.append({ kind: 'account_labelled', accountUuid: picked, label: name.trim() });
-  log.success(`${shortId(picked)} is now "${name.trim()}".`);
+  log.success(`${short(picked)} is now "${name.trim()}".`);
 }
 
 interface SourceOption {
@@ -296,7 +323,7 @@ async function chooseSource(
   const choices: SourceOption[] = [];
 
   for (const [accountUuid, refs] of byAccount) {
-    const name = labels.get(accountUuid) ?? shortId(accountUuid);
+    const name = labels.get(accountUuid) ?? short(accountUuid);
     const suffix = accountUuid === target.accountUuid ? pc.green(' (this account)') : '';
 
     if (refs.length > 1) {
@@ -311,7 +338,7 @@ async function chooseSource(
       const indent = refs.length > 1 ? '   ' : '';
       choices.push({
         refs: [ref],
-        label: `${indent}${pc.bold(name)}${suffix} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`,
+        label: `${indent}${pc.bold(name)}${suffix} ${pc.dim('/ org')} ${short(ref.organizationUuid)}`,
         hint: describeStat(stats.get(refKey(ref))!),
       });
     }

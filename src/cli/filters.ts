@@ -1,3 +1,4 @@
+import { bareSessionId } from '../domain/naming.js';
 import type { DiscoveredSession } from '../domain/types.js';
 
 export interface SessionFilter {
@@ -9,6 +10,36 @@ export interface SessionFilter {
   since?: number;
   /** Include sessions that cannot be fostered (scheduled tasks, never opened). */
   includeUnfosterable?: boolean;
+}
+
+/**
+ * Narrows to named sessions, refusing rather than guessing.
+ *
+ * Identifiers may be given bare or with the app's `local_` prefix, and abbreviated
+ * to any unique prefix. An id that matches nothing is an error rather than an
+ * empty result: a typo and "that session is gone" look identical otherwise, and
+ * only one of them means the user should stop and look.
+ */
+export function selectByIds(
+  sessions: DiscoveredSession[],
+  ids: string[],
+): { selected: DiscoveredSession[]; unmatched: string[] } {
+  const selected = new Map<string, DiscoveredSession>();
+  const unmatched: string[] = [];
+
+  for (const id of ids) {
+    const needle = bareSessionId(id).toLowerCase();
+    const matches = sessions.filter((session) =>
+      bareSessionId(session.data.sessionId).toLowerCase().startsWith(needle),
+    );
+    if (matches.length === 0) {
+      unmatched.push(id);
+      continue;
+    }
+    for (const match of matches) selected.set(match.data.sessionId, match);
+  }
+
+  return { selected: [...selected.values()], unmatched };
 }
 
 /**

@@ -11,6 +11,13 @@ import {
   resolveStore,
 } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
+import {
+  DesktopControlError,
+  inspectDesktop,
+  packagedAppId,
+  quitDesktop,
+  startDesktop,
+} from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
@@ -19,16 +26,16 @@ import { readConfig } from '../store/config.js';
 import { scanAccount, summarise } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
-import { applyFilter, byRecency, parseSince, type SessionFilter } from './filters.js';
+import { applyFilter, byRecency, parseSince, selectByIds, type SessionFilter } from './filters.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
 import {
   accountTree,
+  formatAge,
   formatDate,
   groupByAccount,
   outcomeLine,
-  restartNotice,
   sessionLine,
   shortId,
   updateLine,
@@ -65,6 +72,10 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const store = resolveStore(opts.store);
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store, ledger };
+}
+
+function print(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
 }
 
 /**
@@ -109,8 +120,40 @@ function requireCurrentAccount(
   }
   throw new Error(
     `Found the signed-in account ${shortId(accountUuid)}, but not its organization: this account has no session directory yet.\n` +
-      'Create one session in Claude Desktop so the directory exists, or pass --org <organizationUuid>.',
+      'Create one session in Claude Desktop so the directory exists, or pass --to-org <organizationUuid>.',
   );
+}
+
+/**
+ * Where copies are written.
+ *
+ * Without --to this is the account in use, which is what nearly every run wants.
+ * With it, any account on disk is a legitimate destination — staging copies for
+ * an account before switching to it is a real workflow — but it has to name one
+ * directory exactly, so an account holding two organizations is a refusal rather
+ * than a coin toss.
+ */
+function resolveDestination(
+  store: StoreLayout,
+  accounts: AccountRef[],
+  opts: { to?: string; toOrg?: string },
+): AccountRef {
+  if (opts.to === undefined && opts.toOrg === undefined) {
+    return requireCurrentAccount(store, accounts);
+  }
+
+  const matches = resolveSources(accounts, opts.to, opts.toOrg, {
+    account: '--to',
+    organization: '--to-org',
+  });
+
+  if (matches.length > 1) {
+    const orgs = matches.map((ref) => `  ${ref.organizationUuid}`).join('\n');
+    throw new Error(
+      `--to matches an account with ${matches.length} organizations. Name one with --to-org:\n${orgs}`,
+    );
+  }
+  return matches[0]!;
 }
 
 /**
@@ -124,17 +167,28 @@ function resolveSources(
   candidates: AccountRef[],
   accountPrefix: string | undefined,
   organizationPrefix: string | undefined,
+  flags: { account: string; organization: string } = {
+    account: '--from',
+    organization: '--from-org',
+  },
 ): AccountRef[] {
   let sources = candidates;
 
   if (accountPrefix !== undefined) {
-    sources = matchOrExplain(sources, accountPrefix, 'account', (ref) => ref.accountUuid);
+    sources = matchOrExplain(
+      sources,
+      accountPrefix,
+      'account',
+      flags.account,
+      (r) => r.accountUuid,
+    );
   }
   if (organizationPrefix !== undefined) {
     sources = matchOrExplain(
       sources,
       organizationPrefix,
       'organization',
+      flags.organization,
       (ref) => ref.organizationUuid,
     );
   }
@@ -151,9 +205,9 @@ function matchOrExplain(
   refs: AccountRef[],
   prefix: string,
   kind: 'account' | 'organization',
+  flag: string,
   identifier: (ref: AccountRef) => string,
 ): AccountRef[] {
-  const flag = kind === 'account' ? '--from' : '--from-org';
   const matches = refs.filter((ref) => identifier(ref).startsWith(prefix));
   const distinct = new Set(matches.map(identifier));
 
@@ -195,53 +249,92 @@ function filterOptions(command: Command): Command {
     .option('--since <age>', 'only sessions active within this window, e.g. 30d');
 }
 
+function sourceOptions(command: Command): Command {
+  return command
+    .option('--from <accountUuid>', 'only sessions from this account')
+    .option('--from-org <organizationUuid>', 'only sessions from this organization');
+}
+
 program
   .command('doctor')
   .description('check the environment before doing anything else')
+  .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
-    const opts = this.optsWithGlobals<GlobalOptions>();
+    const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
     const roots = candidateStoreRoots();
+
+    if (roots.length === 0 && !opts.store) {
+      if (opts.json) print({ store: null, error: 'no Claude Desktop store found' });
+      else console.log(pc.red('No Claude Desktop store found — pass --store <path>'));
+      process.exitCode = 1;
+      return;
+    }
+
+    // Reuse the roots already probed rather than walking the package directory twice.
+    const store = opts.store ? resolveStore(opts.store) : layoutFor(roots[0]!);
+    const config = readConfig(store);
+    const app = inspectApp(store);
+
+    if (opts.json) {
+      print({
+        version: VERSION,
+        store: store.root,
+        candidates: roots.length,
+        account: config.lastKnownAccountUuid ?? null,
+        updaterLastSeenVersion: config.updaterLastSeenVersion ?? null,
+        appRunning: app.running,
+        appId: packagedAppId(store) ?? null,
+      });
+      return;
+    }
 
     console.log(pc.bold('foster'));
     console.log(`  ${updateLine(await checkForUpdate())}`);
 
     console.log(pc.bold('Store'));
-    if (roots.length === 0 && !opts.store) {
-      console.log(pc.red('  no Claude Desktop store found — pass --store <path>'));
-      process.exitCode = 1;
-      return;
-    }
-    // Reuse the roots already probed rather than walking the package directory twice.
-    const store = opts.store ? resolveStore(opts.store) : layoutFor(roots[0]!);
     console.log(`  ${store.root}`);
     if (roots.length > 1)
       console.log(pc.yellow(`  (${roots.length} candidates found, using the first)`));
 
-    const config = readConfig(store);
     console.log(pc.bold('App'));
     // This is the release the updater last saw, which can run ahead of the
     // installed build, so it is labelled for what it is.
     console.log(`  updater sees  ${config.updaterLastSeenVersion ?? 'unknown'}`);
     console.log(`  account       ${config.lastKnownAccountUuid ?? 'unknown'}`);
+    console.log(`  launches as   ${packagedAppId(store) ?? 'unknown'}`);
 
-    const app = inspectApp(store);
     console.log(pc.bold('State'));
     if (app.running) {
       console.log(pc.yellow(`  Claude Desktop is running (${app.evidence.join('; ')})`));
-      console.log(pc.dim('  Reading is fine; quit it before fostering or returning.'));
+      console.log(pc.dim('  Fostering works anyway; sending copies back wants it closed.'));
     } else {
-      console.log(pc.green('  Claude Desktop is not running — safe to write'));
+      console.log(pc.green('  Claude Desktop is not running'));
     }
   });
 
 program
   .command('scan')
   .description('read-only inventory of accounts and sessions')
+  .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { store, ledger } = context(this);
     const config = readConfig(store);
     const accounts = summarise(store, config.lastKnownAccountUuid);
     const labels = project(ledger.read()).labels;
+
+    if (this.opts<{ json?: boolean }>().json) {
+      print(
+        accounts.map((row) => ({
+          accountUuid: row.account.accountUuid,
+          organizationUuid: row.account.organizationUuid,
+          label: labels.get(row.account.accountUuid) ?? null,
+          isCurrent: row.isCurrent,
+          sessions: row.nativeCount,
+          fostered: row.copyCount,
+        })),
+      );
+      return;
+    }
 
     if (accounts.length === 0) {
       console.log('No account directories found.');
@@ -251,24 +344,51 @@ program
     console.log(accountTree(groupByAccount(accounts), labels));
   });
 
-filterOptions(program.command('list').description('list sessions available to foster'))
+sourceOptions(
+  filterOptions(program.command('list').description('list sessions available to foster')),
+)
   .option('--all', 'also show sessions that could never appear in the sidebar')
+  .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { store } = context(this);
+    const opts = this.opts<{
+      from?: string;
+      fromOrg?: string;
+      all?: boolean;
+      json?: boolean;
+    }>();
     const accounts = listAccountDirs(store);
     const current = currentAccount(store, accounts);
-    const filter = filterFrom(this.opts());
 
     // Filter by account before reading files: the current account holds the most
     // sessions and every one of them would be discarded straight afterwards.
+    const sources = resolveSources(
+      accounts.filter((account) => account.accountUuid !== current?.accountUuid),
+      opts.from,
+      opts.fromOrg,
+    );
     const candidates = byRecency(
       applyFilter(
-        accounts
-          .filter((account) => account.accountUuid !== current?.accountUuid)
-          .flatMap((account) => scanAccount(store, account)),
-        filter,
+        sources.flatMap((account) => scanAccount(store, account)),
+        filterFrom(this.opts()),
       ),
     );
+
+    if (opts.json) {
+      print(
+        candidates.map((session) => ({
+          sessionId: session.data.sessionId,
+          title: session.data.title ?? null,
+          cwd: session.data.cwd ?? null,
+          lastActivityAt: session.data.lastActivityAt ?? null,
+          accountUuid: session.account.accountUuid,
+          organizationUuid: session.account.organizationUuid,
+          fosterable: session.reasons.length === 0,
+          reasons: session.reasons,
+        })),
+      );
+      return;
+    }
 
     if (candidates.length === 0) {
       console.log('Nothing matches.');
@@ -279,41 +399,47 @@ filterOptions(program.command('list').description('list sessions available to fo
     console.log(pc.bold(`\n${candidates.length} session(s)`));
   });
 
-filterOptions(
-  program
-    .command('foster')
-    .description('copy sessions from another account into the current one')
-    .option('--from <accountUuid>', 'only sessions from this account')
-    .option('--from-org <organizationUuid>', 'only sessions from this organization')
-    .option('--org <organizationUuid>', 'target organization, for an account with no sessions yet')
-    .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
-    .option('--yes', 'actually write; without it nothing is written')
-    .addOption(
-      // Passing both used to silently win for --dry-run, so a script that meant
-      // to write quietly did not. Naming the conflict says so instead.
-      new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'),
-    ),
-).action(function (this: Command) {
+sourceOptions(
+  filterOptions(
+    program
+      .command('foster')
+      .description('copy sessions from another account into the current one')
+      .option('--session <id...>', 'only these sessions, by id or unique prefix')
+      .option('--to <accountUuid>', 'write the copies into this account instead')
+      .option('--to-org <organizationUuid>', 'write the copies into this organization')
+      .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
+      .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
+      .option('--yes', 'actually write; without it nothing is written')
+      .addOption(
+        // Passing both used to silently win for --dry-run, so a script that meant
+        // to write quietly did not. Naming the conflict says so instead.
+        new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'),
+      ),
+  ),
+).action(async function (this: Command) {
   const { store, ledger } = context(this);
   const opts = this.opts<{
     title?: string;
     cwd?: string;
     since?: string;
+    session?: string[];
     from?: string;
     fromOrg?: string;
-    org?: string;
+    to?: string;
+    toOrg?: string;
     prefix: string;
+    restart?: boolean;
     yes?: boolean;
     dryRun?: boolean;
   }>();
 
   const accounts = listAccountDirs(store);
-  const target = requireCurrentAccount(store, accounts, opts.org);
+  const target = resolveDestination(store, accounts, opts);
   const filter = filterFrom(opts);
 
-  // Only the directory the sidebar reads is excluded, not the whole account:
-  // another organization of the same account is just as invisible, and just as
-  // fosterable.
+  // Only the directory the copies are going to is excluded, not the whole
+  // account: another organization of the same account is just as invisible, and
+  // just as fosterable.
   const sources = resolveSources(
     accounts.filter(
       (ref) =>
@@ -327,12 +453,22 @@ filterOptions(
 
   // Sessions that can never appear in the sidebar are always excluded here:
   // offering them would only produce copies the app silently never lists.
-  const candidates = byRecency(
+  let candidates = byRecency(
     applyFilter(
       sources.flatMap((account) => scanAccount(store, account)),
       filter,
     ),
   );
+
+  if (opts.session?.length) {
+    const { selected, unmatched } = selectByIds(candidates, opts.session);
+    if (unmatched.length > 0) {
+      throw new Error(
+        `No session matches --session ${unmatched.join(', ')}.\nRun "foster list" to see the ids.`,
+      );
+    }
+    candidates = byRecency(selected);
+  }
 
   if (candidates.length === 0) {
     console.log('Nothing to foster.');
@@ -363,23 +499,42 @@ filterOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
-  console.log(restartNotice());
+  await finish(store, Boolean(opts.restart));
 });
 
 program
   .command('return')
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
+  .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
+  .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually remove; without it nothing is removed')
   .addOption(new Option('--dry-run', 'show what would happen and remove nothing').conflicts('yes'))
-  .action(function (this: Command) {
+  .action(async function (this: Command) {
     const { store, ledger } = context(this);
-    const opts = this.opts<{ title?: string; yes?: boolean; dryRun?: boolean }>();
+    const opts = this.opts<{
+      title?: string;
+      session?: string[];
+      restart?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
 
     let active = listActive(project(ledger.read()));
     if (opts.title) {
       const needle = opts.title.toLowerCase();
       active = active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(needle));
+    }
+    if (opts.session?.length) {
+      const wanted = opts.session.map((id) => id.replace(/^local_/, '').toLowerCase());
+      active = active.filter((f) =>
+        wanted.some((id) =>
+          f.originSessionId
+            .replace(/^local_/, '')
+            .toLowerCase()
+            .startsWith(id),
+        ),
+      );
     }
 
     if (active.length === 0) {
@@ -399,15 +554,42 @@ program
     }
 
     console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
-    console.log(restartNotice());
+    await finish(store, Boolean(opts.restart));
   });
+
+/** Shared tail of the two writing commands: restart now, or say why it matters. */
+async function finish(store: StoreLayout, restart: boolean): Promise<void> {
+  if (!restart) {
+    console.log(
+      pc.dim('Restart Claude Desktop to see the change, or re-run with --restart to do it here.'),
+    );
+    return;
+  }
+  await restartDesktop(store, false);
+}
 
 program
   .command('status')
   .description('what is currently fostered')
+  .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { ledger } = context(this);
     const active = listActive(project(ledger.read()));
+
+    if (this.opts<{ json?: boolean }>().json) {
+      print(
+        active.map((f) => ({
+          originSessionId: f.originSessionId,
+          copySessionId: f.copySessionId,
+          copyPath: f.copyPath,
+          originalTitle: f.originalTitle ?? null,
+          origin: f.origin,
+          target: f.target,
+          fosteredAt: f.fosteredAt,
+        })),
+      );
+      return;
+    }
 
     if (active.length === 0) {
       console.log('Nothing is fostered.');
@@ -428,15 +610,131 @@ program
   .description('give an account UUID a human name')
   .argument('<accountUuid>')
   .argument('<label>')
-  .action(function (this: Command, accountUuid: string, label: string) {
+  .action(function (this: Command, accountUuid: string, name: string) {
     const { ledger } = context(this);
-    ledger.append({ kind: 'account_labelled', accountUuid, label });
-    console.log(`Labelled ${shortId(accountUuid)} as ${pc.bold(label)}.`);
+    ledger.append({ kind: 'account_labelled', accountUuid, label: name });
+    console.log(`Labelled ${shortId(accountUuid)} as ${pc.bold(name)}.`);
   });
 
-try {
-  program.parse();
-} catch (error) {
-  console.error(pc.red(error instanceof Error ? error.message : String(error)));
-  process.exitCode = 1;
+program
+  .command('labels')
+  .description('list the names given to accounts')
+  .action(function (this: Command) {
+    const { ledger } = context(this);
+    const labels = project(ledger.read()).labels;
+    if (labels.size === 0) {
+      console.log('No accounts have been named.');
+      return;
+    }
+    for (const [accountUuid, name] of labels) console.log(`  ${shortId(accountUuid)}  ${name}`);
+  });
+
+/* ------------------------------------------------------------------ *
+ * Claude Desktop
+ * ------------------------------------------------------------------ */
+
+const app = program
+  .command('app')
+  .description('inspect or restart Claude Desktop')
+  .action(function (this: Command) {
+    reportDesktop(this);
+  });
+
+app
+  .command('status')
+  .description('whether the app is running, and what it is hosting')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    reportDesktop(this);
+  });
+
+function reportDesktop(command: Command): void {
+  const { store } = context(command);
+  const state = inspectDesktop();
+
+  if (command.opts<{ json?: boolean }>().json) {
+    print({ ...state, appId: packagedAppId(store) ?? null });
+    return;
+  }
+
+  if (!state.running) {
+    console.log('Claude Desktop is not running.');
+    return;
+  }
+  console.log(`Claude Desktop is running (pid ${state.mainPid}).`);
+  if (state.startedAt) console.log(pc.dim(`  started ${formatAge(state.startedAt)}`));
+  if (state.codeSessions > 0)
+    console.log(pc.dim(`  hosting ${state.codeSessions} Claude Code session(s)`));
+  if (state.selfHosted)
+    console.log(pc.yellow('  foster is running inside it, so it cannot close it'));
 }
+
+app
+  .command('quit')
+  .description('ask Claude Desktop to close')
+  .option('--force', 'terminate it if it does not close on its own')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    await closeDesktop(store, Boolean(this.opts<{ force?: boolean }>().force));
+  });
+
+app
+  .command('start')
+  .description('start Claude Desktop')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    const started = await startDesktop(store);
+    console.log(started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.');
+  });
+
+app
+  .command('restart')
+  .description('close Claude Desktop and start it again, rebuilding the sidebar')
+  .option('--force', 'terminate it if it does not close on its own')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    await restartDesktop(store, Boolean(this.opts<{ force?: boolean }>().force));
+  });
+
+async function closeDesktop(store: StoreLayout, force: boolean): Promise<boolean> {
+  const result = await quitDesktop(store, { force });
+  if (result.outcome === 'not-running') {
+    console.log('Claude Desktop was not running.');
+    return true;
+  }
+  if (result.outcome === 'quit') {
+    console.log('Claude Desktop is closed.');
+    return true;
+  }
+  console.log(
+    pc.yellow(
+      'Claude Desktop is still running — it may be asking you to confirm.\n' +
+        'Answer it and try again, or pass --force.',
+    ),
+  );
+  process.exitCode = 1;
+  return false;
+}
+
+async function restartDesktop(store: StoreLayout, force: boolean): Promise<void> {
+  if (inspectApp(store).running && !(await closeDesktop(store, force))) return;
+  const started = await startDesktop(store);
+  console.log(
+    started
+      ? 'Claude Desktop is up, with the sidebar rebuilt.'
+      : 'Started it; it has not taken the store yet.',
+  );
+}
+
+async function main(): Promise<void> {
+  try {
+    await program.parseAsync();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(pc.red(message));
+    if (error instanceof DesktopControlError) console.error(pc.dim('Nothing was changed.'));
+    process.exitCode = 1;
+  }
+}
+
+await main();

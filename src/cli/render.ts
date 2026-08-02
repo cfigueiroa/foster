@@ -11,7 +11,33 @@ export function formatDate(ms: number | undefined): string {
 }
 
 export function shortId(id: string): string {
-  return bareSessionId(id).slice(0, 8);
+  return bareSessionId(id).slice(0, SHORT_ID_LENGTH);
+}
+
+const SHORT_ID_LENGTH = 8;
+
+/**
+ * Short forms that stay distinct from each other.
+ *
+ * Eight characters is enough to recognise a UUID and short enough to read, but
+ * not enough to guarantee uniqueness — and two directories printed with the same
+ * name is worse than a long name, because it looks like the tool is repeating
+ * itself. This lengthens the abbreviation only as far as it has to, and only for
+ * the identifiers being shown together.
+ */
+export function abbreviate(ids: Iterable<string>): Map<string, string> {
+  const distinct = [...new Set([...ids].map(bareSessionId))];
+  const longest = distinct.reduce((max, id) => Math.max(max, id.length), 0);
+
+  let length = SHORT_ID_LENGTH;
+  while (
+    length < longest &&
+    new Set(distinct.map((id) => id.slice(0, length))).size < distinct.length
+  ) {
+    length += 4;
+  }
+
+  return new Map(distinct.map((id) => [id, id.slice(0, length)]));
 }
 
 /**
@@ -49,12 +75,19 @@ export function accountTree(
   labels: Map<string, string> = new Map(),
 ): string {
   const lines: string[] = [];
+  // Abbreviated so no two rows can print the same name for different
+  // directories. Accounts and organizations are abbreviated apart: they are never
+  // compared with each other, so a collision between the two kinds is not a
+  // reason to make every identifier on the screen longer.
+  const names = new Map([
+    ...abbreviate(groups.map((group) => group.accountUuid)),
+    ...abbreviate(groups.flatMap((g) => g.organizations.map((org) => org.organizationUuid))),
+  ]);
+  const short = (id: string) => names.get(id) ?? shortId(id);
 
   for (const group of groups) {
     const label = labels.get(group.accountUuid);
-    const name = label
-      ? `${label} ${pc.dim(shortId(group.accountUuid))}`
-      : shortId(group.accountUuid);
+    const name = label ? `${label} ${pc.dim(short(group.accountUuid))}` : short(group.accountUuid);
     const total = group.organizations.reduce((sum, org) => sum + org.nativeCount, 0);
     const plural = group.organizations.length === 1 ? 'organization' : 'organizations';
 
@@ -68,7 +101,7 @@ export function accountTree(
       const fostered = org.copyCount > 0 ? pc.cyan(`, ${org.copyCount} fostered in`) : '';
       lines.push(
         pc.dim(`  ${last ? '└' : '├'} org `) +
-          shortId(org.organizationUuid) +
+          short(org.organizationUuid) +
           pc.dim(`  ${org.nativeCount} own`) +
           fostered,
       );
@@ -143,9 +176,4 @@ export function outcomeLine(outcome: Outcome): string {
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
   return `  ${marks[outcome.status]} ${outcome.title}${detail}`;
-}
-
-/** Reminds the user that the sidebar is only rebuilt when the app starts. */
-export function restartNotice(): string {
-  return pc.dim('Restart Claude Desktop to see the change — the sidebar is built at startup.');
 }

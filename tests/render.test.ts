@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountTree, groupByAccount } from '../src/cli/render.js';
+import { abbreviate, accountTree, formatAge, groupByAccount } from '../src/cli/render.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -83,5 +83,63 @@ describe('accountTree', () => {
       new Map([[ACCOUNT_A, 'old work account']]),
     );
     expect(output).toContain('old work account');
+  });
+});
+
+describe('abbreviate', () => {
+  it('keeps eight characters when that is already unambiguous', () => {
+    const names = abbreviate([ACCOUNT_A, ACCOUNT_B]);
+    expect(names.get(ACCOUNT_A)).toBe('00000000');
+    expect(names.get(ACCOUNT_B)).toBe('11111111');
+  });
+
+  it('lengthens only as far as it must to stay distinct', () => {
+    // These differ at the very last character.
+    const names = abbreviate([ORG_1, ORG_2]);
+    expect(names.get(ORG_1)).not.toBe(names.get(ORG_2));
+    expect(names.get(ORG_1)).toBe(ORG_1);
+  });
+
+  it('does not choke on a single identifier', () => {
+    expect(abbreviate([ORG_1]).get(ORG_1)).toBe('00000000');
+  });
+});
+
+describe('the tree with colliding identifiers', () => {
+  it('never prints the same name for two different organizations', () => {
+    const tree = plain(
+      accountTree(groupByAccount([row(ACCOUNT_A, ORG_1, 1), row(ACCOUNT_A, ORG_2, 1)])),
+    );
+    const shown = [...tree.matchAll(/org (\S+)/g)].map((match) => match[1]);
+
+    expect(shown).toHaveLength(2);
+    expect(new Set(shown).size).toBe(2);
+  });
+
+  it('leaves the account short when only the organizations collide', () => {
+    const tree = plain(
+      accountTree(groupByAccount([row(ACCOUNT_A, ORG_1, 1), row(ACCOUNT_A, ORG_2, 1)])),
+    );
+    expect(tree.split('\n')[0]).toContain('00000000  ');
+  });
+});
+
+describe('formatAge', () => {
+  const now = Date.parse('2026-08-02T00:00:00Z');
+
+  it('says when there is nothing to go on', () => {
+    expect(formatAge(undefined, now)).toBe('never used');
+  });
+
+  it('reads in the units a person would use', () => {
+    expect(formatAge(now, now)).toBe('today');
+    expect(formatAge(now - 86_400_000, now)).toBe('yesterday');
+    expect(formatAge(now - 5 * 86_400_000, now)).toBe('5 days ago');
+    expect(formatAge(now - 90 * 86_400_000, now)).toBe('3 months ago');
+    expect(formatAge(now - 800 * 86_400_000, now)).toBe('2 years ago');
+  });
+
+  it('does not report the future as a very long time ago', () => {
+    expect(formatAge(now + 86_400_000, now)).toBe('just now');
   });
 });
