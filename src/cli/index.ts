@@ -1,4 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
+import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
@@ -16,6 +17,7 @@ import {
   inspectDesktop,
   packagedAppId,
   quitDesktop,
+  runningStores,
   startDesktop,
 } from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
@@ -309,6 +311,22 @@ program
     console.log(`  updater sees  ${config.updaterLastSeenVersion ?? 'unknown'}`);
     console.log(`  account       ${config.lastKnownAccountUuid ?? 'unknown'}`);
     console.log(`  launches as   ${packagedAppId(store) ?? 'unknown'}`);
+
+    // A profile started with the --user-data-dir switch is invisible to a process
+    // that did not launch it, so the running instances are the only place to learn
+    // that it exists — and what to point --store at.
+    //
+    // Compared against every candidate root, not just the resolved one. A packaged
+    // app passes its userData as the pre-virtualisation %APPDATA% path while foster
+    // resolves the package path; both name the same store, and reporting the other
+    // spelling as "another instance" invents a profile that does not exist.
+    const known = new Set([...candidateStoreRoots(), store.root].map((dir) => path.resolve(dir)));
+    const others = runningStores().filter((dir) => !known.has(path.resolve(dir)));
+    if (others.length > 0) {
+      console.log(pc.bold('Other running instances'));
+      for (const dir of others) console.log(`  ${dir}`);
+      console.log(pc.dim('  pass one to --store to work on that profile'));
+    }
 
     console.log(pc.bold('State'));
     if (app.running) {

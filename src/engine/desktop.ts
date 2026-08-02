@@ -25,6 +25,8 @@ export interface ProcessRow {
   name: string;
   /** Empty when the path could not be read, which is normal for other users' processes. */
   path: string;
+  /** The full command line, which is where a profile's --user-data-dir shows up. */
+  commandLine: string;
   /** Epoch milliseconds, or undefined when the creation time was unavailable. */
   startedAt?: number;
 }
@@ -33,6 +35,7 @@ export type ProcessLister = () => ProcessRow[];
 
 const POWERSHELL_QUERY =
   'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,' +
+  'CommandLine,' +
   "@{n='Started';e={if($_.CreationDate){$_.CreationDate.ToUniversalTime().ToString('o')}}} | " +
   'ConvertTo-Csv -NoTypeInformation';
 
@@ -71,12 +74,13 @@ export function parseProcessCsv(csv: string): ProcessRow[] {
     // process with pid 0 — and pid 0 is a plausible-looking parent link.
     const pid = fields[0]?.trim() ? Number(fields[0]) : Number.NaN;
     if (!Number.isInteger(pid) || pid <= 0) continue;
-    const started = fields[4] ? Date.parse(fields[4]) : Number.NaN;
+    const started = fields[5] ? Date.parse(fields[5]) : Number.NaN;
     rows.push({
       pid,
       parentPid: Number(fields[1]) || 0,
       name: fields[2] ?? '',
       path: fields[3] ?? '',
+      commandLine: fields[4] ?? '',
       ...(Number.isFinite(started) ? { startedAt: started } : {}),
     });
   }
@@ -135,6 +139,25 @@ export interface DesktopState {
    * asking for it, part-way through whatever it was doing.
    */
   selfHosted: boolean;
+}
+
+/**
+ * The userData directory of every running instance.
+ *
+ * A second profile can be started either by environment variable or by the
+ * `--user-data-dir` switch, and only the first is visible to a process that did
+ * not launch it. Electron passes the switch down to every child, so the running
+ * processes themselves are the one place both spellings show up — which makes
+ * this the only way to tell someone what to point `--store` at.
+ */
+export function runningStores(list: ProcessLister = readProcesses): string[] {
+  const dirs = new Set<string>();
+  for (const row of list()) {
+    if (row.name.toLowerCase() !== 'claude.exe') continue;
+    const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
+    if (match?.[1]) dirs.add(match[1]);
+  }
+  return [...dirs];
 }
 
 /**

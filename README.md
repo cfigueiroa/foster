@@ -154,23 +154,44 @@ directory the sidebar is on.) So there is no file to edit and no flag to pass. D
 command-line arguments, environment variables, config files and group policy were each checked, and
 none of them selects an account.
 
-**There is a second-profile mechanism, and on Windows it does not get you a second account.**
-`CLAUDE_USER_DATA_DIR` is read at the app's entry point, before anything else, and becomes its
-`userData` outright. That part works — tested: the profile starts, populates a full store, takes its
-own instance lock and runs alongside the default installation without disturbing it.
+**A second profile does give you a second account, with one manual step.** Both
+`CLAUDE_USER_DATA_DIR` and the `--user-data-dir` switch relocate `userData` outright: the profile
+starts, populates its own store, takes its own instance lock, and runs beside the default
+installation without disturbing it.
 
-What it cannot do is sign in. The `claude://` protocol is registered to the installed package, so
-when the browser hands back an SSO or magic-link callback, Windows routes it to the package — which
-starts an instance on the **default** `userData`, fails the single-instance lock, and forwards the
-callback to whichever instance already holds that lock. The profile never receives its own callback
-and never leaves the sign-in screen. Closing the default instance does not help: the callback still
-arrives at a default-`userData` instance, not at the profile. Tested with a real sign-in attempt;
-the callbacks were logged as suppressed by the default instance and the profile's log stayed empty.
+Signing in is where it gets awkward, and it is worth understanding why rather than giving up at the
+symptom. The `claude://` protocol belongs to the installed package, so when the browser hands back
+the OAuth callback, Windows routes it to the package and starts an instance on the **default**
+`userData`. The profile never receives its own callback and sits on the sign-in screen forever.
 
-So `foster` supports the profile path — when `CLAUDE_USER_DATA_DIR` is set it looks there first, and
-operates on the store the app would be using — but do not expect it to be a way of holding two
-accounts on this platform. `foster` also cannot start a profile for you: only whatever launched it
-knows how.
+But look at what that registration actually is:
+
+```
+HKCU\Software\Classes\claude\shell\open\command
+  "…\WindowsApps\Claude_…\app\Claude.exe" "%1"
+```
+
+A plain executable with the URL as an argument — no package activation, no broker. And a second
+invocation carrying the same `--user-data-dir` loses that profile's single-instance lock and
+forwards its argv to the instance holding it. So the callback can simply be delivered by hand:
+
+```powershell
+& "…\app\Claude.exe" --user-data-dir="<profile>" "claude://<the callback URL>"
+```
+
+The profile started the login, so it is the instance holding the pending state; the URL only ever
+needed to reach it. Capture the URL from the browser's network tab (or a fallback link on the page),
+cancel the browser's "Open Claude?" prompt so the default instance never sees it, and run that. The
+authorization code is single-use and short-lived, so do it promptly.
+
+Demonstrated once, end to end: two accounts signed in simultaneously in the same Windows session,
+each in its own instance, with the default installation untouched. An account whose organization
+requires SSO will still refuse — that is the account's policy, not this mechanism.
+
+`foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
+for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
+directories of every running instance so you know what to pass to `--store`. Starting a profile is
+still not something `foster` does — only whatever launched it knows how.
 
 If you are simply moving between accounts on one profile, staging still works and is the shortest
 path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),
@@ -186,7 +207,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.7.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.8.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -314,9 +335,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.7.0
-git commit -am "chore: release 0.7.0" && git tag -a v0.7.0 -m "foster v0.7.0"
-git push && git push origin v0.7.0
+npm run version:set 0.8.0
+git commit -am "chore: release 0.8.0" && git tag -a v0.8.0 -m "foster v0.8.0"
+git push && git push origin v0.8.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

@@ -5,6 +5,7 @@ import {
   packagedAppId,
   parseProcessCsv,
   quitDesktop,
+  runningStores,
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { heldInMemory } from '../src/engine/safety.js';
@@ -24,6 +25,7 @@ function rows(...entries: Partial<ProcessRow>[]): ProcessRow[] {
     parentPid: 1,
     name: 'claude.exe',
     path: DESKTOP,
+    commandLine: `"${DESKTOP}"`,
     ...entry,
   }));
 }
@@ -31,8 +33,8 @@ function rows(...entries: Partial<ProcessRow>[]): ProcessRow[] {
 describe('parseProcessCsv', () => {
   it('reads the fields PowerShell quotes', () => {
     const csv = [
-      '"ProcessId","ParentProcessId","Name","ExecutablePath","Started"',
-      '"4340","10568","Claude.exe","C:\\Apps\\Claude.exe","2026-08-01T23:08:31.0000000Z"',
+      '"ProcessId","ParentProcessId","Name","ExecutablePath","CommandLine","Started"',
+      '"4340","10568","Claude.exe","C:\\Apps\\Claude.exe","""C:\\Apps\\Claude.exe""","2026-08-01T23:08:31.0000000Z"',
     ].join('\r\n');
 
     expect(parseProcessCsv(csv)).toEqual([
@@ -41,6 +43,7 @@ describe('parseProcessCsv', () => {
         parentPid: 10568,
         name: 'Claude.exe',
         path: 'C:\\Apps\\Claude.exe',
+        commandLine: '"C:\\Apps\\Claude.exe"',
         startedAt: Date.parse('2026-08-01T23:08:31.000Z'),
       },
     ]);
@@ -48,17 +51,19 @@ describe('parseProcessCsv', () => {
 
   it('keeps a row whose path contains a comma', () => {
     const csv = [
-      '"ProcessId","ParentProcessId","Name","ExecutablePath","Started"',
-      '"7","1","x.exe","C:\\Program Files\\a, b\\x.exe",""',
+      '"ProcessId","ParentProcessId","Name","ExecutablePath","CommandLine","Started"',
+      '"7","1","x.exe","C:\\Program Files\\a, b\\x.exe","x.exe --flag=a,b",""',
     ].join('\n');
 
     const [row] = parseProcessCsv(csv);
     expect(row!.path).toBe('C:\\Program Files\\a, b\\x.exe');
+    expect(row!.commandLine).toBe('x.exe --flag=a,b');
     expect(row!.startedAt).toBeUndefined();
   });
 
   it('skips rows that are not processes', () => {
-    const csv = '"ProcessId","ParentProcessId","Name","ExecutablePath","Started"\n"","","","",""';
+    const csv =
+      '"ProcessId","ParentProcessId","Name","ExecutablePath","CommandLine","Started"\n"","","","","",""';
     expect(parseProcessCsv(csv)).toEqual([]);
   });
 });
@@ -240,5 +245,42 @@ describe('quitDesktop', () => {
     });
 
     expect(result.outcome).not.toBe('needs-terminate');
+  });
+});
+
+describe('runningStores', () => {
+  /**
+   * A profile can be started by environment variable or by the --user-data-dir
+   * switch. Only the first is visible to a process that did not launch it, so the
+   * running command lines are the one place both spellings show up.
+   */
+  const withCmd = (cmd: string): Partial<ProcessRow> => ({ commandLine: cmd });
+
+  it('reads the profile out of the command line', () => {
+    const table = rows(withCmd('"Claude.exe" --user-data-dir="C:\\work\\profile" --other'));
+    expect(runningStores(() => table)).toEqual(['C:\\work\\profile']);
+  });
+
+  it('reports each profile once, however many processes it has', () => {
+    const table = rows(
+      withCmd('"Claude.exe" --user-data-dir="C:\\one"'),
+      withCmd('"Claude.exe" --type=renderer --user-data-dir="C:\\one"'),
+      withCmd('"Claude.exe" --user-data-dir="C:\\two"'),
+    );
+    expect(runningStores(() => table).sort()).toEqual(['C:\\one', 'C:\\two']);
+  });
+
+  it('handles a profile path that is not quoted', () => {
+    const table = rows(withCmd('Claude.exe --user-data-dir=C:\\plain --type=gpu'));
+    expect(runningStores(() => table)).toEqual(['C:\\plain']);
+  });
+
+  it('ignores processes that are not the app', () => {
+    const table = rows({ name: 'node.exe', commandLine: 'node --user-data-dir="C:\\nope"' });
+    expect(runningStores(() => table)).toEqual([]);
+  });
+
+  it('says nothing when no instance names a profile', () => {
+    expect(runningStores(() => rows(withCmd('"Claude.exe"')))).toEqual([]);
   });
 });
