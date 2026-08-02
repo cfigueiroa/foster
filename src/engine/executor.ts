@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey, stripPrefix } from '../domain/fostering.js';
+import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
@@ -113,7 +113,11 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         target,
         copySessionId: copy.sessionId,
         copyPath,
-        originalTitle: stripPrefix(session.data.title ?? '', prefix),
+        // Recorded verbatim, and left out entirely when the session has no title.
+        // Writing '' instead defeated every `originalTitle ?? fallback` downstream,
+        // because an empty string is not nullish — status and return printed a
+        // blank where they meant to print the session id.
+        ...(session.data.title ? { originalTitle: session.data.title } : {}),
         prefix,
       });
       mintedInBatch.add(key);

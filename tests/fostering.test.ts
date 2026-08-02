@@ -5,7 +5,6 @@ import {
   DEFAULT_PREFIX,
   fosteringKey,
   mintSessionId,
-  stripPrefix,
   unfosterableReasons,
 } from '../src/domain/fostering.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT, session } from './helpers/store.js';
@@ -21,9 +20,12 @@ describe('title prefix', () => {
     expect(twice).toBe(once);
   });
 
-  it('round-trips back to the original title', () => {
-    const prefixed = applyPrefix('Refactor parser', DEFAULT_PREFIX);
-    expect(stripPrefix(prefixed, DEFAULT_PREFIX)).toBe('Refactor parser');
+  it('leaves a title that genuinely begins with the prefix untouched', () => {
+    // Stripping before re-adding used to rewrite real titles: with --prefix
+    // "old-", the title "old-notes" came out as "old-notes" with no marker and
+    // "notes" recorded as the original.
+    expect(applyPrefix('old-notes', 'old-')).toBe('old-notes');
+    expect(applyPrefix('↪ ↪ double', DEFAULT_PREFIX)).toBe('↪ ↪ double');
   });
 
   it('tolerates a missing title', () => {

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { fosterSessions } from '../src/engine/executor.js';
 import { writeFileAtomic } from '../src/engine/fsatomic.js';
 import { Ledger } from '../src/ledger/log.js';
+import { activityOf, applyFilter } from '../src/cli/filters.js';
 import { scanAccount } from '../src/store/scanner.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -65,5 +66,61 @@ describe('writeFileAtomic', () => {
 
     expect(() => writeFileAtomic(target, '{}')).toThrow();
     expect(readdirSync(dir).some((name) => name.startsWith('.foster-tmp-'))).toBe(false);
+  });
+});
+
+describe('--since and the ordering agree on what "recent" means', () => {
+  it('keeps a session whose only timestamp is lastFocusedAt', () => {
+    // The filter used to ignore lastFocusedAt while the sort considered it, so a
+    // session opened recently sorted to the top and was then filtered out.
+    const opened = session({ sessionId: '00000000-0000-4000-8000-0000000000c1' });
+    delete opened.lastActivityAt;
+    delete opened.createdAt;
+
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, opened);
+    const discovered = scanAccount(store, OLD_ACCOUNT);
+
+    expect(activityOf(discovered[0]!)).toBe(opened.lastFocusedAt);
+    expect(applyFilter(discovered, { since: opened.lastFocusedAt! - 1 })).toHaveLength(1);
+  });
+});
+
+describe('the recorded original title', () => {
+  it('is the source title, verbatim', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(scratch(), 'ledger.jsonl'));
+    writeSession(store, OLD_ACCOUNT, session({ title: 'Refactor parser' }));
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      guard: () => {},
+    });
+
+    const fostered = ledger.read().find((event) => event.kind === 'fostered');
+    expect(fostered).toMatchObject({ originalTitle: 'Refactor parser' });
+  });
+
+  it('is absent rather than empty when the session has no title', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(scratch(), 'ledger.jsonl'));
+    const untitled = session();
+    delete untitled.title;
+    writeSession(store, OLD_ACCOUNT, untitled);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      guard: () => {},
+    });
+
+    // '' is not nullish, so recording it defeated every `?? fallback` downstream.
+    const fostered = ledger.read().find((event) => event.kind === 'fostered');
+    expect(
+      fostered && 'originalTitle' in fostered ? fostered.originalTitle : undefined,
+    ).toBeUndefined();
   });
 });

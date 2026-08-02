@@ -79,12 +79,3 @@ export function removeSafely(target: string): boolean {
   unlinkSync(target);
   return true;
 }
-
-/** True when the path is a reparse point (junction or symlink) rather than a real file. */
-export function isLink(target: string): boolean {
-  try {
-    return lstatSync(target).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}

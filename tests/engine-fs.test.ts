@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isLink, removeSafely, writeFileAtomic } from '../src/engine/fsatomic.js';
+import { removeSafely, writeFileAtomic } from '../src/engine/fsatomic.js';
 
 function scratch(): string {
   return mkdtempSync(path.join(tmpdir(), 'foster-fs-'));
@@ -69,7 +70,7 @@ describe('removeSafely', () => {
 
     const link = path.join(dir, 'linked-sandbox');
     symlinkSync(real, link, 'junction');
-    expect(isLink(link)).toBe(true);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
 
     removeSafely(link);
 

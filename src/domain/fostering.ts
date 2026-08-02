@@ -15,16 +15,19 @@ export function mintSessionId(): string {
   return `${SESSION_ID_PREFIX}${randomUUID()}`;
 }
 
+/**
+ * Idempotent: applying a prefix twice must not produce "↪ ↪ title".
+ *
+ * A title that genuinely begins with the prefix is left exactly as it is. The
+ * previous version stripped every leading occurrence before re-adding one, which
+ * quietly rewrote real titles — fostering "old-notes" with `--prefix "old-"`
+ * produced "old-notes" again, with no marker, and recorded "notes" as the
+ * original. Treating an already-prefixed title as done costs nothing and cannot
+ * corrupt anything.
+ */
 export function applyPrefix(title: string | undefined, prefix: string): string {
-  const base = stripPrefix(title ?? '', prefix);
-  return `${prefix}${base}`;
-}
-
-/** Idempotent: applying a prefix twice must not produce "↪ ↪ title". */
-export function stripPrefix(title: string, prefix: string): string {
-  let out = title;
-  while (prefix.length > 0 && out.startsWith(prefix)) out = out.slice(prefix.length);
-  return out;
+  const base = title ?? '';
+  return base.startsWith(prefix) ? base : `${prefix}${base}`;
 }
 
 /**

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildFosterCopy } from '../src/domain/fostering.js';
 import { accountDir } from '../src/domain/paths.js';
-import { listTombstones, scanAccount, scanStore, summarise } from '../src/store/scanner.js';
+import { scanAccount, scanStore, summarise } from '../src/store/scanner.js';
 import { readConfig } from '../src/store/config.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -92,20 +92,6 @@ describe('summarise', () => {
 
     expect(oldSummary).toMatchObject({ nativeCount: 2, copyCount: 0, isCurrent: false });
     expect(newSummary).toMatchObject({ nativeCount: 0, copyCount: 1, isCurrent: true });
-  });
-});
-
-describe('listTombstones', () => {
-  it('reports ids the app has tombstoned', () => {
-    const store = makeStore();
-    writeSession(store, NEW_ACCOUNT, session());
-    writeFileSync(
-      path.join(accountDir(store, NEW_ACCOUNT), 'deleted_00000000-0000-4000-8000-00000000004a'),
-      '1',
-      'utf8',
-    );
-
-    expect(listTombstones(store, NEW_ACCOUNT)).toContain('00000000-0000-4000-8000-00000000004a');
   });
 });
 

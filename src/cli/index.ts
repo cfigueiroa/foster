@@ -1,5 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
@@ -287,8 +287,12 @@ filterOptions(
     .option('--from-org <organizationUuid>', 'only sessions from this organization')
     .option('--org <organizationUuid>', 'target organization, for an account with no sessions yet')
     .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
-    .option('--yes', 'skip the confirmation and write')
-    .option('--dry-run', 'show what would happen and write nothing'),
+    .option('--yes', 'actually write; without it nothing is written')
+    .addOption(
+      // Passing both used to silently win for --dry-run, so a script that meant
+      // to write quietly did not. Naming the conflict says so instead.
+      new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'),
+    ),
 ).action(function (this: Command) {
   const { store, ledger } = context(this);
   const opts = this.opts<{
@@ -366,8 +370,8 @@ program
   .command('return')
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
-  .option('--yes', 'skip the confirmation and remove')
-  .option('--dry-run', 'show what would happen and remove nothing')
+  .option('--yes', 'actually remove; without it nothing is removed')
+  .addOption(new Option('--dry-run', 'show what would happen and remove nothing').conflicts('yes'))
   .action(function (this: Command) {
     const { store, ledger } = context(this);
     const opts = this.opts<{ title?: string; yes?: boolean; dryRun?: boolean }>();

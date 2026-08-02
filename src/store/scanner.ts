@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { unfosterableReasons } from '../domain/fostering.js';
-import { isSessionFileName, isTombstoneFileName, TOMBSTONE_PREFIX } from '../domain/naming.js';
+import { isSessionFileName } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
 import type {
   AccountRef,
@@ -76,20 +76,6 @@ export function summariseAccount(
     copyCount,
     isCurrent: account.accountUuid === currentAccountUuid,
   };
-}
-
-/**
- * Ids the app has tombstoned in a given account directory.
- *
- * The app stores these without its session-id prefix, so compare against
- * `bareSessionId(...)` rather than a raw sessionId.
- */
-export function listTombstones(store: StoreLayout, account: AccountRef): Set<string> {
-  const out = new Set<string>();
-  for (const entry of safeReaddir(accountDir(store, account))) {
-    if (isTombstoneFileName(entry)) out.add(entry.slice(TOMBSTONE_PREFIX.length));
-  }
-  return out;
 }
 
 function readSession(file: string): CodeSessionData | undefined {

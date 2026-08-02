@@ -34,10 +34,7 @@ export function applyFilter(
       if (!cwd.toLowerCase().includes(filter.cwd.toLowerCase())) return false;
     }
 
-    if (filter.since !== undefined) {
-      const activity = session.data.lastActivityAt ?? session.data.createdAt ?? 0;
-      if (activity < filter.since) return false;
-    }
+    if (filter.since !== undefined && activityOf(session) < filter.since) return false;
 
     return true;
   });
@@ -48,7 +45,15 @@ export function byRecency(sessions: DiscoveredSession[]): DiscoveredSession[] {
   return [...sessions].sort((a, b) => activityOf(b) - activityOf(a));
 }
 
-function activityOf(session: DiscoveredSession): number {
+/**
+ * When a session was last touched.
+ *
+ * Shared by the filter and the ordering on purpose: they disagreed before, with
+ * only the ordering considering lastFocusedAt. A session opened yesterday but
+ * with no recorded activity sorted to the top of the list and was then excluded
+ * by --since, which is a confusing thing for one command to do.
+ */
+export function activityOf(session: DiscoveredSession): number {
   return session.data.lastActivityAt ?? session.data.lastFocusedAt ?? session.data.createdAt ?? 0;
 }
 
