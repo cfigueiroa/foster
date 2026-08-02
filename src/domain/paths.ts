@@ -65,7 +65,7 @@ export function resolveStore(override?: string, env: NodeJS.ProcessEnv = process
 export function layoutFor(root: string): StoreLayout {
   // Normalised once, here, so every comparison and every line printed downstream
   // sees one spelling. A path typed with forward slashes on Windows otherwise
-  // travels all the way to the screen as `C:\Users\me\AppData\Local/Profile`.
+  // travels all the way to the screen as `D:\Local/Profile`.
   const resolved = path.resolve(root);
   return {
     root: resolved,
