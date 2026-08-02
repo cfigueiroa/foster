@@ -3,9 +3,9 @@ import type { DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { scanStore } from './scanner.js';
 import { scanAllTombstones, type Tombstone } from './tombstones.js';
 import {
-  claudeProjectsDir,
   indexTranscripts,
   readTranscriptFacts,
+  transcriptRoots,
   type TranscriptFacts,
 } from './transcripts.js';
 
@@ -29,8 +29,10 @@ export interface Restorable {
 export function findRestorable(
   store: StoreLayout,
   env: NodeJS.ProcessEnv = process.env,
+  configDirs: string[] = [],
 ): Restorable[] {
-  const transcripts = indexTranscripts(claudeProjectsDir(env));
+  const roots = transcriptRoots(env, configDirs);
+  const transcripts = indexTranscripts(roots);
   if (transcripts.size === 0) return [];
 
   // Conversations a session file already points at, anywhere on disk. A tombstoned

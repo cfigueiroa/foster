@@ -192,3 +192,40 @@ describe('the title a restore writes', () => {
     expect(data.title).toBeTruthy();
   });
 });
+
+describe('conversations spread across several CLI config directories', () => {
+  /**
+   * Running a second Claude Code account means giving the CLI its own
+   * CLAUDE_CONFIG_DIR, and each of those keeps its own projects/ tree. Looking
+   * only at the one this process runs under would return a shorter list that
+   * looks complete.
+   */
+  function transcriptIn(configDir: string, cliSessionId: string) {
+    const dir = path.join(configDir, 'projects', 'C--work-other');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${cliSessionId}.jsonl`),
+      JSON.stringify({ type: 'user' }),
+      'utf8',
+    );
+  }
+
+  it('finds one whose conversation lives under another config directory', () => {
+    const other = mkdtempSync(path.join(tmpdir(), 'foster-cfg2-'));
+    tombstone([DELETED_CLI]);
+    transcriptIn(other, DELETED_CLI);
+
+    // Not under env's config dir at all — only reachable via the extra roots.
+    expect(findRestorable(store, env)).toEqual([]);
+    expect(findRestorable(store, env, [other])).toHaveLength(1);
+  });
+
+  it('does not count a directory that merely has the right name', () => {
+    const bare = mkdtempSync(path.join(tmpdir(), 'foster-cfg3-'));
+    tombstone([DELETED_CLI]);
+    transcript(DELETED_CLI, [{ type: 'user' }]);
+
+    // No projects/ tree in it, so it contributes nothing and breaks nothing.
+    expect(findRestorable(store, env, [bare])).toHaveLength(1);
+  });
+});

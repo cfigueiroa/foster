@@ -24,6 +24,38 @@ export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string 
 }
 
 /**
+ * Every directory that might hold transcripts.
+ *
+ * `CLAUDE_CONFIG_DIR` is how the CLI is pointed at a different account — a second
+ * subscription is run by giving it its own config directory — and each of those
+ * keeps its own `projects/`. Looking only at the one this process happens to be
+ * running under would quietly miss conversations belonging to the others, which
+ * for a recovery tool is the worst kind of wrong: a shorter list that looks
+ * complete.
+ *
+ * Siblings are found by inspection, not by naming convention: a directory counts
+ * only if it actually contains a `projects/` tree, so an unrelated `.claude-*`
+ * folder cannot join in by name alone.
+ */
+export function transcriptRoots(
+  env: NodeJS.ProcessEnv = process.env,
+  extra: string[] = [],
+): string[] {
+  const home = homedir();
+  const roots = new Set<string>();
+
+  for (const dir of [env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), ...extra]) {
+    if (dir) roots.add(path.join(dir, 'projects'));
+  }
+  for (const entry of safeReaddir(home)) {
+    if (!entry.startsWith('.claude')) continue;
+    roots.add(path.join(home, entry, 'projects'));
+  }
+
+  return [...roots].filter(isDirectory);
+}
+
+/**
  * Every transcript on disk, keyed by the session id that points at it.
  *
  * Built by listing directories only — no transcript is opened. The directory name
@@ -31,19 +63,21 @@ export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string 
  * dashes), so the cwd is read from the file itself rather than decoded from the
  * path.
  */
-export function indexTranscripts(projectsDir: string): Map<string, string> {
+export function indexTranscripts(projectsDirs: string | string[]): Map<string, string> {
   const index = new Map<string, string>();
 
-  for (const project of safeReaddir(projectsDir)) {
-    const dir = path.join(projectsDir, project);
-    if (!isDirectory(dir)) continue;
+  for (const projectsDir of typeof projectsDirs === 'string' ? [projectsDirs] : projectsDirs) {
+    for (const project of safeReaddir(projectsDir)) {
+      const dir = path.join(projectsDir, project);
+      if (!isDirectory(dir)) continue;
 
-    for (const entry of safeReaddir(dir)) {
-      if (!entry.endsWith('.jsonl')) continue;
-      const id = entry.slice(0, -'.jsonl'.length);
-      // First one wins: the same conversation can be mirrored under a second
-      // project directory, and either copy opens the same session.
-      if (!index.has(id)) index.set(id, path.join(dir, entry));
+      for (const entry of safeReaddir(dir)) {
+        if (!entry.endsWith('.jsonl')) continue;
+        const id = entry.slice(0, -'.jsonl'.length);
+        // First one wins: the same conversation can be mirrored under a second
+        // project directory, and either copy opens the same session.
+        if (!index.has(id)) index.set(id, path.join(dir, entry));
+      }
     }
   }
 

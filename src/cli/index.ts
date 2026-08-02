@@ -516,6 +516,7 @@ program
   .option('--session <id...>', 'only these conversations, by id or unique prefix')
   .option('--to <accountUuid>', 'write them into this account instead')
   .option('--to-org <organizationUuid>', 'write them into this organization')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
   .option('--prefix <text>', 'title prefix marking restored sessions', DEFAULT_PREFIX)
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually write; without it nothing is written')
@@ -527,6 +528,7 @@ program
       session?: string[];
       to?: string;
       toOrg?: string;
+      configDir?: string[];
       prefix: string;
       restart?: boolean;
       yes?: boolean;
@@ -534,7 +536,9 @@ program
     }>();
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
-    let candidates = findRestorable(store).map((entry) => entry.session);
+    let candidates = findRestorable(store, process.env, opts.configDir ?? []).map(
+      (entry) => entry.session,
+    );
 
     if (opts.title) {
       candidates = applyFilter(candidates, { title: opts.title });

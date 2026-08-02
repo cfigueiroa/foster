@@ -78,6 +78,12 @@ like any other.
 A conversation that some session still points at is not offered: it is not lost, and restoring it
 would only produce a duplicate.
 
+Conversations are looked for in every Claude config directory that has them, not just the one this
+process happens to be running under. Running a second Claude Code account means pointing the CLI at
+its own `CLAUDE_CONFIG_DIR`, and each of those keeps a separate `projects/` tree — searching only one
+would produce a shorter list that looks complete. Siblings of `~/.claude` are picked up when they
+actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
+
 ## Why a restart is needed
 
 Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
@@ -180,7 +186,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.3/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.7.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -308,9 +314,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.6.3
-git commit -am "chore: release 0.6.3" && git tag -a v0.6.3 -m "foster v0.6.3"
-git push && git push origin v0.6.3
+npm run version:set 0.7.0
+git commit -am "chore: release 0.7.0" && git tag -a v0.7.0 -m "foster v0.7.0"
+git push && git push origin v0.7.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree
