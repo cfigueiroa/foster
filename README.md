@@ -125,10 +125,12 @@ Inside one installation the account is not stored anywhere. The app keeps it in 
 deliberately non-persistent, and cleared whenever its web view navigates — and just three things ever
 set it: an IPC call the app's own signed-in page makes, the app noticing that page navigate to
 `/logout`, and a backfill that asks the server who you are using the cookies you already have. The
-`lastKnownAccountUuid` in the config is a leftover of that answer, not the source of it; nothing reads
-it to decide anything. So there is no file to edit and no flag to pass. Deep links, command-line
-arguments, environment variables, config files and group policy were each checked, and none of them
-selects an account.
+`lastKnownAccountUuid` in the config is a leftover of that answer, not the source of it: nothing reads
+it to decide who you are signed in as. (It is not entirely dead — it feeds a check against reusing a
+token across identities — but it selects nothing, and `foster` reads it only as a hint about which
+directory the sidebar is on.) So there is no file to edit and no flag to pass. Deep links,
+command-line arguments, environment variables, config files and group policy were each checked, and
+none of them selects an account.
 
 **The one real mechanism is a second profile.** `CLAUDE_USER_DATA_DIR` is read at the app's entry
 point, before anything else, and becomes its `userData` outright — separate cookie jar, separate
