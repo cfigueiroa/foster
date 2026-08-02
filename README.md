@@ -65,10 +65,15 @@ foster restore --yes    # bring them back
 ```
 
 Title, working directory and dates are read out of the transcript itself, so the restored session
-arrives named and dated rather than blank. What cannot come back is what was never in the
-conversation: the model it ran, its permission mode, and any MCP or worktree configuration. The
-marker is left exactly where it is — it is the app's record, not `foster`'s to erase — and the
-restored session is an ordinary copy, so `foster return` undoes it like any other.
+arrives named and dated rather than blank — and it sorts into its real place in Recents instead of
+jumping to the top with today's date. Recovering the working directory does more than label it: the
+session opens with its repository and branch bound again, reading the diff and offering to open a
+pull request. It comes back resumable, not merely readable.
+
+What cannot come back is what was never in the conversation: the model it ran, its permission mode,
+and any MCP configuration. The marker is left exactly where it is — it is the app's record, not
+`foster`'s to erase — and the restored session is an ordinary copy, so `foster return` undoes it
+like any other.
 
 A conversation that some session still points at is not offered: it is not lost, and restoring it
 would only produce a duplicate.
