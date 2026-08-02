@@ -371,30 +371,51 @@ program
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const { store, ledger } = context(this);
+    const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     // Everything the menu offers, printed instead of picked: without this, using
     // foster from a script meant knowing a profile's path by heart.
     const stores = knownStores(ledger.read());
+    // Resolved leniently, because this is the command you reach for when nothing
+    // resolves: refusing to list the installations because it could not pick one
+    // of them would be exactly backwards.
+    const current = resolveQuietly(opts.store);
 
-    if (this.opts<{ json?: boolean }>().json) {
+    if (opts.json) {
       print(
         stores.map((known) => ({
           root: known.root,
           knownBy: known.hint,
           running: known.running,
-          isCurrent: samePath(known.root, store.root),
+          isCurrent: current ? samePath(known.root, current.root) : false,
         })),
       );
       return;
     }
 
+    if (stores.length === 0) {
+      console.log('No Claude Desktop installation found.');
+      console.log(pc.dim('Pass --store <path> to name one, or start the app once.'));
+      return;
+    }
+
     for (const known of stores) {
-      const marker = samePath(known.root, store.root) ? pc.green('*') : ' ';
+      const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
       const state = known.running ? `${known.hint}, running` : known.hint;
       console.log(`${marker} ${known.root} ${pc.dim(`(${state})`)}`);
     }
-    console.log(pc.dim(`\n${stores.length === 0 ? 'None found. ' : ''}* is the one in use.`));
+    const marked = current && stores.some((known) => samePath(known.root, current.root));
+    console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
   });
+
+/** The store a bare command would use, or nothing when there is not one. */
+function resolveQuietly(override?: string): StoreLayout | undefined {
+  try {
+    return resolveStore(override);
+  } catch {
+    return undefined;
+  }
+}
 
 program
   .command('scan')
