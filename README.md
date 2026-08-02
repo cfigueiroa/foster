@@ -52,7 +52,7 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.2/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.3.0/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
@@ -104,6 +104,11 @@ were never opened — are always excluded; `list --all` shows them anyway.
   stores or OAuth token caches. It only touches session metadata.
 - **Scheduled-task sessions are treated separately.** Sessions carrying a `scheduledTaskId` are not
   listed in the sidebar's recents and are excluded from ordinary fostering.
+- **One request, and only about versions.** Because the install URL pins a tag, an install would
+  never learn about later releases on its own. So `foster` asks GitHub for the latest release tag,
+  at most once a day, and tells you when you are behind. It sends nothing beyond the request itself,
+  gives up after 2.5s, and stays silent if it fails — being offline never slows anything down.
+  Set `FOSTER_NO_UPDATE_CHECK=1` to turn it off.
 
 ### What is not supported
 
@@ -132,9 +137,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.2.1
-git commit -am "chore: release 0.2.1" && git tag -a v0.2.1 -m "foster v0.2.1"
-git push && git push origin v0.2.1
+npm run version:set 0.3.0
+git commit -am "chore: release 0.3.0" && git tag -a v0.3.0 -m "foster v0.3.0"
+git push && git push origin v0.3.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

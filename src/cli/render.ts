@@ -2,6 +2,8 @@ import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { DiscoveredSession } from '../domain/types.js';
+import type { UpdateStatus } from '../update.js';
+import { VERSION } from '../version.js';
 
 export function formatDate(ms: number | undefined): string {
   if (!ms) return '—';
@@ -10,6 +12,22 @@ export function formatDate(ms: number | undefined): string {
 
 export function shortId(id: string): string {
   return bareSessionId(id).slice(0, 8);
+}
+
+/**
+ * One line describing the installed version, and the upgrade when there is one.
+ *
+ * An unknown answer is reported as unknown rather than as "up to date": the check
+ * is best-effort, and claiming currency on a failed request would be a lie the
+ * user cannot see through.
+ */
+export function updateLine(status: UpdateStatus | undefined): string {
+  if (!status) return `version ${VERSION} ${pc.dim('(latest release unknown)')}`;
+  if (!status.outdated) return `version ${status.current} ${pc.green('(latest)')}`;
+  return (
+    `version ${status.current} ${pc.yellow(`— ${status.latest} is available`)}\n` +
+    `  ${pc.dim(status.command)}`
+  );
 }
 
 export function sessionLine(session: DiscoveredSession): string {

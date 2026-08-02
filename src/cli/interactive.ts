@@ -10,6 +10,8 @@ import { listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { scanAccount, summariseAccount } from '../store/scanner.js';
+import { checkForUpdate } from '../update.js';
+import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
 import { formatDate, outcomeLine, shortId } from './render.js';
 
@@ -22,7 +24,11 @@ function aborted<T>(value: T | symbol): value is symbol {
 }
 
 export async function runInteractive(store: StoreLayout, ledger: Ledger): Promise<void> {
-  intro(pc.bgCyan(pc.black(' foster ')));
+  intro(`${pc.bgCyan(pc.black(' foster '))} ${pc.dim(VERSION)}`);
+
+  // Started before the store work and awaited only when it is about to be shown,
+  // so a slow or unreachable network never delays the menu.
+  const update = checkForUpdate();
 
   const target = resolveTarget(store);
   if (!target) {
@@ -32,6 +38,12 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
   }
 
   showEnvironment(store, target);
+
+  const status = await update;
+  if (status?.outdated) {
+    log.warn(`foster ${status.latest} is available (you have ${status.current}).`);
+    log.message(pc.dim(status.command));
+  }
 
   // The menu loops rather than exiting after one action: fostering is normally a
   // look, decide, act, verify cycle, and quitting between each step means

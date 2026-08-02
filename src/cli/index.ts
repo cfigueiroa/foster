@@ -16,12 +16,20 @@ import { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
 import { scanAccount, summarise } from '../store/scanner.js';
+import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince, type SessionFilter } from './filters.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
-import { formatDate, outcomeLine, restartNotice, sessionLine, shortId } from './render.js';
+import {
+  formatDate,
+  outcomeLine,
+  restartNotice,
+  sessionLine,
+  shortId,
+  updateLine,
+} from './render.js';
 
 interface GlobalOptions {
   store?: string;
@@ -152,9 +160,12 @@ function filterOptions(command: Command): Command {
 program
   .command('doctor')
   .description('check the environment before doing anything else')
-  .action(function (this: Command) {
+  .action(async function (this: Command) {
     const opts = this.optsWithGlobals<GlobalOptions>();
     const roots = candidateStoreRoots();
+
+    console.log(pc.bold('foster'));
+    console.log(`  ${updateLine(await checkForUpdate())}`);
 
     console.log(pc.bold('Store'));
     if (roots.length === 0 && !opts.store) {
