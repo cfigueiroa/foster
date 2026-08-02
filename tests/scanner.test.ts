@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildFosterCopy } from '../src/domain/fostering.js';
 import { accountDir } from '../src/domain/paths.js';
-import { scanAccount, scanStore, summarise } from '../src/store/scanner.js';
+import { scanAccount, scanStore, SESSION_FILE_MAX_BYTES, summarise } from '../src/store/scanner.js';
 import { readConfig } from '../src/store/config.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -118,5 +118,27 @@ describe('readConfig', () => {
 
   it('returns empty rather than throwing when there is no config', () => {
     expect(readConfig(makeStore())).toEqual({});
+  });
+});
+
+describe('the app’s own size limit', () => {
+  it('excludes a session too big for the app to load', () => {
+    const store = makeStore();
+    const big = session({ sessionId: '00000000-0000-4000-8000-0000000000f1' });
+    // Padded past the 10 MB the app refuses to read. Copying it would write a
+    // file the app skips in silence.
+    big.padding = 'x'.repeat(SESSION_FILE_MAX_BYTES);
+    writeSession(store, OLD_ACCOUNT, big);
+
+    const [found] = scanAccount(store, OLD_ACCOUNT);
+    expect(found!.reasons).toContain('too-large');
+  });
+
+  it('leaves an ordinary session alone', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+
+    const [found] = scanAccount(store, OLD_ACCOUNT);
+    expect(found!.reasons).not.toContain('too-large');
   });
 });

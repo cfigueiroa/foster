@@ -111,7 +111,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.1/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.2/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -159,8 +159,9 @@ prefix; an ambiguous one is reported rather than guessed at.
 
 An account can hold several organizations and the sidebar only reads one of them, so any
 organization other than that one is a valid source — including another organization of the account
-you are already signed into. Sessions that could never appear in the sidebar — scheduled tasks, and
-sessions that were never opened — are always excluded; `list --all` shows them anyway.
+you are already signed into. Sessions that could never appear in the sidebar are always excluded —
+scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
+refuses to load. `list --all` shows them anyway.
 
 `scan`, `list`, `status`, `doctor` and `app status` take `--json`.
 
@@ -198,10 +199,18 @@ sessions that were never opened — are always excluded; `list --all` shows them
 
 ### What is not supported
 
-**Cowork sessions cannot be fostered.** Their sandboxes live on disk under
-`local-agent-mode-sessions/`, but the list you see in the app is not built from those folders — it
-comes from the server. Linking or copying a sandbox does not make an old Cowork session reappear.
-`foster` deliberately does not pretend otherwise. This is a Code-session tool.
+**Cowork sessions are not supported — but not for the reason this file used to give.** Earlier
+versions said the Cowork list came from the server and so could never be restored locally. That was
+wrong: `local-agent-mode-sessions/<accountUuid>/<organizationUuid>/local_<id>.json` is the
+authoritative store, and the app builds the list by reading those folders, exactly as it does for
+Code sessions.
+
+So the mechanism probably transfers. It is not supported because it has not been established that it
+_works_, and there are specific reasons to check rather than assume: a Cowork session owns a sandbox
+whose state a copy does not carry, and the app picks between full and shortened directory names for
+that tree, so writing into the wrong one would produce a copy it never reads. Until someone verifies
+it end to end, this remains a Code-session tool — which is a different statement from the one that
+was here before, and an honest one.
 
 ## Development
 
@@ -223,9 +232,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.5.1
-git commit -am "chore: release 0.5.1" && git tag -a v0.5.1 -m "foster v0.5.1"
-git push && git push origin v0.5.1
+npm run version:set 0.5.2
+git commit -am "chore: release 0.5.2" && git tag -a v0.5.2 -m "foster v0.5.2"
+git push && git push origin v0.5.2
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

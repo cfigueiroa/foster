@@ -44,8 +44,14 @@ export interface CodeSessionData {
   [key: string]: unknown;
 }
 
-/** Why a session on disk is not offered for fostering. */
-export type Unfosterable = 'scheduled-task' | 'never-opened' | 'archived' | 'already-a-copy';
+/**
+ * Why a session on disk is not offered for fostering.
+ *
+ * `too-large` is the app's own limit, not foster's: it skips any session file
+ * over 10 MB while loading, so a copy of one would be written and never listed.
+ */
+export type Unfosterable =
+  'scheduled-task' | 'never-opened' | 'archived' | 'already-a-copy' | 'too-large';
 
 export interface DiscoveredSession {
   /** Absolute path of the session JSON. */

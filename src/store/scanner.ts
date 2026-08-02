@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { unfosterableReasons } from '../domain/fostering.js';
 import { isSessionFileName } from '../domain/naming.js';
@@ -43,7 +43,13 @@ export function scanAccount(store: StoreLayout, account: AccountRef): Discovered
     // "discovering" copies as new sessions and attributing them to the wrong origin.
     const isCopy = data._foster !== undefined;
 
-    out.push({ path: file, account, data, isCopy, reasons: unfosterableReasons(data) });
+    const reasons = unfosterableReasons(data);
+    // The app skips any session file over its size limit while loading, with only
+    // a line in its log to show for it. Copying one would write a file that never
+    // appears and never explains why, so it is excluded here instead.
+    if (sizeOf(file) > SESSION_FILE_MAX_BYTES) reasons.push('too-large');
+
+    out.push({ path: file, account, data, isCopy, reasons });
   }
 
   return out;
@@ -76,6 +82,20 @@ export function summariseAccount(
     copyCount,
     isCurrent: account.accountUuid === currentAccountUuid,
   };
+}
+
+/**
+ * The largest session file Claude Desktop will load. Mirrored from the app, which
+ * skips anything bigger and carries on.
+ */
+export const SESSION_FILE_MAX_BYTES = 10 * 1024 * 1024;
+
+function sizeOf(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
+  }
 }
 
 function readSession(file: string): CodeSessionData | undefined {
