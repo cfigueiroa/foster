@@ -5,6 +5,7 @@ import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
   candidateStoreRoots,
   comparablePath,
+  storeIdentity,
   layoutFor,
   listAccountDirs,
   listAgentAccountDirs,
@@ -16,7 +17,7 @@ import {
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
-  inspectDesktop,
+  inspectDesktopFor,
   packagedAppId,
   quitDesktop,
   runningStores,
@@ -799,7 +800,9 @@ app
 
 function reportDesktop(command: Command): void {
   const { store } = context(command);
-  const state = inspectDesktop();
+  // The instance running this store, so `--store <profile> app status` describes
+  // that profile rather than whichever app was found first.
+  const state = inspectDesktopFor(storeIdentity(store.root));
 
   if (command.opts<{ json?: boolean }>().json) {
     print({ ...state, appId: packagedAppId(store) ?? null });

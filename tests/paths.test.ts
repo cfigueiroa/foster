@@ -8,6 +8,7 @@ import {
   layoutFor,
   pickActiveOrganization,
   samePath,
+  storeIdentity,
   storeRootOfCopy,
 } from '../src/domain/paths.js';
 import { makeStore, NEW_ACCOUNT } from './helpers/store.js';
@@ -92,6 +93,30 @@ describe('storeRootOfCopy', () => {
       'local_00000000-0000-4000-8000-00000000abcd.json',
     );
     expect(samePath(storeRootOfCopy(copy), store.root)).toBe(true);
+  });
+});
+
+describe('storeIdentity', () => {
+  /**
+   * This is what decides which app a status — or a close — reaches. The default
+   * installation answers to more than one path and its main process carries no
+   * --user-data-dir; a profile is the opposite on both counts.
+   */
+  it('gives the default store every name the environment knows it by', () => {
+    const store = makeStore();
+    const identity = storeIdentity(store.root, { CLAUDE_USER_DATA_DIR: store.root });
+
+    expect(identity.isDefault).toBe(true);
+    expect(identity.roots).toContain(store.root);
+  });
+
+  it('gives a profile only its own path, and no claim on switchless processes', () => {
+    // Nothing in this environment resolves to the profile, which is exactly the
+    // situation --store creates: a store foster was pointed at by hand.
+    const identity = storeIdentity(makeStore().root, {});
+
+    expect(identity.isDefault).toBe(false);
+    expect(identity.roots).toHaveLength(1);
   });
 });
 

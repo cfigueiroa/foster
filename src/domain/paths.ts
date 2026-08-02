@@ -102,6 +102,31 @@ export function samePath(a: string, b: string): boolean {
 }
 
 /**
+ * How to recognise a store's own processes.
+ *
+ * Two facts are needed and neither is guessable from the path alone. The
+ * packaged installation answers to more than one name — the package directory
+ * foster resolves, and the pre-virtualisation `%APPDATA%` path the app passes to
+ * its children — so matching by a single spelling would miss it. And its main
+ * process carries no `--user-data-dir` at all, so a switchless process means
+ * "the default installation" rather than "any installation": treating it as a
+ * wildcard made a profile report the default app as its own, which for a command
+ * that closes an app is the wrong way to be wrong.
+ */
+export interface StoreIdentity {
+  /** Every path that names this store. */
+  roots: string[];
+  /** Whether this is the installed app, whose main process omits the switch. */
+  isDefault: boolean;
+}
+
+export function storeIdentity(root: string, env: NodeJS.ProcessEnv = process.env): StoreIdentity {
+  const candidates = candidateStoreRoots(env);
+  const isDefault = candidates.some((dir) => samePath(dir, root));
+  return { roots: isDefault ? candidates : [root], isDefault };
+}
+
+/**
  * The store a session file belongs to, read back out of its path.
  *
  * Copies can now be written into a store other than the one foster resolved, and

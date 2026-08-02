@@ -4,6 +4,7 @@ import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
   candidateStoreRoots,
   comparablePath,
+  storeIdentity,
   listAccountDirs,
   listAgentAccountDirs,
   pickActiveOrganization,
@@ -14,7 +15,7 @@ import {
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
-  inspectDesktop,
+  inspectDesktopFor,
   quitDesktop,
   runningStores,
   startDesktop,
@@ -953,7 +954,9 @@ function describeDesktop(state: DesktopState): string {
 
 async function desktopFlow(store: StoreLayout, target: AccountRef): Promise<void> {
   for (;;) {
-    const state = inspectDesktop();
+    // The instance running *this* store: with a second profile up, the global
+    // question would describe — and offer to close — the wrong app.
+    const state = inspectDesktopFor(storeIdentity(store.root));
     note(describeDesktop(state), 'Claude Desktop');
 
     const choice = await selectOrBack('What about it?', [
@@ -1130,7 +1133,7 @@ async function offerRestart(store: StoreLayout, why: string): Promise<void> {
     await startFlow(store);
     return;
   }
-  await restartFlow(store, inspectDesktop());
+  await restartFlow(store, inspectDesktopFor(storeIdentity(store.root)));
 }
 
 function explainRefresh(store: StoreLayout, target: AccountRef): void {

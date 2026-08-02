@@ -10,7 +10,7 @@ import {
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { heldInMemory } from '../src/engine/safety.js';
-import { layoutFor } from '../src/domain/paths.js';
+import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
@@ -197,7 +197,11 @@ describe('quitDesktop', () => {
   // Not a pid Windows can issue: these cases reach taskkill, and a plausible
   // number would mean signalling whatever real process happened to hold it.
   const PID = 999_999;
-  const table = (): ProcessRow[] => rows({ pid: PID, parentPid: 9 });
+  // The instance has to name the store under test. These stores are temp
+  // directories, never the installed app, so a switchless process would belong
+  // to the default installation and rightly be ignored.
+  const table = (root: string) => (): ProcessRow[] =>
+    rows({ pid: PID, parentPid: 9, commandLine: `"Claude.exe" --user-data-dir="${root}"` });
   // The suite itself runs inside a hosted Code session, so the environment has to
   // be stated rather than inherited — otherwise every case below would hit the
   // self-host refusal instead of the behaviour under test.
@@ -215,9 +219,10 @@ describe('quitDesktop', () => {
   });
 
   it('refuses to close the app it is running inside', async () => {
+    const store = storeWith({});
     await expect(
-      quitDesktop(storeWith({}), {
-        list: table,
+      quitDesktop(store, {
+        list: table(store.root),
         terminate: true,
         env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_x' },
       }),
@@ -228,8 +233,9 @@ describe('quitDesktop', () => {
     // The default is no menuBarEnabled key at all. Posting WM_CLOSE here would
     // make the user's window vanish and leave the process up — strictly worse
     // than doing nothing, which is why this reports instead of trying.
-    const result = await quitDesktop(storeWith({ locale: 'en-US' }), {
-      list: table,
+    const store = storeWith({ locale: 'en-US' });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
       env: outside,
     });
 
@@ -239,8 +245,9 @@ describe('quitDesktop', () => {
   it('treats the tray being switched off as permission to ask', async () => {
     // With the tray off the window's close handler really does quit the app, so a
     // polite route exists and this must not report needs-terminate.
-    const result = await quitDesktop(storeWith({ menuBarEnabled: false }), {
-      list: table,
+    const store = storeWith({ menuBarEnabled: false });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
       env: outside,
       timeoutMs: 1,
     });
@@ -302,29 +309,33 @@ describe('inspectDesktopFor', () => {
     commandLine: `"Claude.exe" --user-data-dir="${TWO}"`,
     ...over,
   });
+  /** A profile: known by one path, and its processes always carry the switch. */
+  const profile = (root: string) => ({ roots: [root], isDefault: false });
 
   it('reports the instance running the store it was asked about', () => {
     const table = rows(inA({ pid: 500, parentPid: 9 }), inB({ pid: 700, parentPid: 9 }));
 
-    expect(inspectDesktopFor(ONE, () => table, {}).mainPid).toBe(500);
-    expect(inspectDesktopFor(TWO, () => table, {}).mainPid).toBe(700);
+    expect(inspectDesktopFor(profile(ONE), () => table, {}).mainPid).toBe(500);
+    expect(inspectDesktopFor(profile(TWO), () => table, {}).mainPid).toBe(700);
   });
 
   it('says not running when only the other profile is up', () => {
     const table = rows(inB({ pid: 700, parentPid: 9 }));
-    expect(inspectDesktopFor(ONE, () => table, {})).toMatchObject({ running: false });
+    expect(inspectDesktopFor(profile(ONE), () => table, {})).toMatchObject({ running: false });
   });
 
   it('tolerates a trailing separator on either side', () => {
     const table = rows(inA({ pid: 500, parentPid: 9 }));
-    expect(inspectDesktopFor(`${ONE}\\`, () => table, {}).running).toBe(true);
+    expect(inspectDesktopFor(profile(`${ONE}\\`), () => table, {}).running).toBe(true);
   });
 
-  it('counts an instance with no switch as the default store', () => {
+  it('counts an instance with no switch as the default installation', () => {
     // The packaged app names its userData differently from the path foster
-    // resolves, so an instance without the switch must not be filtered out.
+    // resolves, and its main process carries no switch at all — so for the
+    // default store a switchless instance is the instance.
     const table = rows({ pid: 500, parentPid: 9, commandLine: '"Claude.exe"' });
-    expect(inspectDesktopFor('C:\\anything', () => table, {}).running).toBe(true);
+    const installed = { roots: ['C:\\Roaming\\Claude'], isDefault: true };
+    expect(inspectDesktopFor(installed, () => table, {}).running).toBe(true);
   });
 
   it('keeps the processes the ancestry check needs', () => {
@@ -335,6 +346,54 @@ describe('inspectDesktopFor', () => {
       path: 'C:\\node.exe',
       commandLine: 'node',
     });
-    expect(inspectDesktopFor(ONE, () => table, {}).selfHosted).toBe(true);
+    expect(inspectDesktopFor(profile(ONE), () => table, {}).selfHosted).toBe(true);
+  });
+});
+
+describe('matching an instance to a store with two names', () => {
+  /**
+   * The packaged installation is known by two paths: the package directory
+   * foster resolves, and the pre-virtualisation one the app passes to its
+   * children. Matching by a single spelling would miss the instance — and for a
+   * command that closes an app, that is the wrong way to be wrong.
+   */
+  const PACKAGE = 'C:\\Packages\\Claude\\LocalCache\\Roaming\\Claude';
+  const APPDATA = 'C:\\Roaming\\Claude';
+
+  it('accepts either spelling of the same installation', () => {
+    const table = rows(
+      { pid: 500, parentPid: 9, commandLine: '"Claude.exe"' },
+      { pid: 501, parentPid: 500, commandLine: `"Claude.exe" --user-data-dir="${APPDATA}"` },
+    );
+
+    const identity = { roots: [PACKAGE, APPDATA], isDefault: true };
+    const state = inspectDesktopFor(identity, () => table, {});
+    expect(state.mainPid).toBe(500);
+  });
+
+  it('still excludes an instance on a genuinely different profile', () => {
+    const table = rows({
+      pid: 700,
+      parentPid: 9,
+      commandLine: '"Claude.exe" --user-data-dir="C:\\Elsewhere"',
+    });
+
+    const identity = { roots: [PACKAGE, APPDATA], isDefault: true };
+    expect(inspectDesktopFor(identity, () => table, {}).running).toBe(false);
+  });
+});
+
+describe('a switchless process is not a wildcard', () => {
+  /**
+   * The default installation's main process carries no --user-data-dir, so a
+   * switchless row means "the default one". Treating it as matching any store
+   * made a profile's status describe the default app — and would have offered to
+   * close it.
+   */
+  it('does not count the default instance as a profile', () => {
+    const table = rows({ pid: 500, parentPid: 9, commandLine: '"Claude.exe"' });
+    const store = makeStore(); // a temp dir, never a candidate root
+
+    expect(inspectDesktopFor(storeIdentity(store.root, {}), () => table, {}).running).toBe(false);
   });
 });

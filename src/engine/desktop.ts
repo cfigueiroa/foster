@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import type { StoreLayout } from '../domain/types.js';
+import { comparablePath, storeIdentity, type StoreIdentity } from '../domain/paths.js';
 import { closingWindowQuits } from '../store/config.js';
 import { lockfileHeld } from './lockfile.js';
 
@@ -183,19 +184,20 @@ export function hostedByDesktop(env: NodeJS.ProcessEnv = process.env): boolean {
  * instance, not whichever one happens to be found first.
  */
 export function inspectDesktopFor(
-  userDataDir: string,
+  identity: StoreIdentity,
   list: ProcessLister = readProcesses,
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
-  const wanted = userDataDir.toLowerCase().replace(/[\\/]+$/, '');
+  const wanted = identity.roots.map(comparablePath);
+
   const rows = list().filter((row) => {
     // Everything that is not the app stays: the ancestry walk needs those rows to
     // work out whether foster is running inside the instance.
     if (row.name.toLowerCase() !== 'claude.exe') return true;
     const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
-    // No switch at all means the default store, which every instance of it shares.
-    if (!match?.[1]) return true;
-    return match[1].toLowerCase().replace(/[\\/]+$/, '') === wanted;
+    // A switchless process belongs to the default installation, and only to it.
+    if (!match?.[1]) return identity.isDefault;
+    return wanted.includes(comparablePath(match[1]));
   });
   return inspectDesktop(() => rows, env);
 }
@@ -353,7 +355,9 @@ export async function quitDesktop(
   options: QuitOptions = {},
 ): Promise<QuitResult> {
   const { timeoutMs = 30_000, terminate = false, list = readProcesses, env } = options;
-  const state = inspectDesktop(list, env);
+  // Scoped to the installation being closed. With two profiles up, the global
+  // question would happily quit whichever main process came first.
+  const state = inspectDesktopFor(storeIdentity(store.root, env), list, env);
 
   if (!state.running || state.mainPid === undefined) return { outcome: 'not-running' };
   if (state.selfHosted) {

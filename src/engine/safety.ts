@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { comparablePath, layoutFor, storeRootOfCopy } from '../domain/paths.js';
+import { comparablePath, layoutFor, storeIdentity, storeRootOfCopy } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import {
@@ -119,7 +119,7 @@ export function assertRemovable(
     // Cheap check first: with no app holding that store there is nothing to
     // reason about, and no reason to pay for a process table.
     if (!lockfileHeld(owner)) continue;
-    held.push(...heldInMemory(group, inspectDesktopFor(root, list)));
+    held.push(...heldInMemory(group, inspectDesktopFor(storeIdentity(root), list)));
   }
 
   if (held.length === 0) return;
