@@ -52,7 +52,7 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.1.1/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running

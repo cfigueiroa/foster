@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
   # Release tag to install. Overridable so a specific version can be pinned.
-  [string]$Version = 'v0.1.0',
+  [string]$Version = 'v0.1.1',
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'foster')
 )
 
@@ -78,15 +78,30 @@ try {
 node "%~dp0foster.js" %*
 "@
 
+  # Persisted for future sessions.
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
   if ($userPath -notlike "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallDir", 'User')
-    Write-Host "  added $InstallDir to your PATH (restart your terminal)" -ForegroundColor DarkGray
+    Write-Host "  added $InstallDir to your PATH" -ForegroundColor DarkGray
   }
+
+  # A persisted PATH only reaches processes started afterwards, so the running
+  # session is updated as well. Without this the very next thing the user types
+  # fails, which is exactly the command the installer just told them to run.
+  if ($env:Path -notlike "*$InstallDir*") { $env:Path = "$env:Path;$InstallDir" }
 
   Write-Host ""
   Write-Host "Installed to $InstallDir" -ForegroundColor Green
-  Write-Host "Start with:  foster doctor"
+
+  # Only claim the command is ready if it actually resolves: piping through a
+  # child process would leave this session's PATH untouched.
+  if (Get-Command foster -ErrorAction SilentlyContinue) {
+    Write-Host "Start with:  foster doctor"
+  }
+  else {
+    Write-Host "Open a new terminal, then run:  foster doctor" -ForegroundColor Yellow
+    Write-Host "Or run it here as:  $shim doctor" -ForegroundColor DarkGray
+  }
 }
 finally {
   Remove-Item -Path $temp -Recurse -Force -ErrorAction SilentlyContinue
