@@ -23,6 +23,12 @@ import {
   runningStores,
   startDesktop,
 } from '../engine/desktop.js';
+import {
+  continuedSince,
+  TWO_SIDEBARS,
+  twoLiveSidebars,
+  type ContinuedFostering,
+} from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
@@ -621,6 +627,9 @@ sourceOptions(
     sourceStore: sourceStore.root,
     prefix: opts.prefix,
     dryRun,
+    // Naming sessions one by one is a decision about those sessions, and only
+    // that brings back a copy the user deleted in the app.
+    explicit: Boolean(opts.session?.length),
   });
 
   for (const outcome of outcomes) console.log(outcomeLine(outcome));
@@ -642,6 +651,9 @@ sourceOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
+  if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
+    console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
+  }
   await finish(store, Boolean(opts.restart));
 });
 
@@ -775,6 +787,9 @@ program
     }
 
     const dryRun = opts.dryRun || !opts.yes;
+    // Measured before the copies go: for entries written before the ledger kept
+    // the conversation id, the copy itself is where that id is read from.
+    const continued = continuedSince(store, active);
     const outcomes = returnFosterings(active, { store, ledger, dryRun });
     for (const outcome of outcomes) console.log(outcomeLine(outcome));
 
@@ -786,8 +801,31 @@ program
     }
 
     console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
+    reportContinued(continued);
     await finish(store, Boolean(opts.restart));
   });
+
+/**
+ * Says out loud that a conversation carried on after it was fostered.
+ *
+ * The copy and the original are the same conversation, so nothing is lost when
+ * the copy goes. But the card in the original account is frozen at the moment of
+ * the foster, so the row comes back wearing an old date and an old title, which
+ * reads exactly like work being rolled back. Better said than discovered.
+ */
+function reportContinued(continued: ContinuedFostering[]): void {
+  if (continued.length === 0) return;
+
+  const one = continued.length === 1;
+  console.log(
+    pc.dim(
+      `${continued.length} of these carried on after being fostered. Nothing is lost: ${one ? 'it is' : 'they are'}\n` +
+        `the same conversation, and opening ${one ? 'it' : 'them'} in the original account brings everything\n` +
+        'back. Only the date and title on the row are the old ones, and the app refreshes\n' +
+        'those as soon as you open it.',
+    ),
+  );
+}
 
 /** Shared tail of the two writing commands: restart now, or say why it matters. */
 async function finish(store: StoreLayout, restart: boolean): Promise<void> {
@@ -815,6 +853,7 @@ program
           copySessionId: f.copySessionId,
           copyPath: f.copyPath,
           store: storeRootOfCopy(f.copyPath),
+          cliSessionId: f.cliSessionId ?? null,
           originalTitle: f.originalTitle ?? null,
           origin: f.origin,
           target: f.target,
@@ -833,13 +872,17 @@ program
     // silently mixed them: a copy sitting in the other profile read exactly like
     // one in the store being worked on. Only said when it is true of the run.
     const elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root));
+    // Marked here for the same reason it is said after a return: the row in the
+    // original account still carries the date it had the day it was fostered.
+    const continued = new Set(continuedSince(store, active).map((c) => c.fostering.copySessionId));
 
     for (const fostering of active) {
+      const carried = continued.has(fostering.copySessionId) ? pc.dim(' (continued since)') : '';
       const where = elsewhere.includes(fostering)
         ? pc.dim(` in ${storeRootOfCopy(fostering.copyPath)}`)
         : '';
       console.log(
-        `  ${pc.dim(formatDate(fostering.fosteredAt))}  ${fostering.originalTitle ?? shortId(fostering.originSessionId)}  ${pc.dim(`from ${shortId(fostering.origin.accountUuid)}`)}${where}`,
+        `  ${pc.dim(formatDate(fostering.fosteredAt))}  ${fostering.originalTitle ?? shortId(fostering.originSessionId)}  ${pc.dim(`from ${shortId(fostering.origin.accountUuid)}`)}${carried}${where}`,
       );
     }
     console.log(pc.bold(`\n${active.length} active fostering(s)`));

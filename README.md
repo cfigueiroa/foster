@@ -334,6 +334,16 @@ worked in once never has to be typed again.
   starts again. A copy the app _did_ load is different: it may be written back at any time, which
   would recreate a file `foster` had just deleted. So `return` refuses for copies that already
   existed when the app started, and offers to close it for you.
+- **A copy is the same conversation, which is the point and the one hazard.** The copy carries the
+  original's `cliSessionId`, so both rows open one transcript: work done under the other account is
+  there when you open the original, and returning the copy loses none of it. What does not travel is
+  the row itself — the app only writes the sessions of the account it is holding, so the original
+  keeps the title and date it had when it was fostered until you open it. `status` marks a
+  conversation that carried on, and `return` says so rather than letting an old date read as lost
+  work. The hazard is only this: with two installations running, that one conversation has a row in
+  two live sidebars, and opening it in both at once leaves the record branched instead of continued.
+  `foster` warns when it writes a copy into an installation that is up alongside the one it came
+  from. Work on a conversation in one place at a time.
 - **It never ends the app behind your back.** Where a polite close would work (tray off) it uses one;
   where it would not, it says so and waits for an explicit yes rather than quietly escalating, and it
   names what that costs. `foster` refuses outright to close an app it is running inside — detected

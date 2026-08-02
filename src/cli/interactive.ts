@@ -17,6 +17,7 @@ import {
   startDesktop,
   type DesktopState,
 } from '../engine/desktop.js';
+import { continuedSince, TWO_SIDEBARS, twoLiveSidebars } from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
@@ -257,12 +258,18 @@ function showStatus(ledger: Ledger, store: StoreLayout): void {
   // asked whether the copies were *spread* across installations, which stayed
   // silent in the one case that misleads — every copy in the other profile,
   // reading exactly like copies in this one.
+  // A conversation that carried on since it was fostered is worth marking: the
+  // row in the original account still shows the date it had that day, and left
+  // unsaid the difference only surfaces as a scare after a return.
+  const continued = new Set(continuedSince(store, active).map((c) => c.fostering.copySessionId));
+
   note(
     active
       .map((f) => {
         const root = storeRootOfCopy(f.copyPath);
         const where = samePath(root, store.root) ? '' : pc.dim(`  → ${root}`);
-        return `${pc.dim(formatDate(f.fosteredAt))}  ${f.originalTitle || shortId(f.originSessionId)}${where}`;
+        const carried = continued.has(f.copySessionId) ? pc.dim('  (continued since)') : '';
+        return `${pc.dim(formatDate(f.fosteredAt))}  ${f.originalTitle || shortId(f.originSessionId)}${carried}${where}`;
       })
       .join('\n'),
     `${active.length} fostered`,
@@ -607,8 +614,14 @@ async function chooseTarget(
 
 const PICK_LIMIT = 40;
 
-/** Which of the available sessions to take. */
-async function chooseSessions(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {
+/**
+ * Which of the available sessions to take, and whether the user named them one
+ * by one. Ticking a session is a decision about that session, which is what lets
+ * it come back after being deleted in the app; a sweep is not.
+ */
+async function chooseSessions(
+  sessions: DiscoveredSession[],
+): Promise<Maybe<{ sessions: DiscoveredSession[]; explicit: boolean }>> {
   const how = await selectOrBack(`${sessions.length} session(s) available. Which ones?`, [
     { value: 'all', label: 'All of them' },
     { value: 'pick', label: 'Pick them from a list', hint: 'tick the ones you want' },
@@ -617,8 +630,11 @@ async function chooseSessions(sessions: DiscoveredSession[]): Promise<Maybe<Disc
     { value: 'cwd', label: 'Matching a working directory' },
   ]);
   if (aborted(how)) return BACK;
-  if (how === 'all') return sessions;
-  if (how === 'pick') return pickSessions(sessions);
+  if (how === 'all') return { sessions, explicit: false };
+  if (how === 'pick') {
+    const picked = await pickSessions(sessions);
+    return aborted(picked) ? BACK : { sessions: picked, explicit: true };
+  }
 
   const prompts = {
     since: { message: 'How far back?', placeholder: '30d' },
@@ -631,7 +647,7 @@ async function chooseSessions(sessions: DiscoveredSession[]): Promise<Maybe<Disc
   if (aborted(answer)) return BACK;
 
   const value = answer.trim();
-  if (!value) return sessions;
+  if (!value) return { sessions, explicit: false };
 
   if (how === 'since') {
     const since = parseSince(value);
@@ -639,9 +655,12 @@ async function chooseSessions(sessions: DiscoveredSession[]): Promise<Maybe<Disc
       log.error(`Could not read "${value}". Try 30d, 12h or 2w.`);
       return BACK;
     }
-    return applyFilter(sessions, { since });
+    return { sessions: applyFilter(sessions, { since }), explicit: false };
   }
-  return applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value });
+  return {
+    sessions: applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value }),
+    explicit: false,
+  };
 }
 
 /**
@@ -708,8 +727,9 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
     note(source.store.root, 'Reading from another installation');
   }
 
-  const selected = await chooseSessions(available);
-  if (aborted(selected)) return;
+  const choice = await chooseSessions(available);
+  if (aborted(choice)) return;
+  const { sessions: selected, explicit } = choice;
   if (selected.length === 0) {
     log.info('Nothing matches that.');
     return;
@@ -730,7 +750,7 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
     `${selected.length} session(s) selected`,
   );
 
-  await confirmAndWrite(store, ledger, current, source, selected);
+  await confirmAndWrite(store, ledger, current, source, selected, { explicit });
 }
 
 /**
@@ -747,8 +767,9 @@ async function confirmAndWrite(
   current: AccountRef,
   source: SourcePick,
   selected: DiscoveredSession[],
-  verb = 'Foster',
+  options: { verb?: string; explicit?: boolean } = {},
 ): Promise<void> {
+  const { verb = 'Foster', explicit = false } = options;
   let target = current;
   let prefix = DEFAULT_PREFIX;
 
@@ -804,6 +825,7 @@ async function confirmAndWrite(
       target,
       sourceStore: source.store.root,
       prefix,
+      explicit,
     });
     const counts = summariseOutcomes(outcomes);
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
@@ -811,6 +833,7 @@ async function confirmAndWrite(
 
     log.success(`${counts.fostered} written, ${counts.skipped} skipped, ${counts.failed} failed.`);
     if (counts.fostered === 0) return;
+    if (twoLiveSidebars(source.store, store)) log.warn(TWO_SIDEBARS);
 
     if (refKey(target) !== refKey(current)) {
       note(
@@ -867,7 +890,7 @@ async function restoreFlow(store: StoreLayout, ledger: Ledger, current: AccountR
     'What comes back',
   );
 
-  await confirmAndWrite(store, ledger, current, { store, refs: [] }, selected, 'Restore');
+  await confirmAndWrite(store, ledger, current, { store, refs: [] }, selected, { verb: 'Restore' });
 }
 
 async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {

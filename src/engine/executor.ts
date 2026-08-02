@@ -3,10 +3,11 @@ import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey } from '../domain/fosteri
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
-import { isFostered, project } from '../ledger/project.js';
+import { project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { errorMessage } from '../util/fs.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
+import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
 
 export interface FosterOptions {
@@ -21,6 +22,12 @@ export interface FosterOptions {
   prefix?: string;
   /** When true, compute the plan without writing anything. */
   dryRun?: boolean;
+  /**
+   * True when the caller named these sessions one by one rather than sweeping a
+   * whole account. Only an explicit choice brings back a copy the user deleted in
+   * the app: a bulk run that resurrected it would undo their decision.
+   */
+  explicit?: boolean;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -43,7 +50,7 @@ export interface Outcome {
  * keyed on the origin session rather than on a file (every copy gets a new id).
  */
 export function fosterSessions(sessions: DiscoveredSession[], options: FosterOptions): Outcome[] {
-  const { store, ledger, target, dryRun = false } = options;
+  const { store, ledger, target, dryRun = false, explicit = false } = options;
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   const state = project(ledger.read());
   const outcomes: Outcome[] = [];
@@ -74,7 +81,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     }
 
     const key = fosteringKey(originId, target);
-    if (isFostered(state, originId, target) || mintedInBatch.has(key)) {
+    if (mintedInBatch.has(key)) {
       outcomes.push({
         originSessionId: originId,
         title,
@@ -82,6 +89,18 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         detail: 'already fostered',
       });
       continue;
+    }
+
+    const active = state.active.get(key);
+    if (active) {
+      const skip = resolveExisting(active, { explicit, dryRun, ledger });
+      if (skip) {
+        outcomes.push({ originSessionId: originId, title, ...skip });
+        continue;
+      }
+      // Reconciled: the ledger no longer counts it as active, so fall through and
+      // make the copy the caller asked for.
+      state.active.delete(key);
     }
 
     const copy = buildFosterCopy(session.data, {
@@ -120,6 +139,10 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         // because an empty string is not nullish — status and return printed a
         // blank where they meant to print the session id.
         ...(session.data.title ? { originalTitle: session.data.title } : {}),
+        // The conversation, which outlives both files and is where the work
+        // actually is. Without it, telling the user that a returned copy had
+        // carried on would mean reading a file that has just been deleted.
+        ...(session.data.cliSessionId ? { cliSessionId: session.data.cliSessionId } : {}),
         prefix,
       });
       mintedInBatch.add(key);
@@ -132,6 +155,62 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   }
 
   return outcomes;
+}
+
+/**
+ * What to do about a session the ledger already has an active copy for.
+ *
+ * Returns the outcome fields when the session should be skipped, or nothing when
+ * the ledger has been reconciled and the copy should be made again.
+ *
+ * The distinction that matters is *why* the copy is not there. A copy deleted in
+ * the app was thrown away on purpose, and a bulk run that quietly recreated it
+ * would undo a decision the user made deliberately — so that one is only redone
+ * when the session was named explicitly. A copy that simply is not there any more
+ * was never refused: recreating it is the whole point of the command.
+ */
+function resolveExisting(
+  active: ActiveFostering,
+  context: { explicit: boolean; dryRun: boolean; ledger: Ledger },
+): Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined {
+  const state = inspectCopy(active);
+
+  if (state.kind === 'present') {
+    return { status: 'skipped', detail: 'already fostered', copyPath: active.copyPath };
+  }
+
+  if (state.kind === 'unreachable') {
+    // Its installation is not mounted, so absence proves nothing. Deciding it had
+    // gone would put a second copy there the moment the drive came back.
+    return {
+      status: 'skipped',
+      detail: 'already fostered, into an installation that is not reachable to check',
+      copyPath: active.copyPath,
+    };
+  }
+
+  if (state.kind === 'deleted-in-app' && !context.explicit) {
+    const when = state.deletedAt
+      ? ` on ${new Date(state.deletedAt).toISOString().slice(0, 10)}`
+      : '';
+    return {
+      status: 'skipped',
+      detail: `deleted in the app${when} — name it with --session to foster it again`,
+    };
+  }
+
+  // Recorded rather than assumed: the ledger keeps saying what happened, and a
+  // 'returned' event foster did not perform is marked as the reconciliation it is.
+  if (!context.dryRun) {
+    context.ledger.append({
+      kind: 'returned',
+      originSessionId: active.originSessionId,
+      target: active.target,
+      copySessionId: active.copySessionId,
+      reconciled: true,
+    });
+  }
+  return undefined;
 }
 
 export interface ReturnOptions {

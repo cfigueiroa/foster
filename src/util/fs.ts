@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 
 /**
  * Directory listing that treats an unreadable path as empty.
@@ -20,6 +20,21 @@ export function isDirectory(target: string): boolean {
     return statSync(target).isDirectory();
   } catch {
     return false;
+  }
+}
+
+/**
+ * A file whose whole contents are one epoch-millisecond number, as the app's
+ * deletion markers are. Anything else — missing, unreadable, not a number — is
+ * "no time recorded" rather than an error: the marker's existence is the fact
+ * that matters, and its timestamp is a courtesy.
+ */
+export function readTimestampFile(file: string): number | undefined {
+  try {
+    const at = Number(readFileSync(file, 'utf8').trim());
+    return Number.isFinite(at) && at > 0 ? at : undefined;
+  } catch {
+    return undefined;
   }
 }
 

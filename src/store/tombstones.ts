@@ -1,9 +1,8 @@
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { isTombstoneFileName, TOMBSTONE_PREFIX } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
-import { safeReaddir } from '../util/fs.js';
+import { readTimestampFile, safeReaddir } from '../util/fs.js';
 
 /**
  * What the app leaves behind when a session is deleted.
@@ -40,7 +39,7 @@ export function scanTombstones(store: StoreLayout, account: AccountRef): Tombsto
       id: entry.slice(TOMBSTONE_PREFIX.length),
     };
 
-    const deletedAt = readTimestamp(file);
+    const deletedAt = readTimestampFile(file);
     if (deletedAt !== undefined) tombstone.deletedAt = deletedAt;
     out.push(tombstone);
   }
@@ -50,13 +49,4 @@ export function scanTombstones(store: StoreLayout, account: AccountRef): Tombsto
 
 export function scanAllTombstones(store: StoreLayout): Tombstone[] {
   return listAccountDirs(store).flatMap((account) => scanTombstones(store, account));
-}
-
-function readTimestamp(file: string): number | undefined {
-  try {
-    const at = Number(readFileSync(file, 'utf8').trim());
-    return Number.isFinite(at) && at > 0 ? at : undefined;
-  } catch {
-    return undefined;
-  }
 }

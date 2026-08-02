@@ -29,6 +29,7 @@ export function project(events: LedgerEvent[]): LedgerState {
           copySessionId: event.copySessionId,
           copyPath: event.copyPath,
           originalTitle: event.originalTitle,
+          cliSessionId: event.cliSessionId,
           fosteredAt: event.ts,
         });
         break;

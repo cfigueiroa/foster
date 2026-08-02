@@ -32,6 +32,13 @@ export interface FosteredEvent extends BaseEvent {
   copyPath: string;
   /** Title before the prefix was applied, so a return can restore it exactly. */
   originalTitle?: string;
+  /**
+   * The conversation both the copy and the original point at. Recorded because it
+   * is the only way to reach the transcript once the copy is gone, and the
+   * transcript is what proves the conversation continued after it was fostered.
+   * Absent in entries written before this was kept.
+   */
+  cliSessionId?: string;
   prefix: string;
 }
 
@@ -40,6 +47,13 @@ export interface ReturnedEvent extends BaseEvent {
   originSessionId: string;
   target: AccountRef;
   copySessionId: string;
+  /**
+   * True when foster did not remove the copy — it found it already gone and
+   * brought the record in line with the disk. The fold treats it like any other
+   * return; the distinction is for anyone reading the log afterwards, who would
+   * otherwise see foster claiming a deletion it never performed.
+   */
+  reconciled?: true;
 }
 
 export interface OperationFailedEvent extends BaseEvent {
@@ -73,5 +87,7 @@ export interface ActiveFostering {
   copySessionId: string;
   copyPath: string;
   originalTitle?: string;
+  /** The conversation behind both the copy and the original, when it was recorded. */
+  cliSessionId?: string;
   fosteredAt: number;
 }

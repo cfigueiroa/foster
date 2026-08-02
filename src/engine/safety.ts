@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { comparablePath, layoutFor, storeIdentity, storeRootOfCopy } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
@@ -118,6 +119,12 @@ export function assertRemovable(
   // answer "safe to delete" about exactly the file that gets written back.
   const byStore = new Map<string, ActiveFostering[]>();
   for (const fostering of fosterings) {
+    // A copy that is not on disk cannot be held in memory by anything, and the
+    // app cannot write back a file it no longer has. Without this the gate turned
+    // the one way out of a stale ledger entry into a dead end: the user deletes a
+    // copy in the app, `return` refuses because the copy predates the app's
+    // start, and closing the app changes nothing because there was never a file.
+    if (!existsSync(fostering.copyPath)) continue;
     // Keyed by the comparable form so two spellings of one directory do not
     // become two groups, each asking about half the copies.
     const root = comparablePath(storeRootOfCopy(fostering.copyPath));
