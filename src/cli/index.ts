@@ -34,7 +34,18 @@ program
   )
   .version(VERSION)
   .option('--store <path>', 'path to the Claude Desktop userData directory')
-  .option('--ledger <path>', "path to foster's ledger file");
+  .option('--ledger <path>', "path to foster's ledger file")
+  // Running the bare command opens the guided menu; the subcommands below stay
+  // available for scripting and for anyone who prefers one-shot invocations.
+  .action(async function (this: Command) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      program.outputHelp();
+      return;
+    }
+    const { store, ledger } = context(this);
+    const { runInteractive } = await import('./interactive.js');
+    await runInteractive(store, ledger);
+  });
 
 function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const opts = command.optsWithGlobals<GlobalOptions>();

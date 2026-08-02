@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
   # Release tag to install. Overridable so a specific version can be pinned.
-  [string]$Version = 'v0.1.1',
+  [string]$Version = 'v0.2.0',
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'foster')
 )
 

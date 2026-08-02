@@ -52,13 +52,25 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.1.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.0/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
 it. For development, clone the repo and use `npm run dev -- <command>`.
 
 ## Usage
+
+Run it with no arguments for a guided menu that stays open — pick an account,
+narrow the batch, review, confirm, and carry on without relaunching:
+
+```bash
+foster
+```
+
+If Claude Desktop is open when you confirm, it waits for you to quit it instead
+of failing, and picks up where you left off.
+
+The same operations are available as one-shot commands, for scripting:
 
 ```bash
 foster doctor    # environment check: store location, app state, whether it is running
