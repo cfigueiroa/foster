@@ -5,6 +5,7 @@ import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
   candidateStoreRoots,
   comparablePath,
+  directoryKey,
   storeIdentity,
   layoutFor,
   listAccountDirs,
@@ -24,6 +25,7 @@ import {
   startDesktop,
 } from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import { knownStores } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
@@ -321,11 +323,16 @@ program
       // sessions are missing" should know which one they are being shown.
       console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
     }
+    // Counted as directories, not as paths: the packaged store answers to two
+    // names, and "2 candidates found" for one directory reads as a second
+    // installation that does not exist.
+    //
     // Only when the store was actually discovered: with an explicit --store the
     // candidate list was never consulted, and warning about it invites the reader
     // to doubt the path they just typed.
-    if (!opts.store && roots.length > 1)
-      console.log(pc.yellow(`  (${roots.length} candidates found, using the first)`));
+    const distinct = new Set(roots.map(directoryKey));
+    if (!opts.store && distinct.size > 1)
+      console.log(pc.yellow(`  (${distinct.size} candidates found, using the first)`));
 
     console.log(pc.bold('App'));
     // This is the release the updater last saw, which can run ahead of the
@@ -357,6 +364,36 @@ program
     } else {
       console.log(pc.green('  Claude Desktop is not running'));
     }
+  });
+
+program
+  .command('stores')
+  .description('installations foster knows about, and what to pass to --store')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    // Everything the menu offers, printed instead of picked: without this, using
+    // foster from a script meant knowing a profile's path by heart.
+    const stores = knownStores(ledger.read());
+
+    if (this.opts<{ json?: boolean }>().json) {
+      print(
+        stores.map((known) => ({
+          root: known.root,
+          knownBy: known.hint,
+          running: known.running,
+          isCurrent: samePath(known.root, store.root),
+        })),
+      );
+      return;
+    }
+
+    for (const known of stores) {
+      const marker = samePath(known.root, store.root) ? pc.green('*') : ' ';
+      const state = known.running ? `${known.hint}, running` : known.hint;
+      console.log(`${marker} ${known.root} ${pc.dim(`(${state})`)}`);
+    }
+    console.log(pc.dim(`\n${stores.length === 0 ? 'None found. ' : ''}* is the one in use.`));
   });
 
 program

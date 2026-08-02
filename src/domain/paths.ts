@@ -116,6 +116,28 @@ export function comparableUserDataDir(dir: string): string {
 }
 
 /**
+ * A key that is equal for two paths naming the same directory, or undefined when
+ * there is no such directory.
+ *
+ * The packaged app's store answers to two paths — the package directory and the
+ * pre-virtualisation `%APPDATA%` one — and no path transformation relates them:
+ * only the filesystem knows they are one directory, which it says through the
+ * device and index it reports for both. Listing them as two installations
+ * invents a profile that does not exist.
+ *
+ * Where the index is unavailable (0 on some filesystems) this falls back to the
+ * path, which is no worse than comparing paths outright.
+ */
+export function directoryKey(dir: string): string | undefined {
+  try {
+    const stats = statSync(dir, { bigint: true });
+    return stats.ino === 0n ? comparablePath(dir) : `${stats.dev}:${stats.ino}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * How to recognise a store's own processes.
  *
  * Two facts are needed and neither is guessable from the path alone. The

@@ -1,6 +1,7 @@
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { select } from '@clack/prompts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Safety from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -58,6 +59,7 @@ vi.mock('../src/engine/desktop.js', () => ({
   startDesktop: () => Promise.resolve(true),
   packagedAppId: () => undefined,
   runningStores: () => [],
+  readProcesses: () => [],
   hostedByDesktop: () => false,
   DesktopControlError: class extends Error {},
 }));
@@ -484,4 +486,38 @@ describe('working on another installation', () => {
 
     expect(answers).toHaveLength(0);
   });
+
+  it('offers a store it has worked in before, instead of asking for the path again', async () => {
+    // A stopped profile announces itself nowhere: not in the environment, not in
+    // the process table. The ledger is the one place it is written down.
+    const other = makeStore();
+    ledger.append({
+      kind: 'fostered',
+      originSessionId: 'local_00000000-0000-4000-8000-0000000000e1',
+      origin: OLD_ACCOUNT,
+      target: NEW_ACCOUNT,
+      copySessionId: 'local_00000000-0000-4000-8000-0000000000e2',
+      copyPath: path.join(
+        accountDir(other, NEW_ACCOUNT),
+        'local_00000000-0000-4000-8000-0000000000e2.json',
+      ),
+      prefix: '',
+    });
+
+    answers = ['installation', other.root, 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(offeredBy('Work on which installation?')).toContain(other.root);
+  });
 });
+
+/** The values a scripted screen actually offered, for asserting on a menu. */
+function offeredBy(message: string): string[] {
+  const calls = vi.mocked(select).mock.calls as unknown as Array<
+    [{ message: string; options: Array<{ value: string }> }]
+  >;
+  // The mock is shared across the file, so its calls accumulate: the screen this
+  // test opened is the last one with that message, not the first.
+  const prompt = calls.map(([only]) => only).findLast((arg) => arg.message === message);
+  return (prompt?.options ?? []).map((option) => option.value);
+}

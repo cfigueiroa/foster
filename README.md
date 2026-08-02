@@ -294,7 +294,11 @@ you are already signed into. Sessions that could never appear in the sidebar are
 scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
 refuses to load. `list --all` shows them anyway.
 
-`scan`, `list`, `status`, `doctor` and `app status` take `--json`.
+`foster stores` lists the installations it can name without being told — the installed app, whatever
+is running, and the profiles the ledger has been used in — which is what to pass to `--store`. The
+menu offers the same list, so a profile you have worked in once never has to be typed again.
+
+`scan`, `list`, `status`, `stores`, `doctor` and `app status` take `--json`.
 
 ## Safety model
 

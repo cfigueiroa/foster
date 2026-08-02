@@ -2,7 +2,6 @@ import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@cla
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
-  candidateStoreRoots,
   comparablePath,
   storeIdentity,
   listAccountDirs,
@@ -17,11 +16,11 @@ import {
   DesktopControlError,
   inspectDesktopFor,
   quitDesktop,
-  runningStores,
   startDesktop,
   type DesktopState,
 } from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import { knownStores } from '../engine/stores.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
@@ -171,7 +170,7 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
         await labelFlow(store, ledger, target);
         break;
       case 'installation': {
-        const next = await switchInstallation(store);
+        const next = await switchInstallation(store, ledger);
         if (!aborted(next)) {
           store = next.store;
           target = next.target;
@@ -338,24 +337,28 @@ export interface SourcePick {
 }
 
 /**
- * A second profile is a whole separate store, and nothing in the store foster
- * resolved points at it. Discovery costs a process listing, so it is behind an
- * explicit choice rather than paid for on every run.
- */
-/**
  * Which installation, by path.
  *
- * The ones running are listed because they are the ones you are likely to mean
- * and their paths are awkward to type; a profile that is stopped has to be named
- * outright, since nothing on disk announces it.
+ * Everything foster already knows about is listed — the installed app, whatever
+ * is running, and the profiles the ledger has been used in. Typing one out stays
+ * available for a store that is none of those: it announces itself nowhere.
  */
-async function pickStore(current: StoreLayout, message: string): Promise<Maybe<StoreLayout>> {
-  const known = new Set([...candidateStoreRoots(), current.root].map(comparablePath));
-  const running = runningStores().filter((dir) => !known.has(comparablePath(dir)));
+async function pickStore(
+  current: StoreLayout,
+  ledger: Ledger,
+  message: string,
+): Promise<Maybe<StoreLayout>> {
+  const options = knownStores(ledger.read())
+    .filter((known) => !samePath(known.root, current.root))
+    .map((known) => ({
+      value: known.root,
+      label: known.root,
+      hint: known.running ? `${known.hint} · running` : known.hint,
+    }));
 
   const picked = await selectOrBack(message, [
-    ...running.map((dir) => ({ value: dir, label: dir, hint: 'running now' })),
-    { value: TYPE_A_PATH, label: 'Type a path…', hint: 'a profile that is not running' },
+    ...options,
+    { value: TYPE_A_PATH, label: 'Type a path…', hint: 'an installation not listed here' },
   ]);
   if (aborted(picked)) return BACK;
 
@@ -378,9 +381,10 @@ async function pickStore(current: StoreLayout, message: string): Promise<Maybe<S
 
 async function chooseOtherStore(
   current: StoreLayout,
+  ledger: Ledger,
   labels: Map<string, string>,
 ): Promise<Maybe<SourcePick>> {
-  const store = await pickStore(current, 'Which installation?');
+  const store = await pickStore(current, ledger, 'Which installation?');
   if (aborted(store)) return BACK;
 
   if (accountsIn(store).length === 0) {
@@ -406,8 +410,9 @@ async function chooseOtherStore(
  */
 async function switchInstallation(
   current: StoreLayout,
+  ledger: Ledger,
 ): Promise<Maybe<{ store: StoreLayout; target: AccountRef }>> {
-  const store = await pickStore(current, 'Work on which installation?');
+  const store = await pickStore(current, ledger, 'Work on which installation?');
   if (aborted(store)) return BACK;
 
   const target = resolveTarget(store);
@@ -514,7 +519,7 @@ async function chooseSource(
   // is still reachable from here.
   if (accountsIn(store, target).length === 0) {
     log.info('No other account in this installation.');
-    return chooseOtherStore(store, labels);
+    return chooseOtherStore(store, ledger, labels);
   }
 
   // Only the exact directory the sidebar reads is excluded, not the whole
@@ -535,7 +540,7 @@ async function chooseSource(
   });
 
   if (aborted(picked)) return BACK;
-  if (picked === OTHER_STORE) return chooseOtherStore(store, labels);
+  if (picked === OTHER_STORE) return chooseOtherStore(store, ledger, labels);
   return { store, refs: picked };
 }
 
