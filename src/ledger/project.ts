@@ -48,6 +48,19 @@ export function project(events: LedgerEvent[]): LedgerState {
   return { active, labels };
 }
 
+/**
+ * Every session id foster has ever written, whether or not the copy still exists.
+ *
+ * Ids are minted here and never reused, so an id from a returned fostering cannot
+ * collide with anything else — which makes the whole history the safe answer, and
+ * a cheaper one than folding.
+ */
+export function copySessionIds(events: LedgerEvent[]): Set<string> {
+  const ids = new Set<string>();
+  for (const event of events) if (event.kind === 'fostered') ids.add(event.copySessionId);
+  return ids;
+}
+
 export function listActive(state: LedgerState): ActiveFostering[] {
   return [...state.active.values()].sort((a, b) => a.fosteredAt - b.fosteredAt);
 }

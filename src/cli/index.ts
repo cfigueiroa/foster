@@ -34,7 +34,7 @@ import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
-import { listActive, project } from '../ledger/project.js';
+import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { findRestorable } from '../store/restore.js';
@@ -455,7 +455,7 @@ program
   .action(function (this: Command) {
     const { store, ledger } = context(this);
     const config = readConfig(store);
-    const accounts = summarise(store, config.lastKnownAccountUuid);
+    const accounts = summarise(store, config.lastKnownAccountUuid, copySessionIds(ledger.read()));
     const labels = project(ledger.read()).labels;
 
     if (this.opts<{ json?: boolean }>().json) {
@@ -509,7 +509,9 @@ sourceOptions(
     );
     const candidates = byRecency(
       applyFilter(
-        sources.flatMap((account) => scanAccount(sourceStore, account)),
+        sources.flatMap((account) =>
+          scanAccount(sourceStore, account, copySessionIds(ledger.read())),
+        ),
         filterFrom(this.opts()),
       ),
     );
@@ -599,7 +601,9 @@ sourceOptions(
   // offering them would only produce copies the app silently never lists.
   let candidates = byRecency(
     applyFilter(
-      sources.flatMap((account) => scanAccount(sourceStore, account)),
+      sources.flatMap((account) =>
+        scanAccount(sourceStore, account, copySessionIds(ledger.read())),
+      ),
       filter,
     ),
   );

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type KnownCopies } from '../store/scanner.js';
 
 /**
  * Two rows in one sidebar for one conversation.
@@ -28,6 +28,11 @@ export interface DuplicateReport {
 export function findDuplicates(store: StoreLayout, fosterings: ActiveFostering[]): DuplicateReport {
   const report: DuplicateReport = { copies: [], appMade: 0 };
   const accounts = new Map<string, ActiveFostering[]>();
+  // Which rows are foster's own is settled here rather than by the marker on the
+  // file: the app drops unknown fields when it saves a session, so a copy that
+  // has been opened looks native. Counting those as the app's would blame it for
+  // pairs foster made, and offer no way to remove them.
+  const known: KnownCopies = new Set(fosterings.map((f) => f.copySessionId));
 
   for (const fostering of fosterings) {
     const key = `${fostering.target.accountUuid}/${fostering.target.organizationUuid}`;
@@ -36,7 +41,7 @@ export function findDuplicates(store: StoreLayout, fosterings: ActiveFostering[]
 
   for (const group of accounts.values()) {
     const target = group[0]!.target;
-    const cards = cardsByConversation(store, target);
+    const cards = cardsByConversation(store, target, known);
 
     for (const fostering of group) {
       const id = conversationOf(fostering);
@@ -52,10 +57,11 @@ export function findDuplicates(store: StoreLayout, fosterings: ActiveFostering[]
   // Counted across the account directories in play, once each.
   for (const key of accounts.keys()) {
     const [accountUuid, organizationUuid] = key.split('/');
-    const cards = cardsByConversation(store, {
-      accountUuid: accountUuid!,
-      organizationUuid: organizationUuid!,
-    });
+    const cards = cardsByConversation(
+      store,
+      { accountUuid: accountUuid!, organizationUuid: organizationUuid! },
+      known,
+    );
     for (const rows of cards.values()) {
       if (rows.length > 1 && rows.every((row) => !row.isCopy)) report.appMade++;
     }
@@ -69,10 +75,14 @@ interface Card {
   isCopy: boolean;
 }
 
-function cardsByConversation(store: StoreLayout, account: AccountRef): Map<string, Card[]> {
+function cardsByConversation(
+  store: StoreLayout,
+  account: AccountRef,
+  copies: KnownCopies,
+): Map<string, Card[]> {
   const cards = new Map<string, Card[]>();
 
-  for (const session of scanAccount(store, account)) {
+  for (const session of scanAccount(store, account, copies)) {
     const id = session.data.cliSessionId;
     if (!id) continue;
     const card: Card = { sessionId: session.data.sessionId, isCopy: session.isCopy };

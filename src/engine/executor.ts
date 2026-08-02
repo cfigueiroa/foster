@@ -3,10 +3,10 @@ import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey } from '../domain/fosteri
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
-import { project } from '../ledger/project.js';
+import { copySessionIds, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { errorMessage } from '../util/fs.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
@@ -69,7 +69,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // The result is two rows for one conversation, differing only in which account
   // watched which part of it. Both are live, both are openable, and the sidebar
   // gives no hint they are the same.
-  const conversationsHere = conversationsIn(store, target);
+  const conversationsHere = conversationsIn(store, target, copySessionIds(ledger.read()));
 
   // No gate here on purpose. Every copy gets a session id the app has never seen,
   // so a running app neither reads nor writes the file: it is invisible to the
@@ -199,10 +199,14 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
  * deleted card is not a row, and bringing that conversation back is exactly what
  * fostering (or `restore`) is for.
  */
-function conversationsIn(store: StoreLayout, target: AccountRef): Map<string, string> {
+function conversationsIn(
+  store: StoreLayout,
+  target: AccountRef,
+  copies: KnownCopies,
+): Map<string, string> {
   const here = new Map<string, string>();
 
-  for (const session of scanAccount(store, target)) {
+  for (const session of scanAccount(store, target, copies)) {
     const id = session.data.cliSessionId;
     if (!id) continue;
     const how = session.isCopy

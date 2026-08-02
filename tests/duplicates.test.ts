@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,7 +6,7 @@ import { findDuplicates } from '../src/engine/duplicates.js';
 import { fosterSessions } from '../src/engine/executor.js';
 import { accountDir } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
-import { listActive, project } from '../src/ledger/project.js';
+import { copySessionIds, listActive, project } from '../src/ledger/project.js';
 import { scanAccount } from '../src/store/scanner.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
@@ -128,5 +128,46 @@ describe('a store whose sessions carry no conversation id', () => {
     );
 
     expect(findDuplicates(store, []).copies).toEqual([]);
+  });
+});
+
+describe('a copy the app has written back', () => {
+  /**
+   * The app persists a session through a fixed list of fields, so the first time
+   * it saves a copy — a title change, a focus, any activity — the `_foster`
+   * marker is gone and the file looks like one the app made itself. Measured on a
+   * live store: of 364 copies, the 21 that had been opened had lost it.
+   *
+   * Only the ledger still knows, which is why it is consulted.
+   */
+  it('is still recognised as a copy, and its duplicate is still foster-made', () => {
+    const { store, ledger } = pairOnDisk();
+    const [active] = listActive(project(ledger.read()));
+
+    // Exactly what the app does: rewrite the file without the fields it does not
+    // know about.
+    const stripped = JSON.parse(readFileSync(active!.copyPath, 'utf8')) as Record<string, unknown>;
+    delete stripped._foster;
+    writeFileSync(active!.copyPath, JSON.stringify(stripped), 'utf8');
+
+    const report = findDuplicates(store, listActive(project(ledger.read())));
+    expect(report.copies).toHaveLength(1);
+    // Not blamed on the app: it is foster's copy, and foster can remove it.
+    expect(report.appMade).toBe(0);
+  });
+
+  it('is not fostered onward into a chain', () => {
+    const { store, ledger } = pairOnDisk();
+    const [active] = listActive(project(ledger.read()));
+    const stripped = JSON.parse(readFileSync(active!.copyPath, 'utf8')) as Record<string, unknown>;
+    delete stripped._foster;
+    writeFileSync(active!.copyPath, JSON.stringify(stripped), 'utf8');
+
+    const found = scanAccount(store, NEW_ACCOUNT, copySessionIds(ledger.read())).find(
+      (s) => s.data.sessionId === active!.copySessionId,
+    );
+
+    expect(found!.isCopy).toBe(true);
+    expect(found!.reasons).toContain('already-a-copy');
   });
 });

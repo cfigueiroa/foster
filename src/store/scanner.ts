@@ -27,7 +27,25 @@ export interface AccountSummary {
   isCurrent: boolean;
 }
 
-export function scanAccount(store: StoreLayout, account: AccountRef): DiscoveredSession[] {
+/**
+ * What foster wrote, according to the ledger.
+ *
+ * Needed because the marker on the file is not durable. `activeToPersisted` in
+ * the app builds the object it saves from an explicit list of fields, so the
+ * first time the app writes a copy back — a title change, a focus, any activity —
+ * `_foster` is dropped and the copy becomes indistinguishable from a session the
+ * app made itself. Measured on a live store: of 364 copies, 21 had lost the
+ * marker, and they were exactly the 21 that had been opened.
+ */
+export type KnownCopies = ReadonlySet<string>;
+
+const NOTHING_KNOWN: KnownCopies = new Set<string>();
+
+export function scanAccount(
+  store: StoreLayout,
+  account: AccountRef,
+  copies: KnownCopies = NOTHING_KNOWN,
+): DiscoveredSession[] {
   const dir = accountDir(store, account);
   const out: DiscoveredSession[] = [];
 
@@ -38,12 +56,13 @@ export function scanAccount(store: StoreLayout, account: AccountRef): Discovered
     const data = readSession(file);
     if (!data) continue;
 
-    // A file carrying the marker is a copy foster wrote, not a session the app
-    // created. Classifying before recording is what keeps a rescan from
-    // "discovering" copies as new sessions and attributing them to the wrong origin.
-    const isCopy = data._foster !== undefined;
+    // A copy foster wrote, not a session the app created. Classifying before
+    // recording is what keeps a rescan from "discovering" copies as new sessions
+    // and attributing them to the wrong origin — and the ledger is consulted
+    // because the marker on the file does not survive the app saving it.
+    const isCopy = data._foster !== undefined || copies.has(data.sessionId);
 
-    const reasons = unfosterableReasons(data);
+    const reasons = unfosterableReasons(data, isCopy);
     // The app skips any session file over its size limit while loading, with only
     // a line in its log to show for it. Copying one would write a file that never
     // appears and never explains why, so it is excluded here instead.
@@ -55,16 +74,20 @@ export function scanAccount(store: StoreLayout, account: AccountRef): Discovered
   return out;
 }
 
-export function scanStore(store: StoreLayout): DiscoveredSession[] {
-  return listAccountDirs(store).flatMap((account) => scanAccount(store, account));
+export function scanStore(
+  store: StoreLayout,
+  copies: KnownCopies = NOTHING_KNOWN,
+): DiscoveredSession[] {
+  return listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies));
 }
 
 export function summarise(
   store: StoreLayout,
   currentAccountUuid: string | undefined,
+  copies: KnownCopies = NOTHING_KNOWN,
 ): AccountSummary[] {
   return listAccountDirs(store).map((account) =>
-    summariseAccount(account, scanAccount(store, account), currentAccountUuid),
+    summariseAccount(account, scanAccount(store, account, copies), currentAccountUuid),
   );
 }
 

@@ -28,7 +28,7 @@ import { findDuplicates } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
-import { listActive, project } from '../ledger/project.js';
+import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { findRestorable } from '../store/restore.js';
@@ -299,8 +299,9 @@ function showStatus(ledger: Ledger, store: StoreLayout): void {
 }
 
 function showAccounts(store: StoreLayout, ledger: Ledger, target: AccountRef): void {
+  const copies = copySessionIds(ledger.read());
   const rows = listAccountDirs(store).map((account) =>
-    summariseAccount(account, scanAccount(store, account), target.accountUuid),
+    summariseAccount(account, scanAccount(store, account, copies), target.accountUuid),
   );
   note(accountTree(groupByAccount(rows), labelsOf(ledger)), 'Accounts and their organizations');
 }

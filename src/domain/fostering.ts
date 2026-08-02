@@ -40,12 +40,15 @@ export function applyPrefix(title: string | undefined, prefix: string): string {
  * the sidebar's "Recents", so copying them would produce a file that silently
  * never shows up.
  */
-export function unfosterableReasons(data: CodeSessionData): Unfosterable[] {
+export function unfosterableReasons(data: CodeSessionData, knownCopy = false): Unfosterable[] {
   const reasons: Unfosterable[] = [];
   if (data.scheduledTaskId) reasons.push('scheduled-task');
   if (data.lastFocusedAt === undefined) reasons.push('never-opened');
   if (data.isArchived) reasons.push('archived');
-  if (data._foster) reasons.push('already-a-copy');
+  // The marker is not the only evidence, and it is not durable: the app writes a
+  // session back through a fixed list of fields, so a copy it has loaded and
+  // saved comes back without `_foster`. The caller passes what the ledger knows.
+  if (data._foster || knownCopy) reasons.push('already-a-copy');
   return reasons;
 }
 
