@@ -15,8 +15,10 @@
 [CmdletBinding()]
 param(
   # Release tag to install. Overridable so a specific version can be pinned.
-  [string]$Version = 'v0.2.1',
-  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'foster')
+  [string]$Version = 'v0.2.2',
+  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'foster'),
+  # Install without opening the menu afterwards, for scripted setups.
+  [switch]$NoLaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,12 +97,19 @@ node "%~dp0foster.js" %*
 
   # Only claim the command is ready if it actually resolves: piping through a
   # child process would leave this session's PATH untouched.
-  if (Get-Command foster -ErrorAction SilentlyContinue) {
-    Write-Host "Start with:  foster doctor"
+  if (-not (Get-Command foster -ErrorAction SilentlyContinue)) {
+    Write-Host "Open a new terminal, then run:  foster" -ForegroundColor Yellow
+    Write-Host "Or run it here as:  $shim" -ForegroundColor DarkGray
+  }
+  elseif ($NoLaunch -or [Console]::IsInputRedirected) {
+    # Nothing would be able to answer the menu's prompts, so just say how to start.
+    Write-Host "Start with:  foster"
   }
   else {
-    Write-Host "Open a new terminal, then run:  foster doctor" -ForegroundColor Yellow
-    Write-Host "Or run it here as:  $shim doctor" -ForegroundColor DarkGray
+    # Installing is not the goal, using it is: the menu opens straight away
+    # rather than asking the user to type another command.
+    Write-Host ""
+    & foster
   }
 }
 finally {

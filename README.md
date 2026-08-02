@@ -52,11 +52,12 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.2/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
-it. For development, clone the repo and use `npm run dev -- <command>`.
+it. When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
+clone the repo and use `npm run dev -- <command>`.
 
 ## Usage
 
