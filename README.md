@@ -59,7 +59,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.1/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.2/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -75,6 +75,11 @@ foster
 
 If Claude Desktop is open when you confirm, it waits for you to quit it instead
 of failing, and picks up where you left off.
+
+Copies go to the account you are signed into by default. The confirmation names
+the destination, and offers to send them anywhere else — any organization of any
+account is a valid target, though copies written outside the account in use only
+appear once you switch to it.
 
 The same operations are available as one-shot commands, for scripting:
 
@@ -145,9 +150,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.4.1
-git commit -am "chore: release 0.4.1" && git tag -a v0.4.1 -m "foster v0.4.1"
-git push && git push origin v0.4.1
+npm run version:set 0.4.2
+git commit -am "chore: release 0.4.2" && git tag -a v0.4.2 -m "foster v0.4.2"
+git push && git push origin v0.4.2
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

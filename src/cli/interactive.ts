@@ -23,6 +23,28 @@ function aborted<T>(value: T | symbol): value is symbol {
   return isCancel(value) || value === BACK;
 }
 
+/** The value carried by the "Back" entry; never leaves this module. */
+const BACK_OPTION = '__back';
+
+/**
+ * A select that always answers in the same currency.
+ *
+ * Backing out used to be a string in the option list but a symbol in the return
+ * type, so every caller had to remember to check for both. One that checked only
+ * the symbol passed the literal "__back" downstream, where it was used as a
+ * lookup key and crashed. Converting here means callers only ever see BACK.
+ */
+async function selectOrBack(
+  message: string,
+  options: { value: string; label: string; hint?: string }[],
+): Promise<Maybe<string>> {
+  const picked = await select({
+    message,
+    options: [...options, { value: BACK_OPTION, label: pc.dim('Back') }],
+  });
+  return isCancel(picked) || picked === BACK_OPTION ? BACK : picked;
+}
+
 export async function runInteractive(store: StoreLayout, ledger: Ledger): Promise<void> {
   intro(`${pc.bgCyan(pc.black(' foster '))} ${pc.dim(VERSION)}`);
 
@@ -223,33 +245,76 @@ async function chooseSource(
     }
   }
 
-  const picked = await select({
-    message: 'Where should the sessions come from?',
-    options: [
-      ...choices.map((choice, index) => ({
-        value: String(index),
-        label: choice.label,
-        hint: choice.hint,
-      })),
-      { value: '__back', label: pc.dim('Back') },
-    ],
-  });
+  const picked = await selectOrBack(
+    'Where should the sessions come from?',
+    choices.map((choice, index) => ({
+      value: String(index),
+      label: choice.label,
+      hint: choice.hint,
+    })),
+  );
 
-  if (isCancel(picked) || picked === '__back') return BACK;
+  if (aborted(picked)) return BACK;
   return choices[Number(picked)]?.refs ?? BACK;
 }
 
+const refKey = (ref: AccountRef) => `${ref.accountUuid}/${ref.organizationUuid}`;
+
+/** Account and organization, using a human label for the account when one exists. */
+function describeRef(ledger: Ledger, ref: AccountRef): string {
+  const label = project(ledger.read()).labels.get(ref.accountUuid);
+  return `${label ?? shortId(ref.accountUuid)} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`;
+}
+
+/**
+ * Where the copies are written.
+ *
+ * Defaults to the directory the sidebar reads, which is what almost everyone
+ * wants — but any organization is a valid destination. Writing into one the app
+ * is not currently on is a legitimate thing to do (staging an account before
+ * switching to it); it just will not show anything until you get there, which is
+ * why it says so.
+ */
+async function chooseTarget(
+  store: StoreLayout,
+  ledger: Ledger,
+  current: AccountRef,
+  sources: AccountRef[],
+): Promise<Maybe<AccountRef>> {
+  const taken = new Set(sources.map(refKey));
+
+  const others = listAccountDirs(store).filter(
+    (ref) => !taken.has(refKey(ref)) && refKey(ref) !== refKey(current),
+  );
+  if (others.length === 0) {
+    log.info('There is nowhere else to send them: every other directory is a source.');
+    return BACK;
+  }
+
+  const picked = await selectOrBack('Where should the copies go?', [
+    {
+      value: refKey(current),
+      label: describeRef(ledger, current),
+      hint: 'the account in use — copies show up after a restart',
+    },
+    ...others.map((ref) => ({
+      value: refKey(ref),
+      label: describeRef(ledger, ref),
+      hint: 'not the account in use — copies appear only once you switch to it',
+    })),
+  ]);
+
+  if (aborted(picked)) return BACK;
+  return [current, ...others].find((ref) => refKey(ref) === picked) ?? BACK;
+}
+
 async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {
-  const how = await select({
-    message: `${sessions.length} session(s) available. Narrow them down?`,
-    options: [
-      { value: 'all', label: 'Take all of them' },
-      { value: 'since', label: 'Only recent ones', hint: 'e.g. the last 30 days' },
-      { value: 'title', label: 'Match a title' },
-      { value: 'cwd', label: 'Match a working directory' },
-      { value: '__back', label: pc.dim('Back') },
-    ],
-  });
+  const how = await selectOrBack(`${sessions.length} session(s) available. Narrow them down?`, [
+    { value: 'all', label: 'Take all of them' },
+    { value: 'since', label: 'Only recent ones', hint: 'e.g. the last 30 days' },
+    { value: 'title', label: 'Match a title' },
+    { value: 'cwd', label: 'Match a working directory' },
+  ]);
   if (aborted(how)) return BACK;
   if (how === 'all') return sessions;
 
@@ -276,8 +341,8 @@ async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<Discov
   return applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value });
 }
 
-async function fosterFlow(store: StoreLayout, ledger: Ledger, target: AccountRef): Promise<void> {
-  const sources = await chooseSource(store, ledger, target);
+async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRef): Promise<void> {
+  const sources = await chooseSource(store, ledger, current);
   if (aborted(sources)) return;
 
   const available = byRecency(
@@ -320,13 +385,35 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, target: AccountRef
   });
   if (aborted(prefix)) return;
 
-  const go = await confirm({
-    message: `Foster ${selected.length} session(s)?`,
-    initialValue: false,
-  });
-  if (isCancel(go) || !go) {
-    log.info('Nothing written.');
-    return;
+  // The destination is offered here rather than as its own step: writing into
+  // the account in use is what almost every run wants, and asking about it every
+  // time would tax that case to serve the occasional one. Naming it in the
+  // confirmation keeps it visible, and changing it is one keystroke away.
+  let target = current;
+  for (;;) {
+    const decision = await select({
+      message: `Foster ${selected.length} session(s) into ${describeRef(ledger, target)}?`,
+      options: [
+        { value: 'go', label: 'Yes, foster them' },
+        {
+          value: 'elsewhere',
+          label: 'Send them somewhere else',
+          hint: 'another account or organization',
+        },
+        { value: 'cancel', label: 'Cancel' },
+      ],
+      initialValue: 'cancel',
+    });
+
+    if (isCancel(decision) || decision === 'cancel') {
+      log.info('Nothing written.');
+      return;
+    }
+    if (decision === 'go') break;
+
+    const chosen = await chooseTarget(store, ledger, current, sources);
+    if (aborted(chosen)) continue;
+    target = chosen;
   }
 
   if (!(await waitUntilAppClosed(store))) {
@@ -346,7 +433,13 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, target: AccountRef
     if (outcomes.length > 10) log.message(pc.dim(`… and ${outcomes.length - 10} more`));
 
     log.success(`${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`);
-    note('Restart Claude Desktop to see them in the sidebar.', 'One more step');
+    note(
+      refKey(target) === refKey(current)
+        ? 'Restart Claude Desktop to see them in the sidebar.'
+        : `These went to ${shortId(target.accountUuid)} / org ${shortId(target.organizationUuid)}, which is not the account in use.\n` +
+            'They appear once you switch to it and restart Claude Desktop.',
+      'One more step',
+    );
   } catch (error) {
     // The engine rechecks immediately before writing, so the app can still have
     // been reopened between the confirmation and the write.

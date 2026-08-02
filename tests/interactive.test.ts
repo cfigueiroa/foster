@@ -82,7 +82,8 @@ describe('the guided menu', () => {
       '0', // source: the old account's only organization
       'all', // no filter
       '↪ ', // prefix
-      true, // confirm
+      'go', // confirm
+
       'quit', // back at the menu
     ];
 
@@ -94,7 +95,7 @@ describe('the guided menu', () => {
   });
 
   it('narrows the batch by title before writing', async () => {
-    answers = ['foster', '0', 'title', 'refactor', '↪ ', true, 'quit'];
+    answers = ['foster', '0', 'title', 'refactor', '↪ ', 'go', 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -109,7 +110,7 @@ describe('the guided menu', () => {
       '0',
       'all',
       '↪ ',
-      false, // decline
+      'cancel', // decline
       'status', // menu is still running
       'quit',
     ];
@@ -130,7 +131,7 @@ describe('the guided menu', () => {
   });
 
   it('returns fostered copies, leaving the origin untouched', async () => {
-    answers = ['foster', '0', 'all', '↪ ', true, 'return', 'all', true, 'quit'];
+    answers = ['foster', '0', 'all', '↪ ', 'go', 'return', 'all', true, 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -173,7 +174,7 @@ describe('organizations within an account', () => {
     );
 
     // 0 = the whole account, 1 = its first organization, 2 = its second.
-    answers = ['foster', '2', 'all', '↪ ', true, 'quit'];
+    answers = ['foster', '2', 'all', '↪ ', 'go', 'quit'];
     await runInteractive(store, ledger);
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
@@ -188,7 +189,7 @@ describe('organizations within an account', () => {
       session({ sessionId: '00000000-0000-4000-8000-0000000000b2', title: 'Second org work' }),
     );
 
-    answers = ['foster', '0', 'all', '↪ ', true, 'quit'];
+    answers = ['foster', '0', 'all', '↪ ', 'go', 'quit'];
     await runInteractive(store, ledger);
 
     // Two from the first organization plus one from the second.
@@ -212,7 +213,7 @@ describe('organizations within an account', () => {
     // Both accounts contribute one eligible organization, so neither gets the
     // whole-account shortcut. The sibling must be offered at all: excluding the
     // entire current account would make that session permanently unreachable.
-    answers = ['foster', '1', 'all', '↪ ', true, 'quit'];
+    answers = ['foster', '1', 'all', '↪ ', 'go', 'quit'];
     await runInteractive(store, ledger);
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
@@ -223,9 +224,79 @@ describe('organizations within an account', () => {
   it('never offers the directory the sidebar already reads', async () => {
     // Only the old account's single organization is a valid source here, so any
     // index beyond the first would mean the target itself was on the list.
-    answers = ['foster', '1', 'all', '↪ ', true, 'quit'];
+    answers = ['foster', '1', 'all', '↪ ', 'go', 'quit'];
     await runInteractive(store, ledger);
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+  });
+});
+
+describe('backing out of any step', () => {
+  /**
+   * The "Back" entry carries a string, while callers checked for a symbol. The
+   * filter step checked only the symbol, so the literal fell through and was used
+   * as a lookup key — the menu crashed with "Cannot read properties of undefined".
+   */
+  it('returns to the menu from the filter step instead of crashing', async () => {
+    answers = ['foster', '0', '__back', 'quit'];
+
+    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+    expect(answers).toHaveLength(0);
+  });
+
+  it('returns to the menu from the destination step', async () => {
+    // A second destination has to exist for the step to be asked at all.
+    writeSession(
+      store,
+      {
+        accountUuid: NEW_ACCOUNT.accountUuid,
+        organizationUuid: '11111111-1111-4111-8111-1111111100dd',
+      },
+      session({ sessionId: '11111111-1111-4111-8111-1111111100de' }),
+    );
+    const active = accountDir(store, NEW_ACCOUNT);
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(active, later, later);
+
+    answers = ['foster', '0', '__back', 'quit'];
+
+    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    expect(answers).toHaveLength(0);
+  });
+});
+
+describe('choosing where the copies go', () => {
+  const ELSEWHERE = {
+    accountUuid: OLD_ACCOUNT.accountUuid,
+    organizationUuid: '00000000-0000-4000-8000-0000000000e1',
+  };
+
+  it('can write into an organization other than the one in use', async () => {
+    // ELSEWHERE is a second organization of the old account: available as a
+    // destination precisely because it is not the source and not the target.
+    writeSession(store, ELSEWHERE, session({ sessionId: '00000000-0000-4000-8000-0000000000e2' }));
+
+    // Source = the old account's first organization (index 1, after the
+    // whole-account shortcut at 0). The destination picker is keyed by
+    // account/organization rather than by position, so it is named outright.
+    const destination = `${ELSEWHERE.accountUuid}/${ELSEWHERE.organizationUuid}`;
+    answers = ['foster', '1', 'all', '↪ ', 'elsewhere', destination, 'go', 'quit'];
+    await runInteractive(store, ledger);
+
+    // Nothing landed where the sidebar reads; it all went to the chosen place.
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+    expect(scanAccount(store, ELSEWHERE).filter((s) => s.isCopy)).toHaveLength(2);
+  });
+
+  it('does not ask when the current directory is the only destination', async () => {
+    // Only the old account's organization is a source, and nothing else exists,
+    // so the flow must not consume an answer for a question with one option.
+    answers = ['foster', '0', 'all', '↪ ', 'go', 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(2);
+    expect(answers).toHaveLength(0);
   });
 });
