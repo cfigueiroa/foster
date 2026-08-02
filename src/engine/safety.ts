@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { layoutFor, storeRootOfCopy } from '../domain/paths.js';
+import { comparablePath, layoutFor, storeRootOfCopy } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import {
@@ -107,7 +107,9 @@ export function assertRemovable(
   // answer "safe to delete" about exactly the file that gets written back.
   const byStore = new Map<string, ActiveFostering[]>();
   for (const fostering of fosterings) {
-    const root = storeRootOfCopy(fostering.copyPath);
+    // Keyed by the comparable form so two spellings of one directory do not
+    // become two groups, each asking about half the copies.
+    const root = comparablePath(storeRootOfCopy(fostering.copyPath));
     byStore.set(root, [...(byStore.get(root) ?? []), fostering]);
   }
 
@@ -123,9 +125,9 @@ export function assertRemovable(
   if (held.length === 0) return;
 
   const count = held.length;
-  const stores = new Set(held.map((f) => storeRootOfCopy(f.copyPath)));
+  const stores = new Set(held.map((f) => comparablePath(storeRootOfCopy(f.copyPath))));
   const where =
-    stores.size === 1 && stores.has(store.root)
+    stores.size === 1 && stores.has(comparablePath(store.root))
       ? 'Claude Desktop is running'
       : `Claude Desktop is running on ${stores.size === 1 ? 'the installation holding them' : `${stores.size} installations holding them`}`;
 

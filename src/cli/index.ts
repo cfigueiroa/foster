@@ -1,15 +1,17 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
-import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
   candidateStoreRoots,
+  comparablePath,
   layoutFor,
   listAccountDirs,
   listAgentAccountDirs,
   pickActiveOrganization,
   resolveStore,
+  samePath,
+  storeRootOfCopy,
 } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
@@ -271,7 +273,7 @@ function resolveSourceStore(target: StoreLayout, fromStore: string | undefined):
 }
 
 function sameStore(a: StoreLayout, b: StoreLayout): boolean {
-  return path.resolve(a.root) === path.resolve(b.root);
+  return samePath(a.root, b.root);
 }
 
 program
@@ -336,8 +338,8 @@ program
     // app passes its userData as the pre-virtualisation %APPDATA% path while foster
     // resolves the package path; both name the same store, and reporting the other
     // spelling as "another instance" invents a profile that does not exist.
-    const known = new Set([...candidateStoreRoots(), store.root].map((dir) => path.resolve(dir)));
-    const others = runningStores().filter((dir) => !known.has(path.resolve(dir)));
+    const known = new Set([...candidateStoreRoots(), store.root].map(comparablePath));
+    const others = runningStores().filter((dir) => !known.has(comparablePath(dir)));
     if (others.length > 0) {
       console.log(pc.bold('Other running instances'));
       for (const dir of others) console.log(`  ${dir}`);
@@ -634,6 +636,7 @@ program
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
   .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
+  .option('--all-stores', 'include copies written into other installations')
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually remove; without it nothing is removed')
   .addOption(new Option('--dry-run', 'show what would happen and remove nothing').conflicts('yes'))
@@ -642,12 +645,28 @@ program
     const opts = this.opts<{
       title?: string;
       session?: string[];
+      allStores?: boolean;
       restart?: boolean;
       yes?: boolean;
       dryRun?: boolean;
     }>();
 
     let active = listActive(project(ledger.read()));
+
+    // The ledger spans every installation foster has written into, so without
+    // this a return run in one profile would quietly delete copies sitting in
+    // another. Scoped to the store in use, and the rest are counted out loud.
+    if (!opts.allStores) {
+      const elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root));
+      active = active.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
+      if (elsewhere.length > 0) {
+        console.log(
+          pc.dim(
+            `${elsewhere.length} more ${elsewhere.length === 1 ? 'copy is' : 'copies are'} in other installations — pass --all-stores to include them.`,
+          ),
+        );
+      }
+    }
     if (opts.title) {
       const needle = opts.title.toLowerCase();
       active = active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(needle));

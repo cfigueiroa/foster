@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { accountDir, candidateStoreRoots, pickActiveOrganization } from '../src/domain/paths.js';
+import {
+  accountDir,
+  candidateStoreRoots,
+  pickActiveOrganization,
+  samePath,
+  storeRootOfCopy,
+} from '../src/domain/paths.js';
 import { makeStore, NEW_ACCOUNT } from './helpers/store.js';
 
 /**
@@ -54,5 +60,36 @@ describe('candidateStoreRoots', () => {
 
   it('finds nothing when the environment names nowhere to look', () => {
     expect(candidateStoreRoots({})).toEqual([]);
+  });
+});
+
+describe('comparing store paths', () => {
+  /**
+   * Two spellings of one directory must not look like two installations: that
+   * would make a return run report nothing fostered rather than fail.
+   */
+  it('ignores a trailing separator and relative segments', () => {
+    expect(samePath('C:/a/b', 'C:/a/b/')).toBe(true);
+    expect(samePath('C:/a/b', 'C:/a/x/../b')).toBe(true);
+  });
+
+  it('ignores capitalisation on Windows, where the filesystem does', () => {
+    const differs = samePath('D:/Profiles/Store', 'd:/profiles/store');
+    expect(differs).toBe(process.platform === 'win32');
+  });
+
+  it('still tells genuinely different directories apart', () => {
+    expect(samePath('C:/a/one', 'C:/a/two')).toBe(false);
+  });
+});
+
+describe('storeRootOfCopy', () => {
+  it('reads the store back out of a copy path', () => {
+    const store = makeStore();
+    const copy = path.join(
+      accountDir(store, NEW_ACCOUNT),
+      'local_00000000-0000-4000-8000-00000000abcd.json',
+    );
+    expect(samePath(storeRootOfCopy(copy), store.root)).toBe(true);
   });
 });

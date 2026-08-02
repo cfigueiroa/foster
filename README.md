@@ -207,7 +207,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.10.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.11.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -253,6 +253,11 @@ foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
 foster app       # status | quit | start | restart — drive Claude Desktop itself
 ```
+
+`return` only touches copies in the installation it is pointed at; copies written into another
+profile are counted and left alone unless you pass `--all-stores`. The ledger spans every
+installation, and quietly deleting from one while working in another is not something a tool should
+do on its own.
 
 `foster` and `return` are dry runs unless you pass `--yes`: they print exactly what
 would be written or removed and touch nothing. (`label` only records a name in
@@ -352,9 +357,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.10.0
-git commit -am "chore: release 0.10.0" && git tag -a v0.10.0 -m "foster v0.10.0"
-git push && git push origin v0.10.0
+npm run version:set 0.11.0
+git commit -am "chore: release 0.11.0" && git tag -a v0.11.0 -m "foster v0.11.0"
+git push && git push origin v0.11.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

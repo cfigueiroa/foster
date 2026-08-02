@@ -1,13 +1,15 @@
-import path from 'node:path';
 import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@clack/prompts';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
   candidateStoreRoots,
+  comparablePath,
   listAccountDirs,
   listAgentAccountDirs,
   pickActiveOrganization,
   resolveStore,
+  samePath,
+  storeRootOfCopy,
 } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -159,7 +161,7 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
         await restoreFlow(store, ledger, target);
         break;
       case 'status':
-        showStatus(ledger);
+        showStatus(ledger, store);
         break;
       case 'browse':
         showAccounts(store, ledger, target);
@@ -245,18 +247,24 @@ function showEnvironment(store: StoreLayout, ledger: Ledger, target: AccountRef)
   );
 }
 
-function showStatus(ledger: Ledger): void {
+function showStatus(ledger: Ledger, store: StoreLayout): void {
   const active = listActive(project(ledger.read()));
   if (active.length === 0) {
     log.info('Nothing is fostered.');
     return;
   }
+
+  // Where a copy lives only matters once more than one installation is in play;
+  // saying it always would be noise on the ordinary single-profile setup.
+  const spread = new Set(active.map((f) => comparablePath(storeRootOfCopy(f.copyPath)))).size > 1;
+
   note(
     active
-      .map(
-        (f) =>
-          `${pc.dim(formatDate(f.fosteredAt))}  ${f.originalTitle || shortId(f.originSessionId)}`,
-      )
+      .map((f) => {
+        const root = storeRootOfCopy(f.copyPath);
+        const where = spread && !samePath(root, store.root) ? pc.dim(`  → ${root}`) : '';
+        return `${pc.dim(formatDate(f.fosteredAt))}  ${f.originalTitle || shortId(f.originSessionId)}${where}`;
+      })
       .join('\n'),
     `${active.length} fostered`,
   );
@@ -341,8 +349,8 @@ export interface SourcePick {
  * outright, since nothing on disk announces it.
  */
 async function pickStore(current: StoreLayout, message: string): Promise<Maybe<StoreLayout>> {
-  const known = new Set([...candidateStoreRoots(), current.root].map((dir) => path.resolve(dir)));
-  const running = runningStores().filter((dir) => !known.has(path.resolve(dir)));
+  const known = new Set([...candidateStoreRoots(), current.root].map(comparablePath));
+  const running = runningStores().filter((dir) => !known.has(comparablePath(dir)));
 
   const picked = await selectOrBack(message, [
     ...running.map((dir) => ({ value: dir, label: dir, hint: 'running now' })),
@@ -680,7 +688,7 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
     return;
   }
 
-  if (path.resolve(source.store.root) !== path.resolve(store.root)) {
+  if (!samePath(source.store.root, store.root)) {
     note(source.store.root, 'Reading from another installation');
   }
 
@@ -768,7 +776,7 @@ async function confirmAndWrite(
 
     // Only directories in the destination store can be excluded as "already a
     // source"; a source in another store shares nothing with it.
-    const taken = path.resolve(source.store.root) === path.resolve(store.root) ? source.refs : [];
+    const taken = samePath(source.store.root, store.root) ? source.refs : [];
     const chosen = await chooseTarget(store, ledger, current, taken);
     if (!aborted(chosen)) target = chosen;
   }
@@ -847,10 +855,24 @@ async function restoreFlow(store: StoreLayout, ledger: Ledger, current: AccountR
 }
 
 async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
-  const active = listActive(project(ledger.read()));
+  const everything = listActive(project(ledger.read()));
+
+  // The ledger spans every installation foster has written into. Undoing here
+  // should not reach into another profile's store without being asked, so the
+  // rest are counted rather than silently included.
+  const active = everything.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
+  const elsewhere = everything.length - active.length;
+
   if (active.length === 0) {
-    log.info('Nothing is fostered.');
+    log.info(
+      elsewhere > 0
+        ? `Nothing is fostered here. ${elsewhere} cop${elsewhere === 1 ? 'y is' : 'ies are'} in another installation — switch to it to undo them.`
+        : 'Nothing is fostered.',
+    );
     return;
+  }
+  if (elsewhere > 0) {
+    log.info(pc.dim(`${elsewhere} more in another installation; switch to it to undo those.`));
   }
 
   const scope = await selectOrBack(`${active.length} fostered session(s). Send back which?`, [

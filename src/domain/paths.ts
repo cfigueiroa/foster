@@ -81,6 +81,23 @@ export function sessionPath(store: StoreLayout, account: AccountRef, sessionId: 
 }
 
 /**
+ * A path in the form used for comparing two of them.
+ *
+ * `path.resolve` settles separators and relative segments but not case, and on
+ * Windows `D:\Store` and `d:\store` are the same directory. Comparing them raw
+ * makes a store passed with different capitalisation look like a different
+ * installation — which would quietly report nothing fostered rather than fail.
+ */
+export function comparablePath(target: string): string {
+  const resolved = path.resolve(target);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+export function samePath(a: string, b: string): boolean {
+  return comparablePath(a) === comparablePath(b);
+}
+
+/**
  * The store a session file belongs to, read back out of its path.
  *
  * Copies can now be written into a store other than the one foster resolved, and
