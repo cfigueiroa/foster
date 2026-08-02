@@ -51,11 +51,29 @@ jobs:
       - name: Smoke-test the bundle
         run: |
           set -euo pipefail
+
+          # The release ships and checksums exactly one file, so the build must
+          # produce exactly one. A dynamic import is enough to make the bundler
+          # split out a chunk, which would be left behind at publish time and
+          # only fail once a user reached the code path that loads it.
+          count="$(find dist -name '*.js' | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::build produced $count JS files, expected a single self-contained bundle:"
+            find dist -name '*.js'
+            exit 1
+          fi
+
           expected="$(node -p "require('./package.json').version")"
           actual="$(node dist/foster.js --version)"
           [ "$actual" = "$expected" ] || { echo "::error::bundle reports $actual, expected $expected"; exit 1; }
           node dist/foster.js --help > /dev/null
-          echo "bundle runs and reports $actual"
+
+          # Run it from a directory holding nothing but the bundle, which is what
+          # an install looks like: an unresolvable relative import fails here.
+          isolated="$(mktemp -d)"
+          cp dist/foster.js "$isolated/"
+          (cd "$isolated" && node foster.js --version > /dev/null)
+          echo "bundle is self-contained and reports $actual"
 
       - name: Generate checksum
         working-directory: dist

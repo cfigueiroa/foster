@@ -52,7 +52,7 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.2.1/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
@@ -131,9 +131,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.2.0
-git commit -am "chore: release 0.2.0" && git tag -a v0.2.0 -m "foster v0.2.0"
-git push && git push origin v0.2.0
+npm run version:set 0.2.1
+git commit -am "chore: release 0.2.1" && git tag -a v0.2.1 -m "foster v0.2.1"
+git push && git push origin v0.2.1
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

@@ -18,6 +18,9 @@ import { readConfig } from '../store/config.js';
 import { scanAccount, summarise } from '../store/scanner.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince, type SessionFilter } from './filters.js';
+// Imported statically on purpose: a dynamic import makes the bundler emit a
+// separate chunk, and the release ships (and checksums) a single file.
+import { runInteractive } from './interactive.js';
 import { formatDate, outcomeLine, restartNotice, sessionLine, shortId } from './render.js';
 
 interface GlobalOptions {
@@ -43,7 +46,6 @@ program
       return;
     }
     const { store, ledger } = context(this);
-    const { runInteractive } = await import('./interactive.js');
     await runInteractive(store, ledger);
   });
 
