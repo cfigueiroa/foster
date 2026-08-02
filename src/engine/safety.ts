@@ -54,11 +54,22 @@ function desktopProcessRunning(): boolean {
   }
 }
 
-/** The cheap check: no process table, no parent links, just "is it up". */
-export function inspectApp(store: StoreLayout): AppState {
+/**
+ * The cheap check: no process table, no parent links, just "is it up".
+ *
+ * The lockfile lives in the store, so it answers about that store. A bare
+ * process name does not: with two profiles up, any Claude.exe would make every
+ * store look busy — which had a closed profile refusing an undo and asking the
+ * user to close an app that was not running. The corroborating signal is
+ * therefore only allowed to speak for the installed app, whose processes are the
+ * ones it can actually see.
+ */
+export function inspectApp(store: StoreLayout, env: NodeJS.ProcessEnv = process.env): AppState {
   const evidence: string[] = [];
   if (lockfileHeld(store)) evidence.push('userData lockfile is held by a running app');
-  if (desktopProcessRunning()) evidence.push('a Claude.exe process is running');
+  if (storeIdentity(store.root, env).isDefault && desktopProcessRunning()) {
+    evidence.push('a Claude.exe process is running');
+  }
   return { running: evidence.length > 0, evidence };
 }
 

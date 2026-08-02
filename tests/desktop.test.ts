@@ -9,7 +9,7 @@ import {
   runningStores,
   type ProcessRow,
 } from '../src/engine/desktop.js';
-import { heldInMemory } from '../src/engine/safety.js';
+import { heldInMemory, inspectApp } from '../src/engine/safety.js';
 import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -190,6 +190,20 @@ describe('heldInMemory', () => {
   it('assumes the worst when the start time is unknown', () => {
     const desktop = { running: true, codeSessions: 0, selfHosted: false };
     expect(heldInMemory([fostering(100)], desktop)).toHaveLength(1);
+  });
+});
+
+describe('inspectApp', () => {
+  /**
+   * The cheap check reads a lockfile inside the store, plus a process name. Only
+   * the first is about that store: with the installed app up, the process name
+   * made every profile look busy, and an undo in a closed profile asked the user
+   * to close an app that was not running.
+   */
+  it('does not let another installation make a closed profile look busy', () => {
+    // A temp store: no lockfile, and nothing in this environment resolves to it.
+    // Whatever is running on the machine, this store is not it.
+    expect(inspectApp(makeStore(), {})).toEqual({ running: false, evidence: [] });
   });
 });
 
