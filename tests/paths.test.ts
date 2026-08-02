@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   accountDir,
   candidateStoreRoots,
+  comparableUserDataDir,
   layoutFor,
   pickActiveOrganization,
   samePath,
@@ -93,6 +94,21 @@ describe('storeRootOfCopy', () => {
       'local_00000000-0000-4000-8000-00000000abcd.json',
     );
     expect(samePath(storeRootOfCopy(copy), store.root)).toBe(true);
+  });
+});
+
+describe('comparing userData directories', () => {
+  /**
+   * These come off a command line, not the filesystem, so the comparison has to
+   * mean the same thing on every platform: CI runs these tests on Linux, where
+   * `path.resolve` would treat a Windows path as one long relative name.
+   */
+  it('folds separators, case and a trailing separator', () => {
+    expect(comparableUserDataDir('D:\\Store\\')).toBe(comparableUserDataDir('d:/store'));
+  });
+
+  it('still tells two directories apart', () => {
+    expect(comparableUserDataDir('D:\\one')).not.toBe(comparableUserDataDir('D:\\two'));
   });
 });
 

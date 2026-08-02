@@ -102,6 +102,20 @@ export function samePath(a: string, b: string): boolean {
 }
 
 /**
+ * A userData directory in the form used for comparing it against a command line.
+ *
+ * `comparablePath` is the wrong tool here, because these paths are read out of
+ * `--user-data-dir` rather than off the filesystem: away from Windows,
+ * `path.resolve` treats a Windows path as one long relative name and keeps a
+ * trailing backslash as part of it, so two spellings of one directory stop
+ * matching. Folding separators and case is all this comparison needs, and it
+ * means the same thing wherever the code runs.
+ */
+export function comparableUserDataDir(dir: string): string {
+  return dir.toLowerCase().replace(/\//g, '\\').replace(/\\+$/, '');
+}
+
+/**
  * How to recognise a store's own processes.
  *
  * Two facts are needed and neither is guessable from the path alone. The

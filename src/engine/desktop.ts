@@ -2,7 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import type { StoreLayout } from '../domain/types.js';
 import {
   candidateStoreRoots,
-  comparablePath,
+  comparableUserDataDir,
   storeHoldsSession,
   storeIdentity,
   type StoreIdentity,
@@ -194,7 +194,7 @@ export function inspectDesktopFor(
   list: ProcessLister = readProcesses,
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
-  const wanted = identity.roots.map(comparablePath);
+  const wanted = identity.roots.map(comparableUserDataDir);
 
   const rows = list().filter((row) => {
     // Everything that is not the app stays: the ancestry walk needs those rows to
@@ -203,7 +203,7 @@ export function inspectDesktopFor(
     const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
     // A switchless process belongs to the default installation, and only to it.
     if (!match?.[1]) return identity.isDefault;
-    return wanted.includes(comparablePath(match[1]));
+    return wanted.includes(comparableUserDataDir(match[1]));
   });
 
   // Ancestry is already scoped — the rows above are this instance's — so only the
