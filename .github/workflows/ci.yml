@@ -19,6 +19,8 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # Catches a half-finished bump long before a tag makes it a release problem.
+      - run: npm run version:check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check

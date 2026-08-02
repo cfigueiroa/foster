@@ -113,6 +113,22 @@ Tests run against **synthetic** store fixtures created in a temporary directory.
 write a real Claude Desktop installation. CI additionally runs a privacy guard that fails the build
 if realistic account identifiers or personal filesystem paths appear in tracked files.
 
+### Releasing
+
+The version lives in three files — `package.json`, `src/version.ts` (stamped into every copy foster
+writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
+
+```bash
+npm run version:set 0.2.0
+git commit -am "chore: release 0.2.0" && git tag -a v0.2.0 -m "foster v0.2.0"
+git push && git push origin v0.2.0
+```
+
+Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree
+with each other and with the tag. It then builds the bundle, smoke-tests that it actually starts,
+generates the SHA256 the installer verifies, and creates the release with both assets. Run the
+workflow manually from the Actions tab to exercise all of that without publishing anything.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

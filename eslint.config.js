@@ -13,4 +13,11 @@ export default tseslint.config(
       'no-console': 'off',
     },
   },
+  {
+    // Plain Node scripts, outside the TypeScript program that supplies these globals.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { console: 'readonly', process: 'readonly' },
+    },
+  },
 );
