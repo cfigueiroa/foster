@@ -20,8 +20,9 @@ and organization:
 ```
 
 There is **no account field inside the session file**. The only thing binding a session to an account
-is _the folder it sits in_. The app decides which folder to read from a single value in its config
-(`lastKnownAccountUuid`).
+is _the folder it sits in_, and which folder that is comes from the account you are signed into.
+(The `lastKnownAccountUuid` in the app's config is a cached copy of that answer, not the source of
+it — which is why no local edit can switch accounts.)
 
 So when you sign in with a different account, the app reads a different folder — and everything you
 did under the old account becomes invisible, while remaining perfectly intact on disk.
@@ -46,8 +47,31 @@ folder, with:
 The original file is never touched. `foster return` deletes the copy and the session is simply gone
 from the current account again.
 
-Changes appear **after you restart Claude Desktop** — the sidebar is populated at load time and does
-not watch the directory.
+## Why a restart is needed
+
+Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
+memory. Nothing watches the directory afterwards, so a file that appears later is invisible until the
+app initialises again. Reloading the window (F5) does not help: the list it redraws comes from the
+app, not from disk.
+
+`foster` will do the restart for you — from the menu, or with `--restart`. It asks the app to close
+the way clicking its close button does, so the app runs its own shutdown; it never terminates it
+unless you say so. And it will not close an app it is running inside, because that would kill the
+session that asked.
+
+There is exactly one way to avoid the restart, and it only applies if your account has **more than
+one organization**: switching organization makes the app re-read the directory, and switching back
+reads it again. That also ends any session that is running, so it is not free.
+
+## What about switching accounts?
+
+`foster` cannot switch accounts, and does not try. Which account the app uses comes from the session
+you are signed into — the account id in its config is only a cached copy of that answer, so writing
+to it changes nothing. Doing it properly would mean handling credentials, which `foster` never
+touches.
+
+What does work is staging: send copies to the other account first (`--to`, or "Send them somewhere
+else" in the menu), then sign into it. They are waiting when you arrive.
 
 ## Install
 
@@ -59,7 +83,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.2/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -67,54 +91,72 @@ clone the repo and use `npm run dev -- <command>`.
 ## Usage
 
 Run it with no arguments for a guided menu that stays open — pick an account,
-narrow the batch, review, confirm, and carry on without relaunching:
+choose sessions, review, confirm, and carry on without relaunching:
 
 ```bash
 foster
 ```
 
-If Claude Desktop is open when you confirm, it waits for you to quit it instead
-of failing, and picks up where you left off.
+You do not have to close Claude Desktop first. When the copies are written it
+offers to restart the app so they show up.
 
 Copies go to the account you are signed into by default. The confirmation names
-the destination, and offers to send them anywhere else — any organization of any
-account is a valid target, though copies written outside the account in use only
-appear once you switch to it.
+the destination and the title prefix, and either can be changed from there — any
+organization of any account is a valid target, though copies written outside the
+account in use only appear once you switch to it.
 
 The same operations are available as one-shot commands, for scripting:
 
 ```bash
 foster doctor    # environment check: store location, app state, whether it is running
-foster scan      # read-only discovery of accounts, organizations and sessions
+foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
-foster label     # give the opaque account UUIDs human names
+foster label     # give an opaque account UUID a human name
+foster labels    # list the names given so far
 foster foster    # create the copies
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
+foster app       # status | quit | start | restart — drive Claude Desktop itself
 ```
 
 `foster` and `return` are dry runs unless you pass `--yes`: they print exactly what
 would be written or removed and touch nothing. (`label` only records a name in
-foster's own ledger, so it writes immediately.)
+foster's own ledger, so it writes immediately.) Add `--restart` to either to
+restart Claude Desktop when it finishes.
 
-Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--from <accountUuid>` or
-`--from-org <organizationUuid>`. An account can hold several organizations and the sidebar only
-reads one of them, so any organization other than that one is a valid source — including another
-organization of the account you are already signed into.
-Sessions that could never appear in the sidebar — scheduled tasks, and sessions that
-were never opened — are always excluded; `list --all` shows them anyway.
+Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--session <id...>`,
+`--from <accountUuid>` or `--from-org <organizationUuid>`, and choose where the copies land with
+`--to <accountUuid>` / `--to-org <organizationUuid>`. Identifiers may be abbreviated to any unique
+prefix; an ambiguous one is reported rather than guessed at.
+
+An account can hold several organizations and the sidebar only reads one of them, so any
+organization other than that one is a valid source — including another organization of the account
+you are already signed into. Sessions that could never appear in the sidebar — scheduled tasks, and
+sessions that were never opened — are always excluded; `list --all` shows them anyway.
+
+`scan`, `list`, `status`, `doctor` and `app status` take `--json`.
 
 ## Safety model
 
 - **Reads and writes are separated.** The scanner never writes. All mutation goes through a single
-  engine module, and every operation is appended to a ledger (`~/.foster/ledger.jsonl`) before it
-  happens, so it can be replayed in reverse.
+  engine module, and every completed operation is appended to a ledger (`~/.foster/ledger.jsonl`) so
+  it can be replayed in reverse. The write comes first and only a finished write is recorded: a
+  ledger entry for a write that failed would mark the session as fostered for ever, with no file to
+  show for it.
 - **The originals are never modified.** Fostering only ever _adds_ a file to the current account's
   folder. There is no move, and no rewrite of anything under the old account.
-- **It refuses to run while Claude Desktop is open.** The app rewrites session files at runtime, so
-  writing underneath it risks a lost update. `foster` detects a running app and stops.
+- **Adding is safe while the app runs; removing is the case that is not.** Every copy carries a
+  session id the app has never seen, so a running app neither reads that file (it is past its one
+  read) nor writes it (it only writes sessions it holds) — it is simply invisible until the app
+  starts again. A copy the app _did_ load is different: it may be written back at any time, which
+  would recreate a file `foster` had just deleted. So `return` refuses for copies that already
+  existed when the app started, and offers to close it for you.
+- **It never terminates the app behind your back.** Quitting asks the app to close, the way its own
+  close button does, so it can flush pending writes and warn you about work in progress. Forcing is
+  a separate, explicit answer. And `foster` refuses outright to close an app it is running inside.
 - **It never reads credentials.** `foster` does not open, parse, copy or log credential files, cookie
-  stores or OAuth token caches. It only touches session metadata.
+  stores or OAuth token caches. It only touches session metadata. This is also why it cannot switch
+  accounts.
 - **Scheduled-task sessions are treated separately.** Sessions carrying a `scheduledTaskId` are not
   listed in the sidebar's recents and are excluded from ordinary fostering.
 - **One request, and only about versions.** Because the install URL pins a tag, an install would
@@ -150,9 +192,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.4.2
-git commit -am "chore: release 0.4.2" && git tag -a v0.4.2 -m "foster v0.4.2"
-git push && git push origin v0.4.2
+npm run version:set 0.5.0
+git commit -am "chore: release 0.5.0" && git tag -a v0.5.0 -m "foster v0.5.0"
+git push && git push origin v0.5.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

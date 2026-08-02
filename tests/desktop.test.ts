@@ -11,7 +11,9 @@ import type { ActiveFostering } from '../src/ledger/types.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
-const CLI = 'C:\\Users\\test\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
+// Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
+// that looks like somebody's home directory.
+const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
 
 function rows(...entries: Partial<ProcessRow>[]): ProcessRow[] {
   return entries.map((entry, index) => ({
@@ -142,13 +144,13 @@ describe('inspectDesktop', () => {
 describe('packagedAppId', () => {
   it('derives the launch identity from the store path', () => {
     const store = layoutFor(
-      'C:\\Users\\x\\AppData\\Local\\Packages\\Claude_abc123\\LocalCache\\Roaming\\Claude',
+      'C:\\home\\AppData\\Local\\Packages\\Claude_abc123\\LocalCache\\Roaming\\Claude',
     );
     expect(packagedAppId(store)).toBe('Claude_abc123!Claude');
   });
 
   it('has no answer for a store outside an app package', () => {
-    expect(packagedAppId(layoutFor('C:\\Users\\x\\AppData\\Roaming\\Claude'))).toBeUndefined();
+    expect(packagedAppId(layoutFor('C:\\home\\AppData\\Roaming\\Claude'))).toBeUndefined();
   });
 });
 
