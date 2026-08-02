@@ -63,11 +63,15 @@ export function resolveStore(override?: string, env: NodeJS.ProcessEnv = process
 }
 
 export function layoutFor(root: string): StoreLayout {
+  // Normalised once, here, so every comparison and every line printed downstream
+  // sees one spelling. A path typed with forward slashes on Windows otherwise
+  // travels all the way to the screen as `C:\Users\me\AppData\Local/Profile`.
+  const resolved = path.resolve(root);
   return {
-    root,
-    codeSessionsDir: path.join(root, CODE_SESSIONS),
-    agentSessionsDir: path.join(root, AGENT_SESSIONS),
-    configFile: path.join(root, 'config.json'),
+    root: resolved,
+    codeSessionsDir: path.join(resolved, CODE_SESSIONS),
+    agentSessionsDir: path.join(resolved, AGENT_SESSIONS),
+    configFile: path.join(resolved, 'config.json'),
   };
 }
 

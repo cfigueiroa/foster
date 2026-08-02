@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   accountDir,
   candidateStoreRoots,
+  layoutFor,
   pickActiveOrganization,
   samePath,
   storeRootOfCopy,
@@ -91,5 +92,15 @@ describe('storeRootOfCopy', () => {
       'local_00000000-0000-4000-8000-00000000abcd.json',
     );
     expect(samePath(storeRootOfCopy(copy), store.root)).toBe(true);
+  });
+});
+
+describe('layoutFor', () => {
+  it('normalises the root so one store has one spelling', () => {
+    // A path typed with forward slashes on Windows otherwise reaches the screen
+    // as a mixture, and compares unequal against the same directory.
+    const mixed = layoutFor('C:/one/two/../two');
+    expect(mixed.root).toBe(path.resolve('C:/one/two'));
+    expect(mixed.codeSessionsDir.startsWith(mixed.root)).toBe(true);
   });
 });

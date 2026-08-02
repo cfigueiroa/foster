@@ -112,3 +112,27 @@ describe('identity', () => {
     expect(key).toContain(NEW_ACCOUNT.accountUuid);
   });
 });
+
+describe('a copy of a session that never got a title', () => {
+  /**
+   * Applying the prefix to nothing produced a copy called "↪ " — a marker and no
+   * information. Observed on a real session while fostering across profiles.
+   */
+  it('says it had no title rather than showing a bare marker', () => {
+    const untitled = session();
+    delete untitled.title;
+
+    const copy = buildFosterCopy(untitled, { origin: OLD_ACCOUNT });
+    expect(copy.title).toBe('↪ (untitled)');
+  });
+
+  it('treats a blank title the same as none', () => {
+    const copy = buildFosterCopy(session({ title: '   ' }), { origin: OLD_ACCOUNT });
+    expect(copy.title).toBe('↪ (untitled)');
+  });
+
+  it('leaves a real title alone', () => {
+    const copy = buildFosterCopy(session({ title: 'Refactor parser' }), { origin: OLD_ACCOUNT });
+    expect(copy.title).toBe('↪ Refactor parser');
+  });
+});

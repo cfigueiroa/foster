@@ -320,7 +320,10 @@ program
       // sessions are missing" should know which one they are being shown.
       console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
     }
-    if (roots.length > 1)
+    // Only when the store was actually discovered: with an explicit --store the
+    // candidate list was never consulted, and warning about it invites the reader
+    // to doubt the path they just typed.
+    if (!opts.store && roots.length > 1)
       console.log(pc.yellow(`  (${roots.length} candidates found, using the first)`));
 
     console.log(pc.bold('App'));

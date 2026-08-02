@@ -6,6 +6,9 @@ import type { AccountRef, CodeSessionData, Unfosterable } from './types.js';
 /** Marks a session in the sidebar as living under an account that is not its origin. */
 export const DEFAULT_PREFIX = '↪ ';
 
+/** What a copy is called when the session it came from never got a title. */
+export const UNTITLED = '(untitled)';
+
 /**
  * Every copy gets an identifier the server has never issued. That is what makes
  * fostering safe: deleting the copy in the app can never reach the original
@@ -119,7 +122,11 @@ export function buildFosterCopy(
   delete copy.errorAt;
 
   copy.sessionId = options.sessionId ?? mintSessionId();
-  copy.title = applyPrefix(source.title, prefix);
+  // A session with no title would otherwise become a copy titled with nothing but
+  // the marker — "↪ " — which says it is a copy and nothing else. Saying it had
+  // no title is more use than a bare prefix, and the app's own fallback label is
+  // indistinguishable from every other untitled session.
+  copy.title = applyPrefix(source.title?.trim() ? source.title : UNTITLED, prefix);
   copy._foster = {
     originAccountUuid: options.origin.accountUuid,
     originOrganizationUuid: options.origin.organizationUuid,
