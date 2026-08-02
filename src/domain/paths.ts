@@ -127,6 +127,21 @@ export function storeIdentity(root: string, env: NodeJS.ProcessEnv = process.env
 }
 
 /**
+ * Whether a store holds a given Code session.
+ *
+ * The app stamps the session it hosts into the environment of the CLI it starts,
+ * and the instance that stamped it is the one whose store the file lives in. That
+ * makes this the only local way to tell which of several running installations
+ * foster is running inside — the marker itself names no store.
+ */
+export function storeHoldsSession(root: string, sessionId: string): boolean {
+  const store = layoutFor(root);
+  return listAccountDirs(store).some((account) =>
+    existsSync(sessionPath(store, account, sessionId)),
+  );
+}
+
+/**
  * The store a session file belongs to, read back out of its path.
  *
  * Copies can now be written into a store other than the one foster resolved, and

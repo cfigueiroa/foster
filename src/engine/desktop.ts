@@ -1,6 +1,12 @@
 import { execFileSync, spawn } from 'node:child_process';
 import type { StoreLayout } from '../domain/types.js';
-import { comparablePath, storeIdentity, type StoreIdentity } from '../domain/paths.js';
+import {
+  candidateStoreRoots,
+  comparablePath,
+  storeHoldsSession,
+  storeIdentity,
+  type StoreIdentity,
+} from '../domain/paths.js';
 import { closingWindowQuits } from '../store/config.js';
 import { lockfileHeld } from './lockfile.js';
 
@@ -199,7 +205,41 @@ export function inspectDesktopFor(
     if (!match?.[1]) return identity.isDefault;
     return wanted.includes(comparablePath(match[1]));
   });
-  return inspectDesktop(() => rows, env);
+
+  // Ancestry is already scoped — the rows above are this instance's — so only the
+  // environment marker still needs narrowing to this store.
+  const scoped = hostedElsewhere(identity, env, list)
+    ? { ...env, CLAUDE_CODE_HOST_SESSION_ID: undefined }
+    : env;
+
+  return inspectDesktop(() => rows, scoped);
+}
+
+/**
+ * Whether the app hosting foster is a different installation from this one.
+ *
+ * The hosted-session marker says foster is inside *an* instance; it does not say
+ * which. Left global it made every store refuse — `--store <profile> app restart`
+ * declined to close a profile that foster was demonstrably not running inside,
+ * from a session hosted by the default app.
+ *
+ * The instance that stamped the marker is the one holding that session file, so
+ * the file settles it. When no store holds it — deleted mid-session, say — this
+ * says nothing and the refusal stands: over-refusing costs a manual restart,
+ * while under-refusing kills the caller.
+ */
+function hostedElsewhere(
+  identity: StoreIdentity,
+  env: NodeJS.ProcessEnv,
+  list: ProcessLister,
+): boolean {
+  const hosted = env.CLAUDE_CODE_HOST_SESSION_ID;
+  if (!hosted) return false;
+  if (identity.roots.some((root) => storeHoldsSession(root, hosted))) return false;
+  // Every other store there is: the installations this environment knows about,
+  // plus the profiles only their own command lines name.
+  const others = [...candidateStoreRoots(env), ...runningStores(list)];
+  return others.some((root) => storeHoldsSession(root, hosted));
 }
 
 export function inspectDesktop(
@@ -404,6 +444,9 @@ export interface StartOptions {
   timeoutMs?: number;
   /** Injectable so tests never launch anything. */
   launch?: (appId: string) => void;
+  /** Injectable: starting a profile takes the executable, not the app identity. */
+  launchProfile?: (executable: string, root: string) => void;
+  executable?: () => string | undefined;
 }
 
 /**
@@ -412,22 +455,36 @@ export interface StartOptions {
  * Waiting matters: the point of starting it is that the sidebar gets rebuilt, and
  * returning before that has happened would report success for work still in
  * flight.
+ *
+ * The installed app is activated by its application id, which is what Windows
+ * does from the Start menu. A profile has no identity of its own — it is the same
+ * application pointed at another `userData` — so it is started by running the
+ * executable with the switch that relocates it.
  */
 export async function startDesktop(
   store: StoreLayout,
   options: StartOptions = {},
 ): Promise<boolean> {
-  const { timeoutMs = 60_000, launch = launchPackagedApp } = options;
+  const {
+    timeoutMs = 60_000,
+    launch = launchPackagedApp,
+    launchProfile = launchProfileApp,
+    executable = desktopExecutable,
+  } = options;
+
   const appId = packagedAppId(store);
-  if (!appId) {
-    throw new DesktopControlError(
-      'Could not work out how to start Claude Desktop: this store is not inside an installed app\n' +
-        'package. A store reached through CLAUDE_USER_DATA_DIR is a separate profile, and only\n' +
-        'whatever launched it knows how. Start it yourself; everything else still works.',
-    );
+  if (appId) launch(appId);
+  else {
+    const exe = executable();
+    if (!exe) {
+      throw new DesktopControlError(
+        'Could not work out how to start Claude Desktop: this store is a separate profile, and the\n' +
+          'installed app was not found to start it with. Start it yourself; everything else still works.',
+      );
+    }
+    launchProfile(exe, store.root);
   }
 
-  launch(appId);
   return waitFor(() => lockfileHeld(store), timeoutMs, 500);
 }
 
@@ -441,4 +498,51 @@ function launchPackagedApp(appId: string): void {
     windowsHide: true,
   });
   child.unref();
+}
+
+function launchProfileApp(executable: string, root: string): void {
+  // Not through explorer: activating the application id would start it on the
+  // default userData, which is the installation this profile exists to avoid.
+  // Running the executable is allowed even though listing its directory is not.
+  const child = spawn(executable, [`--user-data-dir=${root}`], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+/**
+ * Where the installed app's executable is.
+ *
+ * Windows records it when it registers the `claude://` handler, as a plain
+ * command line with the URL as an argument — so the registry names the same
+ * executable Windows itself would run, without any of the guessing that reading
+ * a versioned package directory would need. A running instance is the fallback:
+ * its path is right there in the process table.
+ */
+export function desktopExecutable(
+  read: () => string | undefined = readProtocolCommand,
+  list: ProcessLister = readProcesses,
+): string | undefined {
+  const registered = /"([^"]+\.exe)"/i.exec(read() ?? '')?.[1];
+  if (registered) return registered;
+  return list().find((row) => isDesktopProcess(row) && row.path !== '')?.path;
+}
+
+function readProtocolCommand(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  try {
+    const out = execFileSync(
+      'reg',
+      ['query', 'HKCU\\Software\\Classes\\claude\\shell\\open\\command', '/ve'],
+      { encoding: 'utf8', windowsHide: true, stdio: 'pipe' },
+    );
+    // The value's name is localised — "(Default)" is "(padrão)" on this machine —
+    // so the type marker is the only stable thing to cut on.
+    const marker = out.indexOf('REG_SZ');
+    return marker === -1 ? undefined : out.slice(marker + 'REG_SZ'.length).trim();
+  } catch {
+    return undefined;
+  }
 }

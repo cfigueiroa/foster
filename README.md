@@ -190,8 +190,20 @@ requires SSO will still refuse — that is the account's policy, not this mechan
 
 `foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
 for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
-directories of every running instance so you know what to pass to `--store`. Starting a profile is
-still not something `foster` does — only whatever launched it knows how.
+directories of every running instance so you know what to pass to `--store`.
+
+It can also start one. `foster --store <profile> app start` runs the installed executable — the one
+Windows records when it registers the `claude://` handler — with the switch that points it at that
+profile, so `app restart` works there too:
+
+```bash
+foster --store "D:\Claude-Work" app restart --terminate
+```
+
+Everything that inspects or closes an app is scoped to the store you name. The installed app is the
+one whose main process carries no switch; a profile is matched by its own path. And `foster` refuses
+to close the app it is running inside — which, with two instances up, means the one holding the Code
+session that started it, not both of them.
 
 If you are simply moving between accounts on one profile, staging still works and is the shortest
 path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),

@@ -7,13 +7,15 @@ import {
   parseProcessCsv,
   quitDesktop,
   runningStores,
+  startDesktop,
+  desktopExecutable,
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { heldInMemory, inspectApp } from '../src/engine/safety.js';
 import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
-import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
 // Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
@@ -267,6 +269,145 @@ describe('quitDesktop', () => {
     });
 
     expect(result.outcome).not.toBe('needs-terminate');
+  });
+});
+
+describe('which instance foster is running inside', () => {
+  /**
+   * The hosted-session marker says foster is inside *an* instance, not which one.
+   * Left global it made every store refuse: `--store <profile> app restart`
+   * declined to close a profile foster was demonstrably not inside. The instance
+   * that stamped the marker is the one holding that session file, so the file
+   * settles it.
+   */
+  const HOSTED = 'local_00000000-0000-4000-8000-0000000000c1';
+
+  function hostStore(): StoreLayout {
+    const store = makeStore();
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: HOSTED }));
+    return store;
+  }
+
+  const instanceOn = (root: string): ProcessRow[] =>
+    rows({ pid: 500, parentPid: 9, commandLine: `"Claude.exe" --user-data-dir="${root}"` });
+
+  it('refuses for the installation that holds the session hosting it', () => {
+    const host = hostStore();
+    const env = { CLAUDE_CODE_HOST_SESSION_ID: HOSTED, CLAUDE_USER_DATA_DIR: host.root };
+
+    const state = inspectDesktopFor(
+      storeIdentity(host.root, env),
+      () => instanceOn(host.root),
+      env,
+    );
+    expect(state.selfHosted).toBe(true);
+  });
+
+  it('does not refuse for another installation running beside it', () => {
+    const host = hostStore();
+    const other = makeStore();
+    const env = { CLAUDE_CODE_HOST_SESSION_ID: HOSTED, CLAUDE_USER_DATA_DIR: host.root };
+
+    const state = inspectDesktopFor(
+      storeIdentity(other.root, env),
+      () => instanceOn(other.root),
+      env,
+    );
+    expect(state.selfHosted).toBe(false);
+  });
+
+  it('keeps refusing when no store admits to holding the session', () => {
+    // Deleted mid-session, say. Over-refusing costs a manual restart; the other
+    // way round kills the process asking.
+    const other = makeStore();
+    const env = { CLAUDE_CODE_HOST_SESSION_ID: HOSTED };
+
+    const state = inspectDesktopFor(
+      storeIdentity(other.root, env),
+      () => instanceOn(other.root),
+      env,
+    );
+    expect(state.selfHosted).toBe(true);
+  });
+});
+
+describe('starting the app', () => {
+  /**
+   * A profile is the same application on another userData, so it has no
+   * application id to activate — and activating the installed one would start the
+   * very installation the profile exists to sit beside. It is started by running
+   * the executable with the switch instead.
+   */
+  const EXE = 'C:\\Apps\\Claude_1.0.0_x64__test\\app\\Claude.exe';
+  const PACKAGED = layoutFor(
+    'C:\\home\\AppData\\Local\\Packages\\Claude_abc123\\LocalCache\\Roaming\\Claude',
+  );
+
+  it('activates the installed app by its application id', async () => {
+    const activated: string[] = [];
+    await startDesktop(PACKAGED, {
+      timeoutMs: 1,
+      launch: (appId) => activated.push(appId),
+      launchProfile: () => expect.unreachable('a packaged store is not a profile'),
+    });
+
+    expect(activated).toEqual(['Claude_abc123!Claude']);
+  });
+
+  it('runs the executable with the switch for a profile', async () => {
+    const store = makeStore();
+    const started: string[][] = [];
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => started.push([exe, root]),
+      executable: () => EXE,
+    });
+
+    expect(started).toEqual([[EXE, store.root]]);
+  });
+
+  it('says so plainly when there is no installed app to start a profile with', async () => {
+    await expect(
+      startDesktop(makeStore(), { timeoutMs: 1, executable: () => undefined }),
+    ).rejects.toThrow(/Start it yourself/);
+  });
+});
+
+describe('desktopExecutable', () => {
+  /**
+   * Windows records the executable when it registers the claude:// handler, so
+   * the registry names the same one it would run itself — no guessing at a
+   * versioned package directory.
+   */
+  const registered = `"${'C:\\Apps\\Claude\\app\\Claude.exe'}" "%1"`;
+
+  it('takes the path out of the registered protocol command', () => {
+    expect(
+      desktopExecutable(
+        () => registered,
+        () => [],
+      ),
+    ).toBe('C:\\Apps\\Claude\\app\\Claude.exe');
+  });
+
+  it('falls back to a running instance when nothing is registered', () => {
+    const table = rows({ pid: 500, parentPid: 9 });
+    expect(
+      desktopExecutable(
+        () => undefined,
+        () => table,
+      ),
+    ).toBe(DESKTOP);
+  });
+
+  it('has no answer when neither source knows', () => {
+    expect(
+      desktopExecutable(
+        () => undefined,
+        () => [],
+      ),
+    ).toBeUndefined();
   });
 });
 
