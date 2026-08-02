@@ -81,6 +81,20 @@ export function sessionPath(store: StoreLayout, account: AccountRef, sessionId: 
 }
 
 /**
+ * The store a session file belongs to, read back out of its path.
+ *
+ * Copies can now be written into a store other than the one foster resolved, and
+ * the ledger records only the absolute path. Undoing one has to reason about the
+ * installation that actually holds it — checking the wrong app would answer "safe
+ * to delete" about a file another running app is holding.
+ *
+ * The layout is fixed at four levels: <root>/claude-code-sessions/<account>/<org>/<file>.
+ */
+export function storeRootOfCopy(copyPath: string): string {
+  return path.resolve(copyPath, '..', '..', '..', '..');
+}
+
+/**
  * Deleting a session in the app leaves a tombstone next to the sessions. The app
  * writes one for the sessionId and one for the cliSessionId. They do not block a
  * later re-foster (verified), but they are useful to recognise while scanning.

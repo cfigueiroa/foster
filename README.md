@@ -207,7 +207,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.9.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.10.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -234,6 +234,10 @@ is a separate store that nothing in this one points at, so the source picker
 offers it as its own entry: the profiles running right now are listed, and one
 that is not running can be given by path. Copies made that way record which store
 they came from, because two installations can hold the same account identifier.
+
+"Work on another installation" goes further and points the whole menu at a
+different profile — everything after it reads and writes there — so a second
+account is not a reason to quit and relaunch.
 
 The same operations are available as one-shot commands, for scripting:
 
@@ -348,9 +352,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.9.0
-git commit -am "chore: release 0.9.0" && git tag -a v0.9.0 -m "foster v0.9.0"
-git push && git push origin v0.9.0
+npm run version:set 0.10.0
+git commit -am "chore: release 0.10.0" && git tag -a v0.10.0 -m "foster v0.10.0"
+git push && git push origin v0.10.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

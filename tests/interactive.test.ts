@@ -431,3 +431,57 @@ describe('bringing sessions from another installation', () => {
     expect(answers).toHaveLength(0);
   });
 });
+
+describe('working on another installation', () => {
+  /**
+   * Reading from another profile was already possible; acting in one meant
+   * quitting and relaunching with --store, which is a strange thing to ask of a
+   * menu that stays open on purpose.
+   */
+  it('points the whole menu at the other store', async () => {
+    const other = makeStore();
+    writeFileSync(
+      other.configFile,
+      JSON.stringify({ lastKnownAccountUuid: OLD_ACCOUNT.accountUuid }),
+      'utf8',
+    );
+    writeSession(
+      other,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f1' }),
+    );
+    // A second account in that store, to foster from once we are there.
+    writeSession(
+      other,
+      NEW_ACCOUNT,
+      session({ sessionId: '11111111-1111-4111-8111-1111111100f2' }),
+    );
+
+    answers = [
+      'installation',
+      '__type_a_path',
+      other.root,
+      'foster', // now operating inside the other store
+      '0',
+      'all',
+      'go',
+      'later',
+      'quit',
+    ];
+    await runInteractive(store, ledger);
+
+    // The copies landed in the other store, and the one we started in is untouched.
+    expect(scanAccount(other, OLD_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+    expect(answers).toHaveLength(0);
+  });
+
+  it('refuses a store nobody has signed into, and stays where it was', async () => {
+    const empty = makeStore();
+
+    answers = ['installation', '__type_a_path', empty.root, 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(answers).toHaveLength(0);
+  });
+});

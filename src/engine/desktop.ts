@@ -174,6 +174,32 @@ export function hostedByDesktop(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(env.CLAUDE_CODE_HOST_SESSION_ID);
 }
 
+/**
+ * The instance running one particular store.
+ *
+ * With two profiles up there are two main processes, and "is the app running"
+ * stops being a single question. Anything reasoning about a specific store — such
+ * as whether a copy in it is held in memory — has to ask about that store's
+ * instance, not whichever one happens to be found first.
+ */
+export function inspectDesktopFor(
+  userDataDir: string,
+  list: ProcessLister = readProcesses,
+  env: NodeJS.ProcessEnv = process.env,
+): DesktopState {
+  const wanted = userDataDir.toLowerCase().replace(/[\\/]+$/, '');
+  const rows = list().filter((row) => {
+    // Everything that is not the app stays: the ancestry walk needs those rows to
+    // work out whether foster is running inside the instance.
+    if (row.name.toLowerCase() !== 'claude.exe') return true;
+    const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
+    // No switch at all means the default store, which every instance of it shares.
+    if (!match?.[1]) return true;
+    return match[1].toLowerCase().replace(/[\\/]+$/, '') === wanted;
+  });
+  return inspectDesktop(() => rows, env);
+}
+
 export function inspectDesktop(
   list: ProcessLister = readProcesses,
   env: NodeJS.ProcessEnv = process.env,

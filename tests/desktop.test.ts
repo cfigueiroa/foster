@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   inspectDesktop,
+  inspectDesktopFor,
   packagedAppId,
   parseProcessCsv,
   quitDesktop,
@@ -282,5 +283,58 @@ describe('runningStores', () => {
 
   it('says nothing when no instance names a profile', () => {
     expect(runningStores(() => rows(withCmd('"Claude.exe"')))).toEqual([]);
+  });
+});
+
+describe('inspectDesktopFor', () => {
+  /**
+   * With two profiles up there are two main processes, so "is the app running"
+   * stops being one question. Anything about a specific store has to ask about
+   * that store's instance.
+   */
+  const ONE = 'C:\\one';
+  const TWO = 'C:\\two';
+  const inA = (over: Partial<ProcessRow> = {}) => ({
+    commandLine: `"Claude.exe" --user-data-dir="${ONE}"`,
+    ...over,
+  });
+  const inB = (over: Partial<ProcessRow> = {}) => ({
+    commandLine: `"Claude.exe" --user-data-dir="${TWO}"`,
+    ...over,
+  });
+
+  it('reports the instance running the store it was asked about', () => {
+    const table = rows(inA({ pid: 500, parentPid: 9 }), inB({ pid: 700, parentPid: 9 }));
+
+    expect(inspectDesktopFor(ONE, () => table, {}).mainPid).toBe(500);
+    expect(inspectDesktopFor(TWO, () => table, {}).mainPid).toBe(700);
+  });
+
+  it('says not running when only the other profile is up', () => {
+    const table = rows(inB({ pid: 700, parentPid: 9 }));
+    expect(inspectDesktopFor(ONE, () => table, {})).toMatchObject({ running: false });
+  });
+
+  it('tolerates a trailing separator on either side', () => {
+    const table = rows(inA({ pid: 500, parentPid: 9 }));
+    expect(inspectDesktopFor(`${ONE}\\`, () => table, {}).running).toBe(true);
+  });
+
+  it('counts an instance with no switch as the default store', () => {
+    // The packaged app names its userData differently from the path foster
+    // resolves, so an instance without the switch must not be filtered out.
+    const table = rows({ pid: 500, parentPid: 9, commandLine: '"Claude.exe"' });
+    expect(inspectDesktopFor('C:\\anything', () => table, {}).running).toBe(true);
+  });
+
+  it('keeps the processes the ancestry check needs', () => {
+    const table = rows(inA({ pid: 500, parentPid: 9 }), {
+      pid: process.pid,
+      parentPid: 500,
+      name: 'node.exe',
+      path: 'C:\\node.exe',
+      commandLine: 'node',
+    });
+    expect(inspectDesktopFor(ONE, () => table, {}).selfHosted).toBe(true);
   });
 });

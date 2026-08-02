@@ -73,7 +73,10 @@ function nameEverything(store: StoreLayout): void {
   ]);
 }
 
-export async function runInteractive(store: StoreLayout, ledger: Ledger): Promise<void> {
+export async function runInteractive(initialStore: StoreLayout, ledger: Ledger): Promise<void> {
+  // Mutable because the menu can be pointed at a different installation without
+  // relaunching; every screen below reads whichever one is current.
+  let store = initialStore;
   intro(`${pc.bgCyan(pc.black(' foster '))} ${pc.dim(VERSION)}`);
 
   // Started before the store work and awaited only when it is about to be shown,
@@ -82,7 +85,7 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
 
   nameEverything(store);
 
-  const target = resolveTarget(store);
+  let target = resolveTarget(store);
   if (!target) {
     log.error('Could not determine which account is signed in. Open Claude Desktop once first.');
     outro('Nothing to do.');
@@ -127,6 +130,11 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
         },
         { value: 'label', label: 'Name an account', hint: 'so you stop reading UUIDs' },
         {
+          value: 'installation',
+          label: 'Work on another installation',
+          hint: 'point everything at a second profile',
+        },
+        {
           value: 'app',
           label: 'Claude Desktop',
           hint: 'restart it — and why that is what makes changes show up',
@@ -159,6 +167,16 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
       case 'label':
         await labelFlow(store, ledger, target);
         break;
+      case 'installation': {
+        const next = await switchInstallation(store);
+        if (!aborted(next)) {
+          store = next.store;
+          target = next.target;
+          nameEverything(store);
+          showEnvironment(store, ledger, target);
+        }
+        break;
+      }
       case 'app':
         await desktopFlow(store, target);
         break;
@@ -315,14 +333,18 @@ export interface SourcePick {
  * resolved points at it. Discovery costs a process listing, so it is behind an
  * explicit choice rather than paid for on every run.
  */
-async function chooseOtherStore(
-  current: StoreLayout,
-  labels: Map<string, string>,
-): Promise<Maybe<SourcePick>> {
+/**
+ * Which installation, by path.
+ *
+ * The ones running are listed because they are the ones you are likely to mean
+ * and their paths are awkward to type; a profile that is stopped has to be named
+ * outright, since nothing on disk announces it.
+ */
+async function pickStore(current: StoreLayout, message: string): Promise<Maybe<StoreLayout>> {
   const known = new Set([...candidateStoreRoots(), current.root].map((dir) => path.resolve(dir)));
   const running = runningStores().filter((dir) => !known.has(path.resolve(dir)));
 
-  const picked = await selectOrBack('Which installation?', [
+  const picked = await selectOrBack(message, [
     ...running.map((dir) => ({ value: dir, label: dir, hint: 'running now' })),
     { value: TYPE_A_PATH, label: 'Type a path…', hint: 'a profile that is not running' },
   ]);
@@ -337,16 +359,21 @@ async function chooseOtherStore(
     root = answer.trim();
   }
 
-  let store: StoreLayout;
   try {
-    store = resolveStore(root);
+    return resolveStore(root);
   } catch (error) {
     log.error(error instanceof Error ? error.message : String(error));
     return BACK;
   }
+}
 
-  // Same picker as the local one, so both screens read alike and offer the same
-  // granularity: a profile with two accounts is no less worth narrowing.
+async function chooseOtherStore(
+  current: StoreLayout,
+  labels: Map<string, string>,
+): Promise<Maybe<SourcePick>> {
+  const store = await pickStore(current, 'Which installation?');
+  if (aborted(store)) return BACK;
+
   if (accountsIn(store).length === 0) {
     log.info('That installation has no session directories yet — nothing to bring from it.');
     return BACK;
@@ -359,6 +386,29 @@ async function chooseOtherStore(
   });
   if (aborted(refs) || refs === OTHER_STORE) return BACK;
   return { store, refs };
+}
+
+/**
+ * Point the whole menu at a different installation.
+ *
+ * Reading from another profile was already possible; acting *in* one meant
+ * quitting and relaunching with --store, which is a strange thing to ask of a
+ * menu that stays open on purpose.
+ */
+async function switchInstallation(
+  current: StoreLayout,
+): Promise<Maybe<{ store: StoreLayout; target: AccountRef }>> {
+  const store = await pickStore(current, 'Work on which installation?');
+  if (aborted(store)) return BACK;
+
+  const target = resolveTarget(store);
+  if (!target) {
+    log.error(
+      'That installation has no signed-in account yet — open Claude Desktop on it once first.',
+    );
+    return BACK;
+  }
+  return { store, target };
 }
 
 const TYPE_A_PATH = '__type_a_path';

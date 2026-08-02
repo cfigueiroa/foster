@@ -2,7 +2,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { storeRootOfCopy } from '../src/domain/paths.js';
 import { fosterSessions } from '../src/engine/executor.js';
+import { assertRemovable } from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, project } from '../src/ledger/project.js';
 import { scanAccount } from '../src/store/scanner.js';
@@ -100,5 +102,70 @@ describe('fostering from one store into another', () => {
 
     expect(outcome!.status).toBe('fostered');
     expect(scanAccount(target, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
+  });
+});
+
+describe('undoing a cross-store copy', () => {
+  /**
+   * The ledger holds copies from every store, so the removal gate has to ask the
+   * installation each copy actually lives in. Asking the wrong one answers "safe
+   * to delete" about the file the other app will write straight back.
+   */
+  it('knows which store a copy belongs to, from its path alone', () => {
+    const copy = path.join(
+      target.root,
+      'claude-code-sessions',
+      NEW_ACCOUNT.accountUuid,
+      NEW_ACCOUNT.organizationUuid,
+      'local_x.json',
+    );
+    expect(storeRootOfCopy(copy)).toBe(path.resolve(target.root));
+  });
+
+  it('lets a copy go when no app holds the store it lives in', () => {
+    writeSession(source, OLD_ACCOUNT, session());
+    fosterSessions(scanAccount(source, OLD_ACCOUNT), {
+      store: target,
+      ledger,
+      target: NEW_ACCOUNT,
+      sourceStore: source.root,
+    });
+
+    // Neither synthetic store has a lockfile, so nothing is held anywhere.
+    expect(() =>
+      assertRemovable(source, listActive(project(ledger.read())), () => []),
+    ).not.toThrow();
+  });
+
+  it('groups by the store in the path rather than the one it was handed', () => {
+    // Two copies, two stores: the gate has to consider both, not just the store
+    // the caller passed in.
+    writeSession(
+      source,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e1' }),
+    );
+    writeSession(
+      target,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e2' }),
+    );
+
+    fosterSessions(scanAccount(source, OLD_ACCOUNT), {
+      store: target,
+      ledger,
+      target: NEW_ACCOUNT,
+      sourceStore: source.root,
+    });
+    fosterSessions(scanAccount(target, OLD_ACCOUNT), {
+      store: source,
+      ledger,
+      target: NEW_ACCOUNT,
+      sourceStore: target.root,
+    });
+
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(new Set(active.map((f) => storeRootOfCopy(f.copyPath))).size).toBe(2);
   });
 });

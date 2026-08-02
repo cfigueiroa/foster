@@ -1,7 +1,13 @@
 import { execFileSync } from 'node:child_process';
+import { layoutFor, storeRootOfCopy } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
-import { inspectDesktop, type DesktopState, type ProcessLister, readProcesses } from './desktop.js';
+import {
+  inspectDesktopFor,
+  type DesktopState,
+  type ProcessLister,
+  readProcesses,
+} from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
 
 /**
@@ -95,16 +101,36 @@ export function assertRemovable(
   fosterings: ActiveFostering[],
   list: ProcessLister = readProcesses,
 ): void {
-  // Cheap check first: with no app holding the store there is nothing to reason
-  // about, and no reason to pay for a process table.
-  if (!lockfileHeld(store)) return;
+  // Grouped by the installation each copy actually lives in, not by the store
+  // foster resolved. Copies can be written into another profile, and the ledger
+  // holds them all — asking one app about a file another app is holding would
+  // answer "safe to delete" about exactly the file that gets written back.
+  const byStore = new Map<string, ActiveFostering[]>();
+  for (const fostering of fosterings) {
+    const root = storeRootOfCopy(fostering.copyPath);
+    byStore.set(root, [...(byStore.get(root) ?? []), fostering]);
+  }
 
-  const held = heldInMemory(fosterings, inspectDesktop(list));
+  const held: ActiveFostering[] = [];
+  for (const [root, group] of byStore) {
+    const owner = layoutFor(root);
+    // Cheap check first: with no app holding that store there is nothing to
+    // reason about, and no reason to pay for a process table.
+    if (!lockfileHeld(owner)) continue;
+    held.push(...heldInMemory(group, inspectDesktopFor(root, list)));
+  }
+
   if (held.length === 0) return;
 
   const count = held.length;
+  const stores = new Set(held.map((f) => storeRootOfCopy(f.copyPath)));
+  const where =
+    stores.size === 1 && stores.has(store.root)
+      ? 'Claude Desktop is running'
+      : `Claude Desktop is running on ${stores.size === 1 ? 'the installation holding them' : `${stores.size} installations holding them`}`;
+
   throw new AppRunningError(
-    `Claude Desktop is running and has ${count} of these ${count === 1 ? 'copy' : 'copies'} loaded.\n` +
+    `${where} and has ${count} of these ${count === 1 ? 'copy' : 'copies'} loaded.\n` +
       'Removing one it holds in memory only makes it write the file back. Close the app first — ' +
       'foster can do that for you.',
   );
