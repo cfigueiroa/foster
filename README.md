@@ -52,11 +52,16 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.0/install.ps1 | iex
+irm https://github.com/cfigueiroa/foster/releases/latest/download/install.ps1 | iex
 ```
 
-The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
-it. When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
+That URL always serves the installer from the newest release. The installer itself pins the tag it
+was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
+running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
+specific version instead, fetch it by tag:
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.0/install.ps1`.
+
+When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
 
 ## Usage

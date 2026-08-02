@@ -112,8 +112,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # install.ps1 ships as an asset so that
+          # /releases/latest/download/install.ps1 always serves the newest
+          # installer. That URL is stable, which means anything pointing at it
+          # never needs updating for a new release — and the integrity story is
+          # unchanged, because the installer pins the tag it was published from
+          # and verifies the bundle against that release's checksum.
           gh release create "${GITHUB_REF_NAME}" \
-            dist/foster.js dist/foster.js.sha256 \
+            dist/foster.js dist/foster.js.sha256 install.ps1 \
             --title "foster ${GITHUB_REF_NAME}" \
             --notes-file release-notes.md \
             --verify-tag
