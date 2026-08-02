@@ -1,7 +1,7 @@
 import { cancel, confirm, intro, isCancel, log, note, outro, select, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
-import { listAccountDirs, listAgentAccountDirs } from '../domain/paths.js';
+import { listAccountDirs, listAgentAccountDirs, pickActiveOrganization } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
@@ -101,9 +101,13 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
 function resolveTarget(store: StoreLayout): AccountRef | undefined {
   const accountUuid = readConfig(store).lastKnownAccountUuid;
   if (!accountUuid) return undefined;
+  // An account can own several organizations; only one of them is the directory
+  // the sidebar reads, and the config does not say which.
   return (
-    listAccountDirs(store).find((a) => a.accountUuid === accountUuid) ??
-    listAgentAccountDirs(store).find((a) => a.accountUuid === accountUuid)
+    pickActiveOrganization(
+      listAccountDirs(store).filter((a) => a.accountUuid === accountUuid),
+      store,
+    ) ?? listAgentAccountDirs(store).find((a) => a.accountUuid === accountUuid)
   );
 }
 
@@ -173,42 +177,66 @@ async function chooseSource(
   target: AccountRef,
 ): Promise<Maybe<AccountRef[]>> {
   const labels = project(ledger.read()).labels;
-  const others = listAccountDirs(store).filter((a) => a.accountUuid !== target.accountUuid);
 
-  if (others.length === 0) return BACK;
+  // Only the exact directory the sidebar reads is excluded, not the whole
+  // account. Another organization of the *same* account is just as invisible as
+  // another account's, so it is just as fosterable — a session filed under a
+  // second organization would otherwise be unreachable.
+  const sources = listAccountDirs(store).filter(
+    (ref) =>
+      !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
+  );
+  if (sources.length === 0) return BACK;
 
-  // Group organizations under their account: the user thinks in accounts, and an
-  // account with two organizations is still one place the sessions came from.
   const byAccount = new Map<string, AccountRef[]>();
-  for (const account of others) {
-    const list = byAccount.get(account.accountUuid) ?? [];
-    list.push(account);
-    byAccount.set(account.accountUuid, list);
+  for (const ref of sources) {
+    byAccount.set(ref.accountUuid, [...(byAccount.get(ref.accountUuid) ?? []), ref]);
   }
 
-  const options = [...byAccount.entries()].map(([accountUuid, refs]) => {
-    const count = refs.reduce(
-      (total, ref) => total + scanAccount(store, ref).filter((s) => !s.isCopy).length,
-      0,
-    );
-    // Spelling out the organization count matters: picking an account takes
-    // every organization inside it, and an account holding two of them looks
-    // like two separate things until it is said out loud.
-    const spread = refs.length > 1 ? ` across all ${refs.length} of its organizations` : '';
-    return {
-      value: accountUuid,
-      label: labels.get(accountUuid) ?? shortId(accountUuid),
-      hint: `${count} session(s)${spread}`,
-    };
-  });
+  const count = (refs: AccountRef[]) =>
+    refs.reduce((total, ref) => total + scanAccount(store, ref).filter((s) => !s.isCopy).length, 0);
+
+  // Organizations are offered individually, with a whole-account shortcut when
+  // there is more than one: taking everything and taking one part are both
+  // reasonable, and only the user knows which they meant.
+  const choices: { label: string; hint: string; refs: AccountRef[] }[] = [];
+
+  for (const [accountUuid, refs] of byAccount) {
+    const name = labels.get(accountUuid) ?? shortId(accountUuid);
+    const isThisAccount = accountUuid === target.accountUuid;
+    const suffix = isThisAccount ? pc.green(' (this account)') : '';
+
+    if (refs.length > 1) {
+      choices.push({
+        label: `${pc.bold(name)}${suffix} — all ${refs.length} organizations`,
+        hint: `${count(refs)} session(s)`,
+        refs,
+      });
+    }
+    for (const ref of refs) {
+      const prefix = refs.length > 1 ? '   ' : '';
+      choices.push({
+        label: `${prefix}${pc.bold(name)}${suffix} ${pc.dim('/ org')} ${shortId(ref.organizationUuid)}`,
+        hint: `${count([ref])} session(s)`,
+        refs: [ref],
+      });
+    }
+  }
 
   const picked = await select({
-    message: 'Which account should the sessions come from?',
-    options: [...options, { value: '__back', label: pc.dim('Back') }],
+    message: 'Where should the sessions come from?',
+    options: [
+      ...choices.map((choice, index) => ({
+        value: String(index),
+        label: choice.label,
+        hint: choice.hint,
+      })),
+      { value: '__back', label: pc.dim('Back') },
+    ],
   });
 
   if (isCancel(picked) || picked === '__back') return BACK;
-  return byAccount.get(picked) ?? BACK;
+  return choices[Number(picked)]?.refs ?? BACK;
 }
 
 async function chooseFilter(sessions: DiscoveredSession[]): Promise<Maybe<DiscoveredSession[]>> {

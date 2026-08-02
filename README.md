@@ -52,7 +52,7 @@ not watch the directory.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.3.1/install.ps1 | iex
+irm https://raw.githubusercontent.com/cfigueiroa/foster/v0.4.0/install.ps1 | iex
 ```
 
 The URL pins a tagged release and the script verifies the downloaded bundle's SHA256 before running
@@ -87,7 +87,10 @@ foster status    # what is currently fostered
 would be written or removed and touch nothing. (`label` only records a name in
 foster's own ledger, so it writes immediately.)
 
-Narrow what gets fostered with `--title`, `--cwd`, `--since 30d` or `--from <accountUuid>`.
+Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--from <accountUuid>` or
+`--from-org <organizationUuid>`. An account can hold several organizations and the sidebar only
+reads one of them, so any organization other than that one is a valid source — including another
+organization of the account you are already signed into.
 Sessions that could never appear in the sidebar — scheduled tasks, and sessions that
 were never opened — are always excluded; `list --all` shows them anyway.
 
@@ -137,9 +140,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.3.1
-git commit -am "chore: release 0.3.1" && git tag -a v0.3.1 -m "foster v0.3.1"
-git push && git push origin v0.3.1
+npm run version:set 0.4.0
+git commit -am "chore: release 0.4.0" && git tag -a v0.4.0 -m "foster v0.4.0"
+git push && git push origin v0.4.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

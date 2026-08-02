@@ -1,10 +1,11 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Safety from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, project } from '../src/ledger/project.js';
+import { accountDir } from '../src/domain/paths.js';
 import { scanAccount } from '../src/store/scanner.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
@@ -78,7 +79,7 @@ describe('the guided menu', () => {
   it('fosters a whole account and returns to the menu afterwards', async () => {
     answers = [
       'foster', // menu
-      OLD_ACCOUNT.accountUuid, // source account
+      '0', // source: the old account's only organization
       'all', // no filter
       '↪ ', // prefix
       true, // confirm
@@ -93,7 +94,7 @@ describe('the guided menu', () => {
   });
 
   it('narrows the batch by title before writing', async () => {
-    answers = ['foster', OLD_ACCOUNT.accountUuid, 'title', 'refactor', '↪ ', true, 'quit'];
+    answers = ['foster', '0', 'title', 'refactor', '↪ ', true, 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -105,7 +106,7 @@ describe('the guided menu', () => {
   it('writes nothing when the confirmation is declined, and keeps the menu open', async () => {
     answers = [
       'foster',
-      OLD_ACCOUNT.accountUuid,
+      '0',
       'all',
       '↪ ',
       false, // decline
@@ -129,7 +130,7 @@ describe('the guided menu', () => {
   });
 
   it('returns fostered copies, leaving the origin untouched', async () => {
-    answers = ['foster', OLD_ACCOUNT.accountUuid, 'all', '↪ ', true, 'return', 'all', true, 'quit'];
+    answers = ['foster', '0', 'all', '↪ ', true, 'return', 'all', true, 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -145,5 +146,86 @@ describe('the guided menu', () => {
     answers = [CANCELLED];
 
     await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * An account can hold more than one organization, and the sidebar only ever reads
+ * one of them. Taking the whole account and taking a single organization are both
+ * legitimate, and sessions filed under a second organization of the *current*
+ * account are just as invisible as another account's.
+ */
+describe('organizations within an account', () => {
+  const OTHER_ORG = {
+    accountUuid: OLD_ACCOUNT.accountUuid,
+    organizationUuid: '00000000-0000-4000-8000-00000000000f',
+  };
+  const SIBLING_ORG = {
+    accountUuid: NEW_ACCOUNT.accountUuid,
+    organizationUuid: '11111111-1111-4111-8111-11111111000f',
+  };
+
+  it('fosters a single organization without dragging in the rest of the account', async () => {
+    writeSession(
+      store,
+      OTHER_ORG,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000b1', title: 'Second org work' }),
+    );
+
+    // 0 = the whole account, 1 = its first organization, 2 = its second.
+    answers = ['foster', '2', 'all', '↪ ', true, 'quit'];
+    await runInteractive(store, ledger);
+
+    const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
+    expect(copies).toHaveLength(1);
+    expect(copies[0]!.data.title).toContain('Second org work');
+  });
+
+  it('offers a shortcut that takes every organization of the account', async () => {
+    writeSession(
+      store,
+      OTHER_ORG,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000b2', title: 'Second org work' }),
+    );
+
+    answers = ['foster', '0', 'all', '↪ ', true, 'quit'];
+    await runInteractive(store, ledger);
+
+    // Two from the first organization plus one from the second.
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(3);
+  });
+
+  it('can foster from another organization of the account already signed in', async () => {
+    writeSession(
+      store,
+      SIBLING_ORG,
+      session({ sessionId: '11111111-1111-4111-8111-1111111100b3', title: 'Sibling org work' }),
+    );
+    // Which organization the sidebar reads is inferred from how recently the app
+    // touched its directory, so the target has to be the newer one here — as it
+    // would be in practice, since that is the one being written to.
+    const target = accountDir(store, NEW_ACCOUNT);
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(target, later, later);
+
+    // 0 = the old account's organization, 1 = this account's other organization.
+    // Both accounts contribute one eligible organization, so neither gets the
+    // whole-account shortcut. The sibling must be offered at all: excluding the
+    // entire current account would make that session permanently unreachable.
+    answers = ['foster', '1', 'all', '↪ ', true, 'quit'];
+    await runInteractive(store, ledger);
+
+    const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
+    expect(copies).toHaveLength(1);
+    expect(copies[0]!.data.title).toContain('Sibling org work');
+  });
+
+  it('never offers the directory the sidebar already reads', async () => {
+    // Only the old account's single organization is a valid source here, so any
+    // index beyond the first would mean the target itself was on the list.
+    answers = ['foster', '1', 'all', '↪ ', true, 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
   });
 });

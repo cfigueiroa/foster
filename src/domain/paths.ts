@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { isDirectory, safeReaddir } from '../util/fs.js';
@@ -106,4 +106,34 @@ export function listAccountDirs(store: StoreLayout): AccountRef[] {
  */
 export function listAgentAccountDirs(store: StoreLayout): AccountRef[] {
   return listAccountDirsIn(store.agentSessionsDir);
+}
+
+/**
+ * Picks which organization of an account the sidebar is most likely reading.
+ *
+ * The config records only the account, so for an account holding more than one
+ * organization the answer is not written down anywhere. The app rewrites session
+ * files as it runs, so the most recently touched directory is the one in use —
+ * a heuristic, but a well-founded one, and far better than taking whichever
+ * directory the filesystem happened to list first: copies written into an
+ * organization the app never reads would simply never appear, with nothing to
+ * indicate why.
+ *
+ * Callers that know better should pass the organization explicitly.
+ */
+export function pickActiveOrganization(
+  candidates: AccountRef[],
+  store: StoreLayout,
+): AccountRef | undefined {
+  if (candidates.length <= 1) return candidates[0];
+
+  return [...candidates].sort((a, b) => modifiedAt(store, b) - modifiedAt(store, a))[0];
+}
+
+function modifiedAt(store: StoreLayout, ref: AccountRef): number {
+  try {
+    return statSync(accountDir(store, ref)).mtimeMs;
+  } catch {
+    return 0;
+  }
 }

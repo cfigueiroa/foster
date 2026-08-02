@@ -7,6 +7,7 @@ import {
   layoutFor,
   listAccountDirs,
   listAgentAccountDirs,
+  pickActiveOrganization,
   resolveStore,
 } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
@@ -82,9 +83,13 @@ function currentAccount(
   if (!accountUuid) return undefined;
   if (organizationUuid) return { accountUuid, organizationUuid };
 
+  // An account can own several organizations; only one is the directory the
+  // sidebar reads, and the config does not record which.
   return (
-    accounts.find((account) => account.accountUuid === accountUuid) ??
-    listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
+    pickActiveOrganization(
+      accounts.filter((account) => account.accountUuid === accountUuid),
+      store,
+    ) ?? listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
   );
 }
 
@@ -115,20 +120,51 @@ function requireCurrentAccount(
  * leading characters, and a typo would be indistinguishable from an empty
  * result, so both are reported instead.
  */
-function resolveSources(accounts: AccountRef[], prefix: string | undefined): AccountRef[] {
-  if (prefix === undefined) return accounts;
+function resolveSources(
+  candidates: AccountRef[],
+  accountPrefix: string | undefined,
+  organizationPrefix: string | undefined,
+): AccountRef[] {
+  let sources = candidates;
 
-  const matches = accounts.filter((account) => account.accountUuid.startsWith(prefix));
-  const distinct = new Set(matches.map((account) => account.accountUuid));
+  if (accountPrefix !== undefined) {
+    sources = matchOrExplain(sources, accountPrefix, 'account', (ref) => ref.accountUuid);
+  }
+  if (organizationPrefix !== undefined) {
+    sources = matchOrExplain(
+      sources,
+      organizationPrefix,
+      'organization',
+      (ref) => ref.organizationUuid,
+    );
+  }
+  return sources;
+}
 
-  if (distinct.size === 0) throw new Error(`No account matches --from "${prefix}".`);
+/**
+ * Narrows by identifier prefix, refusing rather than guessing.
+ *
+ * A bare prefix match would silently take every identifier sharing those leading
+ * characters, and a typo would be indistinguishable from an empty result.
+ */
+function matchOrExplain(
+  refs: AccountRef[],
+  prefix: string,
+  kind: 'account' | 'organization',
+  identifier: (ref: AccountRef) => string,
+): AccountRef[] {
+  const flag = kind === 'account' ? '--from' : '--from-org';
+  const matches = refs.filter((ref) => identifier(ref).startsWith(prefix));
+  const distinct = new Set(matches.map(identifier));
+
+  if (distinct.size === 0) throw new Error(`No ${kind} matches ${flag} "${prefix}".`);
   if (distinct.size > 1) {
-    // Full identifiers, not shortened ones: accounts that collide on a prefix
+    // Full identifiers, not shortened ones: values that collide on a prefix
     // usually collide on their first characters too, so an abbreviation here
     // would print the same string twice and help nobody.
     const names = [...distinct].map((uuid) => `  ${uuid}`).join('\n');
     throw new Error(
-      `--from "${prefix}" is ambiguous: it matches ${distinct.size} accounts.\n${names}`,
+      `${flag} "${prefix}" is ambiguous: it matches ${distinct.size} ${kind}s.\n${names}`,
     );
   }
   return matches;
@@ -247,7 +283,8 @@ filterOptions(
   program
     .command('foster')
     .description('copy sessions from another account into the current one')
-    .option('--from <accountUuid>', 'origin account (defaults to every non-current account)')
+    .option('--from <accountUuid>', 'only sessions from this account')
+    .option('--from-org <organizationUuid>', 'only sessions from this organization')
     .option('--org <organizationUuid>', 'target organization, for an account with no sessions yet')
     .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
     .option('--yes', 'skip the confirmation and write')
@@ -259,6 +296,7 @@ filterOptions(
     cwd?: string;
     since?: string;
     from?: string;
+    fromOrg?: string;
     org?: string;
     prefix: string;
     yes?: boolean;
@@ -269,9 +307,18 @@ filterOptions(
   const target = requireCurrentAccount(store, accounts, opts.org);
   const filter = filterFrom(opts);
 
+  // Only the directory the sidebar reads is excluded, not the whole account:
+  // another organization of the same account is just as invisible, and just as
+  // fosterable.
   const sources = resolveSources(
-    accounts.filter((account) => account.accountUuid !== target.accountUuid),
+    accounts.filter(
+      (ref) =>
+        !(
+          ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid
+        ),
+    ),
     opts.from,
+    opts.fromOrg,
   );
 
   // Sessions that can never appear in the sidebar are always excluded here:
