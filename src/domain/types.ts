@@ -13,6 +13,8 @@ export interface FosterMark {
   originAccountUuid: string;
   originOrganizationUuid: string;
   originSessionId: string;
+  /** Present only for a copy taken from a different installation or profile. */
+  originStore?: string;
   fosteredAt: number;
   toolVersion: string;
 }

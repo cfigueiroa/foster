@@ -57,6 +57,7 @@ vi.mock('../src/engine/desktop.js', () => ({
   quitDesktop: () => Promise.resolve({ outcome: 'not-running' }),
   startDesktop: () => Promise.resolve(true),
   packagedAppId: () => undefined,
+  runningStores: () => [],
   hostedByDesktop: () => false,
   DesktopControlError: class extends Error {},
 }));
@@ -373,5 +374,60 @@ describe('the main menu', () => {
     answers = ['not-a-menu-entry'];
 
     await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+  });
+});
+
+describe('bringing sessions from another installation', () => {
+  /**
+   * A second profile is a whole separate store. Nothing in the store foster
+   * resolved points at it, so the menu has to offer it explicitly — and the copy
+   * has to record which store it came from.
+   */
+  it('fosters across stores and records the origin', async () => {
+    const other = makeStore();
+    writeFileSync(
+      other.configFile,
+      JSON.stringify({ lastKnownAccountUuid: OLD_ACCOUNT.accountUuid }),
+      'utf8',
+    );
+    writeSession(
+      other,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000d1', title: 'In the other profile' }),
+    );
+
+    answers = [
+      'foster',
+      '__other_store', // "Another installation or profile…"
+      '__type_a_path', // not running, so type where it lives
+      other.root,
+      '0', // its only account/organization
+      'all',
+      'go',
+      'later',
+      'quit',
+    ];
+    await runInteractive(store, ledger);
+
+    const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
+    expect(copies).toHaveLength(1);
+    expect(copies[0]!.data.title).toContain('In the other profile');
+    expect(copies[0]!.data._foster!.originStore).toBe(other.root);
+    // The other store is left exactly as it was.
+    expect(scanAccount(other, OLD_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+  });
+
+  it('comes back to the menu when the path is not a store', async () => {
+    answers = [
+      'foster',
+      '__other_store',
+      '__type_a_path',
+      mkdtempSync(path.join(tmpdir(), 'not-a-store-')),
+      'quit',
+    ];
+
+    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+    expect(answers).toHaveLength(0);
   });
 });

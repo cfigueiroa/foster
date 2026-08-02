@@ -1,12 +1,20 @@
+import path from 'node:path';
 import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@clack/prompts';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
-import { listAccountDirs, listAgentAccountDirs, pickActiveOrganization } from '../domain/paths.js';
+import {
+  candidateStoreRoots,
+  listAccountDirs,
+  listAgentAccountDirs,
+  pickActiveOrganization,
+  resolveStore,
+} from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
   inspectDesktop,
   quitDesktop,
+  runningStores,
   startDesktop,
   type DesktopState,
 } from '../engine/desktop.js';
@@ -21,7 +29,15 @@ import { scanAccount, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
-import { aborted, askText, BACK, type Maybe, pickMany, selectOrBack } from './prompts.js';
+import {
+  aborted,
+  askText,
+  BACK,
+  type Choice,
+  type Maybe,
+  pickMany,
+  selectOrBack,
+} from './prompts.js';
 import {
   abbreviate,
   accountTree,
@@ -288,26 +304,81 @@ function summariseSource(store: StoreLayout, ref: AccountRef) {
   return { fosterable: fosterable.length, lastActivity };
 }
 
-async function chooseSource(
-  store: StoreLayout,
-  ledger: Ledger,
-  target: AccountRef,
-): Promise<Maybe<AccountRef[]>> {
-  const labels = labelsOf(ledger);
+/** Which store the sessions come from, and which directories inside it. */
+export interface SourcePick {
+  store: StoreLayout;
+  refs: AccountRef[];
+}
 
-  // Only the exact directory the sidebar reads is excluded, not the whole
-  // account. Another organization of the *same* account is just as invisible as
-  // another account's, so it is just as fosterable — a session filed under a
-  // second organization would otherwise be unreachable.
-  const sources = listAccountDirs(store).filter(
-    (ref) =>
-      !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
-  );
-  if (sources.length === 0) {
-    log.info('There is nothing to bring here: this is the only account on this machine.');
+/**
+ * A second profile is a whole separate store, and nothing in the store foster
+ * resolved points at it. Discovery costs a process listing, so it is behind an
+ * explicit choice rather than paid for on every run.
+ */
+async function chooseOtherStore(
+  current: StoreLayout,
+  labels: Map<string, string>,
+): Promise<Maybe<SourcePick>> {
+  const known = new Set([...candidateStoreRoots(), current.root].map((dir) => path.resolve(dir)));
+  const running = runningStores().filter((dir) => !known.has(path.resolve(dir)));
+
+  const picked = await selectOrBack('Which installation?', [
+    ...running.map((dir) => ({ value: dir, label: dir, hint: 'running now' })),
+    { value: TYPE_A_PATH, label: 'Type a path…', hint: 'a profile that is not running' },
+  ]);
+  if (aborted(picked)) return BACK;
+
+  let root = picked;
+  if (picked === TYPE_A_PATH) {
+    const answer = await askText('Path to the userData directory', {
+      placeholder: '%LOCALAPPDATA%\\Claude-Work',
+    });
+    if (aborted(answer) || !answer.trim()) return BACK;
+    root = answer.trim();
+  }
+
+  let store: StoreLayout;
+  try {
+    store = resolveStore(root);
+  } catch (error) {
+    log.error(error instanceof Error ? error.message : String(error));
     return BACK;
   }
 
+  // Same picker as the local one, so both screens read alike and offer the same
+  // granularity: a profile with two accounts is no less worth narrowing.
+  if (accountsIn(store).length === 0) {
+    log.info('That installation has no session directories yet — nothing to bring from it.');
+    return BACK;
+  }
+
+  // Same picker as the local one, so both screens read alike and offer the same
+  // granularity: a profile with two accounts is no less worth narrowing.
+  const refs = await chooseAccounts(store, labels, {
+    message: 'Which account in that installation?',
+  });
+  if (aborted(refs) || refs === OTHER_STORE) return BACK;
+  return { store, refs };
+}
+
+const TYPE_A_PATH = '__type_a_path';
+
+/**
+ * The account/organization picker for one store.
+ *
+ * Shared by the store you are signed into and by any other profile, so both
+ * screens read the same and offer the same granularity. Taking a whole account
+ * and taking one of its organizations are both reasonable, and only the user
+ * knows which they meant.
+ */
+async function chooseAccounts(
+  store: StoreLayout,
+  labels: Map<string, string>,
+  options: { exclude?: AccountRef; currentAccountUuid?: string; message: string; extra?: Choice[] },
+): Promise<Maybe<AccountRef[] | typeof OTHER_STORE>> {
+  // Callers check for emptiness before asking. Conflating "nothing to offer"
+  // with BACK sent someone who pressed Back into the other-profile picker.
+  const sources = accountsIn(store, options.exclude);
   const byAccount = new Map<string, AccountRef[]>();
   for (const ref of sources) {
     byAccount.set(ref.accountUuid, [...(byAccount.get(ref.accountUuid) ?? []), ref]);
@@ -326,21 +397,16 @@ async function chooseSource(
       { fosterable: 0, lastActivity: 0 },
     );
 
-  // Organizations are offered individually, with a whole-account shortcut when
-  // there is more than one: taking everything and taking one part are both
-  // reasonable, and only the user knows which they meant.
   const choices: SourceOption[] = [];
-
   for (const [accountUuid, refs] of byAccount) {
     const name = labels.get(accountUuid) ?? short(accountUuid);
-    const suffix = accountUuid === target.accountUuid ? pc.green(' (this account)') : '';
+    const suffix = accountUuid === options.currentAccountUuid ? pc.green(' (this account)') : '';
 
     if (refs.length > 1) {
-      const total = totals(refs);
       choices.push({
         refs,
         label: `${pc.bold(name)}${suffix} — everything, all ${refs.length} organizations`,
-        hint: describeStat(total),
+        hint: describeStat(totals(refs)),
       });
     }
     for (const ref of refs) {
@@ -353,18 +419,68 @@ async function chooseSource(
     }
   }
 
-  const picked = await selectOrBack(
-    'Where should the sessions come from?',
-    choices.map((choice, index) => ({
+  const picked = await selectOrBack(options.message, [
+    ...choices.map((choice, index) => ({
       value: String(index),
       label: choice.label,
       hint: choice.hint,
     })),
-  );
+    ...(options.extra ?? []),
+  ]);
 
   if (aborted(picked)) return BACK;
+  if (picked === OTHER_STORE) return OTHER_STORE;
   return choices[Number(picked)]?.refs ?? BACK;
 }
+
+/** The directories of one store that are eligible as a source. */
+function accountsIn(store: StoreLayout, exclude?: AccountRef): AccountRef[] {
+  return listAccountDirs(store).filter(
+    (ref) =>
+      !exclude ||
+      !(
+        ref.accountUuid === exclude.accountUuid && ref.organizationUuid === exclude.organizationUuid
+      ),
+  );
+}
+
+async function chooseSource(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+): Promise<Maybe<SourcePick>> {
+  const labels = labelsOf(ledger);
+
+  // An installation with nothing else in it is not a dead end: another profile
+  // is still reachable from here.
+  if (accountsIn(store, target).length === 0) {
+    log.info('No other account in this installation.');
+    return chooseOtherStore(store, labels);
+  }
+
+  // Only the exact directory the sidebar reads is excluded, not the whole
+  // account. Another organization of the *same* account is just as invisible as
+  // another account's, so it is just as fosterable — a session filed under a
+  // second organization would otherwise be unreachable.
+  const picked = await chooseAccounts(store, labels, {
+    exclude: target,
+    currentAccountUuid: target.accountUuid,
+    message: 'Where should the sessions come from?',
+    extra: [
+      {
+        value: OTHER_STORE,
+        label: 'Another installation or profile…',
+        hint: 'a second Claude Desktop store',
+      },
+    ],
+  });
+
+  if (aborted(picked)) return BACK;
+  if (picked === OTHER_STORE) return chooseOtherStore(store, labels);
+  return { store, refs: picked };
+}
+
+const OTHER_STORE = '__other_store';
 
 function describeStat(stat: { fosterable: number; lastActivity: number }): string {
   return `${stat.fosterable} session(s) · last used ${formatAge(stat.lastActivity || undefined)}`;
@@ -502,16 +618,20 @@ function reportHidden(all: DiscoveredSession[], offered: DiscoveredSession[]): v
 }
 
 async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRef): Promise<void> {
-  const sources = await chooseSource(store, ledger, current);
-  if (aborted(sources)) return;
+  const source = await chooseSource(store, ledger, current);
+  if (aborted(source)) return;
 
-  const all = sources.flatMap((account) => scanAccount(store, account));
+  const all = source.refs.flatMap((account) => scanAccount(source.store, account));
   const available = byRecency(applyFilter(all, {}));
   reportHidden(all, available);
 
   if (available.length === 0) {
     log.info('Nothing there can be fostered.');
     return;
+  }
+
+  if (path.resolve(source.store.root) !== path.resolve(store.root)) {
+    note(source.store.root, 'Reading from another installation');
   }
 
   const selected = await chooseSessions(available);
@@ -536,7 +656,7 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
     `${selected.length} session(s) selected`,
   );
 
-  await confirmAndWrite(store, ledger, current, sources, selected);
+  await confirmAndWrite(store, ledger, current, source, selected);
 }
 
 /**
@@ -551,7 +671,7 @@ async function confirmAndWrite(
   store: StoreLayout,
   ledger: Ledger,
   current: AccountRef,
-  sources: AccountRef[],
+  source: SourcePick,
   selected: DiscoveredSession[],
   verb = 'Foster',
 ): Promise<void> {
@@ -596,12 +716,21 @@ async function confirmAndWrite(
       continue;
     }
 
-    const chosen = await chooseTarget(store, ledger, current, sources);
+    // Only directories in the destination store can be excluded as "already a
+    // source"; a source in another store shares nothing with it.
+    const taken = path.resolve(source.store.root) === path.resolve(store.root) ? source.refs : [];
+    const chosen = await chooseTarget(store, ledger, current, taken);
     if (!aborted(chosen)) target = chosen;
   }
 
   try {
-    const outcomes = fosterSessions(selected, { store, ledger, target, prefix });
+    const outcomes = fosterSessions(selected, {
+      store,
+      ledger,
+      target,
+      sourceStore: source.store.root,
+      prefix,
+    });
     const counts = summariseOutcomes(outcomes);
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
     if (outcomes.length > 10) log.message(pc.dim(`… and ${outcomes.length - 10} more`));
@@ -664,7 +793,7 @@ async function restoreFlow(store: StoreLayout, ledger: Ledger, current: AccountR
     'What comes back',
   );
 
-  await confirmAndWrite(store, ledger, current, [], selected, 'Restore');
+  await confirmAndWrite(store, ledger, current, { store, refs: [] }, selected, 'Restore');
 }
 
 async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {

@@ -255,7 +255,23 @@ function filterOptions(command: Command): Command {
 function sourceOptions(command: Command): Command {
   return command
     .option('--from <accountUuid>', 'only sessions from this account')
-    .option('--from-org <organizationUuid>', 'only sessions from this organization');
+    .option('--from-org <organizationUuid>', 'only sessions from this organization')
+    .option('--from-store <path>', 'read the sessions from another installation or profile');
+}
+
+/**
+ * Where sessions are read from, which is not always where they are written.
+ *
+ * A second profile is a whole separate store, so its sessions are unreachable
+ * from the one this process resolved. Reading from one and writing into another
+ * is the same operation the engine already performs — only the scan moves.
+ */
+function resolveSourceStore(target: StoreLayout, fromStore: string | undefined): StoreLayout {
+  return fromStore ? resolveStore(fromStore) : target;
+}
+
+function sameStore(a: StoreLayout, b: StoreLayout): boolean {
+  return path.resolve(a.root) === path.resolve(b.root);
 }
 
 program
@@ -379,11 +395,15 @@ sourceOptions(
     const opts = this.opts<{
       from?: string;
       fromOrg?: string;
+      fromStore?: string;
       all?: boolean;
       json?: boolean;
     }>();
-    const accounts = listAccountDirs(store);
-    const current = currentAccount(store, accounts);
+    const sourceStore = resolveSourceStore(store, opts.fromStore);
+    const accounts = listAccountDirs(sourceStore);
+    // Everything in another store is a candidate; only within one store does the
+    // account in use need excluding, because there its sessions are already here.
+    const current = sameStore(sourceStore, store) ? currentAccount(store, accounts) : undefined;
 
     // Filter by account before reading files: the current account holds the most
     // sessions and every one of them would be discarded straight afterwards.
@@ -394,7 +414,7 @@ sourceOptions(
     );
     const candidates = byRecency(
       applyFilter(
-        sources.flatMap((account) => scanAccount(store, account)),
+        sources.flatMap((account) => scanAccount(sourceStore, account)),
         filterFrom(this.opts()),
       ),
     );
@@ -450,6 +470,7 @@ sourceOptions(
     session?: string[];
     from?: string;
     fromOrg?: string;
+    fromStore?: string;
     to?: string;
     toOrg?: string;
     prefix: string;
@@ -458,16 +479,19 @@ sourceOptions(
     dryRun?: boolean;
   }>();
 
-  const accounts = listAccountDirs(store);
-  const target = resolveDestination(store, accounts, opts);
+  const target = resolveDestination(store, listAccountDirs(store), opts);
+  const sourceStore = resolveSourceStore(store, opts.fromStore);
+  const crossStore = !sameStore(sourceStore, store);
   const filter = filterFrom(opts);
 
-  // Only the directory the copies are going to is excluded, not the whole
-  // account: another organization of the same account is just as invisible, and
-  // just as fosterable.
+  // Only the directory the copies are going to is excluded, and only when the
+  // sessions come from the same store: another organization of the same account
+  // is just as invisible and just as fosterable, and a different store shares no
+  // directory with the destination at all.
   const sources = resolveSources(
-    accounts.filter(
+    listAccountDirs(sourceStore).filter(
       (ref) =>
+        crossStore ||
         !(
           ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid
         ),
@@ -480,7 +504,7 @@ sourceOptions(
   // offering them would only produce copies the app silently never lists.
   let candidates = byRecency(
     applyFilter(
-      sources.flatMap((account) => scanAccount(store, account)),
+      sources.flatMap((account) => scanAccount(sourceStore, account)),
       filter,
     ),
   );
@@ -506,12 +530,18 @@ sourceOptions(
     store,
     ledger,
     target,
+    sourceStore: sourceStore.root,
     prefix: opts.prefix,
     dryRun,
   });
 
   for (const outcome of outcomes) console.log(outcomeLine(outcome));
   const counts = summariseOutcomes(outcomes);
+
+  // Named outright when the sessions came from elsewhere: the destination is
+  // stated everywhere already, and a copy arriving from another installation is
+  // exactly the case where "from where?" is not obvious.
+  if (crossStore) console.log(pc.dim(`\nfrom ${sourceStore.root}`));
 
   if (dryRun) {
     console.log(

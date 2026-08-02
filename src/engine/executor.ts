@@ -13,6 +13,11 @@ export interface FosterOptions {
   store: StoreLayout;
   ledger: Ledger;
   target: AccountRef;
+  /**
+   * Where the sessions were read from, when that is not `store`. Recorded on the
+   * copy so a cross-profile origin stays locatable.
+   */
+  sourceStore?: string;
   prefix?: string;
   /** When true, compute the plan without writing anything. */
   dryRun?: boolean;
@@ -79,7 +84,13 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    const copy = buildFosterCopy(session.data, { origin: session.account, prefix });
+    const copy = buildFosterCopy(session.data, {
+      origin: session.account,
+      ...(options.sourceStore && options.sourceStore !== store.root
+        ? { originStore: options.sourceStore }
+        : {}),
+      prefix,
+    });
     const copyPath = sessionPath(store, target, copy.sessionId);
 
     if (dryRun) {

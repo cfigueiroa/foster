@@ -207,7 +207,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.8.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.9.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -228,6 +228,12 @@ Copies go to the account you are signed into by default. The confirmation names
 the destination and the title prefix, and either can be changed from there — any
 organization of any account is a valid target, though copies written outside the
 account in use only appear once you switch to it.
+
+Sessions can also come from **another installation or profile**. A second profile
+is a separate store that nothing in this one points at, so the source picker
+offers it as its own entry: the profiles running right now are listed, and one
+that is not running can be given by path. Copies made that way record which store
+they came from, because two installations can hold the same account identifier.
 
 The same operations are available as one-shot commands, for scripting:
 
@@ -253,6 +259,13 @@ Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--session <id
 `--from <accountUuid>` or `--from-org <organizationUuid>`, and choose where the copies land with
 `--to <accountUuid>` / `--to-org <organizationUuid>`. Identifiers may be abbreviated to any unique
 prefix; an ambiguous one is reported rather than guessed at.
+
+`--from-store <path>` reads the sessions from a different installation or profile while still
+writing into the store `--store` names, which is how sessions move between two profiles:
+
+```bash
+foster --store "$env:LOCALAPPDATA\Claude-Work" foster --from-store "<the default store>" --yes
+```
 
 An account can hold several organizations and the sidebar only reads one of them, so any
 organization other than that one is a valid source — including another organization of the account
@@ -335,9 +348,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.8.0
-git commit -am "chore: release 0.8.0" && git tag -a v0.8.0 -m "foster v0.8.0"
-git push && git push origin v0.8.0
+npm run version:set 0.9.0
+git commit -am "chore: release 0.9.0" && git tag -a v0.9.0 -m "foster v0.9.0"
+git push && git push origin v0.9.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

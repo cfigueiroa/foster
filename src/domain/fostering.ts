@@ -88,6 +88,13 @@ export function buildRestoredSession(facts: {
 
 export interface BuildCopyOptions {
   origin: AccountRef;
+  /**
+   * The store the session came from, recorded only when it is not the store the
+   * copy is being written into. Two installations can hold the same account
+   * identifier, so without this a cross-profile copy would describe an origin
+   * that cannot be located.
+   */
+  originStore?: string;
   prefix?: string;
   now?: number;
   sessionId?: string;
@@ -117,6 +124,7 @@ export function buildFosterCopy(
     originAccountUuid: options.origin.accountUuid,
     originOrganizationUuid: options.origin.organizationUuid,
     originSessionId: source.sessionId,
+    ...(options.originStore ? { originStore: options.originStore } : {}),
     fosteredAt: options.now ?? Date.now(),
     toolVersion: VERSION,
   };
