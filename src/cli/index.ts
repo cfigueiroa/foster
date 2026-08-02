@@ -672,10 +672,10 @@ function reportDesktop(command: Command): void {
 app
   .command('quit')
   .description('ask Claude Desktop to close')
-  .option('--force', 'terminate it if it does not close on its own')
+  .option('--terminate', 'end the process — required while the app keeps a tray icon')
   .action(async function (this: Command) {
     const { store } = context(this);
-    await closeDesktop(store, Boolean(this.opts<{ force?: boolean }>().force));
+    await closeDesktop(store, Boolean(this.opts<{ terminate?: boolean }>().terminate));
   });
 
 app
@@ -690,14 +690,14 @@ app
 app
   .command('restart')
   .description('close Claude Desktop and start it again, rebuilding the sidebar')
-  .option('--force', 'terminate it if it does not close on its own')
+  .option('--terminate', 'end the process — required while the app keeps a tray icon')
   .action(async function (this: Command) {
     const { store } = context(this);
-    await restartDesktop(store, Boolean(this.opts<{ force?: boolean }>().force));
+    await restartDesktop(store, Boolean(this.opts<{ terminate?: boolean }>().terminate));
   });
 
-async function closeDesktop(store: StoreLayout, force: boolean): Promise<boolean> {
-  const result = await quitDesktop(store, { force });
+async function closeDesktop(store: StoreLayout, terminate: boolean): Promise<boolean> {
+  const result = await quitDesktop(store, { terminate });
   if (result.outcome === 'not-running') {
     console.log('Claude Desktop was not running.');
     return true;
@@ -706,18 +706,28 @@ async function closeDesktop(store: StoreLayout, force: boolean): Promise<boolean
     console.log('Claude Desktop is closed.');
     return true;
   }
-  console.log(
-    pc.yellow(
-      'Claude Desktop is still running — it may be asking you to confirm.\n' +
-        'Answer it and try again, or pass --force.',
-    ),
-  );
+  if (result.outcome === 'needs-terminate') {
+    // Not an escalation this can make on its own: with the tray on there is no
+    // way to ask, and ending the process skips the app's own shutdown.
+    console.log(
+      pc.yellow(
+        'Claude Desktop keeps running in its tray icon, so asking the window to close\n' +
+          'would only hide it. Ending the process is the only way, and it skips the\n' +
+          "app's shutdown: a change from the last few seconds may not be saved, and\n" +
+          'Cowork sandboxes will not be stopped cleanly.\n' +
+          'Re-run with --terminate to do it, or quit from the tray icon yourself.',
+      ),
+    );
+    process.exitCode = 1;
+    return false;
+  }
+  console.log(pc.yellow('Claude Desktop is still running. Quit it from the tray icon.'));
   process.exitCode = 1;
   return false;
 }
 
-async function restartDesktop(store: StoreLayout, force: boolean): Promise<void> {
-  if (inspectApp(store).running && !(await closeDesktop(store, force))) return;
+async function restartDesktop(store: StoreLayout, terminate: boolean): Promise<void> {
+  if (inspectApp(store).running && !(await closeDesktop(store, terminate))) return;
   const started = await startDesktop(store);
   console.log(
     started

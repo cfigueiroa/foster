@@ -54,14 +54,42 @@ memory. Nothing watches the directory afterwards, so a file that appears later i
 app initialises again. Reloading the window (F5) does not help: the list it redraws comes from the
 app, not from disk.
 
-`foster` will do the restart for you — from the menu, or with `--restart`. It asks the app to close
-the way clicking its close button does, so the app runs its own shutdown; it never terminates it
-unless you say so. And it will not close an app it is running inside, because that would kill the
-session that asked.
+`foster` will do the restart for you — from the menu, or with `--restart`. It will not close an app
+it is running inside, because that would kill the session that asked.
 
-There is exactly one way to avoid the restart, and it only applies if your account has **more than
-one organization**: switching organization makes the app re-read the directory, and switching back
-reads it again. That also ends any session that is running, so it is not free.
+Closing it is less polite than it should be, and `foster` says so rather than pretending otherwise.
+Claude Desktop's window-close handler quits the app **only when its tray icon is turned off**; with
+the tray on — the default — it cancels the close and hides the window. So asking politely would make
+your window vanish and leave the process running. `foster` does not send that request at all: it
+tells you the situation and asks for an explicit yes to end the process. Session files survive
+either way (they are written through a temporary and renamed), but ending the process skips the
+app's own shutdown, so a title or timestamp changed in the last few seconds may not be saved and
+Cowork sandboxes are not stopped cleanly. Quitting from the tray icon yourself avoids all of that.
+
+If your account has **more than one organization**, switching organization and switching back also
+makes the app re-read the directory, with no restart. It ends any session that is running, so it is
+not free either.
+
+### The app's own import, and why `foster` does not use it
+
+Claude Desktop registers a deep link, `claude://resume?session=<cliSessionId>`, which imports a CLI
+transcript into the current account **live** — no restart, appears immediately. It looks like the
+perfect answer and it is not, for two reasons:
+
+- **It rewrites the transcript it imports.** The import strips thinking blocks from the `.jsonl` in
+  place — the same file the original session points at. `foster` promises not to modify anything
+  that already exists, and calling this would break that promise on the one file that actually holds
+  your conversation.
+- **It only carries the working directory.** Title, model, timestamps and the rest are not read from
+  the old session; the imported session gets today's dates and a default configuration.
+
+It is a good way to pull _one_ session back by hand, and it is worth knowing about. It is not a way
+to move three hundred.
+
+Relatedly: the app has a built-in recovery scan that offers importable transcripts, and it will
+never offer these ones. Before scanning it collects every `cliSessionId` referenced by every account
+and organization on disk and treats those as already known — so a session that still exists under
+your old account is excluded by the very fact that it still exists.
 
 ## What about switching accounts?
 
@@ -83,7 +111,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.1/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -151,9 +179,12 @@ sessions that were never opened — are always excluded; `list --all` shows them
   starts again. A copy the app _did_ load is different: it may be written back at any time, which
   would recreate a file `foster` had just deleted. So `return` refuses for copies that already
   existed when the app started, and offers to close it for you.
-- **It never terminates the app behind your back.** Quitting asks the app to close, the way its own
-  close button does, so it can flush pending writes and warn you about work in progress. Forcing is
-  a separate, explicit answer. And `foster` refuses outright to close an app it is running inside.
+- **It never ends the app behind your back.** Where a polite close would work (tray off) it uses one;
+  where it would not, it says so and waits for an explicit yes rather than quietly escalating, and it
+  names what that costs. `foster` refuses outright to close an app it is running inside — detected
+  both from the process tree and from the environment the app stamps on the sessions it spawns,
+  because an exited intermediate can break the first signal and the failure mode is killing the
+  caller mid-write.
 - **It never reads credentials.** `foster` does not open, parse, copy or log credential files, cookie
   stores or OAuth token caches. It only touches session metadata. This is also why it cannot switch
   accounts.
@@ -192,9 +223,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.5.0
-git commit -am "chore: release 0.5.0" && git tag -a v0.5.0 -m "foster v0.5.0"
-git push && git push origin v0.5.0
+npm run version:set 0.5.1
+git commit -am "chore: release 0.5.1" && git tag -a v0.5.1 -m "foster v0.5.1"
+git push && git push origin v0.5.1
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

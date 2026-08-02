@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import type { StoreLayout } from '../domain/types.js';
+import { closingWindowQuits } from '../store/config.js';
 import { lockfileHeld } from './lockfile.js';
 
 /**
@@ -254,9 +255,14 @@ async function waitFor(
 export interface QuitOptions {
   /** How long to wait for the app to shut itself down. */
   timeoutMs?: number;
-  /** Terminate the process tree when the polite request is not honoured. */
-  force?: boolean;
+  /**
+   * End the process rather than asking. Required whenever the tray is on, which
+   * is the default — see quitDesktop.
+   */
+  terminate?: boolean;
   list?: ProcessLister;
+  /** Injectable for tests: the suite itself runs inside a hosted session. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export type QuitResult =
@@ -264,25 +270,41 @@ export type QuitResult =
   | { outcome: 'quit' }
   /** It was not running to begin with. */
   | { outcome: 'not-running' }
-  /** The request was sent and the app is still up — it may be showing a dialog. */
+  /**
+   * Nothing was done, because asking would not have worked: this app keeps
+   * running in the tray, so closing its window only hides it. Ending the process
+   * is the only way, and that needs saying out loud rather than doing quietly.
+   */
+  | { outcome: 'needs-terminate'; mainPid: number }
+  /** It was asked to close and is still up. */
   | { outcome: 'still-running'; mainPid: number };
 
 /**
- * Ask Claude Desktop to quit.
+ * Close Claude Desktop.
  *
- * `taskkill` without /F posts WM_CLOSE, which is the same thing clicking the
- * window's close button does: the app closes its window, sees it has none left
- * and quits through its own shutdown path. That path is worth preserving — it
- * flushes session writes, and it is what puts up the "Claude is working in N
- * sessions" prompt instead of silently interrupting them. So the app is allowed
- * to refuse, and a refusal is reported rather than overridden.
+ * There are two worlds here, and which one you are in is a setting.
+ *
+ * With the tray **off**, the main window's close handler quits the app, so
+ * `taskkill` without /F — which posts WM_CLOSE, exactly what the close button
+ * does — shuts it down through its own path: pending session writes are flushed
+ * and Cowork sandboxes are stopped.
+ *
+ * With the tray **on**, which is the default, that same handler cancels the close
+ * and hides the window. Posting WM_CLOSE would make the user's window disappear
+ * and change nothing else, so this does not send it at all. The only way out is
+ * to end the process, which is offered as an explicit answer rather than a silent
+ * escalation: it skips the app's own shutdown.
+ *
+ * Ending the process cannot corrupt a session file — the app writes through a
+ * temporary and renames — but it can lose a metadata update from the last few
+ * seconds, and Cowork sandboxes do not get stopped cleanly.
  */
 export async function quitDesktop(
   store: StoreLayout,
   options: QuitOptions = {},
 ): Promise<QuitResult> {
-  const { timeoutMs = 30_000, force = false, list = readProcesses } = options;
-  const state = inspectDesktop(list);
+  const { timeoutMs = 30_000, terminate = false, list = readProcesses, env } = options;
+  const state = inspectDesktop(list, env);
 
   if (!state.running || state.mainPid === undefined) return { outcome: 'not-running' };
   if (state.selfHosted) {
@@ -293,13 +315,27 @@ export async function quitDesktop(
   }
 
   const pid = state.mainPid;
-  taskkill(force ? ['/F', '/T', '/PID', String(pid)] : ['/PID', String(pid)]);
+  const asking = closingWindowQuits(store);
+  if (!asking && !terminate) return { outcome: 'needs-terminate', mainPid: pid };
+
+  if (terminate) {
+    // The app saves on a trailing debounce of up to three seconds. Waiting that
+    // out first turns "probably lost the last edit" into "probably did not",
+    // which is cheap at this point — the user has already decided to close it.
+    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    taskkill(['/F', '/T', '/PID', String(pid)]);
+  } else {
+    taskkill(['/PID', String(pid)]);
+  }
 
   // The lockfile is held for as long as the app runs and is released on exit, so
   // it corroborates the pid check — a recycled pid cannot fake it.
   const gone = await waitFor(() => !processAlive(pid) && !lockfileHeld(store), timeoutMs);
   return gone ? { outcome: 'quit' } : { outcome: 'still-running', mainPid: pid };
 }
+
+/** Long enough to outlast the app's save debounce (1s idle, 3s while running). */
+const SETTLE_MS = 3_500;
 
 function taskkill(args: string[]): void {
   try {

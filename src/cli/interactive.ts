@@ -775,29 +775,18 @@ async function quitFlow(store: StoreLayout, state: DesktopState): Promise<boolea
 
 /** The quit half, shared by quit and restart. */
 async function closeDesktop(store: StoreLayout): Promise<boolean> {
-  log.message('Asking the app to close…');
   try {
     const result = await quitDesktop(store);
-    if (result.outcome !== 'still-running') {
+    if (result.outcome === 'quit' || result.outcome === 'not-running') {
       log.success('Claude Desktop is closed.');
       return true;
     }
 
-    log.warn('It is still running. The app may be asking you to confirm — check its window.');
-    const force = await select({
-      message: 'What now?',
-      options: [
-        { value: 'wait', label: 'I answered it — check again' },
-        { value: 'force', label: 'Force it to close', hint: 'ends it without its own shutdown' },
-        { value: 'stop', label: 'Leave it running' },
-      ],
-      initialValue: 'wait',
-    });
-    if (isCancel(force) || force === 'stop') return false;
+    if (result.outcome === 'needs-terminate' && !(await consentToTerminate())) return false;
 
-    const second = await quitDesktop(store, { force: force === 'force' });
-    if (second.outcome === 'still-running') {
-      log.error('Could not close it. Quit it from the app menu and try again.');
+    const second = await quitDesktop(store, { terminate: true });
+    if (second.outcome !== 'quit' && second.outcome !== 'not-running') {
+      log.error('Could not close it. Quit it from the tray icon and try again.');
       return false;
     }
     log.success('Claude Desktop is closed.');
@@ -809,6 +798,37 @@ async function closeDesktop(store: StoreLayout): Promise<boolean> {
     }
     throw error;
   }
+}
+
+/**
+ * The one thing foster cannot do politely, said plainly.
+ *
+ * With its tray icon on — the default — Claude Desktop treats a close request as
+ * "hide the window" and keeps running. There is no outside handle on its Quit,
+ * so ending the process is the only route, and it skips the shutdown the app
+ * would otherwise run. That is a real cost and gets an explicit yes.
+ */
+async function consentToTerminate(): Promise<boolean> {
+  note(
+    [
+      'Claude Desktop keeps running in the tray, so asking its window to close',
+      'would only hide it. foster can end the process instead.',
+      '',
+      'Session files are written through a temporary and renamed, so ending it',
+      'cannot corrupt one. What it does skip is the app’s own shutdown: a title or',
+      'timestamp changed in the last few seconds may not be saved, and Cowork',
+      'sandboxes will not be stopped cleanly.',
+      '',
+      'Quitting from the tray icon yourself avoids all of that.',
+    ].join('\n'),
+    'No polite way to ask',
+  );
+
+  const go = await confirm({
+    message: 'End the Claude Desktop process?',
+    initialValue: false,
+  });
+  return !isCancel(go) && go;
 }
 
 async function startFlow(store: StoreLayout): Promise<boolean> {

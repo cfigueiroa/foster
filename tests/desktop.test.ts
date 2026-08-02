@@ -1,14 +1,17 @@
+import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   inspectDesktop,
   packagedAppId,
   parseProcessCsv,
+  quitDesktop,
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { heldInMemory } from '../src/engine/safety.js';
 import { layoutFor } from '../src/domain/paths.js';
+import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
-import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
 // Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
@@ -181,5 +184,61 @@ describe('heldInMemory', () => {
   it('assumes the worst when the start time is unknown', () => {
     const desktop = { running: true, codeSessions: 0, selfHosted: false };
     expect(heldInMemory([fostering(100)], desktop)).toHaveLength(1);
+  });
+});
+
+describe('quitDesktop', () => {
+  // Not a pid Windows can issue: these cases reach taskkill, and a plausible
+  // number would mean signalling whatever real process happened to hold it.
+  const PID = 999_999;
+  const table = (): ProcessRow[] => rows({ pid: PID, parentPid: 9 });
+  // The suite itself runs inside a hosted Code session, so the environment has to
+  // be stated rather than inherited — otherwise every case below would hit the
+  // self-host refusal instead of the behaviour under test.
+  const outside: NodeJS.ProcessEnv = {};
+
+  function storeWith(config: Record<string, unknown>): StoreLayout {
+    const store = makeStore();
+    writeFileSync(store.configFile, JSON.stringify(config), 'utf8');
+    return store;
+  }
+
+  it('says nothing to do when the app is not running', async () => {
+    const result = await quitDesktop(storeWith({}), { list: () => [], env: outside });
+    expect(result.outcome).toBe('not-running');
+  });
+
+  it('refuses to close the app it is running inside', async () => {
+    await expect(
+      quitDesktop(storeWith({}), {
+        list: table,
+        terminate: true,
+        env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_x' },
+      }),
+    ).rejects.toThrow(/running inside/);
+  });
+
+  it('will not ask a tray-backed app to close, because asking only hides it', async () => {
+    // The default is no menuBarEnabled key at all. Posting WM_CLOSE here would
+    // make the user's window vanish and leave the process up — strictly worse
+    // than doing nothing, which is why this reports instead of trying.
+    const result = await quitDesktop(storeWith({ locale: 'en-US' }), {
+      list: table,
+      env: outside,
+    });
+
+    expect(result).toEqual({ outcome: 'needs-terminate', mainPid: PID });
+  });
+
+  it('treats the tray being switched off as permission to ask', async () => {
+    // With the tray off the window's close handler really does quit the app, so a
+    // polite route exists and this must not report needs-terminate.
+    const result = await quitDesktop(storeWith({ menuBarEnabled: false }), {
+      list: table,
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result.outcome).not.toBe('needs-terminate');
   });
 });
