@@ -9,6 +9,7 @@ import {
   runningStores,
   startDesktop,
   desktopExecutable,
+  deliverUrl,
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { heldInMemory, inspectApp } from '../src/engine/safety.js';
@@ -371,6 +372,47 @@ describe('starting the app', () => {
     await expect(
       startDesktop(makeStore(), { timeoutMs: 1, executable: () => undefined }),
     ).rejects.toThrow(/Start it yourself/);
+  });
+});
+
+describe('handing a link to one installation', () => {
+  /**
+   * Windows routes claude:// to the installed package, so a profile never
+   * receives its own sign-in callback. The registration is a plain executable
+   * with the URL as an argument, and a second invocation carrying the same
+   * --user-data-dir forwards its argv to the instance holding that profile.
+   */
+  const EXE = 'C:\\Apps\\Claude\\app\\Claude.exe';
+
+  it('runs the executable with the profile switch and the link', () => {
+    const store = makeStore();
+    const calls: Array<[string, string[]]> = [];
+
+    deliverUrl(store, 'claude://resume?id=abc', {
+      executable: () => EXE,
+      launch: (exe, args) => calls.push([exe, args]),
+    });
+
+    expect(calls).toEqual([[EXE, [`--user-data-dir=${store.root}`, 'claude://resume?id=abc']]]);
+  });
+
+  it('refuses anything that is not a claude:// link', () => {
+    // This is a way to reach one instance, not a way to make foster run things.
+    const launched: string[] = [];
+    const attempt = () =>
+      deliverUrl(makeStore(), 'https://example.com', {
+        executable: () => EXE,
+        launch: (exe) => launched.push(exe),
+      });
+
+    expect(attempt).toThrow(/Only claude:\/\/ links/);
+    expect(launched).toEqual([]);
+  });
+
+  it('says so when there is no executable to hand it to', () => {
+    expect(() => deliverUrl(makeStore(), 'claude://x', { executable: () => undefined })).toThrow(
+      /Could not find the Claude Desktop executable/,
+    );
   });
 });
 

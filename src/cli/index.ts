@@ -16,6 +16,7 @@ import {
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
+  deliverUrl,
   inspectDesktopFor,
   packagedAppId,
   quitDesktop,
@@ -934,6 +935,23 @@ app
     const { store } = context(this);
     const started = await startDesktop(store);
     console.log(started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.');
+  });
+
+app
+  .command('link <url>')
+  .summary('hand a claude:// link to this installation')
+  .description(
+    'Hand a claude:// link to the installation --store names.\n\n' +
+      'Windows registers the protocol for the installed package, so a sign-in callback always\n' +
+      'lands there — which is why a second profile can sit on the sign-in screen for ever while\n' +
+      'the default installation opens instead. This delivers the link to the profile itself.\n\n' +
+      'The link is never printed or recorded. A sign-in code is single-use and short-lived, so\n' +
+      'cancel the browser prompt that offers to open Claude, and do this promptly.',
+  )
+  .action(function (this: Command, url: string) {
+    const { store } = context(this);
+    deliverUrl(store, url);
+    console.log(`Handed to the installation at ${store.root}.`);
   });
 
 app

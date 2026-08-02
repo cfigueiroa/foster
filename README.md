@@ -184,6 +184,14 @@ needed to reach it. Capture the URL from the browser's network tab (or a fallbac
 cancel the browser's "Open Claude?" prompt so the default instance never sees it, and run that. The
 authorization code is single-use and short-lived, so do it promptly.
 
+`foster` does that part for you, without needing the executable's path:
+
+```bash
+foster --store "D:\Claude-Work" app link "claude://<the callback URL>"
+```
+
+It refuses anything that is not a `claude://` link, and never prints or records the URL.
+
 Demonstrated once, end to end: two accounts signed in simultaneously in the same Windows session,
 each in its own instance, with the default installation untouched. An account whose organization
 requires SSO will still refuse — that is the account's policy, not this mechanism.

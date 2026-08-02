@@ -488,6 +488,51 @@ export async function startDesktop(
   return waitFor(() => lockfileHeld(store), timeoutMs, 500);
 }
 
+export interface DeliverOptions {
+  /** Injectable so tests never launch anything. */
+  launch?: (executable: string, args: string[]) => void;
+  executable?: () => string | undefined;
+}
+
+/**
+ * Hand a `claude://` link to one particular installation.
+ *
+ * Windows registers the protocol for the installed package, so a callback from
+ * the browser always lands there — which is why a signed-out profile sits on the
+ * sign-in screen for ever while the default installation opens instead. The
+ * registration is a plain executable with the URL as an argument, and a second
+ * invocation carrying the same `--user-data-dir` forwards its argv to the
+ * instance holding that profile's lock. So the link can simply be delivered.
+ *
+ * Only `claude://` links: this is a way to reach one instance, not a way to make
+ * foster run arbitrary things. The URL is never printed or recorded — a sign-in
+ * callback carries a single-use code, and foster has no business keeping it.
+ */
+export function deliverUrl(store: StoreLayout, url: string, options: DeliverOptions = {}): void {
+  const { launch = launchWithArgs, executable = desktopExecutable } = options;
+
+  if (!/^claude:\/\//i.test(url)) {
+    throw new DesktopControlError('Only claude:// links can be handed to an installation.');
+  }
+
+  const exe = executable();
+  if (!exe) {
+    throw new DesktopControlError(
+      'Could not find the Claude Desktop executable to hand the link to.\n' +
+        'Nothing is registered for claude:// links and no instance is running.',
+    );
+  }
+
+  // The switch goes even to the installed store: without it this process would
+  // be a second instance of whichever profile the environment names.
+  launch(exe, [`--user-data-dir=${store.root}`, url]);
+}
+
+function launchWithArgs(executable: string, args: string[]): void {
+  const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  child.unref();
+}
+
 function launchPackagedApp(appId: string): void {
   // Explorer is the documented way to activate a packaged application by its
   // model id from a plain process; the executable itself sits in a directory
