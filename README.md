@@ -148,14 +148,23 @@ directory the sidebar is on.) So there is no file to edit and no flag to pass. D
 command-line arguments, environment variables, config files and group policy were each checked, and
 none of them selects an account.
 
-**The one real mechanism is a second profile.** `CLAUDE_USER_DATA_DIR` is read at the app's entry
-point, before anything else, and becomes its `userData` outright — separate cookie jar, separate
-account, separate instance lock. That is how you hold two accounts at once, and each one needs its
-own sign-in. `foster` looks there first when that variable is set, so it operates on the profile the
-app would be using rather than the default one. Two caveats worth knowing before relying on it: the
-`claude://` protocol is registered to the installed package, so magic links, SSO callbacks and
-`claude://resume` always land on the default instance whatever profile you meant them for; and
-`foster` cannot start a profile for you, because only whatever launched it knows how.
+**There is a second-profile mechanism, and on Windows it does not get you a second account.**
+`CLAUDE_USER_DATA_DIR` is read at the app's entry point, before anything else, and becomes its
+`userData` outright. That part works — tested: the profile starts, populates a full store, takes its
+own instance lock and runs alongside the default installation without disturbing it.
+
+What it cannot do is sign in. The `claude://` protocol is registered to the installed package, so
+when the browser hands back an SSO or magic-link callback, Windows routes it to the package — which
+starts an instance on the **default** `userData`, fails the single-instance lock, and forwards the
+callback to whichever instance already holds that lock. The profile never receives its own callback
+and never leaves the sign-in screen. Closing the default instance does not help: the callback still
+arrives at a default-`userData` instance, not at the profile. Tested with a real sign-in attempt;
+the callbacks were logged as suppressed by the default instance and the profile's log stayed empty.
+
+So `foster` supports the profile path — when `CLAUDE_USER_DATA_DIR` is set it looks there first, and
+operates on the store the app would be using — but do not expect it to be a way of holding two
+accounts on this platform. `foster` also cannot start a profile for you: only whatever launched it
+knows how.
 
 If you are simply moving between accounts on one profile, staging still works and is the shortest
 path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),
@@ -171,7 +180,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.2/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.3/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -299,9 +308,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.6.2
-git commit -am "chore: release 0.6.2" && git tag -a v0.6.2 -m "foster v0.6.2"
-git push && git push origin v0.6.2
+npm run version:set 0.6.3
+git commit -am "chore: release 0.6.3" && git tag -a v0.6.3 -m "foster v0.6.3"
+git push && git push origin v0.6.3
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree
