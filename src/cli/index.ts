@@ -23,7 +23,9 @@ import { applyFilter, byRecency, parseSince, type SessionFilter } from './filter
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
 import {
+  accountTree,
   formatDate,
+  groupByAccount,
   outcomeLine,
   restartNotice,
   sessionLine,
@@ -210,16 +212,7 @@ program
       return;
     }
 
-    for (const entry of accounts) {
-      const label = labels.get(entry.account.accountUuid);
-      const marker = entry.isCurrent ? pc.green(' (current)') : '';
-      const name = label
-        ? `${label} ${pc.dim(shortId(entry.account.accountUuid))}`
-        : shortId(entry.account.accountUuid);
-      console.log(`${pc.bold(name)}${marker}`);
-      console.log(`  organization ${shortId(entry.account.organizationUuid)}`);
-      console.log(`  ${entry.nativeCount} own, ${entry.copyCount} fostered in`);
-    }
+    console.log(accountTree(groupByAccount(accounts), labels));
   });
 
 filterOptions(program.command('list').description('list sessions available to foster'))

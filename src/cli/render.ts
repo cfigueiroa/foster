@@ -15,6 +15,82 @@ export function shortId(id: string): string {
 }
 
 /**
+ * Renders accounts with their organizations nested underneath.
+ *
+ * The store nests them — <accountUuid>/<organizationUuid>/ — and showing both at
+ * the same indentation invites exactly the wrong reading: that an account with
+ * two organizations is two accounts, or that the first identifier is the
+ * organization. The tree makes the containment visible, and the account total
+ * makes it clear that picking an account takes every organization inside it.
+ */
+export function accountTree(
+  groups: AccountGroup[],
+  labels: Map<string, string> = new Map(),
+): string {
+  const lines: string[] = [];
+
+  for (const group of groups) {
+    const label = labels.get(group.accountUuid);
+    const name = label
+      ? `${label} ${pc.dim(shortId(group.accountUuid))}`
+      : shortId(group.accountUuid);
+    const total = group.organizations.reduce((sum, org) => sum + org.nativeCount, 0);
+    const plural = group.organizations.length === 1 ? 'organization' : 'organizations';
+
+    lines.push(
+      `${pc.bold(name)}${group.isCurrent ? pc.green('  (this account)') : ''}` +
+        pc.dim(`  ${total} session(s) in ${group.organizations.length} ${plural}`),
+    );
+
+    group.organizations.forEach((org, index) => {
+      const last = index === group.organizations.length - 1;
+      const fostered = org.copyCount > 0 ? pc.cyan(`, ${org.copyCount} fostered in`) : '';
+      lines.push(
+        pc.dim(`  ${last ? '└' : '├'} org `) +
+          shortId(org.organizationUuid) +
+          pc.dim(`  ${org.nativeCount} own`) +
+          fostered,
+      );
+    });
+  }
+
+  return lines.join('\n');
+}
+
+export interface AccountGroup {
+  accountUuid: string;
+  isCurrent: boolean;
+  organizations: { organizationUuid: string; nativeCount: number; copyCount: number }[];
+}
+
+/** Collapses per-organization rows into one entry per account, preserving order. */
+export function groupByAccount(
+  rows: {
+    account: { accountUuid: string; organizationUuid: string };
+    nativeCount: number;
+    copyCount: number;
+    isCurrent: boolean;
+  }[],
+): AccountGroup[] {
+  const groups = new Map<string, AccountGroup>();
+
+  for (const row of rows) {
+    let group = groups.get(row.account.accountUuid);
+    if (!group) {
+      group = { accountUuid: row.account.accountUuid, isCurrent: row.isCurrent, organizations: [] };
+      groups.set(row.account.accountUuid, group);
+    }
+    group.organizations.push({
+      organizationUuid: row.account.organizationUuid,
+      nativeCount: row.nativeCount,
+      copyCount: row.copyCount,
+    });
+  }
+
+  return [...groups.values()];
+}
+
+/**
  * One line describing the installed version, and the upgrade when there is one.
  *
  * An unknown answer is reported as unknown rather than as "up to date": the check

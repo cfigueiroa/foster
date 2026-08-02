@@ -13,7 +13,7 @@ import { scanAccount, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
-import { formatDate, outcomeLine, shortId } from './render.js';
+import { accountTree, formatDate, groupByAccount, outcomeLine, shortId } from './render.js';
 
 /** Sentinel returned by a step the user backed out of, so callers can return to the menu. */
 const BACK = Symbol('back');
@@ -138,13 +138,10 @@ function showStatus(ledger: Ledger): void {
 
 function showAccounts(store: StoreLayout, ledger: Ledger, target: AccountRef): void {
   const labels = project(ledger.read()).labels;
-  const lines = listAccountDirs(store).map((account) => {
-    const summary = summariseAccount(account, scanAccount(store, account), target.accountUuid);
-    const name = labels.get(account.accountUuid) ?? shortId(account.accountUuid);
-    const marker = summary.isCurrent ? pc.green(' (current)') : '';
-    return `${name}${marker}  ${pc.dim(`org ${shortId(account.organizationUuid)}`)}\n  ${summary.nativeCount} own, ${summary.copyCount} fostered in`;
-  });
-  note(lines.join('\n'), 'Accounts');
+  const rows = listAccountDirs(store).map((account) =>
+    summariseAccount(account, scanAccount(store, account), target.accountUuid),
+  );
+  note(accountTree(groupByAccount(rows), labels), 'Accounts and their organizations');
 }
 
 /**
@@ -194,10 +191,14 @@ async function chooseSource(
       (total, ref) => total + scanAccount(store, ref).filter((s) => !s.isCopy).length,
       0,
     );
+    // Spelling out the organization count matters: picking an account takes
+    // every organization inside it, and an account holding two of them looks
+    // like two separate things until it is said out loud.
+    const spread = refs.length > 1 ? ` across all ${refs.length} of its organizations` : '';
     return {
       value: accountUuid,
       label: labels.get(accountUuid) ?? shortId(accountUuid),
-      hint: `${count} session(s)`,
+      hint: `${count} session(s)${spread}`,
     };
   });
 
