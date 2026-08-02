@@ -294,6 +294,12 @@ program
 
     console.log(pc.bold('Store'));
     console.log(`  ${store.root}`);
+    if (process.env.CLAUDE_USER_DATA_DIR) {
+      // Worth saying out loud: with this set, the app and foster are both looking
+      // at a profile rather than the default install, and someone debugging "my
+      // sessions are missing" should know which one they are being shown.
+      console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
+    }
     if (roots.length > 1)
       console.log(pc.yellow(`  (${roots.length} candidates found, using the first)`));
 

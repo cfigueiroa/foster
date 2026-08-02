@@ -368,8 +368,9 @@ export async function startDesktop(
   const appId = packagedAppId(store);
   if (!appId) {
     throw new DesktopControlError(
-      'Could not work out how to start Claude Desktop: the store is not inside an installed app package.\n' +
-        'Start the app yourself and everything else still works.',
+      'Could not work out how to start Claude Desktop: this store is not inside an installed app\n' +
+        'package. A store reached through CLAUDE_USER_DATA_DIR is a separate profile, and only\n' +
+        'whatever launched it knows how. Start it yourself; everything else still works.',
     );
   }
 

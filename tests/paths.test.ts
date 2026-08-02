@@ -1,6 +1,8 @@
-import { mkdirSync, utimesSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { accountDir, pickActiveOrganization } from '../src/domain/paths.js';
+import { accountDir, candidateStoreRoots, pickActiveOrganization } from '../src/domain/paths.js';
 import { makeStore, NEW_ACCOUNT } from './helpers/store.js';
 
 /**
@@ -30,5 +32,27 @@ describe('pickActiveOrganization', () => {
     utimesSync(accountDir(store, second), later, later);
 
     expect(pickActiveOrganization([NEW_ACCOUNT, second], store)).toEqual(second);
+  });
+});
+
+describe('candidateStoreRoots', () => {
+  it('takes the profile override the app itself honours', () => {
+    // CLAUDE_USER_DATA_DIR becomes userData at the app's entry point, so a store
+    // reached that way is the one the app is actually using.
+    const store = makeStore();
+    const roots = candidateStoreRoots({ CLAUDE_USER_DATA_DIR: store.root });
+
+    expect(roots[0]).toBe(store.root);
+  });
+
+  it('ignores an override pointing at something that is not a store', () => {
+    // Only directories that actually hold sessions are offered, override or not.
+    expect(
+      candidateStoreRoots({ CLAUDE_USER_DATA_DIR: mkdtempSync(path.join(tmpdir(), 'x-')) }),
+    ).toHaveLength(0);
+  });
+
+  it('finds nothing when the environment names nowhere to look', () => {
+    expect(candidateStoreRoots({})).toEqual([]);
   });
 });

@@ -118,13 +118,30 @@ your old account is excluded by the very fact that it still exists.
 
 ## What about switching accounts?
 
-`foster` cannot switch accounts, and does not try. Which account the app uses comes from the session
-you are signed into — the account id in its config is only a cached copy of that answer, so writing
-to it changes nothing. Doing it properly would mean handling credentials, which `foster` never
-touches.
+`foster` cannot switch accounts, and nothing else on your disk can either. This is worth stating
+precisely, because it is the first thing people try.
 
-What does work is staging: send copies to the other account first (`--to`, or "Send them somewhere
-else" in the menu), then sign into it. They are waiting when you arrive.
+Inside one installation the account is not stored anywhere. The app keeps it in memory only —
+deliberately non-persistent, and cleared whenever its web view navigates — and just three things ever
+set it: an IPC call the app's own signed-in page makes, the app noticing that page navigate to
+`/logout`, and a backfill that asks the server who you are using the cookies you already have. The
+`lastKnownAccountUuid` in the config is a leftover of that answer, not the source of it; nothing reads
+it to decide anything. So there is no file to edit and no flag to pass. Deep links, command-line
+arguments, environment variables, config files and group policy were each checked, and none of them
+selects an account.
+
+**The one real mechanism is a second profile.** `CLAUDE_USER_DATA_DIR` is read at the app's entry
+point, before anything else, and becomes its `userData` outright — separate cookie jar, separate
+account, separate instance lock. That is how you hold two accounts at once, and each one needs its
+own sign-in. `foster` looks there first when that variable is set, so it operates on the profile the
+app would be using rather than the default one. Two caveats worth knowing before relying on it: the
+`claude://` protocol is registered to the installed package, so magic links, SSO callbacks and
+`claude://resume` always land on the default instance whatever profile you meant them for; and
+`foster` cannot start a profile for you, because only whatever launched it knows how.
+
+If you are simply moving between accounts on one profile, staging still works and is the shortest
+path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),
+then sign into it. They are waiting when you arrive.
 
 ## Install
 
@@ -136,7 +153,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.0/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.1/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -215,6 +232,12 @@ refuses to load. `list --all` shows them anyway.
 - **It never reads credentials.** `foster` does not open, parse, copy or log credential files, cookie
   stores or OAuth token caches. It only touches session metadata. This is also why it cannot switch
   accounts.
+- **A copy shares one thing with its original: the conversation.** That is the point — it is what
+  makes the copy open the real thing rather than an empty session — but it means the file is not
+  private to either of them. `foster` only ever reads it. The app does write to it: renaming a
+  session syncs the new title into the transcript, and its own import rewrites the file in place. So
+  renaming a copy is not confined to the copy. Nothing is lost by it; it is simply not the isolation
+  the word "copy" suggests, and you should know which part is shared.
 - **Scheduled-task sessions are treated separately.** Sessions carrying a `scheduledTaskId` are not
   listed in the sidebar's recents and are excluded from ordinary fostering.
 - **One request, and only about versions.** Because the install URL pins a tag, an install would
@@ -258,9 +281,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.6.0
-git commit -am "chore: release 0.6.0" && git tag -a v0.6.0 -m "foster v0.6.0"
-git push && git push origin v0.6.0
+npm run version:set 0.6.1
+git commit -am "chore: release 0.6.1" && git tag -a v0.6.1 -m "foster v0.6.1"
+git push && git push origin v0.6.1
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

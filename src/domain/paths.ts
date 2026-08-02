@@ -20,6 +20,14 @@ const AGENT_SESSIONS = 'local-agent-mode-sessions';
  */
 export function candidateStoreRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const roots: string[] = [];
+
+  // The app's own profile override, applied at its entry point before anything
+  // else: `CLAUDE_USER_DATA_DIR` becomes userData outright. Running a second
+  // profile is the only way to hold two accounts at once, so a store reached that
+  // way has to be findable — and it wins, because an environment that sets it is
+  // an environment where the app would use it.
+  if (env.CLAUDE_USER_DATA_DIR) roots.push(env.CLAUDE_USER_DATA_DIR);
+
   const localAppData = env.LOCALAPPDATA;
 
   if (localAppData) {
