@@ -177,3 +177,18 @@ describe('restoring end to end', () => {
     expect(findRestorable(store, env)).toEqual([]);
   });
 });
+
+describe('the title a restore writes', () => {
+  it('is marked as coming from the app, which is where it came from', () => {
+    // Real sessions carry 'auto' for an app-generated title and 'user' for a
+    // manual rename. The restored title is the app's own ai-title record.
+    expect(buildRestoredSession({ cliSessionId: DELETED_CLI }).titleSource).toBe('auto');
+  });
+
+  it('is never left for the app to fill in', () => {
+    // An untitled session is shown as "General coding session", which is
+    // indistinguishable from every other untitled one.
+    const data = buildRestoredSession({ cliSessionId: DELETED_CLI });
+    expect(data.title).toBeTruthy();
+  });
+});

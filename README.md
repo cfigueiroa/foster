@@ -54,9 +54,10 @@ stays under `~/.claude/projects`, and the app records the deletion by writing a 
 next to the sessions — one per identifier the session carried, each holding only the time.
 
 Those markers exist to stop the app's own recovery scan from offering back something you threw away
-on purpose. They do not stop a session file that points at that conversation from being written and
-loaded. So for an accidental deletion, writing a fresh pointer is the only route left, and it is the
-one `foster restore` takes:
+on purpose. They stop the _scan_ only: a `claude://resume` link imports a tombstoned conversation
+without complaint, and nothing stops a session file that points at one from being written and
+loaded. So for an accidental deletion, writing a fresh pointer is the route left, and it is the one
+`foster restore` takes:
 
 ```bash
 foster restore          # what could come back, writing nothing
@@ -99,17 +100,27 @@ not free either.
 
 Claude Desktop registers a deep link, `claude://resume?session=<cliSessionId>`, which imports a CLI
 transcript into the current account **live** — no restart, appears immediately. It looks like the
-perfect answer and it is not, for two reasons:
+perfect answer. Running it once on a real conversation is what settles it:
 
-- **It rewrites the transcript it imports.** The import strips thinking blocks from the `.jsonl` in
-  place — the same file the original session points at. `foster` promises not to modify anything
-  that already exists, and calling this would break that promise on the one file that actually holds
-  your conversation.
-- **It only carries the working directory.** Title, model, timestamps and the rest are not read from
-  the old session; the imported session gets today's dates and a default configuration.
+- **It deletes part of the conversation.** The import rewrites the `.jsonl` in place to strip
+  reasoning. Measured on a 58,678-byte transcript: 22 records became 19, three assistant records
+  containing only reasoning were removed, and 9,677 bytes went with them. Nothing else changed — no
+  message or answer was touched — but the file is the one the original session also points at, and
+  those records are not coming back. This is the reason `foster` will not call it.
+- **The title does not survive.** It carries the working directory and nothing else, so the session
+  arrives with no title at all — which the app displays as "General coding session", the same label
+  every other untitled session gets. The transcript holds the real title the whole time; the import
+  simply does not read it.
+- **The dates are reset** to the moment of the import, and the model and permission mode are gone.
+- **It takes over your window.** The app navigates to the imported session and focuses the composer,
+  so whatever you were reading is replaced.
 
-It is a good way to pull _one_ session back by hand, and it is worth knowing about. It is not a way
-to move three hundred.
+`foster restore` reads the same transcript and writes a pointer at it instead: the real title with
+your prefix, the real dates, a fresh identity, and the transcript's modification time left exactly
+where it was.
+
+The deep link is still worth knowing about — it is the only thing that puts a session on screen
+without a restart. It is not a way to move three hundred, and it is not free.
 
 Relatedly: the app has a built-in recovery scan that offers importable transcripts, and it will
 never offer these ones. Before scanning it collects every `cliSessionId` referenced by every account
@@ -155,7 +166,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.1/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.2/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -283,9 +294,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.6.1
-git commit -am "chore: release 0.6.1" && git tag -a v0.6.1 -m "foster v0.6.1"
-git push && git push origin v0.6.1
+npm run version:set 0.6.2
+git commit -am "chore: release 0.6.2" && git tag -a v0.6.2 -m "foster v0.6.2"
+git push && git push origin v0.6.2
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

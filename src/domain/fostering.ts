@@ -71,8 +71,14 @@ export function buildRestoredSession(facts: {
     sessionId: `${SESSION_ID_PREFIX}${facts.cliSessionId}`,
     cliSessionId: facts.cliSessionId,
     ...(facts.cwd === undefined ? {} : { cwd: facts.cwd, originCwd: facts.cwd }),
-    // An untitled restore is still worth having; it just says what it is.
+    // An untitled restore is still worth having; it just says what it is. Left
+    // unset, the app labels it "General coding session", which is indistinguishable
+    // from every other untitled one — worse than blank for finding it again.
     title: facts.title ?? '(recovered conversation)',
+    // Where the title genuinely came from: the app's own ai-title record in the
+    // transcript. Real sessions carry 'auto' for that and 'user' for a manual
+    // rename, and claiming the latter would misdescribe who chose it.
+    titleSource: 'auto',
     createdAt: facts.createdAt ?? at,
     lastActivityAt: at,
     lastFocusedAt: at,
