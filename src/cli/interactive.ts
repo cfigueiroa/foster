@@ -2,7 +2,6 @@ import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@cla
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
-  comparablePath,
   storeIdentity,
   listAccountDirs,
   listAgentAccountDirs,
@@ -254,15 +253,16 @@ function showStatus(ledger: Ledger, store: StoreLayout): void {
     return;
   }
 
-  // Where a copy lives only matters once more than one installation is in play;
-  // saying it always would be noise on the ordinary single-profile setup.
-  const spread = new Set(active.map((f) => comparablePath(storeRootOfCopy(f.copyPath)))).size > 1;
-
+  // Where a copy lives is said whenever it is not here. On the ordinary
+  // single-profile setup that is never, so nothing is added; the earlier rule
+  // asked whether the copies were *spread* across installations, which stayed
+  // silent in the one case that misleads — every copy in the other profile,
+  // reading exactly like copies in this one.
   note(
     active
       .map((f) => {
         const root = storeRootOfCopy(f.copyPath);
-        const where = spread && !samePath(root, store.root) ? pc.dim(`  → ${root}`) : '';
+        const where = samePath(root, store.root) ? '' : pc.dim(`  → ${root}`);
         return `${pc.dim(formatDate(f.fosteredAt))}  ${f.originalTitle || shortId(f.originSessionId)}${where}`;
       })
       .join('\n'),

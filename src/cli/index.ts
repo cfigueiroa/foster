@@ -122,8 +122,12 @@ function requireCurrentAccount(
 
   const accountUuid = readConfig(store).lastKnownAccountUuid;
   if (!accountUuid) {
+    // Naming the store matters once profiles are in play: each one signs in
+    // separately, and "open Claude Desktop once" reads as advice about the app
+    // the reader already has open — which is usually the other installation.
     throw new Error(
-      'Could not determine the account currently signed in. Open Claude Desktop once, then try again.',
+      `No account is recorded for ${store.root}.\n` +
+        'Open Claude Desktop on that installation and sign in once — each installation signs in separately.',
     );
   }
   throw new Error(
@@ -781,7 +785,7 @@ program
   .description('what is currently fostered')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const { ledger } = context(this);
+    const { store, ledger } = context(this);
     const active = listActive(project(ledger.read()));
 
     if (this.opts<{ json?: boolean }>().json) {
@@ -790,6 +794,7 @@ program
           originSessionId: f.originSessionId,
           copySessionId: f.copySessionId,
           copyPath: f.copyPath,
+          store: storeRootOfCopy(f.copyPath),
           originalTitle: f.originalTitle ?? null,
           origin: f.origin,
           target: f.target,
@@ -804,12 +809,27 @@ program
       return;
     }
 
+    // The ledger spans every installation, so with two profiles in play the list
+    // silently mixed them: a copy sitting in the other profile read exactly like
+    // one in the store being worked on. Only said when it is true of the run.
+    const elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root));
+
     for (const fostering of active) {
+      const where = elsewhere.includes(fostering)
+        ? pc.dim(` in ${storeRootOfCopy(fostering.copyPath)}`)
+        : '';
       console.log(
-        `  ${pc.dim(formatDate(fostering.fosteredAt))}  ${fostering.originalTitle ?? shortId(fostering.originSessionId)}  ${pc.dim(`from ${shortId(fostering.origin.accountUuid)}`)}`,
+        `  ${pc.dim(formatDate(fostering.fosteredAt))}  ${fostering.originalTitle ?? shortId(fostering.originSessionId)}  ${pc.dim(`from ${shortId(fostering.origin.accountUuid)}`)}${where}`,
       );
     }
     console.log(pc.bold(`\n${active.length} active fostering(s)`));
+    if (elsewhere.length > 0) {
+      console.log(
+        pc.dim(
+          `${elsewhere.length} of them ${elsewhere.length === 1 ? 'is' : 'are'} in another installation — return needs --all-stores, or --store on that one.`,
+        ),
+      );
+    }
     console.log(pc.dim(`Ledger: ${ledger.path}`));
   });
 
