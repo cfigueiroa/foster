@@ -171,3 +171,45 @@ describe('a copy the app has written back', () => {
     expect(found!.reasons).toContain('already-a-copy');
   });
 });
+
+describe('the round trip that made the duplicates', () => {
+  /**
+   * The loop, as it happened: foster copies a session from A into B; the copy is
+   * opened in B, so the app saves it and the marker is gone; a later sweep from B
+   * into A no longer recognises it as a copy and carries it home, into the
+   * account that still has the original. Two rows, one conversation, both of
+   * them foster's doing.
+   *
+   * Fourteen of these were recorded on the reporter's ledger, every one a round
+   * trip back to the account it came from.
+   */
+  it('cannot start: a copy is still a copy after the app has saved it', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c9', cliSessionId: SHARED }),
+    );
+    const ledger = ledgerIn();
+
+    // A -> B.
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { store, ledger, target: NEW_ACCOUNT });
+    const [copy] = listActive(project(ledger.read()));
+
+    // The app opens it and writes it back through its own list of fields.
+    const persisted = JSON.parse(readFileSync(copy!.copyPath, 'utf8')) as Record<string, unknown>;
+    delete persisted._foster;
+    writeFileSync(copy!.copyPath, JSON.stringify(persisted), 'utf8');
+
+    // B -> A. The copy must not be offered, and must not land.
+    const outcomes = fosterSessions(
+      scanAccount(store, NEW_ACCOUNT, copySessionIds(ledger.read())),
+      { store, ledger, target: OLD_ACCOUNT },
+    );
+
+    expect(outcomes.filter((o) => o.status === 'fostered')).toHaveLength(0);
+    expect(outcomes[0]!.detail).toContain('already-a-copy');
+    // The origin account still has exactly the one card it started with.
+    expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
+  });
+});
