@@ -46,6 +46,40 @@ export function unfosterableReasons(data: CodeSessionData): Unfosterable[] {
   return reasons;
 }
 
+/**
+ * Rebuild the session a deletion threw away, from the conversation it left.
+ *
+ * Deleting removes the pointer and keeps the transcript, so everything worth
+ * having is still on disk — just not in a form the app will list. This
+ * reconstructs the pointer: the identity is the conversation's own id, which is
+ * the convention the app itself uses when it imports one, and the title, working
+ * directory and dates come from the transcript rather than being invented.
+ *
+ * `lastFocusedAt` matters more than it looks. A session without it counts as
+ * never opened and never appears under Recents, so a restore that left it unset
+ * would write a file that is correct and invisible.
+ */
+export function buildRestoredSession(facts: {
+  cliSessionId: string;
+  cwd?: string;
+  title?: string;
+  createdAt?: number;
+  lastActivityAt?: number;
+}): CodeSessionData {
+  const at = facts.lastActivityAt ?? facts.createdAt ?? Date.now();
+  return {
+    sessionId: `${SESSION_ID_PREFIX}${facts.cliSessionId}`,
+    cliSessionId: facts.cliSessionId,
+    ...(facts.cwd === undefined ? {} : { cwd: facts.cwd, originCwd: facts.cwd }),
+    // An untitled restore is still worth having; it just says what it is.
+    title: facts.title ?? '(recovered conversation)',
+    createdAt: facts.createdAt ?? at,
+    lastActivityAt: at,
+    lastFocusedAt: at,
+    isArchived: false,
+  };
+}
+
 export interface BuildCopyOptions {
   origin: AccountRef;
   prefix?: string;

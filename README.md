@@ -47,6 +47,31 @@ folder, with:
 The original file is never touched. `foster return` deletes the copy and the session is simply gone
 from the current account again.
 
+## Undoing a deletion
+
+Deleting a session in the app removes the pointer and **keeps the conversation**. The transcript
+stays under `~/.claude/projects`, and the app records the deletion by writing a `deleted_<id>` marker
+next to the sessions — one per identifier the session carried, each holding only the time.
+
+Those markers exist to stop the app's own recovery scan from offering back something you threw away
+on purpose. They do not stop a session file that points at that conversation from being written and
+loaded. So for an accidental deletion, writing a fresh pointer is the only route left, and it is the
+one `foster restore` takes:
+
+```bash
+foster restore          # what could come back, writing nothing
+foster restore --yes    # bring them back
+```
+
+Title, working directory and dates are read out of the transcript itself, so the restored session
+arrives named and dated rather than blank. What cannot come back is what was never in the
+conversation: the model it ran, its permission mode, and any MCP or worktree configuration. The
+marker is left exactly where it is — it is the app's record, not `foster`'s to erase — and the
+restored session is an ordinary copy, so `foster return` undoes it like any other.
+
+A conversation that some session still points at is not offered: it is not lost, and restoring it
+would only produce a duplicate.
+
 ## Why a restart is needed
 
 Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
@@ -111,7 +136,7 @@ That URL always serves the installer from the newest release. The installer itse
 was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
 running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
 specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.5.2/install.ps1`.
+`https://raw.githubusercontent.com/cfigueiroa/foster/v0.6.0/install.ps1`.
 
 When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
 clone the repo and use `npm run dev -- <command>`.
@@ -142,6 +167,7 @@ foster list      # sessions from other accounts that are available to foster
 foster label     # give an opaque account UUID a human name
 foster labels    # list the names given so far
 foster foster    # create the copies
+foster restore   # bring back sessions deleted in the app
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
 foster app       # status | quit | start | restart — drive Claude Desktop itself
@@ -232,9 +258,9 @@ The version lives in three files — `package.json`, `src/version.ts` (stamped i
 writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
 
 ```bash
-npm run version:set 0.5.2
-git commit -am "chore: release 0.5.2" && git tag -a v0.5.2 -m "foster v0.5.2"
-git push && git push origin v0.5.2
+npm run version:set 0.6.0
+git commit -am "chore: release 0.6.0" && git tag -a v0.6.0 -m "foster v0.6.0"
+git push && git push origin v0.6.0
 ```
 
 Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree

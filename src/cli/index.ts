@@ -23,6 +23,7 @@ import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
+import { findRestorable } from '../store/restore.js';
 import { scanAccount, summarise } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
@@ -501,6 +502,74 @@ sourceOptions(
   );
   await finish(store, Boolean(opts.restart));
 });
+
+program
+  .command('restore')
+  .description('bring back sessions deleted in the app, from the conversations they left behind')
+  .option('--title <text>', 'only conversations whose title contains this text')
+  .option('--session <id...>', 'only these conversations, by id or unique prefix')
+  .option('--to <accountUuid>', 'write them into this account instead')
+  .option('--to-org <organizationUuid>', 'write them into this organization')
+  .option('--prefix <text>', 'title prefix marking restored sessions', DEFAULT_PREFIX)
+  .option('--restart', 'restart Claude Desktop afterwards')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      title?: string;
+      session?: string[];
+      to?: string;
+      toOrg?: string;
+      prefix: string;
+      restart?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    let candidates = findRestorable(store).map((entry) => entry.session);
+
+    if (opts.title) {
+      candidates = applyFilter(candidates, { title: opts.title });
+    }
+    if (opts.session?.length) {
+      const { selected, unmatched } = selectByIds(candidates, opts.session);
+      if (unmatched.length > 0) {
+        throw new Error(
+          `No deleted conversation matches --session ${unmatched.join(', ')}.\n` +
+            'Run "foster restore" with no --yes to see what is available.',
+        );
+      }
+      candidates = selected;
+    }
+
+    if (candidates.length === 0) {
+      console.log('Nothing to restore: no deleted session still has its conversation on disk.');
+      return;
+    }
+
+    const dryRun = opts.dryRun || !opts.yes;
+    const outcomes = fosterSessions(candidates, {
+      store,
+      ledger,
+      target,
+      prefix: opts.prefix,
+      dryRun,
+    });
+
+    for (const outcome of outcomes) console.log(outcomeLine(outcome));
+    const counts = summariseOutcomes(outcomes);
+
+    if (dryRun) {
+      console.log(pc.bold(`\nDry run: ${counts.fostered} would be restored.`));
+      console.log(pc.dim('Re-run with --yes to write.'));
+      return;
+    }
+
+    console.log(pc.bold(`\n${counts.fostered} restored, ${counts.failed} failed.`));
+    await finish(store, Boolean(opts.restart));
+  });
 
 program
   .command('return')

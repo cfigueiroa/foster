@@ -16,6 +16,7 @@ import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import { findRestorable } from '../store/restore.js';
 import { scanAccount, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
@@ -97,6 +98,11 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
           label: 'Send them back',
           hint: 'remove the copies, restoring the previous state',
         },
+        {
+          value: 'restore',
+          label: 'Undo a deletion',
+          hint: 'bring back a session deleted in the app',
+        },
         { value: 'status', label: 'What foster has done', hint: 'copies currently in place' },
         {
           value: 'browse',
@@ -124,6 +130,9 @@ export async function runInteractive(store: StoreLayout, ledger: Ledger): Promis
         break;
       case 'return':
         await returnFlow(store, ledger);
+        break;
+      case 'restore':
+        await restoreFlow(store, ledger, target);
         break;
       case 'status':
         showStatus(ledger);
@@ -544,6 +553,7 @@ async function confirmAndWrite(
   current: AccountRef,
   sources: AccountRef[],
   selected: DiscoveredSession[],
+  verb = 'Foster',
 ): Promise<void> {
   let target = current;
   let prefix = DEFAULT_PREFIX;
@@ -551,9 +561,9 @@ async function confirmAndWrite(
   for (;;) {
     const labels = labelsOf(ledger);
     const decision = await select({
-      message: `Foster ${selected.length} session(s) into ${describeRef(labels, target)}?`,
+      message: `${verb} ${selected.length} session(s) into ${describeRef(labels, target)}?`,
       options: [
-        { value: 'go', label: 'Yes, foster them' },
+        { value: 'go', label: `Yes, ${verb.toLowerCase()} them` },
         {
           value: 'elsewhere',
           label: 'Send them somewhere else',
@@ -596,7 +606,7 @@ async function confirmAndWrite(
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
     if (outcomes.length > 10) log.message(pc.dim(`… and ${outcomes.length - 10} more`));
 
-    log.success(`${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`);
+    log.success(`${counts.fostered} written, ${counts.skipped} skipped, ${counts.failed} failed.`);
     if (counts.fostered === 0) return;
 
     if (refKey(target) !== refKey(current)) {
@@ -615,6 +625,46 @@ async function confirmAndWrite(
     if (error instanceof AppRunningError) log.error(error.message);
     else throw error;
   }
+}
+
+/**
+ * Undo a deletion.
+ *
+ * A session deleted in the app loses its pointer and keeps its conversation. The
+ * app will not offer to bring it back — it records the deletion precisely so its
+ * own recovery scan skips it — but writing a fresh pointer at that conversation
+ * works, and for an accidental deletion nothing else does.
+ */
+async function restoreFlow(store: StoreLayout, ledger: Ledger, current: AccountRef): Promise<void> {
+  const restorable = findRestorable(store);
+  if (restorable.length === 0) {
+    log.info('Nothing to undo: no deleted session still has its conversation on disk.');
+    return;
+  }
+
+  const picked = await pickMany(
+    `${restorable.length} deleted conversation(s) still on disk. Bring back which?`,
+    restorable.slice(0, PICK_LIMIT).map((entry, index) => ({
+      value: String(index),
+      label: entry.facts.title ?? '(recovered conversation)',
+      hint: `deleted ${formatAge(entry.tombstone.deletedAt)}${
+        entry.facts.cwd ? ` · ${entry.facts.cwd}` : ''
+      }`,
+    })),
+  );
+  if (aborted(picked) || picked.length === 0) {
+    log.info('Nothing restored.');
+    return;
+  }
+
+  const selected = picked.map((index) => restorable[Number(index)]!.session);
+  note(
+    'These are rebuilt from the conversation on disk. Titles and dates come from\n' +
+      'the transcript; the model and permission settings the session had are gone.',
+    'What comes back',
+  );
+
+  await confirmAndWrite(store, ledger, current, [], selected, 'Restore');
 }
 
 async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
