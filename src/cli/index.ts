@@ -80,7 +80,7 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   // the whole thing, since the installations it has been used in are recorded
   // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
-  return { store: resolveStoreArg(opts.store, ledger.read()), ledger };
+  return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
 }
 
 function print(value: unknown): void {
@@ -284,7 +284,7 @@ function resolveSourceStore(
   // Abbreviated the same way as --store: the two flags name the same kind of
   // thing, and one of them accepting `work` while the other demanded the whole
   // path would be a distinction without a reason.
-  return fromStore ? resolveStoreArg(fromStore, ledger.read()) : target;
+  return fromStore ? resolveStoreArg(fromStore, () => ledger.read()) : target;
 }
 
 function sameStore(a: StoreLayout, b: StoreLayout): boolean {
@@ -390,7 +390,8 @@ program
     // Resolved leniently, because this is the command you reach for when nothing
     // resolves: refusing to list the installations because it could not pick one
     // of them would be exactly backwards.
-    const current = resolveQuietly(opts.store, ledger.read());
+    const current = resolveQuietly(opts.store, () => ledger.read());
+    const labels = project(ledger.read()).labels;
 
     if (opts.json) {
       print(
@@ -398,6 +399,8 @@ program
           root: known.root,
           knownBy: known.hint,
           running: known.running,
+          account: known.accountUuid ?? null,
+          label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
           isCurrent: current ? samePath(known.root, current.root) : false,
         })),
       );
@@ -413,7 +416,13 @@ program
     for (const known of stores) {
       const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
       const state = known.running ? `${known.hint}, running` : known.hint;
-      console.log(`${marker} ${known.root} ${pc.dim(`(${state})`)}`);
+      // Which account an installation holds is the question a second profile
+      // exists to answer, and a store with none is one that fostering into will
+      // refuse — better said here than discovered there.
+      const who = known.accountUuid
+        ? (labels.get(known.accountUuid) ?? shortId(known.accountUuid))
+        : 'not signed in';
+      console.log(`${marker} ${known.root} ${pc.dim(`(${state}) ${who}`)}`);
     }
     const marked = current && stores.some((known) => samePath(known.root, current.root));
     console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
@@ -422,10 +431,10 @@ program
 /** The store a bare command would use, or nothing when there is not one. */
 function resolveQuietly(
   override: string | undefined,
-  events: LedgerEvent[],
+  readEvents: () => LedgerEvent[],
 ): StoreLayout | undefined {
   try {
-    return resolveStoreArg(override, events);
+    return resolveStoreArg(override, readEvents);
   } catch {
     return undefined;
   }

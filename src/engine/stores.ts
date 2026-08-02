@@ -10,6 +10,7 @@ import type { StoreLayout } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
+import { readConfig } from '../store/config.js';
 
 /**
  * Every installation foster can name without being told.
@@ -32,6 +33,13 @@ export interface KnownStore {
    */
   hint: 'installed app' | 'profile' | 'used before';
   running: boolean;
+  /**
+   * The account this installation last recorded, when it has one. With profiles
+   * the whole point is that each holds a different account, so which one is the
+   * question being asked — and a store with none has not been signed into yet,
+   * which is why fostering into it refuses.
+   */
+  accountUuid?: string;
 }
 
 /** Just the read: this takes the ledger's events, not the object holding them. */
@@ -53,7 +61,13 @@ export function knownStores(
     const key = directoryKey(store.root);
     if (key === undefined || seen.has(key)) return;
     seen.add(key);
-    stores.push({ root: store.root, hint, running: lockfileHeld(store) });
+    const accountUuid = readConfig(store).lastKnownAccountUuid;
+    stores.push({
+      root: store.root,
+      hint,
+      running: lockfileHeld(store),
+      ...(accountUuid ? { accountUuid } : {}),
+    });
   };
 
   for (const dir of candidateStoreRoots(env)) offer(dir, 'installed app');
@@ -79,7 +93,10 @@ export function knownStores(
  */
 export function resolveStoreArg(
   arg: string | undefined,
-  events: LedgerEvent[],
+  // A thunk, not the events: the two answers that need no ledger at all are the
+  // two every ordinary run takes, and reading it for them would be work done to
+  // be thrown away.
+  readEvents: () => LedgerEvent[],
   env: NodeJS.ProcessEnv = process.env,
   list: ProcessLister = readProcesses,
 ): StoreLayout {
@@ -87,13 +104,13 @@ export function resolveStoreArg(
   if (existsSync(arg)) return layoutFor(arg);
 
   const wanted = arg.toLowerCase();
-  const stores = knownStores(events, env, list);
+  const stores = knownStores(readEvents(), env, list);
   const matches = stores.filter((store) => store.root.toLowerCase().includes(wanted));
 
   if (matches.length === 1) return layoutFor(matches[0]!.root);
   if (matches.length > 1) {
-    const list = matches.map((store) => `  ${store.root}`).join('\n');
-    throw new Error(`--store "${arg}" matches ${matches.length} installations:\n${list}`);
+    const lines = matches.map((store) => `  ${store.root}`).join('\n');
+    throw new Error(`--store "${arg}" matches ${matches.length} installations:\n${lines}`);
   }
 
   // Nothing on disk and nothing known: a typo, most likely, and continuing would

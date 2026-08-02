@@ -300,8 +300,14 @@ them is reported rather than guessed at, and one that matches nothing and is not
 error rather than an empty store.
 
 `foster stores` lists the installations it can name without being told — the installed app, whatever
-is running, and the profiles the ledger has been used in — which is what to pass to `--store`. The
-menu offers the same list, so a profile you have worked in once never has to be typed again.
+is running, and the profiles the ledger has been used in — with the account each one holds, which is
+the question a second profile exists to answer. The menu offers the same list, so a profile you have
+worked in once never has to be typed again.
+
+```
+* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) 9866b1e8
+  D:\Claude-Work                           (profile, running) not signed in
+```
 
 `scan`, `list`, `status`, `stores`, `doctor` and `app status` take `--json`.
 

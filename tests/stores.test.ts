@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -77,6 +77,25 @@ describe('knownStores', () => {
     expect(found[0]!.hint).toBe('used before');
   });
 
+  it('reports the account each installation holds, and when it has none', () => {
+    // The question a second profile exists to answer. A store with no account
+    // has not been signed into, which is why fostering into it refuses.
+    const signedIn = makeStore();
+    writeFileSync(
+      signedIn.configFile,
+      JSON.stringify({ lastKnownAccountUuid: NEW_ACCOUNT.accountUuid }),
+      'utf8',
+    );
+    const fresh = mkdtempSync(path.join(tmpdir(), 'foster-signed-out-'));
+
+    const found = knownStores([], { CLAUDE_USER_DATA_DIR: signedIn.root }, () => running(fresh));
+
+    expect(found.find((store) => store.root === signedIn.root)?.accountUuid).toBe(
+      NEW_ACCOUNT.accountUuid,
+    );
+    expect(found.find((store) => store.root === path.resolve(fresh))?.accountUuid).toBeUndefined();
+  });
+
   it('names one directory once, however many ways lead to it', () => {
     // The installed store, reached again through the ledger. Listing it twice
     // would read as a second installation.
@@ -102,14 +121,28 @@ describe('what --store names', () => {
    */
   it('takes a directory that exists as a directory', () => {
     const store = makeStore();
-    expect(resolveStoreArg(store.root, [], {}, () => []).root).toBe(store.root);
+    expect(
+      resolveStoreArg(
+        store.root,
+        () => [],
+        {},
+        () => [],
+      ).root,
+    ).toBe(store.root);
   });
 
   it('accepts a distinctive piece of a known path', () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'foster-distinctive-'));
     const piece = path.basename(profile).slice(-8);
 
-    expect(resolveStoreArg(piece, [], {}, () => running(profile)).root).toBe(path.resolve(profile));
+    expect(
+      resolveStoreArg(
+        piece,
+        () => [],
+        {},
+        () => running(profile),
+      ).root,
+    ).toBe(path.resolve(profile));
   });
 
   it('refuses a piece that matches two installations', () => {
@@ -117,12 +150,21 @@ describe('what --store names', () => {
     const two = mkdtempSync(path.join(tmpdir(), 'foster-twin-'));
     const list = () => [...running(one), ...running(two).map((row) => ({ ...row, pid: 501 }))];
 
-    expect(() => resolveStoreArg('foster-twin-', [], {}, list)).toThrow(/matches 2 installations/);
+    expect(() => resolveStoreArg('foster-twin-', () => [], {}, list)).toThrow(
+      /matches 2 installations/,
+    );
   });
 
   it('says so rather than resolving a typo to an empty store', () => {
     // Silently returning a layout for a path that is not there would report no
     // sessions, which reads exactly like a store that has none.
-    expect(() => resolveStoreArg('nowhere-at-all', [], {}, () => [])).toThrow(/not a directory/);
+    expect(() =>
+      resolveStoreArg(
+        'nowhere-at-all',
+        () => [],
+        {},
+        () => [],
+      ),
+    ).toThrow(/not a directory/);
   });
 });

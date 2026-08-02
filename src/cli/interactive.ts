@@ -347,12 +347,21 @@ async function pickStore(
   ledger: Ledger,
   message: string,
 ): Promise<Maybe<StoreLayout>> {
+  const labels = labelsOf(ledger);
   const options = knownStores(ledger.read())
     .filter((known) => !samePath(known.root, current.root))
     .map((known) => ({
       value: known.root,
       label: known.root,
-      hint: known.running ? `${known.hint} · running` : known.hint,
+      // Which account it holds is the reason to pick one profile over another,
+      // and a store with none is one that acting in it will refuse.
+      hint: [
+        known.hint,
+        ...(known.running ? ['running'] : []),
+        known.accountUuid
+          ? (labels.get(known.accountUuid) ?? short(known.accountUuid))
+          : 'not signed in',
+      ].join(' · '),
     }));
 
   const picked = await selectOrBack(message, [
@@ -373,7 +382,7 @@ async function pickStore(
   try {
     // The same resolution the flags use, so a path typed here can be a piece of
     // one — and a typo is reported rather than turning into an empty store.
-    return resolveStoreArg(root, ledger.read());
+    return resolveStoreArg(root, () => ledger.read());
   } catch (error) {
     log.error(error instanceof Error ? error.message : String(error));
     return BACK;
