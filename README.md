@@ -294,6 +294,11 @@ you are already signed into. Sessions that could never appear in the sidebar are
 scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
 refuses to load. `list --all` shows them anyway.
 
+`--store` and `--from-store` take a distinctive piece of a path as well as the whole thing, matched
+against the installations below — `--store work` finds `D:\Claude-Work`. A piece that matches two of
+them is reported rather than guessed at, and one that matches nothing and is not a directory is an
+error rather than an empty store.
+
 `foster stores` lists the installations it can name without being told — the installed app, whatever
 is running, and the profiles the ledger has been used in — which is what to pass to `--store`. The
 menu offers the same list, so a profile you have worked in once never has to be typed again.

@@ -7,11 +7,9 @@ import {
   comparablePath,
   directoryKey,
   storeIdentity,
-  layoutFor,
   listAccountDirs,
   listAgentAccountDirs,
   pickActiveOrganization,
-  resolveStore,
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
@@ -25,10 +23,11 @@ import {
   startDesktop,
 } from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
-import { knownStores } from '../engine/stores.js';
+import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
+import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, summarise } from '../store/scanner.js';
@@ -77,9 +76,11 @@ program
 
 function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const opts = command.optsWithGlobals<GlobalOptions>();
-  const store = resolveStore(opts.store);
+  // The ledger first: it is what lets --store take a piece of a path rather than
+  // the whole thing, since the installations it has been used in are recorded
+  // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
-  return { store, ledger };
+  return { store: resolveStoreArg(opts.store, ledger.read()), ledger };
 }
 
 function print(value: unknown): void {
@@ -275,8 +276,15 @@ function sourceOptions(command: Command): Command {
  * from the one this process resolved. Reading from one and writing into another
  * is the same operation the engine already performs — only the scan moves.
  */
-function resolveSourceStore(target: StoreLayout, fromStore: string | undefined): StoreLayout {
-  return fromStore ? resolveStore(fromStore) : target;
+function resolveSourceStore(
+  target: StoreLayout,
+  fromStore: string | undefined,
+  ledger: Ledger,
+): StoreLayout {
+  // Abbreviated the same way as --store: the two flags name the same kind of
+  // thing, and one of them accepting `work` while the other demanded the whole
+  // path would be a distinction without a reason.
+  return fromStore ? resolveStoreArg(fromStore, ledger.read()) : target;
 }
 
 function sameStore(a: StoreLayout, b: StoreLayout): boolean {
@@ -298,8 +306,7 @@ program
       return;
     }
 
-    // Reuse the roots already probed rather than walking the package directory twice.
-    const store = opts.store ? resolveStore(opts.store) : layoutFor(roots[0]!);
+    const { store } = context(this);
     const config = readConfig(store);
     const app = inspectApp(store);
 
@@ -383,7 +390,7 @@ program
     // Resolved leniently, because this is the command you reach for when nothing
     // resolves: refusing to list the installations because it could not pick one
     // of them would be exactly backwards.
-    const current = resolveQuietly(opts.store);
+    const current = resolveQuietly(opts.store, ledger.read());
 
     if (opts.json) {
       print(
@@ -413,9 +420,12 @@ program
   });
 
 /** The store a bare command would use, or nothing when there is not one. */
-function resolveQuietly(override?: string): StoreLayout | undefined {
+function resolveQuietly(
+  override: string | undefined,
+  events: LedgerEvent[],
+): StoreLayout | undefined {
   try {
-    return resolveStore(override);
+    return resolveStoreArg(override, events);
   } catch {
     return undefined;
   }
@@ -459,7 +469,7 @@ sourceOptions(
   .option('--all', 'also show sessions that could never appear in the sidebar')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const { store } = context(this);
+    const { store, ledger } = context(this);
     const opts = this.opts<{
       from?: string;
       fromOrg?: string;
@@ -467,7 +477,7 @@ sourceOptions(
       all?: boolean;
       json?: boolean;
     }>();
-    const sourceStore = resolveSourceStore(store, opts.fromStore);
+    const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
     const accounts = listAccountDirs(sourceStore);
     // Everything in another store is a candidate; only within one store does the
     // account in use need excluding, because there its sessions are already here.
@@ -548,7 +558,7 @@ sourceOptions(
   }>();
 
   const target = resolveDestination(store, listAccountDirs(store), opts);
-  const sourceStore = resolveSourceStore(store, opts.fromStore);
+  const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
   const crossStore = !sameStore(sourceStore, store);
   const filter = filterFrom(opts);
 

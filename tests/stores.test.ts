@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { knownStores } from '../src/engine/stores.js';
+import { knownStores, resolveStoreArg } from '../src/engine/stores.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import type { LedgerEvent } from '../src/ledger/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
@@ -90,5 +90,39 @@ describe('knownStores', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0]!.hint).toBe('installed app');
+  });
+});
+
+describe('what --store names', () => {
+  /**
+   * The paths are long and a profile's is nobody's idea of memorable, so a
+   * distinctive piece of one is accepted — the same abbreviation the identifier
+   * flags already allow. The guess decides which installation gets written to,
+   * so an ambiguous one is refused rather than resolved.
+   */
+  it('takes a directory that exists as a directory', () => {
+    const store = makeStore();
+    expect(resolveStoreArg(store.root, [], {}, () => []).root).toBe(store.root);
+  });
+
+  it('accepts a distinctive piece of a known path', () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-distinctive-'));
+    const piece = path.basename(profile).slice(-8);
+
+    expect(resolveStoreArg(piece, [], {}, () => running(profile)).root).toBe(path.resolve(profile));
+  });
+
+  it('refuses a piece that matches two installations', () => {
+    const one = mkdtempSync(path.join(tmpdir(), 'foster-twin-'));
+    const two = mkdtempSync(path.join(tmpdir(), 'foster-twin-'));
+    const list = () => [...running(one), ...running(two).map((row) => ({ ...row, pid: 501 }))];
+
+    expect(() => resolveStoreArg('foster-twin-', [], {}, list)).toThrow(/matches 2 installations/);
+  });
+
+  it('says so rather than resolving a typo to an empty store', () => {
+    // Silently returning a layout for a path that is not there would report no
+    // sessions, which reads exactly like a store that has none.
+    expect(() => resolveStoreArg('nowhere-at-all', [], {}, () => [])).toThrow(/not a directory/);
   });
 });

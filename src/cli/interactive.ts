@@ -6,7 +6,6 @@ import {
   listAccountDirs,
   listAgentAccountDirs,
   pickActiveOrganization,
-  resolveStore,
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
@@ -19,7 +18,7 @@ import {
   type DesktopState,
 } from '../engine/desktop.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
-import { knownStores } from '../engine/stores.js';
+import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
@@ -372,7 +371,9 @@ async function pickStore(
   }
 
   try {
-    return resolveStore(root);
+    // The same resolution the flags use, so a path typed here can be a piece of
+    // one — and a typo is reported rather than turning into an empty store.
+    return resolveStoreArg(root, ledger.read());
   } catch (error) {
     log.error(error instanceof Error ? error.message : String(error));
     return BACK;

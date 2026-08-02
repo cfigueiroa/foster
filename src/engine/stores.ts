@@ -1,4 +1,12 @@
-import { candidateStoreRoots, directoryKey, layoutFor, storeRootOfCopy } from '../domain/paths.js';
+import { existsSync } from 'node:fs';
+import {
+  candidateStoreRoots,
+  directoryKey,
+  layoutFor,
+  resolveStore,
+  storeRootOfCopy,
+} from '../domain/paths.js';
+import type { StoreLayout } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
@@ -55,4 +63,44 @@ export function knownStores(
   }
 
   return stores;
+}
+
+/**
+ * What `--store` names: a directory, or a distinctive piece of one.
+ *
+ * The paths are long, and a profile's is the sort of thing nobody remembers
+ * exactly — `--store work` for `D:\Claude-Work` is the same abbreviation the
+ * identifier flags already allow. A path that exists is always taken as a path,
+ * so this can only add meanings, never change one.
+ *
+ * An abbreviation matching two installations is reported rather than guessed at,
+ * for the same reason `--from` refuses an ambiguous prefix: with `--store` the
+ * guess decides which installation gets written to.
+ */
+export function resolveStoreArg(
+  arg: string | undefined,
+  events: LedgerEvent[],
+  env: NodeJS.ProcessEnv = process.env,
+  list: ProcessLister = readProcesses,
+): StoreLayout {
+  if (arg === undefined) return resolveStore(undefined, env);
+  if (existsSync(arg)) return layoutFor(arg);
+
+  const wanted = arg.toLowerCase();
+  const stores = knownStores(events, env, list);
+  const matches = stores.filter((store) => store.root.toLowerCase().includes(wanted));
+
+  if (matches.length === 1) return layoutFor(matches[0]!.root);
+  if (matches.length > 1) {
+    const list = matches.map((store) => `  ${store.root}`).join('\n');
+    throw new Error(`--store "${arg}" matches ${matches.length} installations:\n${list}`);
+  }
+
+  // Nothing on disk and nothing known: a typo, most likely, and continuing would
+  // quietly report an empty store rather than say so.
+  const known = stores.map((store) => `  ${store.root}`).join('\n');
+  throw new Error(
+    `--store "${arg}" is not a directory, and no installation foster knows about matches it.` +
+      (known ? `\nKnown installations:\n${known}` : ''),
+  );
 }
