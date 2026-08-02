@@ -747,7 +747,7 @@ async function desktopFlow(store: StoreLayout, target: AccountRef): Promise<void
  * Returns false when foster must not do it at all — which is the case whenever
  * foster is itself running inside the app.
  */
-async function confirmShutdown(state: DesktopState, verb: string): Promise<boolean> {
+async function confirmShutdown(state: DesktopState, verb: 'quit' | 'restart'): Promise<boolean> {
   if (state.selfHosted) {
     log.error(
       `foster is running inside Claude Desktop, so it cannot ${verb} it — that would kill this session.`,
@@ -762,12 +762,14 @@ async function confirmShutdown(state: DesktopState, verb: string): Promise<boole
     );
   }
 
-  const go = await confirm({ message: `${verb} Claude Desktop?`, initialValue: false });
+  // Capitalised only here: the verb reads mid-sentence in the refusal above.
+  const prompt = verb[0]!.toUpperCase() + verb.slice(1);
+  const go = await confirm({ message: `${prompt} Claude Desktop?`, initialValue: false });
   return !isCancel(go) && go;
 }
 
 async function quitFlow(store: StoreLayout, state: DesktopState): Promise<boolean> {
-  if (!(await confirmShutdown(state, 'Quit'))) return false;
+  if (!(await confirmShutdown(state, 'quit'))) return false;
   return closeDesktop(store);
 }
 
@@ -827,7 +829,7 @@ async function startFlow(store: StoreLayout): Promise<boolean> {
 
 async function restartFlow(store: StoreLayout, state: DesktopState): Promise<void> {
   if (state.running) {
-    if (!(await confirmShutdown(state, 'Restart'))) return;
+    if (!(await confirmShutdown(state, 'restart'))) return;
     if (!(await closeDesktop(store))) return;
   }
   await startFlow(store);
