@@ -272,6 +272,9 @@ foster restore   # bring back sessions deleted in the app
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
 foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster transcript  # read a conversation's transcript, by cliSessionId
+foster resume    # send one prompt to an existing conversation, headlessly
+foster live      # conversations a claude process is holding open right now
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
@@ -318,7 +321,15 @@ worked in once never has to be typed again.
   D:\Claude-Work                           (profile, running) not signed in
 ```
 
-`scan`, `list`, `status`, `stores`, `doctor` and `app status` take `--json`.
+`transcript`, `resume` and `live` are the deterministic counterparts of what the agent (below) does
+with its tools — for when you know exactly what you want and a model in the middle would only add
+cost. `foster transcript <cliSessionId>` prints the most recent part of a conversation (`--head` for
+the start, `--chars` for how much; the id comes from `list --json` or `status --json`).
+`foster resume <cliSessionId> "<prompt>"` runs `claude -p --resume` behind the same gate the agent
+has: it refuses while a live `claude` process holds that conversation, because two writers on one
+transcript is how transcripts get corrupted. `foster live` shows exactly what is being held.
+
+`scan`, `list`, `status`, `stores`, `doctor`, `app status`, `transcript` and `live` take `--json`.
 
 ## Agent
 
@@ -364,8 +375,14 @@ foster agent --setup
 ```
 
 which runs a normal npm install into `~/.foster/agent`, where foster finds it from then on. The
-model itself runs through your existing Claude Code sign-in (or `ANTHROPIC_API_KEY`). `--model`
-overrides the model and `--max-turns` bounds the run (default 50).
+model itself runs through your existing Claude Code sign-in (or `ANTHROPIC_API_KEY`).
+
+**The default model is Haiku** — the tools do the heavy lifting and most agent tasks here are
+orchestration, so the cheap tier ($1/$5 per million tokens, roughly a fifth of Opus) is the right
+default. Pass `--model sonnet` or `--model opus` when the task needs more judgment — cross-reading
+many transcripts, deciding what is worth fostering — and `--max-turns` bounds the run (default 50).
+And before reaching for the agent at all: if the task is a known, mechanical one, the deterministic
+commands above do it for free.
 
 ## Safety model
 
