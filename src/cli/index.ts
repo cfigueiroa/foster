@@ -8,11 +8,10 @@ import {
   directoryKey,
   storeIdentity,
   listAccountDirs,
-  listAgentAccountDirs,
-  pickActiveOrganization,
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
+import { currentAccount, requireCurrentAccount } from '../engine/account.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
@@ -39,6 +38,8 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, summarise } from '../store/scanner.js';
+import { runAgent } from '../agent/run.js';
+import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince, selectByIds, type SessionFilter } from './filters.js';
@@ -93,56 +94,6 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
 
 function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
-}
-
-/**
- * The account the app currently populates its sidebar from.
- *
- * The organization is only discoverable from a directory name, so a brand-new
- * account — which has a config entry but no session directory yet — falls back to
- * the agent-mode tree the app creates before any Code session exists.
- */
-function currentAccount(
-  store: StoreLayout,
-  accounts: AccountRef[],
-  organizationUuid?: string,
-): AccountRef | undefined {
-  const accountUuid = readConfig(store).lastKnownAccountUuid;
-  if (!accountUuid) return undefined;
-  if (organizationUuid) return { accountUuid, organizationUuid };
-
-  // An account can own several organizations; only one is the directory the
-  // sidebar reads, and the config does not record which.
-  return (
-    pickActiveOrganization(
-      accounts.filter((account) => account.accountUuid === accountUuid),
-      store,
-    ) ?? listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
-  );
-}
-
-function requireCurrentAccount(
-  store: StoreLayout,
-  accounts: AccountRef[],
-  organizationUuid?: string,
-): AccountRef {
-  const account = currentAccount(store, accounts, organizationUuid);
-  if (account) return account;
-
-  const accountUuid = readConfig(store).lastKnownAccountUuid;
-  if (!accountUuid) {
-    // Naming the store matters once profiles are in play: each one signs in
-    // separately, and "open Claude Desktop once" reads as advice about the app
-    // the reader already has open — which is usually the other installation.
-    throw new Error(
-      `No account is recorded for ${store.root}.\n` +
-        'Open Claude Desktop on that installation and sign in once — each installation signs in separately.',
-    );
-  }
-  throw new Error(
-    `Found the signed-in account ${shortId(accountUuid)}, but not its organization: this account has no session directory yet.\n` +
-      'Create one session in Claude Desktop so the directory exists, or pass --to-org <organizationUuid>.',
-  );
 }
 
 /**
@@ -941,6 +892,67 @@ program
       return;
     }
     for (const [accountUuid, name] of labels) console.log(`  ${shortId(accountUuid)}  ${name}`);
+  });
+
+program
+  .command('agent')
+  .summary("run a Claude agent with foster's operations as its tools")
+  .description(
+    "Run a Claude agent with foster's operations as its tools.\n\n" +
+      'The agent gets an in-process MCP server (foster_session_mgmt) wrapping the same engine\n' +
+      'as the CLI, behind the same gates: every mutation is a dry run unless this command was\n' +
+      'started with --yes, and removing copies still requires Claude Desktop to be closed.\n\n' +
+      'Needs the Claude Agent SDK, installed once with --setup, and a signed-in Claude Code\n' +
+      'CLI (or ANTHROPIC_API_KEY) for the model itself.',
+  )
+  .argument('[task]', 'what the agent should do, in plain language')
+  .option('--yes', 'let the agent actually write; without it every mutation is a dry run')
+  .option('--model <model>', 'model override for the run')
+  .option('--max-turns <n>', 'stop the agent after this many turns', '50')
+  .option(
+    '--setup',
+    'install the Claude Agent SDK into ~/.foster/agent, then run the task if given',
+  )
+  .action(async function (this: Command, task?: string) {
+    const opts = this.opts<{ yes?: boolean; model?: string; maxTurns: string; setup?: boolean }>();
+
+    if (opts.setup) installAgentSdk();
+    if (!task) {
+      if (!opts.setup) throw new Error('Give the agent a task: foster agent "<what to do>"');
+      return;
+    }
+
+    const maxTurns = Number(opts.maxTurns);
+    if (!Number.isInteger(maxTurns) || maxTurns <= 0) {
+      throw new Error(`--max-turns must be a positive integer, not "${opts.maxTurns}".`);
+    }
+
+    const { store, ledger } = context(this);
+    if (!opts.yes) {
+      console.log(
+        pc.dim(
+          'Dry-run mode: the agent can read everything but write nothing (--yes enables writes).',
+        ),
+      );
+    }
+
+    try {
+      process.exitCode = await runAgent({
+        task,
+        store,
+        ledger,
+        allowWrites: Boolean(opts.yes),
+        maxTurns,
+        ...(opts.model ? { model: opts.model } : {}),
+      });
+    } catch (error) {
+      if (error instanceof AgentSdkNotInstalledError) {
+        console.error(pc.red(error.message));
+        process.exitCode = 1;
+        return;
+      }
+      throw error;
+    }
   });
 
 /* ------------------------------------------------------------------ *
