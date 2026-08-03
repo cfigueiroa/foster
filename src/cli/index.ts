@@ -40,6 +40,10 @@ import { findRestorable } from '../store/restore.js';
 import { scanAccount, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
+import { bareSessionId } from '../domain/naming.js';
+import { resumeConversation } from '../engine/resume.js';
+import { liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
+import { viewTranscript } from '../store/transcripts.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince, selectByIds, type SessionFilter } from './filters.js';
@@ -895,6 +899,105 @@ program
   });
 
 program
+  .command('transcript')
+  .summary("read a conversation's transcript")
+  .description(
+    "Read part of a conversation's transcript — the JSONL under ~/.claude*/projects.\n" +
+      'The id is the cliSessionId that `list --json` and `status --json` report.\n' +
+      'Reads the most recent part by default; --head reads the start instead.',
+  )
+  .argument('<cliSessionId>', 'the conversation id')
+  .option('--head', 'read the start of the conversation instead of the most recent part')
+  .option('--chars <n>', 'how much to read', '20000')
+  .option('--json', 'facts and text as JSON')
+  .action(function (this: Command, cliSessionId: string) {
+    const opts = this.opts<{ head?: boolean; chars: string; json?: boolean }>();
+    const chars = Number(opts.chars);
+    if (!Number.isInteger(chars) || chars <= 0) {
+      throw new Error(`--chars must be a positive integer, not "${opts.chars}".`);
+    }
+
+    const view = viewTranscript(
+      bareSessionId(cliSessionId),
+      process.env,
+      opts.head ? 'head' : 'tail',
+      chars,
+    );
+
+    if (opts.json) {
+      print(view);
+      return;
+    }
+    console.error(
+      pc.dim(
+        `${view.path}\n${view.title ?? '(untitled)'} — ${view.sizeBytes} bytes` +
+          (view.truncated ? `, showing the ${view.part}` : ''),
+      ),
+    );
+    // The text goes to stdout on its own so the command pipes cleanly.
+    console.log(view.text);
+  });
+
+program
+  .command('resume')
+  .summary('send one prompt to an existing conversation, headlessly')
+  .description(
+    'Send one prompt to an existing conversation via `claude -p --resume` and print the answer.\n\n' +
+      'This appends to the conversation, so it refuses when a live claude process is holding\n' +
+      'the conversation open — two writers on one transcript is how transcripts get corrupted.\n' +
+      '`foster live` shows what is being held right now.',
+  )
+  .argument('<cliSessionId>', 'the conversation id')
+  .argument('<prompt...>', 'what to say to it')
+  .option('--timeout <seconds>', 'give up after this long', '300')
+  .action(function (this: Command, cliSessionId: string, prompt: string[]) {
+    const opts = this.opts<{ timeout: string }>();
+    const timeout = Number(opts.timeout);
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new Error(`--timeout must be a positive number of seconds, not "${opts.timeout}".`);
+    }
+
+    const result = resumeConversation(cliSessionId, prompt.join(' '), {
+      timeoutMs: timeout * 1000,
+    });
+    if ('refused' in result) {
+      console.error(pc.yellow(result.refused));
+      process.exitCode = 1;
+      return;
+    }
+    console.log(result.output);
+  });
+
+program
+  .command('live')
+  .description('conversations a claude process is holding open right now')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const sessions = liveSessions(sessionRegistryRoots(process.env));
+
+    if (this.opts<{ json?: boolean }>().json) {
+      print(
+        sessions.map((s) => ({
+          pid: s.pid,
+          cliSessionId: s.sessionId,
+          cwd: s.cwd ?? null,
+          registryFile: s.registryFile,
+        })),
+      );
+      return;
+    }
+
+    if (sessions.length === 0) {
+      console.log('No live claude sessions.');
+      return;
+    }
+    for (const s of sessions) {
+      console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(s.cwd ?? '')}`);
+    }
+    console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
+  });
+
+program
   .command('agent')
   .summary("run a Claude agent with foster's operations as its tools")
   .description(
@@ -912,14 +1015,17 @@ program
     '--yes',
     'allow writing: foster mutations apply, and shell/file/web tools run unrestricted',
   )
-  .option('--model <model>', 'model override for the run')
+  // Haiku on purpose: the tools do the heavy lifting and most agent tasks here
+  // are orchestration, so the cheap tier is the right default; --model opus is
+  // one flag away for the tasks that need judgment.
+  .option('--model <model>', 'model for the run — haiku, sonnet, opus or a full id', 'haiku')
   .option('--max-turns <n>', 'stop the agent after this many turns', '50')
   .option(
     '--setup',
     'install the Claude Agent SDK into ~/.foster/agent, then run the task if given',
   )
   .action(async function (this: Command, task?: string) {
-    const opts = this.opts<{ yes?: boolean; model?: string; maxTurns: string; setup?: boolean }>();
+    const opts = this.opts<{ yes?: boolean; model: string; maxTurns: string; setup?: boolean }>();
 
     if (opts.setup) installAgentSdk();
     if (!task) {
@@ -948,7 +1054,7 @@ program
         ledger,
         allowWrites: Boolean(opts.yes),
         maxTurns,
-        ...(opts.model ? { model: opts.model } : {}),
+        model: opts.model,
       });
     } catch (error) {
       if (error instanceof AgentSdkNotInstalledError) {

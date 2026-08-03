@@ -122,6 +122,80 @@ export function readTranscriptFacts(file: string, cliSessionId: string): Transcr
   return facts;
 }
 
+export interface TranscriptView {
+  cliSessionId: string;
+  path: string;
+  title?: string;
+  cwd?: string;
+  createdAt?: number;
+  lastActivityAt?: number;
+  sizeBytes: number;
+  part: 'head' | 'tail';
+  /** True when the file holds more than was read. */
+  truncated: boolean;
+  /**
+   * Raw JSONL — one record per line; on a truncated read the first or last line
+   * can be a fragment.
+   */
+  text: string;
+}
+
+/**
+ * One conversation's facts plus a readable slice of its transcript — the start,
+ * or (default) the most recent part, which is where "what happened here?" is
+ * usually answered.
+ */
+export function viewTranscript(
+  cliSessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  part: 'head' | 'tail' = 'tail',
+  maxChars = 20_000,
+): TranscriptView {
+  const file = indexTranscripts(transcriptRoots(env)).get(cliSessionId);
+  if (!file) {
+    throw new Error(
+      `No transcript found for conversation ${cliSessionId}. ` +
+        'Only conversations that ran on this machine have one.',
+    );
+  }
+
+  const facts = readTranscriptFacts(file, cliSessionId);
+  const chars = Math.max(1000, Math.min(maxChars, 200_000));
+  const { text, sizeBytes } = readPart(file, part, chars);
+
+  return {
+    cliSessionId,
+    path: file,
+    ...(facts.title !== undefined ? { title: facts.title } : {}),
+    ...(facts.cwd !== undefined ? { cwd: facts.cwd } : {}),
+    ...(facts.createdAt !== undefined ? { createdAt: facts.createdAt } : {}),
+    ...(facts.lastActivityAt !== undefined ? { lastActivityAt: facts.lastActivityAt } : {}),
+    sizeBytes,
+    part,
+    truncated: sizeBytes > chars,
+    text,
+  };
+}
+
+function readPart(
+  file: string,
+  part: 'head' | 'tail',
+  maxChars: number,
+): { text: string; sizeBytes: number } {
+  const size = statSync(file).size;
+  const length = Math.min(size, maxChars);
+  const position = part === 'head' ? 0 : size - length;
+
+  const fd = openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    const read = readSync(fd, buffer, 0, length, position);
+    return { text: buffer.subarray(0, read).toString('utf8'), sizeBytes: size };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * The first records of a transcript.
  *

@@ -1,5 +1,3 @@
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { bareSessionId } from '../domain/naming.js';
 import { listAccountDirs, samePath, storeRootOfCopy } from '../domain/paths.js';
 import type { DiscoveredSession, StoreLayout } from '../domain/types.js';
@@ -12,6 +10,7 @@ import {
   summariseOutcomes,
   type Outcome,
 } from '../engine/executor.js';
+import { resumeConversation, type ResumeRunner } from '../engine/resume.js';
 import { AppRunningError, inspectApp, type RemovalGuard } from '../engine/safety.js';
 import { storeIdentity } from '../domain/paths.js';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
@@ -19,8 +18,7 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
 import { scanAccount, summarise } from '../store/scanner.js';
-import { liveSessionFor, sessionRegistryRoots } from '../store/liveSessions.js';
-import { indexTranscripts, readTranscriptFacts, transcriptRoots } from '../store/transcripts.js';
+import { viewTranscript } from '../store/transcripts.js';
 import { applyFilter, byRecency, selectByIds, type SessionFilter } from '../cli/filters.js';
 
 /**
@@ -45,7 +43,7 @@ export interface AgentToolContext {
   resumeRunner?: ResumeRunner;
 }
 
-export type ResumeRunner = (cliSessionId: string, prompt: string, timeoutMs: number) => string;
+export type { ResumeRunner } from '../engine/resume.js';
 
 /** What a refused mutation tells the model, so it can tell the user. */
 export const WRITES_DISABLED =
@@ -203,54 +201,27 @@ export interface ReadTranscriptArgs {
 }
 
 export function readTranscript(ctx: AgentToolContext, args: ReadTranscriptArgs): unknown {
-  const id = bareSessionId(args.cliSessionId);
-  const index = indexTranscripts(transcriptRoots(envOf(ctx)));
-  const file = index.get(id);
-  if (!file) {
-    throw new Error(
-      `No transcript found for conversation ${id}. ` +
-        "list_sessions shows each session's cliSessionId; only conversations that ran on this machine have one.",
-    );
-  }
-
-  const facts = readTranscriptFacts(file, id);
-  const maxChars = Math.max(1000, Math.min(args.maxChars ?? 20_000, 200_000));
-  const part = args.part ?? 'tail';
-  const { text, sizeBytes } = readPart(file, part, maxChars);
+  const view = viewTranscript(
+    bareSessionId(args.cliSessionId),
+    envOf(ctx),
+    args.part ?? 'tail',
+    args.maxChars ?? 20_000,
+  );
 
   return {
-    cliSessionId: id,
-    path: file,
-    title: facts.title ?? null,
-    cwd: facts.cwd ?? null,
-    createdAt: iso(facts.createdAt),
-    lastActivityAt: iso(facts.lastActivityAt),
-    sizeBytes,
-    part,
-    truncated: sizeBytes > maxChars,
+    cliSessionId: view.cliSessionId,
+    path: view.path,
+    title: view.title ?? null,
+    cwd: view.cwd ?? null,
+    createdAt: iso(view.createdAt),
+    lastActivityAt: iso(view.lastActivityAt),
+    sizeBytes: view.sizeBytes,
+    part: view.part,
+    truncated: view.truncated,
     format:
       'jsonl — one record per line; partial first/last lines are possible on a truncated read',
-    text,
+    text: view.text,
   };
-}
-
-function readPart(
-  file: string,
-  part: 'head' | 'tail',
-  maxChars: number,
-): { text: string; sizeBytes: number } {
-  const size = statSync(file).size;
-  const length = Math.min(size, maxChars);
-  const position = part === 'head' ? 0 : size - length;
-
-  const fd = openSync(file, 'r');
-  try {
-    const buffer = Buffer.alloc(length);
-    const read = readSync(fd, buffer, 0, length, position);
-    return { text: buffer.subarray(0, read).toString('utf8'), sizeBytes: size };
-  } finally {
-    closeSync(fd);
-  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -437,60 +408,15 @@ const RESUME_TIMEOUT_DEFAULT = 300;
 
 export function resumeHeadless(ctx: AgentToolContext, args: ResumeHeadlessArgs): unknown {
   // Resuming appends to the conversation's transcript, so it is a write and sits
-  // behind the same switch as the store mutations.
+  // behind the same switch as the store mutations. The live-writer gate itself
+  // lives in the engine, shared with the `foster resume` command.
   if (!ctx.allowWrites) return { refused: WRITES_DISABLED };
-
-  const id = bareSessionId(args.cliSessionId);
-  if (!/^[0-9a-f][0-9a-f-]{7,63}$/i.test(id)) {
-    throw new Error(`"${args.cliSessionId}" does not look like a conversation id.`);
-  }
-  if (!args.prompt.trim()) throw new Error('The prompt must not be empty.');
-
-  // Two writers on one transcript corrupt it. The CLI registers every live
-  // process under <configDir>/sessions, so a conversation someone is using right
-  // now — in the app or in a terminal — is refused rather than raced.
-  const live = liveSessionFor(id, sessionRegistryRoots(envOf(ctx)));
-  if (live) {
-    return {
-      refused:
-        `A live claude process (pid ${live.pid}) is using this conversation right now` +
-        (live.cwd ? ` in ${live.cwd}` : '') +
-        '. Resuming it from outside would put two writers on one transcript.',
-    };
-  }
 
   const timeoutMs =
     Math.max(30, Math.min(args.timeoutSeconds ?? RESUME_TIMEOUT_DEFAULT, 3600)) * 1000;
-  const run = ctx.resumeRunner ?? runClaudeResume;
-  const output = run(id, args.prompt, timeoutMs);
-  const capped =
-    output.length > 100_000 ? `${output.slice(0, 100_000)}\n[output truncated]` : output;
-  return { cliSessionId: id, output: capped };
-}
-
-/**
- * `claude -p --resume` with the prompt on stdin.
- *
- * stdin on purpose: on Windows the command resolves through a shell (the CLI is
- * a .cmd shim, which Node refuses to spawn directly), and an argument that came
- * from a model has no business being interpreted by one. The only argv values
- * are literals and an id validated to [0-9a-f-].
- */
-function runClaudeResume(cliSessionId: string, prompt: string, timeoutMs: number): string {
-  try {
-    return execFileSync('claude', ['-p', '--resume', cliSessionId], {
-      input: prompt,
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-      shell: process.platform === 'win32',
-    });
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      `Running \`claude -p --resume\` failed: ${detail}\n` +
-        'The Claude Code CLI must be installed and signed in for headless resume.',
-    );
-  }
+  return resumeConversation(args.cliSessionId, args.prompt, {
+    env: envOf(ctx),
+    timeoutMs,
+    ...(ctx.resumeRunner ? { runner: ctx.resumeRunner } : {}),
+  });
 }
