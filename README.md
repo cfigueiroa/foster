@@ -272,6 +272,7 @@ foster restore   # bring back sessions deleted in the app
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
 foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
 `return` only touches copies in the installation it is pointed at; copies written into another
@@ -318,6 +319,42 @@ worked in once never has to be typed again.
 ```
 
 `scan`, `list`, `status`, `stores`, `doctor` and `app status` take `--json`.
+
+## Agent
+
+`foster agent` hands a task, in plain language, to a Claude agent whose only tools are foster's own
+operations:
+
+```bash
+foster agent "which of my old accounts has sessions about the billing rework, and what state was that work left in?"
+foster agent --yes "foster everything from my old account that touched the api-gateway repo, then clean up any duplicate copies"
+```
+
+It works the way Claude Desktop itself runs Code sessions, with the roles reversed: foster is the
+parent process, it spawns the agent headlessly via the
+[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), and serves it an in-process
+MCP server (`foster_session_mgmt`) over the same stdio pair. The agent sees nine tools — account and
+session inventory, fostering status, app status, transcript reading, labelling, fostering,
+returning, and a headless resume — and nothing else: no shell, no file access, no network.
+
+**Mutations follow exactly the gates the CLI has.** Everything is a dry run unless _you_ started the
+command with `--yes` — the model asking nicely does not count, and a gated attempt comes back to it
+marked "writes are disabled" so it reports that instead of retrying. Removing copies still refuses
+while Claude Desktop may hold them in memory, with the same message the CLI prints. The headless
+resume (`claude -p --resume` against a conversation's transcript) counts as a write, and is
+additionally refused when a live `claude` process is holding that conversation open — two writers on
+one transcript is how transcripts get corrupted.
+
+The Agent SDK is not part of foster's single-file release — it is megabytes of runtime with a
+per-platform binary. Install it once with:
+
+```bash
+foster agent --setup
+```
+
+which runs a normal npm install into `~/.foster/agent`, where foster finds it from then on. The
+model itself runs through your existing Claude Code sign-in (or `ANTHROPIC_API_KEY`). `--model`
+overrides the model and `--max-turns` bounds the run (default 50).
 
 ## Safety model
 
