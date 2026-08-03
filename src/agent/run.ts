@@ -37,12 +37,20 @@ Domain facts you can rely on:
 - Fostering copies a card into the current account under a fresh session id; originals are never
   modified. Returning deletes only what foster wrote. Both are recorded in foster's own ledger.
 - The sidebar is built when Claude Desktop starts: changes appear only after an app restart.
-- Mutations are dry runs unless the user started foster agent with --yes AND you pass apply.
-  When a result says writes are disabled, report that to the user instead of retrying.
+- Mutations via the foster_session_mgmt tools are dry runs unless the user started foster agent
+  with --yes AND you pass apply. When a result says writes are disabled, report that to the user
+  instead of retrying.
 - Never advise deleting fostered sessions in the app's UI; return_fosterings is the way back.
 
-Work with the tools you were given; report counts and outcomes plainly, and quote session titles
-rather than raw uuids when both are available.`;
+You also have Claude Code's general tools. Two rules about them:
+- For anything touching the session store or fostered copies, use the foster_session_mgmt tools,
+  never raw file operations: the foster tools go through the engine's safety gates and ledger,
+  and a direct write bypasses both and can corrupt what the app or foster tracks.
+- Without --yes the run is read-only: built-in tools that write or execute are denied by the
+  permission layer. Report a denial as the user's choice, not as an error to work around.
+
+Report counts and outcomes plainly, and quote session titles rather than raw uuids when both are
+available.`;
 
 /** Runs the task and returns the process exit code. */
 export async function runAgent(options: AgentRunOptions): Promise<number> {
@@ -57,11 +65,22 @@ export async function runAgent(options: AgentRunOptions): Promise<number> {
 
   const queryOptions: Options = {
     mcpServers: { [SERVER_NAME]: server },
-    // No built-in tools: the agent's whole world is the session-management
-    // server. What it cannot do, it cannot be prompt-injected into doing.
-    tools: [],
-    allowedTools,
-    systemPrompt: SYSTEM_PROMPT,
+    // The full Claude Code toolset, deliberately: the session-management server
+    // covers the store, and everything else — shell, files, web — is there for
+    // whatever the task turns out to need. What keeps this honest is the
+    // permission layer below, not a trimmed tool list.
+    tools: { type: 'preset', preset: 'claude_code' },
+    // The foster tools never prompt, and the read-only trio works even in a
+    // gated run — reading is what a dry run is for.
+    allowedTools: [...allowedTools, 'Read', 'Glob', 'Grep'],
+    // One switch decides writing, and it is the same one the CLI has: --yes.
+    // Without it, headless 'default' mode auto-denies every tool that would
+    // have asked (Bash, edits, web) — there is no terminal to ask in — and the
+    // foster tools stay dry runs via their own gate. With it, everything runs.
+    ...(options.allowWrites
+      ? { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }
+      : { permissionMode: 'default' as const }),
+    systemPrompt: { type: 'preset', preset: 'claude_code', append: SYSTEM_PROMPT },
     maxTurns: options.maxTurns ?? 50,
     ...(options.model ? { model: options.model } : {}),
   };

@@ -900,13 +900,18 @@ program
   .description(
     "Run a Claude agent with foster's operations as its tools.\n\n" +
       'The agent gets an in-process MCP server (foster_session_mgmt) wrapping the same engine\n' +
-      'as the CLI, behind the same gates: every mutation is a dry run unless this command was\n' +
-      'started with --yes, and removing copies still requires Claude Desktop to be closed.\n\n' +
+      "as the CLI, plus Claude Code's full toolset (shell, files, web). One switch governs all\n" +
+      'of it: without --yes the run is read-only — foster mutations are dry runs and built-in\n' +
+      'tools that write or execute are denied. With --yes everything runs, and removing copies\n' +
+      'still requires Claude Desktop to be closed.\n\n' +
       'Needs the Claude Agent SDK, installed once with --setup, and a signed-in Claude Code\n' +
       'CLI (or ANTHROPIC_API_KEY) for the model itself.',
   )
   .argument('[task]', 'what the agent should do, in plain language')
-  .option('--yes', 'let the agent actually write; without it every mutation is a dry run')
+  .option(
+    '--yes',
+    'allow writing: foster mutations apply, and shell/file/web tools run unrestricted',
+  )
   .option('--model <model>', 'model override for the run')
   .option('--max-turns <n>', 'stop the agent after this many turns', '50')
   .option(
@@ -931,7 +936,7 @@ program
     if (!opts.yes) {
       console.log(
         pc.dim(
-          'Dry-run mode: the agent can read everything but write nothing (--yes enables writes).',
+          'Read-only run: foster mutations are dry runs and tools that write or execute are denied (--yes lifts both).',
         ),
       );
     }

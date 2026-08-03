@@ -322,8 +322,8 @@ worked in once never has to be typed again.
 
 ## Agent
 
-`foster agent` hands a task, in plain language, to a Claude agent whose only tools are foster's own
-operations:
+`foster agent` hands a task, in plain language, to a Claude agent that knows foster's domain and
+carries foster's operations as first-class tools:
 
 ```bash
 foster agent "which of my old accounts has sessions about the billing rework, and what state was that work left in?"
@@ -333,17 +333,28 @@ foster agent --yes "foster everything from my old account that touched the api-g
 It works the way Claude Desktop itself runs Code sessions, with the roles reversed: foster is the
 parent process, it spawns the agent headlessly via the
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), and serves it an in-process
-MCP server (`foster_session_mgmt`) over the same stdio pair. The agent sees nine tools — account and
-session inventory, fostering status, app status, transcript reading, labelling, fostering,
-returning, and a headless resume — and nothing else: no shell, no file access, no network.
+MCP server (`foster_session_mgmt`) over the same stdio pair. That server carries nine tools —
+account and session inventory, fostering status, app status, transcript reading, labelling,
+fostering, returning, and a headless resume — and alongside it the agent has Claude Code's full
+toolset: shell, files, web. The foster tools remain the required path for anything touching the
+session store, because they are what goes through the engine's gates and ledger; the general tools
+are there for whatever else the task turns out to need.
 
-**Mutations follow exactly the gates the CLI has.** Everything is a dry run unless _you_ started the
-command with `--yes` — the model asking nicely does not count, and a gated attempt comes back to it
-marked "writes are disabled" so it reports that instead of retrying. Removing copies still refuses
-while Claude Desktop may hold them in memory, with the same message the CLI prints. The headless
-resume (`claude -p --resume` against a conversation's transcript) counts as a write, and is
-additionally refused when a live `claude` process is holding that conversation open — two writers on
-one transcript is how transcripts get corrupted.
+**One switch governs all writing, and it is the same one the CLI has: `--yes`.** Without it the run
+is read-only end to end — foster mutations are dry runs, and built-in tools that write or execute
+(shell, edits, web fetches) are denied by the permission layer, since a headless run has no
+terminal to ask in. The model asking nicely does not count: a gated attempt comes back marked
+"writes are disabled" so it reports that instead of retrying. With `--yes`, foster mutations apply
+and the general tools run unrestricted (the SDK's bypass-permissions mode) — give it the flag only
+with a task you would be comfortable typing into Claude Code itself. Two gates hold even then:
+removing copies still refuses while Claude Desktop may hold them in memory, with the same message
+the CLI prints, and the headless resume (`claude -p --resume` against a conversation's transcript)
+is refused when a live `claude` process is holding that conversation open — two writers on one
+transcript is how transcripts get corrupted.
+
+One honesty note: foster's own engine never reads credentials, and that promise is unchanged — but
+an agent with general read tools is as able to open files on your machine as any Claude Code
+session is. `foster agent` is Claude Code with extra knowledge, not a sandbox.
 
 The Agent SDK is not part of foster's single-file release — it is megabytes of runtime with a
 per-platform binary. Install it once with:
