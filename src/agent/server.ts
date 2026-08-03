@@ -173,7 +173,11 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
   ];
 
   return {
-    server: createSdkMcpServer({ name: SERVER_NAME, version: '1.0.0', tools }),
+    // alwaysLoad: with the full Claude Code toolset the harness defers MCP tools
+    // behind tool search, and the cheap default model reliably fumbled the
+    // load-then-call dance (observed: three ToolSearch calls, zero tool calls,
+    // then giving up). Nine tools are cheap enough to keep in the prompt.
+    server: createSdkMcpServer({ name: SERVER_NAME, version: '1.0.0', tools, alwaysLoad: true }),
     allowedTools: [
       'scan_accounts',
       'list_sessions',
