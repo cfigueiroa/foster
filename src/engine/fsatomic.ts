@@ -49,6 +49,28 @@ export function writeFileAtomic(target: string, contents: string): void {
 }
 
 /**
+ * Append bytes and flush them before returning.
+ *
+ * Not atomic, and deliberately not pretending to be: this is for a log whose
+ * format already tolerates a torn record at the end of the file, where rewriting
+ * the whole thing to add a few hundred bytes would replace a recoverable failure
+ * with an unrecoverable one. The single write and the fsync are what keep the
+ * window small and stop the bytes sitting in cache after the call returns.
+ */
+export function appendSynced(target: string, contents: Buffer): void {
+  const fd = openSync(target, 'a');
+  try {
+    let written = 0;
+    while (written < contents.length) {
+      written += writeSync(fd, contents, written, contents.length - written);
+    }
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Remove a path without ever following a reparse point.
  *
  * A junction or symlink must be unlinked as a link. Deleting one recursively

@@ -107,6 +107,14 @@ If your account has **more than one organization**, switching organization and s
 makes the app re-read the directory, with no restart. It ends any session that is running, so it is
 not free either.
 
+With only one organization there is still a way, because the re-read is not guarded by a
+"sessions are already loaded" flag: when the account and organization it resolves are the same ones
+it already has, the app takes a branch that loads the directory again anyway. Signing out and back
+in reaches it. Nothing external can force it — the organization change is noticed through an
+in-process cookie event, so writing that cookie from outside emits nothing, and a same-value change
+is discarded by two separate guards. It is a second door, not a cheaper one: the sign-in is more
+disruptive than the restart it saves.
+
 ### The app's own import, and why `foster` does not use it
 
 Claude Desktop registers a deep link, `claude://resume?session=<cliSessionId>`, which imports a CLI
@@ -137,6 +145,52 @@ Relatedly: the app has a built-in recovery scan that offers importable transcrip
 never offer these ones. Before scanning it collects every `cliSessionId` referenced by every account
 and organization on disk and treats those as already known — so a session that still exists under
 your old account is excluded by the very fact that it still exists.
+
+## Pinned sessions
+
+A pinned session is not a session with a flag set. The session file has no field for it and the
+app's config never mentions it: pinning is state of the **window**, kept in Chromium's IndexedDB
+under one key, holding one JSON array of session ids.
+
+That makes it the one thing a copy cannot inherit. `foster` mints a fresh `sessionId` for every copy
+— which is exactly what keeps deleting the copy from ever reaching the original — and the pin is
+keyed on the id. So a pinned session, fostered, arrives unpinned, and the entry left behind still
+points at the original. `foster pin` is the way to put it back:
+
+```bash
+foster pin                                    # what is pinned, with titles
+foster pin --session 14f73ab6 --yes           # pin it
+foster pin --remove --session 14f73ab6 --yes  # unpin it
+```
+
+Reading is always safe. Writing needs **Claude Desktop closed** — not for the usual reason, but
+because LevelDB keeps recent writes in memory and flushes them on its own schedule, so a change made
+underneath a running app would simply be overwritten. The database is copied into `~/.foster/backups`
+before anything is written, and the write itself only ever **appends**: LevelDB replays its log in
+order, so a record added at the end supersedes the earlier one without a single existing byte being
+rewritten. The worst an interrupted write can leave is a torn record at the end of the file, which is
+the one kind of damage that format is designed to discard.
+
+Reading has to look in **both halves** of the database, and this is the part that is easy to get
+wrong. LevelDB writes to a log and, once that log grows, folds it into a sorted table and forgets it.
+A reader that only knows about logs therefore answers "nothing has ever been pinned" for any
+installation that has been running long enough to compact — which is every installation that has been
+running for a while. It was the first thing to break here against a real profile, with ten sessions
+visibly pinned in the sidebar and the log holding no trace of them. So `foster` reads the sorted
+tables too, decompresses them, and takes whichever copy of the record carries the higher sequence
+number. The same number is what a write has to climb above: a record appended to the log but numbered
+below the table's is read as the older of the two, and the change quietly does nothing.
+
+One thing `foster` deliberately will not do: write a pin list into an installation that has **never
+pinned anything**. The record carries Blink's serialisation envelope, and with no record there is
+nothing to copy it from — inventing one is guessing at a serialiser version. Pin any session in the
+sidebar by hand, once, and the rest follows.
+
+There is no LevelDB dependency, and it would not have helped: the database declares the comparator
+`idb_cmp1`, and a stock binding refuses to open a database whose comparator it does not recognise.
+The pieces actually needed are implemented directly — the log record format, the sorted-table format,
+Snappy decompression, and IndexedDB's key encoding, which stores its strings as UTF-16 big-endian
+while every other multi-byte field in the file is little-endian.
 
 ## What about switching accounts?
 
@@ -271,6 +325,7 @@ foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
+foster pin       # pin sessions in the sidebar, or see what is pinned
 foster app       # status | quit | start | restart — drive Claude Desktop itself
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly

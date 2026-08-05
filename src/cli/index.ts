@@ -1,4 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
+import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
@@ -12,7 +13,7 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount } from '../engine/account.js';
-import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
   deliverUrl,
@@ -36,8 +37,9 @@ import { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
-import { scanAccount, summarise } from '../store/scanner.js';
+import { scanAccount, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
@@ -897,6 +899,183 @@ program
     }
     for (const [accountUuid, name] of labels) console.log(`  ${shortId(accountUuid)}  ${name}`);
   });
+
+program
+  .command('pin')
+  .summary('pin sessions in the sidebar, or see what is pinned')
+  .description(
+    'Pin or unpin sessions in the Claude Desktop sidebar.\n\n' +
+      'Pinning is not part of a session file. The app keeps it in its own IndexedDB, keyed on the\n' +
+      'session id — and foster mints a fresh id for every copy, so a copy of a pinned session\n' +
+      'always arrives unpinned. That is the gap this closes.\n\n' +
+      'The database belongs to the app and is locked while it runs, so Claude Desktop has to be\n' +
+      'closed. A copy of it is taken before anything is written.',
+  )
+  .option('--session <id...>', 'sessions to pin, by id or unique prefix')
+  .option('--remove', 'unpin them instead')
+  .option('--backup-dir <path>', 'where to copy the database before writing')
+  .option('--start', 'start Claude Desktop afterwards')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      session?: string[];
+      remove?: boolean;
+      backupDir?: string;
+      start?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+
+    const state = readPinState(store);
+    if (!state) {
+      console.log('Nothing has ever been pinned in this installation.');
+      console.log(
+        pc.dim(
+          'foster copies the record the app writes rather than inventing one, because that record\n' +
+            'carries a serialiser version it has no business guessing. Pin any session in the\n' +
+            'sidebar once, and foster can do the rest from then on.',
+        ),
+      );
+      return;
+    }
+
+    const onDisk = new Map(scanStore(store).map((found) => [found.data.sessionId, found]));
+
+    if (!opts.session?.length) {
+      console.log(`${state.ids.length} pinned in ${store.root}:`);
+      for (const id of state.ids) {
+        const found = onDisk.get(id);
+        const title =
+          found?.data.title ?? pc.dim('(no session file — pinned id points at nothing)');
+        console.log(`  ${shortId(id)}  ${title}`);
+      }
+      console.log(pc.dim(`\nRead from ${state.logPath}`));
+      return;
+    }
+
+    const wanted = opts.remove
+      ? selectPinnedIds(state.ids, opts.session)
+      : selectByIds([...onDisk.values()], opts.session);
+    const selected = opts.remove
+      ? (wanted as { selected: string[] }).selected
+      : (wanted as { selected: DiscoveredSession[] }).selected.map((found) => found.data.sessionId);
+
+    if (wanted.unmatched.length > 0) {
+      throw new Error(
+        `No ${opts.remove ? 'pinned session' : 'session'} matches --session ${wanted.unmatched.join(', ')}.\n` +
+          'Run "foster pin" with no arguments to see what is there.',
+      );
+    }
+
+    // Pinning reaches across the whole store, but the sidebar does not: the app
+    // loads one account's directory and marks what it finds there, so an id from
+    // any other account joins the list and is never drawn. Refusing is the only
+    // honest answer — writing it would report a pin that cannot appear, and the
+    // ids of other accounts are exactly what "foster list" puts in front of you.
+    if (!opts.remove) {
+      const sidebar = currentAccount(store, listAccountDirs(store));
+      const elsewhere = (wanted as { selected: DiscoveredSession[] }).selected.filter(
+        (found) =>
+          sidebar &&
+          (found.account.accountUuid !== sidebar.accountUuid ||
+            found.account.organizationUuid !== sidebar.organizationUuid),
+      );
+      if (elsewhere.length > 0) {
+        const names = elsewhere
+          .map((found) => `  ${shortId(found.data.sessionId)}  ${found.data.title ?? ''}`)
+          .join('\n');
+        throw new Error(
+          `${elsewhere.length} of those ${elsewhere.length === 1 ? 'sessions belongs' : 'sessions belong'} to another account, which the sidebar never shows:\n${names}\n` +
+            'Foster them into the account in use first, then pin the copies.',
+        );
+      }
+    }
+
+    // The app appends on toggle, so appending is what keeps foster's writes
+    // indistinguishable from the sidebar's own.
+    const next = opts.remove
+      ? state.ids.filter((id) => !selected.includes(id))
+      : [...state.ids, ...selected.filter((id) => !state.ids.includes(id))];
+
+    if (next.length === state.ids.length) {
+      console.log(
+        opts.remove
+          ? 'Nothing to do: none of those are pinned.'
+          : 'Nothing to do: all of those are already pinned.',
+      );
+      return;
+    }
+
+    const verb = opts.remove ? 'unpin' : 'pin';
+    for (const id of selected) {
+      if (opts.remove ? state.ids.includes(id) : !state.ids.includes(id)) {
+        console.log(`${verb} ${shortId(id)}  ${onDisk.get(id)?.data.title ?? ''}`);
+      }
+    }
+
+    if (opts.dryRun || !opts.yes) {
+      console.log(pc.bold(`\nDry run: ${state.ids.length} pinned would become ${next.length}.`));
+      console.log(pc.dim('Re-run with --yes to write.'));
+      return;
+    }
+
+    // Checked here rather than at the top so that reading and dry runs keep
+    // working while the app is up — it is only the write that cannot share the
+    // database, because LevelDB holds unflushed writes in memory and would put
+    // them over the top of foster's.
+    const app = inspectApp(store);
+    if (app.running) {
+      throw new Error(
+        `Claude Desktop is running (${app.evidence.join('; ')}).\n` +
+          'Its IndexedDB is locked and holds writes that are not on disk yet, so changing the\n' +
+          'pin list now would be overwritten the moment it flushes. Close it first — ' +
+          '"foster app quit --terminate" will.',
+      );
+    }
+
+    const backup = backupPinState(
+      store,
+      opts.backupDir ?? path.join(path.dirname(ledger.path), 'backups', `pin-state-${Date.now()}`),
+    );
+    console.log(pc.dim(`Database copied to ${backup}`));
+
+    writePinState(state, next);
+    console.log(pc.bold(`\n${state.ids.length} pinned is now ${next.length}.`));
+
+    if (opts.start) {
+      const started = await startDesktop(store);
+      console.log(
+        started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.',
+      );
+    }
+  });
+
+/** The removal counterpart of selectByIds, matching against the pin list itself. */
+function selectPinnedIds(
+  pinned: string[],
+  wanted: string[],
+): { selected: string[]; unmatched: string[] } {
+  const selected = new Set<string>();
+  const unmatched: string[] = [];
+
+  for (const id of wanted) {
+    const needle = bareSessionId(id).toLowerCase();
+    // Matched against what is pinned rather than what is on disk, so an id left
+    // behind by a session that no longer exists can still be taken off the list.
+    const matches = pinned.filter((candidate) =>
+      bareSessionId(candidate).toLowerCase().startsWith(needle),
+    );
+    if (matches.length === 0) {
+      unmatched.push(id);
+      continue;
+    }
+    for (const match of matches) selected.add(match);
+  }
+
+  return { selected: [...selected], unmatched };
+}
 
 program
   .command('transcript')
