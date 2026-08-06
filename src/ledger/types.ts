@@ -6,7 +6,11 @@ import type { AccountRef } from '../domain/types.js';
  * trivially recoverable, and no native database dependency is needed.
  */
 export type LedgerEvent =
-  AccountLabelledEvent | FosteredEvent | ReturnedEvent | OperationFailedEvent;
+  | AccountLabelledEvent
+  | FosteredEvent
+  | ReturnedEvent
+  | ConversationPurgedEvent
+  | OperationFailedEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -63,10 +67,39 @@ export interface ReturnedEvent extends BaseEvent {
   reconciled?: true;
 }
 
+/**
+ * A conversation destroyed on disk, recorded deliberately thin.
+ *
+ * The ledger exists so every operation can be replayed in reverse, and this is
+ * the one that cannot be — so what it records is not a way back but an account
+ * of what happened. Without it a transcript missing from `~/.claude/projects`
+ * looks like corruption, and "did foster do this?" has no answer.
+ *
+ * What it does *not* record is the point. The title, the working directory and
+ * the text were the thing the user asked to be rid of; copying them into a file
+ * that survives would make the ledger the backup this command promises not to
+ * keep. An opaque id, a count and a size say that something was destroyed here
+ * without preserving any of it.
+ */
+export interface ConversationPurgedEvent extends BaseEvent {
+  kind: 'conversation_purged';
+  cliSessionId: string;
+  /** How many copies of the transcript were removed — mirrors can exist. */
+  files: number;
+  bytes: number;
+}
+
 export interface OperationFailedEvent extends BaseEvent {
   kind: 'failed';
   operation: string;
   originSessionId?: string;
+  /**
+   * The conversation, for operations keyed on one rather than on a session card.
+   * A failed purge without it names nothing at all, which is the worst moment to
+   * be anonymous: the operation may have destroyed part of a transcript before
+   * it threw.
+   */
+  cliSessionId?: string;
   reason: string;
 }
 
@@ -84,6 +117,7 @@ export type LedgerEventInput =
   | Draft<AccountLabelledEvent>
   | Draft<FosteredEvent>
   | Draft<ReturnedEvent>
+  | Draft<ConversationPurgedEvent>
   | Draft<OperationFailedEvent>;
 
 /** A fostering that is currently in place, derived by folding the log. */

@@ -7,6 +7,7 @@ import {
   candidateStoreRoots,
   comparablePath,
   directoryKey,
+  layoutFor,
   storeIdentity,
   listAccountDirs,
   samePath,
@@ -30,6 +31,7 @@ import {
   twoLiveSidebars,
 } from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import { assertPurgeConfirmed, purgeConversations, summarisePurge } from '../engine/purge.js';
 import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
@@ -38,6 +40,7 @@ import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
+import { findPurgeable } from '../store/purge.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
@@ -55,9 +58,11 @@ import { runInteractive } from './interactive.js';
 import {
   accountTree,
   formatAge,
+  formatBytes,
   formatDate,
   groupByAccount,
   outcomeLine,
+  purgeLine,
   sessionLine,
   shortId,
   updateLine,
@@ -689,6 +694,147 @@ program
 
     console.log(pc.bold(`\n${counts.fostered} restored, ${counts.failed} failed.`));
     await finish(store, Boolean(opts.restart));
+  });
+
+program
+  .command('purge')
+  .description('destroy the conversations behind deleted sessions — permanently, with no undo')
+  .option('--title <text>', 'only conversations whose title contains this text')
+  .option('--session <id...>', 'only these conversations, by id or unique prefix')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
+  .option('--this-store-only', 'judge "still referenced" from this installation alone')
+  .option('--json', 'machine-readable list of what would be destroyed')
+  .option('--yes', 'actually destroy; requires --confirm as well')
+  .option('--confirm <count>', 'the number this run destroys, as printed by the dry run')
+  .addOption(new Option('--dry-run', 'show what would happen and destroy nothing').conflicts('yes'))
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      title?: string;
+      session?: string[];
+      configDir?: string[];
+      thisStoreOnly?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      confirm?: string;
+      dryRun?: boolean;
+    }>();
+
+    // Every installation gets a say in whether a conversation is still in use,
+    // because a card in a profile foster is not pointed at right now is still a
+    // card, and the session it opens is still there after a restart. Narrowing
+    // that to one store is available, and is a worse question to ask. The store
+    // in use is not in this list because findPurgeable always counts it.
+    const referenceStores = opts.thisStoreOnly
+      ? []
+      : knownStores(ledger.read()).map((known) => layoutFor(known.root));
+
+    let candidates = findPurgeable({
+      store,
+      referenceStores,
+      env: process.env,
+      configDirs: opts.configDir ?? [],
+    });
+
+    if (opts.title) {
+      const needle = opts.title.toLowerCase();
+      candidates = candidates.filter((item) =>
+        (item.facts.title ?? '').toLowerCase().includes(needle),
+      );
+    }
+    if (opts.session?.length) {
+      const wanted = opts.session.map((id) => bareSessionId(id).toLowerCase());
+      const matches = (item: (typeof candidates)[number], id: string) =>
+        item.cliSessionId.toLowerCase().startsWith(id);
+      // Refused rather than quietly narrowed, as every other identifier flag in
+      // foster is. A typo that filtered to nothing fell through to "no deleted
+      // session still has its conversation on disk", which reads as "you have
+      // nothing left to clean up" and is not what happened.
+      const unmatched = wanted.filter((id) => !candidates.some((item) => matches(item, id)));
+      if (unmatched.length > 0) {
+        throw new Error(
+          `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
+            'Run "foster purge" with no --yes to see what is available.',
+        );
+      }
+      candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
+    }
+
+    const held = new Set(
+      liveSessions(sessionRegistryRoots(process.env, opts.configDir ?? [])).map((session) =>
+        session.sessionId.toLowerCase(),
+      ),
+    );
+    // Settled before anything is printed, so the number the user is asked to
+    // confirm is the number that will actually be destroyed — a conversation
+    // held open by a live process is skipped, and confirming a total that
+    // included it would be confirming something that never happens.
+    const doomed = candidates.filter((item) => !held.has(item.cliSessionId.toLowerCase()));
+
+    if (opts.json) {
+      // The doomed set, not every candidate: this flag says it lists what would
+      // be destroyed, and a script that feeds its length to --confirm has to get
+      // the same answer the command reached. Held conversations go to stderr so
+      // they are not lost, and stdout stays parseable.
+      print(
+        doomed.map((item) => ({
+          cliSessionId: item.cliSessionId,
+          title: item.facts.title ?? null,
+          cwd: item.facts.cwd ?? null,
+          lastActivityAt: item.facts.lastActivityAt ?? null,
+          deletedAt: item.deletedAt ?? null,
+          files: item.files,
+          bytes: item.bytes,
+        })),
+      );
+      const heldHere = candidates.length - doomed.length;
+      if (heldHere > 0) {
+        console.error(
+          pc.dim(
+            `${heldHere} more held open by a live claude process, and not listed: they cannot be purged now.`,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.log('Nothing to purge: no deleted session still has its conversation on disk.');
+      return;
+    }
+
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (!dryRun) assertPurgeConfirmed(opts.confirm, doomed.length);
+
+    const outcomes = purgeConversations(candidates, { ledger, dryRun, held });
+    for (const outcome of outcomes) console.log(purgeLine(outcome, dryRun));
+
+    const counts = summarisePurge(outcomes);
+    if (dryRun) {
+      console.log(
+        pc.bold(
+          `\nDry run: ${counts.purged} conversation(s) would be destroyed, ` +
+            `${formatBytes(counts.bytes)} in total.`,
+        ),
+      );
+      console.log(
+        pc.red('This cannot be undone, and foster keeps no copy. Read the list before confirming.'),
+      );
+      console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
+      return;
+    }
+
+    console.log(
+      pc.bold(
+        `\n${counts.purged} destroyed (${formatBytes(counts.bytes)}), ` +
+          `${counts.skipped} skipped, ${counts.failed} failed.`,
+      ),
+    );
+    // No restart offer, and nothing to see afterwards: these conversations had no
+    // card in any sidebar — that is what made them purgeable — so the app's view
+    // is exactly as it was.
+    console.log(pc.dim("The app's deletion markers were left where they are."));
   });
 
 program

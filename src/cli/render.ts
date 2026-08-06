@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
+import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { DiscoveredSession } from '../domain/types.js';
 import type { UpdateStatus } from '../update.js';
 import { VERSION } from '../version.js';
@@ -165,6 +166,47 @@ export function sessionLine(session: DiscoveredSession): string {
   const title = session.data.title ?? '(untitled)';
   const note = session.reasons.length > 0 ? pc.yellow(` [${session.reasons.join(', ')}]`) : '';
   return `  ${pc.dim(date)}  ${title}${note}`;
+}
+
+/**
+ * Sizes as a person reads them.
+ *
+ * Shown because it is the only honest measure of what a purge destroys: a title
+ * says which conversation, and the byte count says how much of it there was.
+ */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  // Carried on the rounded number rather than the exact one. 1023.999 KB fails a
+  // plain `value >= 1024` test and then rounds up on the way to the screen, so a
+  // byte short of a megabyte printed as "1024 KB".
+  while (displayed(value) >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/** The number the reader will actually see, which is what has to stay under 1024. */
+function displayed(value: number): number {
+  return value < 10 ? Number(value.toFixed(1)) : Math.round(value);
+}
+
+export function purgeLine(outcome: PurgeOutcome, dryRun: boolean): string {
+  const marks: Record<PurgeStatus, string> = {
+    // Not the green of the other commands: nothing here is being added, and a
+    // list of green ticks is the wrong thing to feel while reading it.
+    purged: dryRun ? pc.red('×') : pc.red('✕'),
+    skipped: pc.dim('·'),
+    failed: pc.yellow('!'),
+  };
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  // Keyed on what went, not on the status: a purge that threw part-way through a
+  // mirrored transcript still destroyed something, and the line has to say so.
+  const size = outcome.files > 0 ? pc.dim(`  ${formatBytes(outcome.bytes)}`) : '';
+  return `  ${marks[outcome.status]} ${outcome.title}${size}${detail}`;
 }
 
 export function outcomeLine(outcome: Outcome): string {

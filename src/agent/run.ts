@@ -41,6 +41,9 @@ Domain facts you can rely on:
   with --yes AND you pass apply. When a result says writes are disabled, report that to the user
   instead of retrying.
 - Never advise deleting fostered sessions in the app's UI; return_fosterings is the way back.
+- \`foster purge\` destroys conversations on disk and cannot be undone. It is deliberately not one
+  of your tools, and you must never run it through the shell either — not with --yes, not with
+  --confirm, not to "clean up". If a task seems to call for it, say so and let the user run it.
 
 You also have Claude Code's general tools. Two rules about them:
 - For anything touching the session store or fostered copies, use the foster_session_mgmt tools,

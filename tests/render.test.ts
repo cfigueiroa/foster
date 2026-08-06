@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { abbreviate, accountTree, formatAge, groupByAccount } from '../src/cli/render.js';
+import {
+  abbreviate,
+  accountTree,
+  formatAge,
+  formatBytes,
+  groupByAccount,
+} from '../src/cli/render.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -121,6 +127,27 @@ describe('the tree with colliding identifiers', () => {
       accountTree(groupByAccount([row(ACCOUNT_A, ORG_1, 1), row(ACCOUNT_A, ORG_2, 1)])),
     );
     expect(tree.split('\n')[0]).toContain('00000000  ');
+  });
+});
+
+describe('formatBytes', () => {
+  it('carries the unit when rounding would reach 1024', () => {
+    // A byte short of a megabyte rounds up on the way to the screen, so a plain
+    // `value >= 1024` carry left it reading "1024 KB".
+    expect(formatBytes(1024 * 1024 - 1)).toBe('1.0 MB');
+    expect(formatBytes(1024 * 1024 * 1024 - 1)).toBe('1.0 GB');
+  });
+
+  it('reads the ordinary sizes the way a person would', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(1023)).toBe('1023 B');
+    expect(formatBytes(1024)).toBe('1.0 KB');
+    expect(formatBytes(4176)).toBe('4.1 KB');
+    expect(formatBytes(50 * 1024)).toBe('50 KB');
+  });
+
+  it('stops at the largest unit it has rather than inventing one', () => {
+    expect(formatBytes(1024 ** 4)).toBe('1024 GB');
   });
 });
 

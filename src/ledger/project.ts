@@ -39,6 +39,13 @@ export function project(events: LedgerEvent[]): LedgerState {
         active.delete(fosteringKey(event.originSessionId, event.target));
         break;
 
+      case 'conversation_purged':
+        // Deliberately no state. A purge destroys a conversation, not a
+        // fostering: the cards that pointed at it were already gone — that is
+        // the precondition for purging at all — so there is nothing here to fold
+        // away. The event is history, and history is all it can be.
+        break;
+
       case 'failed':
         // Failures are recorded for the audit trail but do not change state.
         break;

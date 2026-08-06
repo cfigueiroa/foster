@@ -1,6 +1,7 @@
 import { openSync, readSync, closeSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { samePath } from '../domain/paths.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 
 /**
@@ -64,7 +65,23 @@ export function transcriptRoots(
  * path.
  */
 export function indexTranscripts(projectsDirs: string | string[]): Map<string, string> {
-  const index = new Map<string, string>();
+  // First one wins: the same conversation can be mirrored under a second project
+  // directory, and either copy opens the same session.
+  return new Map(
+    [...indexAllTranscripts(projectsDirs)].map(([id, files]) => [id, files[0]!] as const),
+  );
+}
+
+/**
+ * Every path a conversation occupies, rather than the first one that answers.
+ *
+ * Reading needs one copy and does not care which. Destroying one is the opposite
+ * question: a mirrored copy left behind is a conversation still on disk after
+ * being reported as gone, which — for the one command whose whole promise is
+ * that it cannot be undone — is the failure that matters most.
+ */
+export function indexAllTranscripts(projectsDirs: string | string[]): Map<string, string[]> {
+  const index = new Map<string, string[]>();
 
   for (const projectsDir of typeof projectsDirs === 'string' ? [projectsDirs] : projectsDirs) {
     for (const project of safeReaddir(projectsDir)) {
@@ -74,9 +91,15 @@ export function indexTranscripts(projectsDirs: string | string[]): Map<string, s
       for (const entry of safeReaddir(dir)) {
         if (!entry.endsWith('.jsonl')) continue;
         const id = entry.slice(0, -'.jsonl'.length);
-        // First one wins: the same conversation can be mirrored under a second
-        // project directory, and either copy opens the same session.
-        if (!index.has(id)) index.set(id, path.join(dir, entry));
+        const file = path.join(dir, entry);
+        const found = index.get(id);
+        // The same roots can be reached twice — CLAUDE_CONFIG_DIR naming the
+        // default directory in a different capitalisation, say — and counting
+        // one file as two would report a conversation as living in more places
+        // than it does. Compared the way paths are compared everywhere else,
+        // because the string form is exactly what differs between the spellings.
+        if (!found) index.set(id, [file]);
+        else if (!found.some((seen) => samePath(seen, file))) found.push(file);
       }
     }
   }

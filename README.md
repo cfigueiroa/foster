@@ -42,7 +42,15 @@ folder, with:
 - `error` / `errorAt` **stripped**, so a stale failure from the old account does not show up as a
   warning badge on the restored session;
 - a configurable **title prefix** (default `↪ `) marking it as fostered;
-- a `_foster` key recording where it came from, so the copy is self-describing.
+- a `_foster` key recording where it came from.
+
+That last one is a hint, not a record. The app rebuilds a session from a fixed list of fields when
+it saves one, so the first time it writes a copy back — a rename, a focus, any activity at all —
+`_foster` is dropped and the copy becomes indistinguishable on disk from a session the app made
+itself. Measured on a live store: of 364 copies, 21 had lost it, and they were exactly the 21 that
+had been opened. What is authoritative is foster's own ledger, which the app cannot reach; the
+marker earns its place by covering the one case the ledger cannot, a crash between writing the copy
+and recording it.
 
 The original file is never touched. `foster return` deletes the copy and the session is simply gone
 from the current account again.
@@ -77,6 +85,52 @@ like any other.
 
 A conversation that some session still points at is not offered: it is not lost, and restoring it
 would only produce a duplicate.
+
+## Deleting for real
+
+`restore` is also the uncomfortable proof of something: deleting a session in the app does not
+delete the conversation. Everything that was said is still in a file, and a tool that can list those
+files and put them back in your sidebar is a tool that just demonstrated they were never gone.
+Sometimes gone is what you actually wanted.
+
+```bash
+foster purge                        # what could be destroyed, writing nothing
+foster purge --yes --confirm 19     # destroy it
+```
+
+This deletes the transcripts themselves — every copy of them — and nothing else in foster can bring
+them back. There is no backup, deliberately: a command whose purpose is to make something
+unrecoverable cannot quietly keep a copy and still be that command.
+
+Two gates stand in front of it, and they are not the usual ones.
+
+**It only ever considers conversations the app has already deleted.** The candidates are exactly
+what `restore` would offer: a deletion marker exists, the transcript is still on disk, and no
+session file anywhere points at it. That last check is asked of **every installation foster knows
+about**, not just the one in use — a card in a profile you are not signed into is still a card, and
+the session it opens is one restart away. `--this-store-only` narrows it, and is a worse question to
+ask. A conversation a live `claude` process is holding open is skipped as well, and said so out
+loud.
+
+**`--yes` is not enough on its own.** Every other writing command in foster is undone by the command
+next to it, so one flag is a fair price; here the same flag would put "destroy every conversation I
+ever threw away" one word away from "copy them into my sidebar". So `purge` also wants
+`--confirm <count>` — the number the dry run printed. A count is the one confirmation that can fail
+for a reason other than intent: it cannot be pasted from documentation or typed from memory, and if
+the set moved between reading and running — something else deleted in the app in the meantime, a
+filter that matches more than it did — the number no longer agrees and nothing happens.
+
+Narrow it with `--title` or `--session <id...>`, and `--json` lists the candidates with their sizes
+without destroying anything.
+
+What it leaves behind is the app's own deletion marker, for the same reason `restore` does: that
+record belongs to the app. And the ledger gets one line saying a conversation was destroyed here —
+an id, a file count, a byte count, and nothing else. Not the title, not the working directory, not a
+word of the text. A ledger that kept those would be the backup this command promises not to keep.
+
+`foster agent` cannot do this. It is not one of the agent's tools, and the agent is told not to
+reach for it through the shell either: an irreversible delete is not a thing to hand to a model
+working from a one-line description of what you wanted.
 
 Conversations are looked for in every Claude config directory that has them, not just the one this
 process happens to be running under. Running a second Claude Code account means pointing the CLI at
@@ -323,6 +377,7 @@ foster label     # give an opaque account UUID a human name
 foster labels    # list the names given so far
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
+foster purge     # destroy the conversations behind deleted sessions, permanently
 foster return    # remove fostered copies, restoring the previous state
 foster status    # what is currently fostered
 foster pin       # pin sessions in the sidebar, or see what is pinned
@@ -338,10 +393,11 @@ profile are counted and left alone unless you pass `--all-stores`. The ledger sp
 installation, and quietly deleting from one while working in another is not something a tool should
 do on its own.
 
-`foster` and `return` are dry runs unless you pass `--yes`: they print exactly what
-would be written or removed and touch nothing. (`label` only records a name in
-foster's own ledger, so it writes immediately.) Add `--restart` to either to
-restart Claude Desktop when it finishes.
+`foster`, `restore`, `return` and `purge` are dry runs unless you pass `--yes`: they print exactly
+what would be written or removed and touch nothing. (`label` only records a name in
+foster's own ledger, so it writes immediately; `purge` wants `--confirm` as well as
+`--yes`.) Add `--restart` to any of the first three to restart Claude Desktop when it
+finishes.
 
 Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--session <id...>`,
 `--from <accountUuid>` or `--from-org <organizationUuid>`, and choose where the copies land with
@@ -384,7 +440,8 @@ the start, `--chars` for how much; the id comes from `list --json` or `status --
 has: it refuses while a live `claude` process holds that conversation, because two writers on one
 transcript is how transcripts get corrupted. `foster live` shows exactly what is being held.
 
-`scan`, `list`, `status`, `stores`, `doctor`, `app status`, `transcript` and `live` take `--json`.
+`scan`, `list`, `status`, `stores`, `doctor`, `app status`, `transcript`, `live` and `purge` take
+`--json`.
 
 ## Agent
 
@@ -448,6 +505,11 @@ commands above do it for free.
   show for it.
 - **The originals are never modified.** Fostering only ever _adds_ a file to the current account's
   folder. There is no move, and no rewrite of anything under the old account.
+- **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
+  already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
+  It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,
+  `--yes` alone will not run it, and the agent is not allowed near it. Every other command in
+  foster adds a file or removes one foster itself wrote.
 - **Adding is safe while the app runs; removing is the case that is not.** Every copy carries a
   session id the app has never seen, so a running app neither reads that file (it is past its one
   read) nor writes it (it only writes sessions it holds) — it is simply invisible until the app
