@@ -1152,12 +1152,14 @@ program
         accountUuid,
         email: identity?.email ?? null,
         name: identity?.name ?? null,
+        plan: identity?.plan ?? null,
       });
     }
 
     if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
     if (identity?.email) console.log(`email    ${identity.email}`);
-    if (!identity?.email && !identity?.name) {
+    if (identity?.plan) console.log(`plan     ${identity.plan}`);
+    if (!identity?.email && !identity?.name && !identity?.plan) {
       console.log(
         pc.dim(
           "Nothing found in the app's cache for this account.\n" +

@@ -375,7 +375,7 @@ foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster label     # give an account a human name
 foster labels    # list the names given so far
-foster whoami    # the signed-in account's name and email, from the app's own cache
+foster whoami    # the signed-in account's name, email and plan, from the app's own cache
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 foster purge     # destroy the conversations behind deleted sessions, permanently
@@ -417,7 +417,7 @@ So the pairing has to come from you — but only once per account, and only the 
 already knows which account the sidebar is reading:
 
 ```bash
-foster label "John — johndoe@…"     # names the account you are signed into
+foster label "John · johndoe@…"     # names the account you are signed into
 foster label 00000000 "old personal"      # names any other
 ```
 
@@ -425,20 +425,27 @@ An identifier given on its own is refused rather than recorded as a name. From t
 appears in `scan`, `status` and the menu, and "Name an account" starts on the account in use —
 the one whose email you can actually go and read right now.
 
-`foster whoami` reads that email for you, from the app's own cache rather than off the screen. The
-authoritative copy of your name and email is behind the API, and the token that reaches it is a
-credential foster will not touch — but the app, having fetched its own profile once, keeps a copy at
-rest in the web-origin storage under `Local Storage/` and `IndexedDB/`. Those are Chromium LevelDB
-databases, the same format foster already reads for the pin list, and they are page data rather than
-a credential, so foster may read them. `foster label --from-cache` names the signed-in account with
-what it finds there, and the menu's "Name an account" pre-fills the same suggestion.
+`foster whoami` reads your name, email and plan for you, from the app's own cache rather than off the
+screen — `John · johndoe@… · Max`, the same pieces the app shows under your avatar. The
+authoritative copy is behind the API, and the token that reaches it is a credential foster will not
+touch — but the app, having fetched its own profile once, keeps a copy at rest in the web-origin
+storage under `Local Storage/` and `IndexedDB/`, which is page data rather than a credential, so
+foster may read it. `foster label --from-cache` names the signed-in account with what it finds, and
+the menu's "Name an account" pre-fills the same suggestion.
 
-Two honesties about it. It is **best-effort**: the storage layout is the app's, not a contract, so a
-version that keeps the profile differently makes `whoami` find nothing rather than something wrong —
-and the manual `label` is always there. And it only ever describes the account signed in **now**,
-because web storage belongs to the current session; naming your other accounts still means visiting
-each one. An email is taken only from a cached value that also carries the account's own UUID, so a
-correspondent's address quoted in a conversation cannot end up as the account's name.
+It is read the crudest way that cannot fail: the files are loaded as bytes, capped by size, and
+searched as text. Parsing that storage as a database — which an earlier version did, with the reader
+foster uses for the pin list — corrupted the heap on a real table and crashed the process outright,
+because the format is the app's to change and foster's reader was built for one narrow database.
+Reading bytes trusts nothing: it finds less (a value hidden inside a compressed block is missed) and
+crashes never.
+
+Two honesties beyond that. It is **best-effort**: a version that keeps the profile differently makes
+`whoami` find nothing rather than something wrong, and the manual `label` is always there. And it only
+ever describes the account signed in **now**, because web storage belongs to the current session;
+naming your other accounts still means visiting each one. What it extracts is tied to the account by
+proximity — an email or plan is taken only from text sitting right beside the account's own UUID — so
+a correspondent's address quoted in a conversation cannot end up as the account's name.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer
