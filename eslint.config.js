@@ -3,7 +3,12 @@ import eslint from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'coverage/**', 'node_modules/**'] },
+  // .claude/ holds the tooling's own state, and its worktrees/ is a checkout of
+  // this same repository per branch in progress — build output and all. Linting
+  // those is linting copies of the project through a config that does not apply
+  // to them: on this machine it turned a clean run into 574 errors, every one of
+  // them from a file git itself excludes.
+  { ignores: ['dist/**', 'coverage/**', 'node_modules/**', '.claude/**'] },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
