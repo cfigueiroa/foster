@@ -97,13 +97,14 @@ jobs:
           ## Safety
 
           - The originals are never modified; fostering only adds files to the current account's folder.
-          - \`foster\` and \`return\` are dry runs unless you pass \`--yes\`.
-          - Both refuse to run while Claude Desktop is open, because the app rewrites session files at runtime.
+          - \`foster\`, \`restore\`, \`return\` and \`purge\` are dry runs unless you pass \`--yes\`.
+          - Adding copies works while Claude Desktop is open. Removing them refuses for copies a running app has already loaded, since deleting one it holds in memory only makes it write the file back.
+          - \`purge\` destroys conversations on disk and cannot be undone. It takes \`--confirm <count>\` as well as \`--yes\`, and only ever considers conversations whose session the app has already deleted and that nothing still points at.
           - Credential files, cookie stores and OAuth token caches are never read.
 
           Changes appear after you restart Claude Desktop — the sidebar is built at startup and does not watch the directory.
 
-          **Cowork sessions cannot be fostered:** the list the app shows is built from the server, not from the local folder. This is a Code-session tool.
+          **Cowork sessions are not supported:** their store is local like the Code one, so the mechanism probably transfers, but a Cowork session owns a sandbox state a copy does not carry and this has not been verified end to end. This is a Code-session tool.
           NOTES
         if: startsWith(github.ref, 'refs/tags/')
 
