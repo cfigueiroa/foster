@@ -393,6 +393,21 @@ profile are counted and left alone unless you pass `--all-stores`. The ledger sp
 installation, and quietly deleting from one while working in another is not something a tool should
 do on its own.
 
+It also reads the axis the copies were written along. `foster` chooses a destination with `--to`, so
+`return --to <accountUuid>` removes the copies in one account and leaves the rest — which is what
+"clean up the account I stopped using" means, and what the unfiltered command cannot express: with
+several accounts fostered into, a bare `return` removes the copies in the one you are using too.
+
+```bash
+foster return --to 00000000          # dry run, scoped to that account
+foster return --to 00000000 --yes    # with Claude Desktop closed
+```
+
+`status` answers the same question the other way round. It summarises by account by default —
+how many copies, and where — because with a few hundred of them a line per copy is not an answer
+anyone can read. `status --all` prints the full list, `status --to <accountUuid>` narrows to one
+account, and `--json` is always complete.
+
 `foster`, `restore`, `return` and `purge` are dry runs unless you pass `--yes`: they print exactly
 what would be written or removed and touch nothing. (`label` only records a name in
 foster's own ledger, so it writes immediately; `purge` wants `--confirm` as well as

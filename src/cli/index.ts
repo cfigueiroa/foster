@@ -36,7 +36,13 @@ import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import { Ledger } from '../ledger/log.js';
-import { copySessionIds, listActive, project } from '../ledger/project.js';
+import {
+  copySessionIds,
+  listActive,
+  project,
+  selectByTarget,
+  whereCopiesAre,
+} from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -843,6 +849,8 @@ program
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
   .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
+  .option('--to <accountUuid>', 'only copies written into this account')
+  .option('--to-org <organizationUuid>', 'only copies written into this organization')
   .option('--all-stores', 'include copies written into other installations')
   .option('--duplicates', 'only copies of a conversation their account already had')
   .option('--restart', 'restart Claude Desktop afterwards')
@@ -853,6 +861,8 @@ program
     const opts = this.opts<{
       title?: string;
       session?: string[];
+      to?: string;
+      toOrg?: string;
       allStores?: boolean;
       duplicates?: boolean;
       restart?: boolean;
@@ -875,6 +885,9 @@ program
           ),
         );
       }
+    }
+    if (opts.to !== undefined || opts.toOrg !== undefined) {
+      active = selectByTarget(active, opts.to, opts.toOrg);
     }
     if (opts.duplicates) {
       const duplicated = new Set(findDuplicates(store, active).copies.map((f) => f.copySessionId));
@@ -967,12 +980,16 @@ async function finish(store: StoreLayout, restart: boolean): Promise<void> {
 program
   .command('status')
   .description('what is currently fostered')
+  .option('--all', 'list every copy instead of summarising by account')
+  .option('--to <accountUuid>', 'only copies written into this account')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { store, ledger } = context(this);
-    const active = listActive(project(ledger.read()));
+    const opts = this.opts<{ all?: boolean; to?: string; json?: boolean }>();
+    let active = listActive(project(ledger.read()));
+    if (opts.to !== undefined) active = selectByTarget(active, opts.to, undefined);
 
-    if (this.opts<{ json?: boolean }>().json) {
+    if (opts.json) {
       print(
         active.map((f) => ({
           originSessionId: f.originSessionId,
@@ -1001,6 +1018,32 @@ program
     // Marked here for the same reason it is said after a return: the row in the
     // original account still carries the date it had the day it was fostered.
     const continued = new Set(continuedSince(store, active).map((c) => c.fostering.copySessionId));
+
+    // Summary first, list on request. "What has foster done?" is a question
+    // about shape — how many, and where — and answering it with one line per
+    // copy stopped answering it at all: on this machine that was 1262 lines,
+    // and finding out which account they were in meant piping the JSON through
+    // a script. The per-copy list is still here, one flag away.
+    if (!opts.all) {
+      const labels = project(ledger.read()).labels;
+      for (const line of whereCopiesAre(active).split('\n')) {
+        const uuid = line.trim().split(/\s+/)[0]!;
+        const name = labels.get(uuid);
+        console.log(name ? `${line}  ${pc.dim(name)}` : line);
+      }
+      console.log(pc.bold(`\n${active.length} active fostering(s)`));
+      console.log(pc.dim('foster status --all lists them; --to <accountUuid> narrows to one.'));
+      reportDuplicates(findDuplicates(store, active));
+      if (elsewhere.length > 0) {
+        console.log(
+          pc.dim(
+            `${elsewhere.length} of them ${elsewhere.length === 1 ? 'is' : 'are'} in another installation — return needs --all-stores, or --store on that one.`,
+          ),
+        );
+      }
+      console.log(pc.dim(`Ledger: ${ledger.path}`));
+      return;
+    }
 
     for (const fostering of active) {
       const carried = continued.has(fostering.copySessionId) ? pc.dim(' (continued since)') : '';

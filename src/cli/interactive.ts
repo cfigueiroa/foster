@@ -943,8 +943,22 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
   // the same conversation twice in the sidebar.
   const duplicates = findDuplicates(store, active).copies;
 
+  // Grouped by the account they were written into, because that is how copies
+  // pile up: one sweep per account you have signed into. Offered only when
+  // there is more than one, so the ordinary case gains no extra question.
+  const accounts = groupByTarget(active, ledger);
+
   const scope = await selectOrBack(`${active.length} fostered session(s). Send back which?`, [
     { value: 'all', label: 'All of them' },
+    ...(accounts.length > 1
+      ? [
+          {
+            value: 'account',
+            label: 'Only those in one account',
+            hint: 'clean up an account you stopped using',
+          },
+        ]
+      : []),
     { value: 'pick', label: 'Pick them from a list', hint: 'tick the ones you want' },
     { value: 'title', label: 'Only those matching a title' },
     ...(duplicates.length > 0
@@ -959,7 +973,7 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
   ]);
   if (aborted(scope)) return;
 
-  const chosen = await narrowFosterings(active, scope, duplicates);
+  const chosen = await narrowFosterings(active, scope, duplicates, accounts);
   if (aborted(chosen)) return;
   if (chosen.length === 0) {
     log.info('Nothing matches.');
@@ -996,13 +1010,47 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
   }
 }
 
+/** The accounts copies were written into, most-populated first, with names when known. */
+function groupByTarget(
+  active: ActiveFostering[],
+  ledger: Ledger,
+): { accountUuid: string; count: number; label: string }[] {
+  const labels = labelsOf(ledger);
+  const counts = new Map<string, number>();
+  for (const fostering of active) {
+    counts.set(fostering.target.accountUuid, (counts.get(fostering.target.accountUuid) ?? 0) + 1);
+  }
+
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([accountUuid, count]) => ({
+      accountUuid,
+      count,
+      label: labels.get(accountUuid) ?? shortId(accountUuid),
+    }));
+}
+
 async function narrowFosterings(
   active: ActiveFostering[],
   scope: string,
   duplicates: ActiveFostering[] = [],
+  accounts: { accountUuid: string; count: number; label: string }[] = [],
 ): Promise<Maybe<ActiveFostering[]>> {
   if (scope === 'all') return active;
   if (scope === 'duplicates') return duplicates;
+
+  if (scope === 'account') {
+    const picked = await selectOrBack(
+      'Copies in which account?',
+      accounts.map((account) => ({
+        value: account.accountUuid,
+        label: account.label,
+        hint: `${account.count} cop${account.count === 1 ? 'y' : 'ies'}`,
+      })),
+    );
+    if (aborted(picked)) return BACK;
+    return active.filter((f) => f.target.accountUuid === picked);
+  }
 
   if (scope === 'pick') {
     const picked = await pickMany(

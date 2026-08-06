@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Ledger } from '../src/ledger/log.js';
-import { isFostered, listActive, project } from '../src/ledger/project.js';
+import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
+import type { ActiveFostering } from '../src/ledger/types.js';
+import type { AccountRef } from '../src/domain/types.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 function makeLedger(): Ledger {
@@ -113,5 +115,50 @@ describe('projection', () => {
 
     expect(state.labels.get(OLD_ACCOUNT.accountUuid)).toBe('work');
     expect(listActive(state)).toHaveLength(0);
+  });
+});
+
+describe('selectByTarget', () => {
+  const OTHER: AccountRef = {
+    accountUuid: '22222222-2222-4222-8222-222222222222',
+    organizationUuid: '22222222-2222-4222-8222-222222222223',
+  };
+
+  function copyInto(target: AccountRef, originSessionId: string): ActiveFostering {
+    return {
+      originSessionId,
+      origin: OLD_ACCOUNT,
+      target,
+      copySessionId: `local_${originSessionId}`,
+      copyPath: `/store/${target.accountUuid}/${originSessionId}.json`,
+      fosteredAt: 1,
+    };
+  }
+
+  const active = [copyInto(NEW_ACCOUNT, 'a1'), copyInto(NEW_ACCOUNT, 'a2'), copyInto(OTHER, 'b1')];
+
+  it('keeps only the copies in the account named', () => {
+    // The whole point: cleaning up an account you stopped using must not touch
+    // the one you are in.
+    const picked = selectByTarget(active, OTHER.accountUuid.slice(0, 8), undefined);
+    expect(picked).toHaveLength(1);
+    expect(picked[0]!.originSessionId).toBe('b1');
+  });
+
+  it('says where the copies actually are when the prefix matches none', () => {
+    expect(() => selectByTarget(active, 'deadbeef', undefined)).toThrow(/No fostered copies/);
+    expect(() => selectByTarget(active, 'deadbeef', undefined)).toThrow(
+      new RegExp(`${NEW_ACCOUNT.accountUuid}  2 copies`),
+    );
+  });
+
+  it('refuses a prefix that spans two accounts rather than guessing wide', () => {
+    // Guessing here removes copies from an account nobody named.
+    expect(() => selectByTarget(active, '', undefined)).toThrow(/ambiguous: it matches 2 accounts/);
+  });
+
+  it('narrows by organization on its own', () => {
+    const picked = selectByTarget(active, undefined, OTHER.organizationUuid.slice(0, 8));
+    expect(picked.map((f) => f.originSessionId)).toEqual(['b1']);
   });
 });

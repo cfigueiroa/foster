@@ -73,6 +73,70 @@ export function listActive(state: LedgerState): ActiveFostering[] {
 }
 
 /**
+ * Narrow to the copies sitting in one account.
+ *
+ * `foster` chooses where copies go with `--to`; without the same axis here, the
+ * command that undoes it could not read the one dimension it was written along.
+ * The target of every copy has been in the ledger from the start — the filter
+ * was simply missing, and its absence left "clean up the account I stopped
+ * using" with no expression short of listing every id by hand, while the
+ * unfiltered command removed the copies in the account still in use.
+ *
+ * Matched against the accounts that actually hold copies rather than the
+ * directories on disk, because that is the question being asked. A prefix
+ * matching nothing is answered with where the copies really are, which is the
+ * fact the user was reaching for anyway.
+ */
+export function selectByTarget(
+  active: ActiveFostering[],
+  accountPrefix: string | undefined,
+  organizationPrefix: string | undefined,
+): ActiveFostering[] {
+  let selected = active;
+
+  if (accountPrefix !== undefined) {
+    selected = selected.filter((f) => f.target.accountUuid.startsWith(accountPrefix));
+  }
+  if (organizationPrefix !== undefined) {
+    selected = selected.filter((f) => f.target.organizationUuid.startsWith(organizationPrefix));
+  }
+
+  if (selected.length === 0) {
+    const named =
+      accountPrefix !== undefined ? `--to "${accountPrefix}"` : `--to-org "${organizationPrefix}"`;
+    throw new Error(
+      `No fostered copies are in the account ${named} names.\nCopies are in:\n${whereCopiesAre(active)}`,
+    );
+  }
+
+  // Ambiguity is reported rather than guessed at, as everywhere else — and it
+  // matters more here than anywhere, because guessing wide removes copies from
+  // an account the user never named.
+  const accounts = new Set(selected.map((f) => f.target.accountUuid));
+  if (accountPrefix !== undefined && accounts.size > 1) {
+    throw new Error(
+      `--to "${accountPrefix}" is ambiguous: it matches ${accounts.size} accounts.\n` +
+        [...accounts].map((uuid) => `  ${uuid}`).join('\n'),
+    );
+  }
+
+  return selected;
+}
+
+/** One line per account holding copies — the answer to "where are they, then?". */
+export function whereCopiesAre(active: ActiveFostering[]): string {
+  const counts = new Map<string, number>();
+  for (const fostering of active) {
+    counts.set(fostering.target.accountUuid, (counts.get(fostering.target.accountUuid) ?? 0) + 1);
+  }
+
+  return [...counts]
+    .sort((a, b) => b[1] - a[1])
+    .map(([uuid, count]) => `  ${uuid}  ${count} cop${count === 1 ? 'y' : 'ies'}`)
+    .join('\n');
+}
+
+/**
  * Idempotency check. Fostering mints a new sessionId every time, so "has this
  * already been done?" cannot be answered by looking for a file — it has to be
  * keyed on the origin session and the target account.
