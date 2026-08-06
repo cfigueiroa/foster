@@ -38,6 +38,49 @@ export interface CachedIdentity {
   plan?: string;
 }
 
+/** Where each part of an identity came from, so a stale answer can say so. */
+export interface ResolvedIdentity extends CachedIdentity {
+  /** True when nothing was in the cache and every part came from the ledger. */
+  remembered?: boolean;
+  /** When the remembered part was last confirmed, for anything not read fresh. */
+  seenAt?: number;
+}
+
+/**
+ * The identity to use, from the cache when it says something and from memory
+ * when it does not.
+ *
+ * This is the answer to a source that cannot be read more carefully, only more
+ * often. The profile lands in the app's web storage on sign-in and leaves when
+ * Chromium compacts that database — the plan was readable here minutes after
+ * signing in and absent from every non-credential file an hour later — so a
+ * command that only reads gets a different answer depending on when it runs.
+ * Reading and *remembering* turns that into a stable one: whatever the cache
+ * still offers wins, because it is current, and anything it has forgotten falls
+ * back to what foster wrote down when it was there.
+ */
+export function resolveIdentity(
+  cached: CachedIdentity | undefined,
+  known: { email?: string; name?: string; plan?: string; seenAt: number } | undefined,
+): ResolvedIdentity | undefined {
+  if (!cached && !known) return undefined;
+
+  const merged: ResolvedIdentity = {
+    ...((cached?.email ?? known?.email) ? { email: cached?.email ?? known?.email } : {}),
+    ...((cached?.name ?? known?.name) ? { name: cached?.name ?? known?.name } : {}),
+    ...((cached?.plan ?? known?.plan) ? { plan: cached?.plan ?? known?.plan } : {}),
+  };
+  if (!merged.email && !merged.name && !merged.plan) return undefined;
+
+  // Only called remembered when the cache contributed nothing at all. A partial
+  // read — the usual case once the plan has aged out — is still a fresh sighting
+  // of what it did find, and saying otherwise would age the whole answer wrongly.
+  const fresh = Boolean(cached?.email || cached?.name || cached?.plan);
+  if (!fresh && known) return { ...merged, remembered: true, seenAt: known.seenAt };
+  if (known && !cached?.plan && known.plan) return { ...merged, seenAt: known.seenAt };
+  return merged;
+}
+
 const EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
 // A person's name field specifically — not a bare `"name"`, which the app's cache
 // attaches to organizations, workspaces and a dozen other things, and which is

@@ -5,6 +5,26 @@ export interface LedgerState {
   /** Keyed by origin session + target account: one active copy per pair. */
   active: Map<string, ActiveFostering>;
   labels: Map<string, string>;
+  /** Who each account belongs to, as last seen — see KnownIdentity. */
+  identities: Map<string, KnownIdentity>;
+}
+
+/**
+ * An account's identity as the ledger remembers it.
+ *
+ * Accumulated field by field rather than replaced wholesale: the cache gives up
+ * different parts at different moments — the name and email persist, the plan
+ * appears after a sign-in and vanishes when the database is compacted — and a
+ * later sighting that found less must not erase what an earlier one found. Each
+ * field carries when it was seen, because "Max, seen three weeks ago" is a
+ * different claim from "Max" and the difference is worth showing.
+ */
+export interface KnownIdentity {
+  email?: string;
+  name?: string;
+  plan?: string;
+  /** When any part of this was last confirmed. */
+  seenAt: number;
 }
 
 /**
@@ -14,12 +34,29 @@ export interface LedgerState {
 export function project(events: LedgerEvent[]): LedgerState {
   const active = new Map<string, ActiveFostering>();
   const labels = new Map<string, string>();
+  const identities = new Map<string, KnownIdentity>();
 
   for (const event of events) {
     switch (event.kind) {
       case 'account_labelled':
         labels.set(event.accountUuid, event.label);
         break;
+
+      case 'account_identity_seen': {
+        // Merged over what is already known, so a run that saw only the name
+        // keeps the plan an earlier one recorded. The timestamp moves regardless:
+        // it marks when the account was last looked at, which is what makes a
+        // remembered answer honest about its age.
+        const known = identities.get(event.accountUuid);
+        identities.set(event.accountUuid, {
+          ...known,
+          ...(event.email ? { email: event.email } : {}),
+          ...(event.name ? { name: event.name } : {}),
+          ...(event.plan ? { plan: event.plan } : {}),
+          seenAt: event.ts,
+        });
+        break;
+      }
 
       case 'fostered':
         active.set(fosteringKey(event.originSessionId, event.target), {
@@ -52,7 +89,7 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels };
+  return { active, labels, identities };
 }
 
 /**

@@ -50,7 +50,7 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
-import { identityLabel, readIdentityFromCache } from '../store/identity.js';
+import { identityLabel, readIdentityFromCache, resolveIdentity } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
 import { scanSources, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
@@ -1114,12 +1114,17 @@ program
       if (!currentAccountUuid) {
         throw new Error('No account is signed in, so there is nothing to read a name for.');
       }
-      const identity = readIdentityFromCache(store, currentAccountUuid);
+      // The same resolution `whoami` uses, so the two never disagree: the cache
+      // for what it still holds, the ledger for what it has forgotten.
+      const identity = resolveIdentity(
+        readIdentityFromCache(store, currentAccountUuid),
+        project(ledger.read()).identities.get(currentAccountUuid),
+      );
       const fromCache = identityLabel(identity);
       if (!fromCache) {
         throw new Error(
-          "Nothing was found in the app's cache for this account.\n" +
-            'Name it by hand instead: foster label "a name".',
+          "Nothing is known about this account — the app's cache holds no profile for it,\n" +
+            'and foster has not recorded one. Name it by hand instead: foster label "a name".',
         );
       }
       ledger.append({
@@ -1153,12 +1158,12 @@ program
   .description("the signed-in account's name, email and plan, read from the app's own cache")
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const { store } = context(this);
+    const { store, ledger } = context(this);
     const accountUuid = readConfig(store).lastKnownAccountUuid;
     const json = this.opts<{ json?: boolean }>().json;
 
     if (!accountUuid) {
-      if (json) return print({ accountUuid: null, email: null, name: null });
+      if (json) return print({ accountUuid: null, email: null, name: null, plan: null });
       console.log('No account is signed in. Open Claude Desktop once first.');
       return;
     }
@@ -1169,10 +1174,25 @@ program
     if (!json) console.log(`account  ${accountUuid}`);
 
     // Read at rest, never over the network: the app cached its own profile in the
-    // web-origin LevelDB, which is page data rather than a credential. When the
-    // schema has moved and nothing is found, that is reported plainly — the point
-    // of a best-effort read is that its failure is not an error.
-    const identity = readIdentityFromCache(store, accountUuid);
+    // web-origin LevelDB, which is page data rather than a credential. What the
+    // cache no longer holds comes from the ledger, which is why this answer does
+    // not change with the app's compaction schedule.
+    const cached = readIdentityFromCache(store, accountUuid);
+    const identity = resolveIdentity(cached, project(ledger.read()).identities.get(accountUuid));
+
+    // Written down whenever the cache said something, so the next run still knows
+    // it after the app has forgotten. Recorded only on a sighting: a run that
+    // found nothing has nothing to add, and appending it would age the record for
+    // no reason.
+    if (cached?.email || cached?.name || cached?.plan) {
+      ledger.append({
+        kind: 'account_identity_seen',
+        accountUuid,
+        ...(cached.email ? { email: cached.email } : {}),
+        ...(cached.name ? { name: cached.name } : {}),
+        ...(cached.plan ? { plan: cached.plan } : {}),
+      });
+    }
 
     if (json) {
       return print({
@@ -1180,12 +1200,28 @@ program
         email: identity?.email ?? null,
         name: identity?.name ?? null,
         plan: identity?.plan ?? null,
+        remembered: identity?.remembered ?? false,
+        seenAt: identity?.seenAt ?? null,
       });
     }
 
     if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
     if (identity?.email) console.log(`email    ${identity.email}`);
     if (identity?.plan) console.log(`plan     ${identity.plan}`);
+    // Said when any of it came from memory rather than from the cache. The plan
+    // ages out of the cache within hours of a sign-in, so this is the ordinary
+    // case rather than the exception, and a remembered answer that pretends to be
+    // fresh is the kind of small lie that costs trust later.
+    if (identity?.seenAt !== undefined) {
+      const when = formatDate(identity.seenAt);
+      console.log(
+        pc.dim(
+          identity.remembered
+            ? `\nNot in the app's cache now; this is what foster recorded on ${when}.`
+            : `\nThe plan is no longer in the app's cache; that part was recorded on ${when}.`,
+        ),
+      );
+    }
     if (!identity?.email && !identity?.name && !identity?.plan) {
       console.log(
         pc.dim(

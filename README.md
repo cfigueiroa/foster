@@ -440,12 +440,23 @@ because the format is the app's to change and foster's reader was built for one 
 Reading bytes trusts nothing: it finds less (a value hidden inside a compressed block is missed) and
 crashes never.
 
+**It reads and remembers, because the source is volatile.** The profile lands in that storage when
+the app fetches it and leaves when Chromium compacts the database: measured here, the plan was
+readable minutes after signing in and absent from every non-credential file an hour later. No amount
+of careful parsing finds what is no longer written down, so `whoami` records what it sees in
+foster's own ledger and falls back to that when the cache has forgotten. A remembered answer says
+so, with the date it was last confirmed — that is a different claim from a fresh reading, and the
+difference is worth keeping visible.
+
+Remembering is also what makes the **other** accounts nameable. Web storage only ever describes the
+session in front of you, so the cache alone can name one account; the ledger accumulates them, one
+per visit, and `label` offers what it knows for whichever account you pick.
+
 Two honesties beyond that. It is **best-effort**: a version that keeps the profile differently makes
-`whoami` find nothing rather than something wrong, and the manual `label` is always there. And it only
-ever describes the account signed in **now**, because web storage belongs to the current session;
-naming your other accounts still means visiting each one. What it extracts is tied to the account by
-proximity — an email or plan is taken only from text sitting right beside the account's own UUID — so
-a correspondent's address quoted in a conversation cannot end up as the account's name.
+`whoami` find nothing new rather than something wrong, and the manual `label` is always there. And
+what it extracts is tied to the account by proximity — the email must sit beside the account’s own
+UUID, and the name and plan beside that email — so a correspondent’s address quoted in a conversation
+cannot end up as the account’s name, and a workspace called "Sales" cannot end up as its owner.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer
