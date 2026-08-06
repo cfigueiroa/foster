@@ -511,6 +511,10 @@ const TYPE_A_PATH = '__type_a_path';
  * screens read the same and offer the same granularity. Taking a whole account
  * and taking one of its organizations are both reasonable, and only the user
  * knows which they meant.
+ *
+ * Ticked rather than chosen: the scan below takes a list of directories and
+ * always did, so a single choice was a limit of this screen alone — someone
+ * consolidating three accounts had to run the whole flow three times.
  */
 async function chooseAccounts(
   store: StoreLayout,
@@ -539,6 +543,18 @@ async function chooseAccounts(
     );
 
   const choices: SourceOption[] = [];
+
+  // Only when there is more than one account to gather: with a single one its
+  // own shortcut already says the same thing, and two rows that mean exactly the
+  // same is the sort of list nobody trusts.
+  if (byAccount.size > 1) {
+    choices.push({
+      refs: sources,
+      label: `${pc.bold('Everything here')} — all ${byAccount.size} accounts`,
+      hint: describeStat(totals(sources)),
+    });
+  }
+
   for (const [accountUuid, refs] of byAccount) {
     const name = labels.get(accountUuid) ?? short(accountUuid);
     const suffix = accountUuid === options.currentAccountUuid ? pc.green(' (this account)') : '';
@@ -560,18 +576,44 @@ async function chooseAccounts(
     }
   }
 
-  const picked = await selectOrBack(options.message, [
-    ...choices.map((choice, index) => ({
-      value: String(index),
-      label: choice.label,
-      hint: choice.hint,
-    })),
-    ...(options.extra ?? []),
-  ]);
+  const picked = await pickMany(
+    `${options.message} ${pc.dim('· space to tick, enter to accept')}`,
+    [
+      ...choices.map((choice, index) => ({
+        value: String(index),
+        label: choice.label,
+        hint: choice.hint,
+      })),
+      ...(options.extra ?? []),
+    ],
+  );
 
   if (aborted(picked)) return BACK;
-  if (picked === OTHER_STORE) return OTHER_STORE;
-  return choices[Number(picked)]?.refs ?? BACK;
+
+  // Another installation is a different scan rather than another tick: one run
+  // reads one store, so asking for both is said out loud instead of being
+  // quietly resolved to whichever the code happened to check first.
+  if (picked.includes(OTHER_STORE)) {
+    if (picked.length > 1) {
+      log.error('One installation at a time — untick either the accounts here or the other one.');
+      return BACK;
+    }
+    return OTHER_STORE;
+  }
+
+  // Ticking an account and one of its organizations is not a contradiction, so
+  // the rows are merged rather than refused: what the user pointed at is the
+  // union, and a directory named twice is still one directory.
+  const refs = new Map<string, AccountRef>();
+  for (const value of picked) {
+    for (const ref of choices[Number(value)]?.refs ?? []) refs.set(refKey(ref), ref);
+  }
+
+  if (refs.size === 0) {
+    log.info('Nothing ticked.');
+    return BACK;
+  }
+  return [...refs.values()];
 }
 
 /** The directories of one store that are eligible as a source. */

@@ -1,7 +1,7 @@
 import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { select } from '@clack/prompts';
+import { log, select } from '@clack/prompts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Safety from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -95,7 +95,7 @@ describe('the guided menu', () => {
   it('fosters a whole account and returns to the menu afterwards', async () => {
     answers = [
       'foster', // menu
-      '0', // source: the old account's only organization
+      ['0'], // source: the old account's only organization
       'all', // take every session
       'go', // confirm
       'later', // decline the offer to restart the app
@@ -111,7 +111,7 @@ describe('the guided menu', () => {
   });
 
   it('narrows the batch by title before writing', async () => {
-    answers = ['foster', '0', 'title', 'refactor', 'go', 'later', 'quit'];
+    answers = ['foster', ['0'], 'title', 'refactor', 'go', 'later', 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -123,7 +123,7 @@ describe('the guided menu', () => {
   it('writes nothing when the confirmation is declined, and keeps the menu open', async () => {
     answers = [
       'foster',
-      '0',
+      ['0'],
       'all',
       'cancel', // decline
       'status', // menu is still running
@@ -137,7 +137,8 @@ describe('the guided menu', () => {
   });
 
   it('backing out of the source picker returns to the menu instead of exiting', async () => {
-    answers = ['foster', '__back', 'quit'];
+    // Ticking nothing is how you leave a multiselect: there is no Back row to press.
+    answers = ['foster', [], 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -146,7 +147,7 @@ describe('the guided menu', () => {
   });
 
   it('returns fostered copies, leaving the origin untouched', async () => {
-    answers = ['foster', '0', 'all', 'go', 'later', 'return', 'all', true, 'later', 'quit'];
+    answers = ['foster', ['0'], 'all', 'go', 'later', 'return', 'all', true, 'later', 'quit'];
 
     await runInteractive(store, ledger);
 
@@ -189,7 +190,7 @@ describe('organizations within an account', () => {
     );
 
     // 0 = the whole account, 1 = its first organization, 2 = its second.
-    answers = ['foster', '2', 'all', 'go', 'later', 'quit'];
+    answers = ['foster', ['2'], 'all', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
@@ -204,7 +205,7 @@ describe('organizations within an account', () => {
       session({ sessionId: '00000000-0000-4000-8000-0000000000b2', title: 'Second org work' }),
     );
 
-    answers = ['foster', '0', 'all', 'go', 'later', 'quit'];
+    answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     // Two from the first organization plus one from the second.
@@ -224,11 +225,12 @@ describe('organizations within an account', () => {
     const later = new Date(Date.now() + 60_000);
     utimesSync(target, later, later);
 
-    // 0 = the old account's organization, 1 = this account's other organization.
-    // Both accounts contribute one eligible organization, so neither gets the
-    // whole-account shortcut. The sibling must be offered at all: excluding the
-    // entire current account would make that session permanently unreachable.
-    answers = ['foster', '1', 'all', 'go', 'later', 'quit'];
+    // 0 = every account at once, 1 = the old account's organization, 2 = this
+    // account's other organization. Both accounts contribute one eligible
+    // organization, so neither gets the whole-account shortcut. The sibling must
+    // be offered at all: excluding the entire current account would make that
+    // session permanently unreachable.
+    answers = ['foster', ['2'], 'all', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
@@ -239,10 +241,69 @@ describe('organizations within an account', () => {
   it('never offers the directory the sidebar already reads', async () => {
     // Only the old account's single organization is a valid source here, so any
     // index beyond the first would mean the target itself was on the list.
-    answers = ['foster', '1', 'all', 'go', 'later', 'quit'];
+    answers = ['foster', ['1'], 'all', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+  });
+});
+
+/**
+ * The scan below this screen always took a list of directories, so being able to
+ * name only one of them was a limit of the picker alone: consolidating three
+ * accounts meant three passes through the whole flow.
+ */
+describe('taking more than one source at once', () => {
+  const THIRD_ACCOUNT = {
+    accountUuid: '22222222-2222-4222-8222-222222222221',
+    organizationUuid: '22222222-2222-4222-8222-222222222222',
+  };
+
+  it('sweeps every account in one pass', async () => {
+    writeSession(
+      store,
+      THIRD_ACCOUNT,
+      session({ sessionId: '22222222-2222-4222-8222-2222222200c1', title: 'Third account work' }),
+    );
+
+    // 0 = the row that stands for both accounts.
+    answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
+    await runInteractive(store, ledger);
+
+    const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
+    expect(copies).toHaveLength(3);
+    expect(copies.map((c) => c.data.title)).toContainEqual(
+      expect.stringContaining('Third account work'),
+    );
+  });
+
+  it('counts a directory once when the account and its organization are both ticked', async () => {
+    writeSession(
+      store,
+      {
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        organizationUuid: '00000000-0000-4000-8000-00000000000f',
+      },
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c2', title: 'Second org work' }),
+    );
+
+    // 0 = the whole account, 1 = its first organization: overlapping, not
+    // contradictory, and the overlap must not produce a second copy.
+    answers = ['foster', ['0', '1'], 'all', 'go', 'later', 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(3);
+  });
+
+  it('refuses to read this installation and another one in the same pass', async () => {
+    answers = ['foster', ['0', '__other_store'], 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
+    expect(vi.mocked(log.error).mock.calls.flat()).toContainEqual(
+      expect.stringMatching(/one installation at a time/i),
+    );
+    expect(answers).toHaveLength(0);
   });
 });
 
@@ -253,7 +314,7 @@ describe('backing out of any step', () => {
    * as a lookup key — the menu crashed with "Cannot read properties of undefined".
    */
   it('returns to the menu from the filter step instead of crashing', async () => {
-    answers = ['foster', '0', '__back', 'quit'];
+    answers = ['foster', ['0'], '__back', 'quit'];
 
     await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
 
@@ -275,7 +336,7 @@ describe('backing out of any step', () => {
     const later = new Date(Date.now() + 60_000);
     utimesSync(active, later, later);
 
-    answers = ['foster', '0', '__back', 'quit'];
+    answers = ['foster', ['0'], '__back', 'quit'];
 
     await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
     expect(answers).toHaveLength(0);
@@ -297,7 +358,7 @@ describe('choosing where the copies go', () => {
     // whole-account shortcut at 0). The destination picker is keyed by
     // account/organization rather than by position, so it is named outright.
     const destination = `${ELSEWHERE.accountUuid}/${ELSEWHERE.organizationUuid}`;
-    answers = ['foster', '1', 'all', 'elsewhere', destination, 'go', 'quit'];
+    answers = ['foster', ['1'], 'all', 'elsewhere', destination, 'go', 'quit'];
     await runInteractive(store, ledger);
 
     // Nothing landed where the sidebar reads; it all went to the chosen place.
@@ -308,7 +369,7 @@ describe('choosing where the copies go', () => {
   it('does not ask when the current directory is the only destination', async () => {
     // Only the old account's organization is a source, and nothing else exists,
     // so the flow must not consume an answer for a question with one option.
-    answers = ['foster', '0', 'all', 'go', 'later', 'quit'];
+    answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(2);
@@ -319,7 +380,7 @@ describe('choosing where the copies go', () => {
 describe('picking sessions individually', () => {
   it('takes only the ticked ones', async () => {
     // Sessions are offered most recently used first, so index 0 is deterministic.
-    answers = ['foster', '0', 'pick', ['0'], 'go', 'later', 'quit'];
+    answers = ['foster', ['0'], 'pick', ['0'], 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
@@ -327,7 +388,7 @@ describe('picking sessions individually', () => {
   });
 
   it('treats ticking nothing as a change of mind rather than a batch of zero', async () => {
-    answers = ['foster', '0', 'pick', [], 'quit'];
+    answers = ['foster', ['0'], 'pick', [], 'quit'];
     await runInteractive(store, ledger);
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
@@ -337,7 +398,7 @@ describe('picking sessions individually', () => {
 
 describe('the confirmation screen', () => {
   it('changes the prefix without leaving it', async () => {
-    answers = ['foster', '0', 'all', 'prefix', '[old] ', 'go', 'later', 'quit'];
+    answers = ['foster', ['0'], 'all', 'prefix', '[old] ', 'go', 'later', 'quit'];
     await runInteractive(store, ledger);
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
@@ -347,7 +408,7 @@ describe('the confirmation screen', () => {
 
   it('writes nothing when the answer is one it does not understand', async () => {
     // A prompt that returns something unexpected used to spin the loop forever.
-    answers = ['foster', '0', 'all', 'something-else', 'quit'];
+    answers = ['foster', ['0'], 'all', 'something-else', 'quit'];
 
     await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
@@ -400,10 +461,10 @@ describe('bringing sessions from another installation', () => {
 
     answers = [
       'foster',
-      '__other_store', // "Another installation or profile…"
+      ['__other_store'], // "Another installation or profile…"
       '__type_a_path', // not running, so type where it lives
       other.root,
-      '0', // its only account/organization
+      ['0'], // its only account/organization
       'all',
       'go',
       'later',
@@ -422,7 +483,7 @@ describe('bringing sessions from another installation', () => {
   it('comes back to the menu when the path is not a store', async () => {
     answers = [
       'foster',
-      '__other_store',
+      ['__other_store'],
       '__type_a_path',
       mkdtempSync(path.join(tmpdir(), 'not-a-store-')),
       'quit',
@@ -464,7 +525,7 @@ describe('working on another installation', () => {
       '__type_a_path',
       other.root,
       'foster', // now operating inside the other store
-      '0',
+      ['0'],
       'all',
       'go',
       'later',
