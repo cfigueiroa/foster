@@ -1136,6 +1136,11 @@ program
       return;
     }
 
+    // Printed before the cache read, so this command always says something even
+    // if the read below finds nothing — the account is the one fact that never
+    // depends on the cache.
+    if (!json) console.log(`account  ${accountUuid}`);
+
     // Read at rest, never over the network: the app cached its own profile in the
     // web-origin LevelDB, which is page data rather than a credential. When the
     // schema has moved and nothing is found, that is reported plainly — the point
@@ -1150,7 +1155,6 @@ program
       });
     }
 
-    console.log(`account  ${accountUuid}`);
     if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
     if (identity?.email) console.log(`email    ${identity.email}`);
     if (!identity?.email && !identity?.name) {
