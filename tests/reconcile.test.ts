@@ -368,6 +368,43 @@ describe('a copy the app repointed at another conversation', () => {
     expect(here).toContain(BRANCH);
   });
 
+  it('does not call a copy repurposed over a difference in case', () => {
+    // Every other comparison of this identifier folds case first. Reading a
+    // capitalisation change as a different conversation would disown a copy that
+    // holds exactly the one it was made for, and mint a second card for it.
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));
+    fosterOnce(store, ledger);
+
+    const [active] = listActive(project(ledger.read()));
+    const copy = JSON.parse(readFileSync(active!.copyPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      active!.copyPath,
+      JSON.stringify({ ...copy, cliSessionId: TRUNK.toUpperCase() }),
+      'utf8',
+    );
+
+    expect(inspectCopy(active!)).toEqual({ kind: 'present' });
+  });
+
+  it('records a repurposed copy as still on disk, not as gone', () => {
+    // `reconciled` means the file had already vanished. Saying that about a file
+    // that is still there sends anyone reading the log hunting for a deletion
+    // that never happened.
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));
+    fosterOnce(store, ledger);
+    const [first] = listActive(project(ledger.read()));
+    const copy = JSON.parse(readFileSync(first!.copyPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(first!.copyPath, JSON.stringify({ ...copy, cliSessionId: BRANCH }), 'utf8');
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { store, ledger, target: NEW_ACCOUNT });
+
+    const returned = ledger.read().find((e) => e.kind === 'returned');
+    expect(returned).toMatchObject({ repurposed: true });
+    expect(returned).not.toHaveProperty('reconciled');
+  });
+
   it('still skips a copy that is present and unchanged', () => {
     const store = makeStore();
     const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));

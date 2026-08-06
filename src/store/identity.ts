@@ -26,9 +26,10 @@ import { isDirectory, safeReaddir } from '../util/fs.js';
  *
  * Two honesties beyond that. It is best-effort: a version that stores the profile
  * differently makes this find nothing rather than something wrong, and the manual
- * `label` is always there. And it only ever describes the account signed in now,
- * because web storage belongs to the current session — naming the others still
- * means visiting each.
+ * `label` is always there. And what this file reads describes only the account
+ * signed in now, because web storage belongs to the current session — the other
+ * accounts are known through the ledger, which keeps what was seen on the visit
+ * that saw it, so a name is available for an account you are not in.
  */
 
 export interface CachedIdentity {
@@ -46,19 +47,6 @@ export interface ResolvedIdentity extends CachedIdentity {
   seenAt?: number;
 }
 
-/**
- * The identity to use, from the cache when it says something and from memory
- * when it does not.
- *
- * This is the answer to a source that cannot be read more carefully, only more
- * often. The profile lands in the app's web storage on sign-in and leaves when
- * Chromium compacts that database — the plan was readable here minutes after
- * signing in and absent from every non-credential file an hour later — so a
- * command that only reads gets a different answer depending on when it runs.
- * Reading and *remembering* turns that into a stable one: whatever the cache
- * still offers wins, because it is current, and anything it has forgotten falls
- * back to what foster wrote down when it was there.
- */
 /**
  * Whether a sighting is worth writing down.
  *
@@ -82,6 +70,19 @@ export function worthRecording(
   );
 }
 
+/**
+ * The identity to use, from the cache when it says something and from memory
+ * when it does not.
+ *
+ * This is the answer to a source that cannot be read more carefully, only more
+ * often. The profile lands in the app's web storage on sign-in and leaves when
+ * Chromium compacts that database — the plan was readable here minutes after
+ * signing in and absent from every non-credential file an hour later — so a
+ * command that only reads gets a different answer depending on when it runs.
+ * Reading and *remembering* turns that into a stable one: whatever the cache
+ * still offers wins, because it is current, and anything it has forgotten falls
+ * back to what foster wrote down when it was there.
+ */
 export function resolveIdentity(
   cached: CachedIdentity | undefined,
   known: { email?: string; name?: string; plan?: string; seenAt: number } | undefined,

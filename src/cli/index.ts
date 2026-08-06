@@ -1512,12 +1512,12 @@ program
   .option('--json', 'machine-readable output')
   .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
   .option('--yes', 'actually end them; without it nothing is stopped')
-  .action(function (this: Command) {
+  .action(async function (this: Command) {
     const opts = this.opts<{ json?: boolean; stop?: string[]; yes?: boolean }>();
     const sessions = liveSessions(sessionRegistryRoots(process.env));
 
     if (opts.stop?.length) {
-      stopWriters(sessions, opts.stop, Boolean(opts.yes));
+      await stopWriters(sessions, opts.stop, Boolean(opts.yes), Boolean(opts.json));
       return;
     }
 
@@ -1560,48 +1560,80 @@ program
  * already has: a command must not kill the thing it is running in, part-way
  * through, leaving nobody to report what happened.
  */
-function stopWriters(sessions: LiveCliSession[], wanted: string[], apply: boolean): void {
-  const selected = sessions.filter((session) =>
-    wanted.some((id) => session.sessionId.toLowerCase().startsWith(id.toLowerCase())),
-  );
-
-  const unmatched = wanted.filter(
-    (id) => !sessions.some((s) => s.sessionId.toLowerCase().startsWith(id.toLowerCase())),
-  );
-  if (unmatched.length > 0) {
-    throw new Error(
-      `No live session matches ${unmatched.join(', ')}.\nRun "foster live" to see what is running.`,
-    );
+async function stopWriters(
+  sessions: LiveCliSession[],
+  wanted: string[],
+  apply: boolean,
+  json: boolean,
+): Promise<void> {
+  // Resolved one prefix at a time, refusing rather than guessing — the rule every
+  // other identifier flag here follows, and the one this command needs most. A
+  // prefix that matched several used to end all of them, so a short id typed for
+  // the session someone had in mind killed the others silently, and a kill is not
+  // an operation anyone gets to take back.
+  const selected = new Map<string, LiveCliSession>();
+  for (const id of wanted) {
+    const matches = sessions.filter((s) => s.sessionId.toLowerCase().startsWith(id.toLowerCase()));
+    if (matches.length === 0) {
+      throw new Error(`No live session matches ${id}.\nRun "foster live" to see what is running.`);
+    }
+    if (matches.length > 1) {
+      throw new Error(
+        `"${id}" is ambiguous: it matches ${matches.length} live sessions.\n` +
+          matches.map((s) => `  ${s.sessionId}  ${s.cwd ?? ''}`).join('\n'),
+      );
+    }
+    selected.set(matches[0]!.sessionId, matches[0]!);
   }
 
   const rows = readProcesses();
-  for (const session of selected) {
+  const results: { pid: number; cliSessionId: string; cwd: string | null; outcome: string }[] = [];
+  for (const session of selected.values()) {
     const self = isSelfHostedBy(session.pid, () => rows);
     const where = session.cwd ? ` in ${session.cwd}` : '';
 
+    const row = { pid: session.pid, cliSessionId: session.sessionId, cwd: session.cwd ?? null };
+
     if (self) {
-      console.log(
-        pc.yellow(
-          `  ! ${session.pid}  ${session.sessionId}${where}\n` +
-            '    This is the session foster is running in. Ending it would kill this command\n' +
-            '    part-way through. Close it yourself, or run foster from another terminal.',
-        ),
-      );
+      results.push({ ...row, outcome: 'refused-self' });
+      if (!json) {
+        console.log(
+          pc.yellow(
+            `  ! ${session.pid}  ${session.sessionId}${where}\n` +
+              '    This is the session foster is running in. Ending it would kill this command\n' +
+              '    part-way through. Close it yourself, or run foster from another terminal.',
+          ),
+        );
+      }
       continue;
     }
 
     if (!apply) {
-      console.log(`  × ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
+      results.push({ ...row, outcome: 'would-end' });
+      if (!json) console.log(`  × ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
       continue;
     }
 
     endProcess(session.pid);
-    const gone = !pidAlive(session.pid);
-    console.log(
-      gone
-        ? `  ✕ ${session.pid}  ${session.sessionId}${pc.dim(where)}`
-        : pc.yellow(`  ! ${session.pid} did not end.`),
-    );
+    // Waited for rather than asked once. `taskkill /F` returns when termination
+    // has been requested, not when the process object is gone, so the pid can
+    // still answer for a moment afterwards — and reporting a kill that worked as
+    // "did not end" sends someone hunting for a window that has already closed.
+    // `quitDesktop` waits for the same reason.
+    const gone = await settles(() => !pidAlive(session.pid));
+    results.push({ ...row, outcome: gone ? 'ended' : 'still-running' });
+    if (!json) {
+      console.log(
+        gone
+          ? `  ✕ ${session.pid}  ${session.sessionId}${pc.dim(where)}`
+          : pc.yellow(`  ! ${session.pid} did not end.`),
+      );
+    }
+  }
+
+  if (json) {
+    print(results);
+    return;
   }
 
   if (!apply) {
@@ -1612,6 +1644,16 @@ function stopWriters(sessions: LiveCliSession[], wanted: string[], apply: boolea
       ),
     );
     console.log(pc.dim('Re-run with --yes to end them.'));
+  }
+}
+
+/** Polls a condition briefly, for a state change that is requested rather than immediate. */
+async function settles(done: () => boolean, timeoutMs = 3_000): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    if (done()) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 

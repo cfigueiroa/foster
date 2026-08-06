@@ -325,7 +325,10 @@ function resolveExisting(
         originSessionId: active.originSessionId,
         target: active.target,
         copySessionId: active.copySessionId,
-        reconciled: true,
+        // Not `reconciled`: that one means the file was already gone, and this
+        // file is still there. Recording it as a disappearance would send anyone
+        // reading the log looking for a deletion that never happened.
+        repurposed: true,
       });
     }
     return undefined;
