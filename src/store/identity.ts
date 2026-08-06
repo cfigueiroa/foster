@@ -34,19 +34,32 @@ import { isDirectory, safeReaddir } from '../util/fs.js';
 export interface CachedIdentity {
   email?: string;
   name?: string;
+  /** The subscription tier as the app would name it — "Max", "Pro" — when the cache says. */
+  plan?: string;
 }
 
 const EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-const NAME = /"(?:full_name|fullName|display_name|displayName|name)"\s*:\s*"([^"]{1,80})"/;
+// A person's name field specifically — not a bare `"name"`, which the app's cache
+// attaches to organizations, workspaces and a dozen other things, and which is
+// what once put a workspace called "Sales" where the account holder belonged.
+const NAME = /"(?:full_name|fullName|display_name|displayName)"\s*:\s*"([^"]{1,80})"/;
+// The plan is stored under one of several names and with an unpredictable value —
+// "max", "claude_max", "default_claude_max_20x" — so the field is matched loosely
+// and the tier is read out of the value by keyword rather than trusted verbatim.
+const PLAN =
+  /"(?:subscription_?type|subscriptionType|plan|billing_?type|membership|tier|rate_?limit_?tier|rateLimitTier)"\s*:\s*"([^"]{1,60})"/i;
 
 /**
  * The account's identity from cache, or undefined when nothing can be tied to it.
  *
- * Tied is the word that matters. The cache holds emails that are not the
- * account's — a correspondent quoted in a conversation, a teammate — so an email
- * is only taken from a chunk of text that also carries the account's own UUID. A
- * guess that could label the account with a stranger's address is worse than no
- * guess, which is why this returns undefined rather than a loose match.
+ * Two anchors, chosen for what each reliably sits beside. The email is tied to
+ * the account's own UUID — the profile keeps them in one small object, while a
+ * stranger's address quoted in a conversation is off in another record. The name
+ * and plan are then tied to the *email*, not the UUID: the cache is live app
+ * state, thick with `name` fields for workspaces and organizations near the
+ * account id, and only the email marks the one object that is actually the
+ * person's. Anchoring the name to the id once labelled this account with a
+ * workspace called "Sales"; anchoring it to the email does not.
  */
 export function readIdentityFromCache(
   store: StoreLayout,
@@ -57,17 +70,42 @@ export function readIdentityFromCache(
   const found: CachedIdentity = {};
 
   for (const text of readCandidateFiles(store)) {
-    // Extracted only when it sits close to the account's own id. A file can hold
-    // the profile and, elsewhere, a conversation with a different person's
-    // address; the profile keeps the email in the same small object as the uuid,
-    // a few characters away, while a stranger's address is off in another record.
-    // Nearest-to-the-uuid, within a bound, is what tells the two apart.
-    found.email ??= nearest(text, needle, EMAIL, (m) => m[0]);
-    found.name ??= nearest(text, needle, NAME, (m) => m[1]?.trim());
-    if (found.email && found.name) return found;
+    const uuids = occurrences(text, needle, true);
+    const email = found.email ?? nearest(text, uuids, EMAIL, (m) => m[0], MAX_DISTANCE);
+    if (email) found.email = email;
+
+    // The profile object is the one that holds the account's email. Name and plan
+    // are read from beside it — a tight reach for the name, which shares the
+    // object, a looser one for the plan, which can sit in a sibling. With no email
+    // in this file there is no trustworthy anchor, so neither is guessed from the
+    // id alone.
+    const anchor = email ? occurrences(text, email) : [];
+    if (anchor.length > 0) {
+      found.name ??= nearest(text, anchor, NAME, (m) => m[1]?.trim(), NAME_DISTANCE);
+      found.plan ??= nearest(text, anchor, PLAN, (m) => planName(m[1]), PLAN_DISTANCE);
+    }
+    if (found.email && found.name && found.plan) return found;
   }
 
-  return found.email || found.name ? found : undefined;
+  return found.email || found.name || found.plan ? found : undefined;
+}
+
+/**
+ * The subscription tier as the app would name it, read out of a raw plan value.
+ *
+ * The stored string is not the label — it is "max", or "default_claude_max_20x",
+ * or "claude_pro" — so the tier is recognised by the word inside it rather than
+ * shown as-is. An unrecognised value yields nothing, because a mangled tier on a
+ * label is worse than no tier.
+ */
+function planName(raw: string | undefined): string | undefined {
+  const value = raw?.toLowerCase() ?? '';
+  if (value.includes('enterprise')) return 'Enterprise';
+  if (value.includes('team')) return 'Team';
+  if (value.includes('max')) return 'Max';
+  if (value.includes('pro')) return 'Pro';
+  if (value.includes('free')) return 'Free';
+  return undefined;
 }
 
 /**
@@ -133,37 +171,42 @@ function* readFileText(file: string): Generator<string> {
 }
 
 /**
- * The match closest to any occurrence of the account id, if one is close enough.
+ * The match closest to one of the anchor strings, if it is close enough.
  *
- * Closeness is the whole safeguard. The profile's email and name sit beside the
- * uuid in one small object; a stranger's address, cached from a conversation, is
- * in a different record and further away. Taking the match nearest the uuid — and
- * only when it is within a profile-object's reach — keeps the wrong one from
- * winning, in a way a plain "somewhere in the same file" cannot.
+ * Closeness is the whole safeguard. What is being read sits beside its anchor in
+ * one small object; the same field for something else — a workspace's name, a
+ * stranger's address — is in another record, further away. Taking the match
+ * nearest an anchor, and only within a bound, keeps the wrong one from winning in
+ * a way a plain "somewhere in the same file" cannot. The anchors are the
+ * positions of a string already located: the account id for the email, the email
+ * for the name and plan.
  */
 function nearest(
   text: string,
-  needle: string,
+  anchors: { at: number; length: number }[],
   pattern: RegExp,
   pick: (match: RegExpExecArray) => string | undefined,
+  maxDistance: number,
 ): string | undefined {
-  const uuids = occurrences(text.toLowerCase(), needle);
-  if (uuids.length === 0) return undefined;
+  if (anchors.length === 0) return undefined;
 
-  const source = new RegExp(pattern.source, 'g');
+  const source = new RegExp(
+    pattern.source,
+    pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g',
+  );
   let best: { value: string; distance: number } | undefined;
 
   for (let match = source.exec(text); match; match = source.exec(text)) {
     const value = pick(match);
     if (!value) continue;
-    // Between spans, not between start points: the account id is 36 characters
+    // Between spans, not between start points: an anchor can be many characters
     // long, so a field beside it but after it starts far from its beginning while
     // a neighbour before it starts near — measuring start-to-start would prefer
     // the neighbour. The gap between the two spans is what "beside" really means.
     const start = match.index;
     const end = match.index + match[0].length;
-    const distance = Math.min(...uuids.map((at) => gap(at, at + needle.length, start, end)));
-    if (distance <= MAX_DISTANCE && (!best || distance < best.distance)) {
+    const distance = Math.min(...anchors.map((a) => gap(a.at, a.at + a.length, start, end)));
+    if (distance <= maxDistance && (!best || distance < best.distance)) {
       best = { value, distance };
     }
   }
@@ -176,24 +219,36 @@ function gap(aStart: number, aEnd: number, bStart: number, bEnd: number): number
   return Math.max(0, bStart - aEnd, aStart - bEnd);
 }
 
-/** Every index where the account id appears, searched in the lower-cased text. */
-function occurrences(haystack: string, needle: string): number[] {
-  const out: number[] = [];
+/** Every occurrence of a substring, as anchor spans. Case-insensitive when asked. */
+function occurrences(text: string, sub: string, fold = false): { at: number; length: number }[] {
+  const haystack = fold ? text.toLowerCase() : text;
+  const needle = fold ? sub.toLowerCase() : sub;
+  const out: { at: number; length: number }[] = [];
   for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
-    out.push(at);
+    out.push({ at, length: needle.length });
   }
   return out;
 }
 
 /**
- * How far from the account id a match may be and still be its own.
- *
- * A profile object — uuid, email, name and a few other fields — is a few hundred
- * characters at most, so a match beyond this is in some other record and not the
- * account's. Small enough to exclude a neighbour, generous enough to span the
- * object the uuid lives in.
+ * How far from the account id its email may be. A profile object — id, email,
+ * name and a few fields — is a few hundred characters, so an email beyond this is
+ * in another record and not the account's.
  */
 const MAX_DISTANCE = 600;
+
+/** How far from the email its owner's name may be. They share one small object. */
+const NAME_DISTANCE = 300;
+
+/**
+ * How far from the email the plan may be. Much looser than the name, because the
+ * plan lives on the account's organization, and the organization's settings — a
+ * long block of feature flags — sit between the email and the `rate_limit_tier`
+ * that names the tier. Measured at ~2100 characters on a real profile; the reach
+ * clears that with headroom, and is still anchored to the email, so a second
+ * organization's tier stays further away than the account's own.
+ */
+const PLAN_DISTANCE = 5000;
 
 /**
  * The largest file this will read. Nothing being looked for lives in a big file;
@@ -234,6 +289,9 @@ function trace(message: string): void {
  */
 export function identityLabel(identity: CachedIdentity | undefined): string | undefined {
   if (!identity) return undefined;
-  if (identity.name && identity.email) return `${identity.name} — ${identity.email}`;
-  return identity.name ?? identity.email ?? undefined;
+  // Whatever is known, joined by the middle dot the app itself uses between an
+  // account's name and its plan. Name first, then email, then plan as a trailing
+  // tag; each is dropped when absent, so a partial read still reads cleanly.
+  const parts = [identity.name, identity.email, identity.plan].filter(Boolean);
+  return parts.length > 0 ? parts.join(' · ') : undefined;
 }
