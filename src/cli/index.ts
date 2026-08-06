@@ -1123,7 +1123,7 @@ program
 
 program
   .command('whoami')
-  .description("the signed-in account's name and email, read from the app's own cache")
+  .description("the signed-in account's name, email and plan, read from the app's own cache")
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { store } = context(this);
