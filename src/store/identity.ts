@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { decodeBatch, readLog, scanTable } from '../engine/leveldb.js';
 import type { StoreLayout } from '../domain/types.js';
@@ -86,16 +86,22 @@ function* readAllValues(dir: string): Generator<string> {
   for (const name of safeReaddir(dir)) {
     const file = path.join(dir, name);
     try {
+      // Read into memory only what is safe to. The IndexedDB holds whole
+      // conversations and can reach hundreds of megabytes; readFileSync of one of
+      // those, before any per-value guard can apply, is itself the crash. The
+      // profile lives in a small database, so a large file is skipped rather than
+      // loaded — and the small Local Storage database, where the name is, is read.
+      if (fileSize(file) > MAX_FILE_BYTES) continue;
       if (name.endsWith('.ldb')) {
         const values: Buffer[] = [];
         scanTable(readFileSync(file), (_entry, value) => {
-          if (value.length > 0) values.push(Buffer.from(value));
+          if (worthSearching(value)) values.push(Buffer.from(value));
         });
         for (const value of values) yield* decodings(value);
       } else if (name.endsWith('.log')) {
         for (const batch of readLog(readFileSync(file), { tolerant: true })) {
           for (const entry of decodeBatch(batch.payload).entries) {
-            if (entry.value && entry.value.length > 0) yield* decodings(Buffer.from(entry.value));
+            if (worthSearching(entry.value)) yield* decodings(Buffer.from(entry.value!));
           }
         }
       }
@@ -104,6 +110,35 @@ function* readAllValues(dir: string): Generator<string> {
       // implement: any one file failing must not stop the search across the rest.
       // Best-effort means the read that works is what counts.
     }
+  }
+}
+
+/**
+ * The largest value worth decoding. A profile is a small JSON object; the same
+ * database also holds whole conversations, and copying one of those five ways to
+ * search it for an email is how a best-effort read turns into an out-of-memory
+ * crash — which a `try` cannot catch, so it has to be prevented rather than
+ * handled. Nothing this looks for is ever bigger than a few kilobytes.
+ */
+const MAX_VALUE_BYTES = 64 * 1024;
+
+function worthSearching(value: Buffer | undefined): value is Buffer {
+  return value !== undefined && value.length > 0 && value.length <= MAX_VALUE_BYTES;
+}
+
+/**
+ * The largest database file this will load. `scanTable` reads the whole file and
+ * decompresses every block, so an oversized one is a crash before the per-value
+ * guard is ever reached. The profile's database is small; a large file is the
+ * conversation store, which this has no reason to read.
+ */
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
+
+function fileSize(file: string): number {
+  try {
+    return statSync(file).size;
+  } catch {
+    return 0;
   }
 }
 
