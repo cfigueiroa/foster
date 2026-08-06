@@ -59,6 +59,29 @@ export interface ResolvedIdentity extends CachedIdentity {
  * still offers wins, because it is current, and anything it has forgotten falls
  * back to what foster wrote down when it was there.
  */
+/**
+ * Whether a sighting is worth writing down.
+ *
+ * The ledger is append-only, so a command that records on every run turns a
+ * reading command into a source of noise: three `whoami` calls in a row wrote
+ * three identical events, and the log is meant to be readable by a person. A
+ * sighting earns its line only when it says something the record does not
+ * already — the first time an account is seen, or when a field has actually
+ * changed, which is a renamed account or a changed plan.
+ */
+export function worthRecording(
+  cached: CachedIdentity | undefined,
+  known: { email?: string; name?: string; plan?: string } | undefined,
+): boolean {
+  if (!cached?.email && !cached?.name && !cached?.plan) return false;
+  if (!known) return true;
+  return (
+    (Boolean(cached.email) && cached.email !== known.email) ||
+    (Boolean(cached.name) && cached.name !== known.name) ||
+    (Boolean(cached.plan) && cached.plan !== known.plan)
+  );
+}
+
 export function resolveIdentity(
   cached: CachedIdentity | undefined,
   known: { email?: string; name?: string; plan?: string; seenAt: number } | undefined,

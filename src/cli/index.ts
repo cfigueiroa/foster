@@ -50,7 +50,12 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
-import { identityLabel, readIdentityFromCache, resolveIdentity } from '../store/identity.js';
+import {
+  identityLabel,
+  readIdentityFromCache,
+  resolveIdentity,
+  worthRecording,
+} from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
 import { scanSources, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
@@ -1178,13 +1183,13 @@ program
     // cache no longer holds comes from the ledger, which is why this answer does
     // not change with the app's compaction schedule.
     const cached = readIdentityFromCache(store, accountUuid);
-    const identity = resolveIdentity(cached, project(ledger.read()).identities.get(accountUuid));
+    const known = project(ledger.read()).identities.get(accountUuid);
+    const identity = resolveIdentity(cached, known);
 
-    // Written down whenever the cache said something, so the next run still knows
-    // it after the app has forgotten. Recorded only on a sighting: a run that
-    // found nothing has nothing to add, and appending it would age the record for
-    // no reason.
-    if (cached?.email || cached?.name || cached?.plan) {
+    // Written down so the next run still knows it after the app has forgotten —
+    // but only when it adds something. A reading command that appended on every
+    // invocation would fill an append-only log with identical lines.
+    if (cached && worthRecording(cached, known)) {
       ledger.append({
         kind: 'account_identity_seen',
         accountUuid,
