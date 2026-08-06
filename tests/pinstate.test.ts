@@ -157,6 +157,15 @@ describe('pin state', () => {
     expect([...data.subarray(6, 10)]).toEqual([0x00, 0x73, 0x00, 0x74]);
   });
 
+  it('refuses an index id that the one-byte key encoding cannot hold', () => {
+    // The header packs each id as a single byte. A wider id means this encoding
+    // no longer matches the app's format; writing on would append a record that
+    // is never read, so it is refused instead of silently not sticking.
+    expect(() => recordKey(0x100, PIN_STATE_KEY)).toThrow(PinStateError);
+    expect(() => recordKey(-1, PIN_STATE_KEY)).toThrow(PinStateError);
+    expect(() => recordKey(1.5, PIN_STATE_KEY)).toThrow(PinStateError);
+  });
+
   it('reports nothing rather than an empty list when the app has never pinned', () => {
     const store = makeStore();
     makeDatabase(store);
@@ -285,7 +294,12 @@ describe('pin state', () => {
     const log = readFileSync(logPath);
     writeFileSync(logPath, log.subarray(0, log.length - 8));
 
-    expect(readPinState(store)!.ids).toEqual([ID_A]);
+    const state = readPinState(store)!;
+    // The intact record is still read, and the cut tail is surfaced rather than
+    // silently dropped.
+    expect(state.ids).toEqual([ID_A]);
+    expect(state.notices.length).toBeGreaterThan(0);
+    expect(state.notices.join(' ')).toMatch(/offset/);
   });
 
   it('skips a sorted table it cannot read rather than giving up on the database', () => {

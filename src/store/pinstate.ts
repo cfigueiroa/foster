@@ -64,8 +64,25 @@ export function indexedDbDir(store: StoreLayout): string {
  * itself. The key is a string, and IndexedDB encodes strings as UTF-16 in **big**
  * endian — the opposite of everything else in the file — with a length counted in
  * characters rather than bytes.
+ *
+ * The first five bytes are hardcoded against the format the app writes today
+ * (`[0x00, 0x01, 0x01, indexId, 0x01]`): a leading byte packing the byte-lengths
+ * of the three ids that follow, all of which are a single byte here. This is the
+ * one thing in this module that cannot be re-derived, and the exact bytes are
+ * locked by `pinstate.test.ts` against values captured from a real database. If
+ * an upgrade ever needs a wider id, this guard turns what would otherwise
+ * *silently* append a record under a key the app never reads — a pin that looks
+ * like it stuck and does not — into a clear refusal instead.
  */
 export function recordKey(indexId: number, name: string): Buffer {
+  // The header packs each of the three ids as a one-byte length. Any of them
+  // exceeding a byte means this encoding no longer reflects the app's format,
+  // and writing on would produce a record the app never looks at.
+  if (!Number.isInteger(indexId) || indexId < 0 || indexId > 0xff) {
+    throw new PinStateError(
+      `object-store index id ${indexId} cannot be encoded in the database's one-byte key ids.`,
+    );
+  }
   const characters = Buffer.alloc(name.length * 2);
   for (let index = 0; index < name.length; index++) {
     characters.writeUInt16BE(name.charCodeAt(index), index * 2);
@@ -111,6 +128,12 @@ export interface PinState {
    * the older record as the newer one and the change appears to do nothing.
    */
   highestSequence: bigint;
+  /**
+   * Anything the tolerant read decided to look past rather than fail on — a
+   * fragmented or torn tail of the log — that the caller may want to surface.
+   * Empty when the database read cleanly.
+   */
+  notices: string[];
 }
 
 function locate(directory: string): { logPath: string; lastSequence: bigint } {
@@ -189,8 +212,14 @@ export function readPinState(store: StoreLayout): PinState | undefined {
 
   // Tolerant on purpose: a torn record at the end of a log is what any kill
   // during a write leaves, and LevelDB opens such a log by discarding it. Every
-  // record before the damage is still checksummed and still read.
-  for (const batch of readLog(readFileSync(logPath), { tolerant: true })) {
+  // record before the damage is still checksummed and still read. Anything the
+  // tolerant read gives up on is collected so the caller can say so instead of
+  // quietly reporting a shorter list.
+  const notices: string[] = [];
+  for (const batch of readLog(readFileSync(logPath), {
+    tolerant: true,
+    onNotice: (message) => notices.push(message),
+  })) {
     const decoded = decodeBatch(batch.payload);
     decoded.entries.forEach((entry, index) => {
       if (!entry.key.equals(dataKey)) return;
@@ -245,6 +274,7 @@ export function readPinState(store: StoreLayout): PinState | undefined {
     envelope: Buffer.from(record.subarray(version.next, tag + 1)),
     document,
     highestSequence: highest,
+    notices,
   };
 }
 
@@ -292,6 +322,12 @@ export function writePinState(state: PinState, ids: string[]): void {
   // listing.
   const inLog = nextSequence(readLog(existing));
   const sequence = inLog > state.highestSequence ? inLog : state.highestSequence + 1n;
+  // Read-then-append is not atomic against another writer in between. That is
+  // deliberate: the app must be closed to reach here (its unflushed writes would
+  // be put back on top of the log), so the only other writer is a second `foster
+  // pin --yes` running at the same moment. Two concurrent invocations could lose
+  // one update; a personal CLI with an explicit write flag accepts that far more
+  // cheaply than an exclusive lock would cost.
   appendSynced(state.logPath, frameRecords(encodeBatch(sequence, entries), existing.length));
 }
 

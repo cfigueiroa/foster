@@ -1087,6 +1087,12 @@ program
       return;
     }
 
+    if (state.notices.length > 0) {
+      for (const note of state.notices) {
+        console.log(pc.yellow(`warning: ${note}`));
+      }
+    }
+
     const onDisk = new Map(scanStore(store).map((found) => [found.data.sessionId, found]));
 
     if (!opts.session?.length) {

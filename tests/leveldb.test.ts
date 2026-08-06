@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BLOCK_SIZE,
   HEADER_SIZE,
+  LAST,
   LevelDbFormatError,
   crc32c,
   decodeBatch,
@@ -17,7 +18,15 @@ import {
   splitInternalKey,
   unmaskCrc,
 } from '../src/engine/leveldb.js';
-import { internalKey, makeTable } from './helpers/leveldb.js';
+import {
+  internalKey,
+  makeTable,
+  referenceBatch,
+  referenceCrc32c,
+  referenceFrame,
+  referenceMask,
+  referenceVarint,
+} from './helpers/leveldb.js';
 
 /**
  * The format has no second implementation to check against, so a round trip
@@ -158,6 +167,42 @@ describe('leveldb log format', () => {
     expect(decodeBatch(batches[0]!.payload).entries[0]!.value?.toString()).toBe('1');
   });
 
+  it('says what a tolerant read gave up on, rather than silently reading less', () => {
+    const good = frameRecords(
+      encodeBatch(1n, [{ key: Buffer.from('a'), value: Buffer.from('1') }]),
+      0,
+    );
+    const torn = frameRecords(
+      encodeBatch(2n, [{ key: Buffer.from('a'), value: Buffer.from('2') }]),
+      good.length,
+    );
+    const file = Buffer.concat([good, torn.subarray(0, torn.length - 4)]);
+
+    const notices: string[] = [];
+    const batches = readLog(file, { tolerant: true, onNotice: (m) => notices.push(m) });
+    // The intact record is still read, and the caller is told the tail was lost.
+    expect(batches).toHaveLength(1);
+    expect(notices.length).toBeGreaterThan(0);
+    expect(notices.join(' ')).toMatch(/offset/);
+  });
+
+  it('reports a record fragment it cannot join to a beginning', () => {
+    // A file that starts mid-record: a single LAST fragment with no FIRST before
+    // it, as a log truncated at the front would leave. Its beginning is gone, so
+    // it cannot be rebuilt — but the tolerant read should say so, not swallow it.
+    const data = Buffer.from('ab');
+    const header = Buffer.alloc(HEADER_SIZE);
+    header[6] = LAST; // a stray closing fragment with no FIRST
+    header.writeUInt16LE(data.length, 4);
+    header.writeUInt32LE(maskCrc(crc32c(Buffer.concat([Buffer.from([LAST]), data]))), 0);
+    const file = Buffer.concat([header, data]);
+
+    const notices: string[] = [];
+    const batches = readLog(file, { tolerant: true, onNotice: (m) => notices.push(m) });
+    expect(batches).toHaveLength(0);
+    expect(notices.some((message) => /no beginning/.test(message))).toBe(true);
+  });
+
   it('splits an internal key into its user key, sequence and kind', () => {
     const key = internalKey(Buffer.from('user'), 1234n);
     const split = splitInternalKey(key);
@@ -238,5 +283,81 @@ describe('leveldb sorted tables', () => {
 
   it('refuses a file that is not a sorted table', () => {
     expect(() => scanTable(Buffer.alloc(64), () => {})).toThrow(LevelDbFormatError);
+  });
+});
+
+/**
+ * The encoders are checked against independent reimplementations written from
+ * the specification, so that a symmetric bug — an encoder and decoder that
+ * agree on the wrong bytes — cannot pass by round-tripping through itself.
+ */
+describe('leveldb encoders against independent reference implementations', () => {
+  it('computes the same crc32c as a table-less bit-by-bit implementation', () => {
+    // The published check value anchors the reference itself.
+    expect(referenceCrc32c(Buffer.from('123456789'))).toBe(0xe3069283);
+
+    const buffers = [
+      Buffer.from(''),
+      Buffer.from('a'),
+      Buffer.from('hello world'),
+      Buffer.from('idb_cmp1'),
+      Buffer.from([0, 1, 2, 3, 0xff, 0x80]),
+      Buffer.alloc(900, 0x5a),
+    ];
+    for (const buffer of buffers) expect(crc32c(buffer)).toBe(referenceCrc32c(buffer));
+  });
+
+  it('masks checksums the same way the reference does', () => {
+    for (const value of [0, 1, 0xe3069283, 0xffffffff, 123_456_789]) {
+      expect(maskCrc(value)).toBe(referenceMask(value));
+      expect(unmaskCrc(maskCrc(value))).toBe(value);
+    }
+  });
+
+  it('encodes varints the same way the reference does', () => {
+    for (const value of [0, 1, 127, 128, 300, 16_383, 16_384, 0x7fffffff]) {
+      expect(encodeVarint32(value).equals(referenceVarint(value))).toBe(true);
+      // And either encoding decodes back to the value.
+      expect(decodeVarint32(referenceVarint(value), 0).value).toBe(value);
+    }
+  });
+
+  it('builds write batches the same bytes the reference does', () => {
+    const entries = [
+      { key: Buffer.from('alpha'), value: Buffer.from('one') },
+      { key: Buffer.from('beta') },
+      { key: Buffer.from('gamma'), value: Buffer.alloc(0) },
+    ];
+    expect(encodeBatch(42n, entries).equals(referenceBatch(42n, entries))).toBe(true);
+    // And foster's decoder reads the reference's bytes.
+    expect(decodeBatch(referenceBatch(42n, entries)).sequence).toBe(42n);
+  });
+
+  it('frames payloads to the same bytes the reference does', () => {
+    const small = referenceBatch(7n, [{ key: Buffer.from('k'), value: Buffer.from('v') }]);
+    expect(frameRecords(small, 0).equals(referenceFrame(small, 0))).toBe(true);
+
+    // A payload too long for one block splits into FIRST/MIDDLE/LAST records.
+    // Both encoders must agree on where the boundaries land.
+    const big = referenceBatch(1n, [
+      { key: Buffer.from('big'), value: Buffer.alloc(BLOCK_SIZE * 2 + 500, 0x61) },
+    ]);
+    expect(frameRecords(big, 0).equals(referenceFrame(big, 0))).toBe(true);
+    expect(readLog(frameRecords(big, 0))).toHaveLength(1);
+    expect(decodeBatch(readLog(frameRecords(big, 0))[0]!.payload).entries[0]!.key.toString()).toBe(
+      'big',
+    );
+
+    // A non-zero start offset, which is what an appending write looks like: the
+    // frame is laid out for the tail of an existing log and only makes sense once
+    // prepended to it. The two encoders must agree on the padding before a record
+    // crosses a block boundary.
+    const start = BLOCK_SIZE - 3; // leaves fewer than seven bytes in the first block
+    expect(frameRecords(small, start).equals(referenceFrame(small, start))).toBe(true);
+    // And, read together with the block it attaches to, the wrapped frame is
+    // recovered as one untorn record.
+    const file = Buffer.concat([Buffer.alloc(start, 0), referenceFrame(small, start)]);
+    expect(readLog(file)).toHaveLength(1);
+    expect(decodeBatch(readLog(file)[0]!.payload).sequence).toBe(7n);
   });
 });

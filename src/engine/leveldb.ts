@@ -151,6 +151,13 @@ export interface ReadLogOptions {
    * remainder of the file is given up.
    */
   tolerant?: boolean;
+  /**
+   * Called for damage that a tolerant read tolerates rather than reports by
+   * throwing: a record that stops the read, or a fragment of a record dropped
+   * because its beginning was already lost. Lets a caller that chooses to keep
+   * reading also choose to say so, instead of silently settling for less.
+   */
+  onNotice?: (message: string) => void;
 }
 
 /**
@@ -168,10 +175,14 @@ export interface ReadLogOptions {
  * working and foster unable to so much as list what is there, which is why
  * callers that only look pass `tolerant`.
  */
-export function readLog(buffer: Buffer, { tolerant = false }: ReadLogOptions = {}): LogBatch[] {
+export function readLog(
+  buffer: Buffer,
+  { tolerant = false, onNotice }: ReadLogOptions = {},
+): LogBatch[] {
   const batches: LogBatch[] = [];
   let pending: Buffer[] | undefined;
   let pendingOffset = 0;
+  const notice = (message: string): void => onNotice?.(message);
 
   for (let base = 0; base < buffer.length; base += BLOCK_SIZE) {
     const limit = Math.min(base + BLOCK_SIZE, buffer.length);
@@ -186,7 +197,12 @@ export function readLog(buffer: Buffer, { tolerant = false }: ReadLogOptions = {
       if (type === 0 && length === 0 && storedCrc === 0) break;
 
       if (at + HEADER_SIZE + length > limit) {
-        if (tolerant) return batches;
+        if (tolerant) {
+          notice(
+            `a record at offset ${at} runs past its block; the rest of the log is being skipped`,
+          );
+          return batches;
+        }
         throw new LevelDbFormatError(
           `record at ${at} claims ${length} bytes, which runs past the end of its block`,
         );
@@ -195,25 +211,44 @@ export function readLog(buffer: Buffer, { tolerant = false }: ReadLogOptions = {
       const data = buffer.subarray(at + HEADER_SIZE, at + HEADER_SIZE + length);
       const expected = crc32c(Buffer.concat([Buffer.from([type]), data]));
       if (unmaskCrc(storedCrc) !== expected) {
-        if (tolerant) return batches;
+        if (tolerant) {
+          notice(
+            `a record at offset ${at} failed its checksum; the rest of the log is being skipped`,
+          );
+          return batches;
+        }
         throw new LevelDbFormatError(`checksum mismatch in the record at offset ${at}`);
       }
 
       if (type === FULL) {
+        if (pending) {
+          // A new record began before the previous one finished; the earlier
+          // fragment is gone and cannot be rebuilt.
+          notice(`a partial record at offset ${pendingOffset} was left unfinished`);
+          pending = undefined;
+        }
         batches.push({ offset: at, payload: Buffer.from(data) });
       } else if (type === FIRST) {
         pending = [Buffer.from(data)];
         pendingOffset = at;
       } else if (type === MIDDLE) {
         if (pending) pending.push(Buffer.from(data));
+        else notice(`a record fragment at offset ${at} has no beginning in this log`);
       } else if (type === LAST) {
         if (pending) {
           pending.push(Buffer.from(data));
           batches.push({ offset: pendingOffset, payload: Buffer.concat(pending) });
           pending = undefined;
+        } else {
+          notice(`a record fragment at offset ${at} has no beginning in this log`);
         }
       } else {
-        if (tolerant) return batches;
+        if (tolerant) {
+          notice(
+            `a record at offset ${at} has an unrecognised type ${type}; the rest of the log is being skipped`,
+          );
+          return batches;
+        }
         throw new LevelDbFormatError(`unknown record type ${type} at offset ${at}`);
       }
 
@@ -221,6 +256,7 @@ export function readLog(buffer: Buffer, { tolerant = false }: ReadLogOptions = {
     }
   }
 
+  if (pending) notice(`the log ends inside a record that began at offset ${pendingOffset}`);
   return batches;
 }
 
@@ -422,6 +458,13 @@ function readBlock(table: Buffer, offset: number, size: number): Buffer {
  * Once LevelDB folds a log into a table, the log no longer holds those records —
  * so reading only the log answers "never written" about anything the database has
  * had time to compact, which for a long-running app is nearly everything.
+ *
+ * Every block is read, verified and (if compressed) decompressed in full, even
+ * though the caller here wants a single key. That is fine for the pinned-session
+ * store — a few kilobytes — but it is a whole-table scan. If this is ever pointed
+ * at a larger database, the index block and its separators (already walked here
+ * to reach the data blocks) would let a single record be located without reading
+ * the rest; nothing currently needs that, so it is not built.
  */
 export function scanTable(table: Buffer, visit: (entry: InternalKey, value: Buffer) => void): void {
   if (table.length < FOOTER_SIZE || !table.subarray(-8).equals(TABLE_MAGIC)) {
