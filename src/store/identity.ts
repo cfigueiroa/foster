@@ -1,6 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
-import { decodeBatch, readLog, scanTable } from '../engine/leveldb.js';
 import type { StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
@@ -11,17 +10,25 @@ import { isDirectory, safeReaddir } from '../util/fs.js';
  * The account's email and display name are not in any file foster is allowed to
  * read outright: the token cache is a credential, and the authoritative copy is
  * behind the API. But the app, having fetched its own profile once, keeps a copy
- * at rest — in the web-origin storage under `Local Storage/` and `IndexedDB/`,
- * which are Chromium LevelDB databases, the same format foster already reads for
- * the pin list. That copy is not a credential; it is cached page data, the same
- * category as the session files. So it can be read.
+ * at rest, in the web-origin storage under `Local Storage/` and `IndexedDB/`.
+ * That copy is cached page data, the same category as the session files, so it
+ * can be read.
  *
- * Two honesties about this. It is **best-effort**: the schema is the app's, not a
- * contract, and a version that stores the profile differently makes this return
- * nothing rather than something wrong. And it only ever describes the account
- * signed in **now** — web storage belongs to the current session, so this pairs
- * one email with one directory per run, exactly as reading it off the screen
- * would. When it fails, the caller falls back to asking, or to the opt-in fetch.
+ * It is read the crudest way on purpose: every candidate file is loaded as bytes,
+ * capped by size, and searched as text. An earlier version parsed the Local
+ * Storage LevelDB with the same reader foster uses for the pin list — and that
+ * reader, written for one narrow database, corrupted the heap on a real Local
+ * Storage table and took the process down with a status no `try` can catch
+ * (0xC0000374). Parsing the app's storage means trusting a format that is the
+ * app's to change; reading bytes and looking for an email trusts nothing. It
+ * finds less — a value that only exists inside a compressed block is missed — but
+ * it cannot crash, and a best-effort read that crashes is not best-effort.
+ *
+ * Two honesties beyond that. It is best-effort: a version that stores the profile
+ * differently makes this find nothing rather than something wrong, and the manual
+ * `label` is always there. And it only ever describes the account signed in now,
+ * because web storage belongs to the current session — naming the others still
+ * means visiting each.
  */
 
 export interface CachedIdentity {
@@ -37,140 +44,167 @@ const NAME = /"(?:full_name|fullName|display_name|displayName|name)"\s*:\s*"([^"
  *
  * Tied is the word that matters. The cache holds emails that are not the
  * account's — a correspondent quoted in a conversation, a teammate — so an email
- * is only taken when it sits in the same cached value as the account's own UUID.
- * A guess that could label the account with a stranger's address is worse than
- * no guess, which is why this returns undefined rather than a loose match.
+ * is only taken from a chunk of text that also carries the account's own UUID. A
+ * guess that could label the account with a stranger's address is worse than no
+ * guess, which is why this returns undefined rather than a loose match.
  */
 export function readIdentityFromCache(
   store: StoreLayout,
   accountUuid = readConfig(store).lastKnownAccountUuid,
 ): CachedIdentity | undefined {
   if (!accountUuid) return undefined;
-
+  const needle = accountUuid.toLowerCase();
   const found: CachedIdentity = {};
 
-  // Every candidate string, from two sources kept deliberately separate. The
-  // Local Storage database is small and holds the display name; it is read
-  // through the LevelDB parser. The IndexedDB database is not — it holds whole
-  // conversations, reaches hundreds of megabytes, and decompressing it to search
-  // for an email is how this crashes. Its large values spill into blob files that
-  // are plain bytes, so those are read raw and capped instead, never parsed.
-  const sources = [
-    readAllValues(path.join(store.root, 'Local Storage', 'leveldb')),
-    readBlobs(path.join(store.root, 'IndexedDB', 'https_claude.ai_0.indexeddb.blob')),
-  ];
-
-  for (const values of sources) {
-    for (const value of values) {
-      // Only values that name this very account are considered, so the email that
-      // comes back belongs to the account being named and not to whoever else the
-      // app has cached — a correspondent, a teammate.
-      if (!containsUuid(value, accountUuid)) continue;
-
-      found.email ??= value.match(EMAIL)?.[0];
-      found.name ??= value.match(NAME)?.[1]?.trim();
-      if (found.email && found.name) return found;
-    }
+  for (const text of readCandidateFiles(store)) {
+    // Extracted only when it sits close to the account's own id. A file can hold
+    // the profile and, elsewhere, a conversation with a different person's
+    // address; the profile keeps the email in the same small object as the uuid,
+    // a few characters away, while a stranger's address is off in another record.
+    // Nearest-to-the-uuid, within a bound, is what tells the two apart.
+    found.email ??= nearest(text, needle, EMAIL, (m) => m[0]);
+    found.name ??= nearest(text, needle, NAME, (m) => m[1]?.trim());
+    if (found.email && found.name) return found;
   }
 
   return found.email || found.name ? found : undefined;
 }
 
 /**
- * Every value in a LevelDB directory, decoded to the strings it might be.
+ * The text of every file worth searching, each decoded a few plausible ways.
  *
- * Over-reads on purpose: every SSTable and the log are scanned, stale and
- * superseded records included, because this is a search for whether the profile
- * is present anywhere rather than for the current value of one key. Following the
- * manifest to read only live records would be more correct for a Get and is not
- * worth it here — more haystack only helps when looking for a needle.
+ * Both stores are read the same crude way — bytes, size-capped — because neither
+ * is parsed. Local Storage is small and holds the display name; the IndexedDB
+ * blob tree holds the large values, the email among them, as plain files. The
+ * IndexedDB LevelDB itself is skipped: it is the conversation database, big and
+ * the source of the crash, and nothing here needs it.
  */
-function* readAllValues(dir: string): Generator<string> {
-  for (const name of safeReaddir(dir)) {
-    const file = path.join(dir, name);
-    try {
-      // Read into memory only what is safe to. The IndexedDB holds whole
-      // conversations and can reach hundreds of megabytes; readFileSync of one of
-      // those, before any per-value guard can apply, is itself the crash. The
-      // profile lives in a small database, so a large file is skipped rather than
-      // loaded — and the small Local Storage database, where the name is, is read.
-      if (fileSize(file) > MAX_FILE_BYTES) continue;
-      if (name.endsWith('.ldb')) {
-        const values: Buffer[] = [];
-        scanTable(readFileSync(file), (_entry, value) => {
-          if (worthSearching(value)) values.push(Buffer.from(value));
-        });
-        for (const value of values) yield* decodings(value);
-      } else if (name.endsWith('.log')) {
-        for (const batch of readLog(readFileSync(file), { tolerant: true })) {
-          for (const entry of decodeBatch(batch.payload).entries) {
-            if (worthSearching(entry.value)) yield* decodings(Buffer.from(entry.value!));
-          }
-        }
-      }
-    } catch {
-      // A half-written table, a log torn by a kill, a compression this does not
-      // implement: any one file failing must not stop the search across the rest.
-      // Best-effort means the read that works is what counts.
+function* readCandidateFiles(store: StoreLayout): Generator<string> {
+  const localStorage = path.join(store.root, 'Local Storage', 'leveldb');
+  for (const name of safeReaddir(localStorage)) {
+    if (name.endsWith('.ldb') || name.endsWith('.log')) {
+      yield* readFileText(path.join(localStorage, name));
     }
   }
+
+  yield* walkBlobs(path.join(store.root, 'IndexedDB', 'https_claude.ai_0.indexeddb.blob'), {
+    files: MAX_BLOB_FILES,
+  });
 }
 
-/**
- * IndexedDB blob files, decoded to the strings they might hold.
- *
- * When an IndexedDB value is large, Blink stores it outside the LevelDB as a
- * plain file under `…indexeddb.blob/<db>/<dir>/<file>`. Those files are the raw
- * value bytes — no framing, no compression to bomb — so they can be read
- * directly, which is exactly what makes them safe where parsing the database is
- * not. Read capped and counted: a blob past the size limit is skipped, and the
- * walk stops after a bounded number of files, because this is a search for a
- * small profile, not a reason to load a conversation archive.
- */
-function* readBlobs(root: string, budget = { files: MAX_BLOB_FILES }): Generator<string> {
+/** The blob tree, walked breadth-unaware but bounded, each file read as text. */
+function* walkBlobs(root: string, budget: { files: number }): Generator<string> {
   for (const entry of safeReaddir(root)) {
     if (budget.files <= 0) return;
     const full = path.join(root, entry);
     try {
       if (isDirectory(full)) {
-        yield* readBlobs(full, budget);
+        yield* walkBlobs(full, budget);
         continue;
       }
-      budget.files -= 1;
-      if (fileSize(full) > MAX_BLOB_BYTES) continue;
-      yield* decodings(readFileSync(full));
     } catch {
-      // A blob that vanished or cannot be read is skipped like any other file.
+      continue;
     }
+    budget.files -= 1;
+    yield* readFileText(full);
   }
 }
 
 /**
- * The largest value worth decoding. A profile is a small JSON object; the same
- * database also holds whole conversations, and copying one of those five ways to
- * search it for an email is how a best-effort read turns into an out-of-memory
- * crash — which a `try` cannot catch, so it has to be prevented rather than
- * handled. Nothing this looks for is ever bigger than a few kilobytes.
+ * A file's bytes, decoded to the strings they might be — or nothing.
+ *
+ * Size-capped before it is opened: a file past the limit is a conversation store
+ * or a document, never a profile record, and reading it is the memory the crude
+ * approach exists to avoid spending. The bytes are offered as UTF-8 and as
+ * UTF-16LE because Chromium stores strings both ways; a wrong decoding simply
+ * fails to match the patterns.
  */
-const MAX_VALUE_BYTES = 64 * 1024;
-
-function worthSearching(value: Buffer | undefined): value is Buffer {
-  return value !== undefined && value.length > 0 && value.length <= MAX_VALUE_BYTES;
+function* readFileText(file: string): Generator<string> {
+  try {
+    if (fileSize(file) > MAX_FILE_BYTES) return;
+    trace(`${path.basename(file)} (${fileSize(file)} bytes)`);
+    const bytes = readFileSync(file);
+    yield bytes.toString('latin1');
+    yield bytes.toString('utf16le');
+  } catch {
+    // A file that vanished, is locked, or cannot be read is skipped; the search
+    // across the rest is what matters, and its failure is not an error.
+  }
 }
 
 /**
- * The largest database file this will load. `scanTable` reads the whole file and
- * decompresses every block, so an oversized one is a crash before the per-value
- * guard is ever reached. The profile's database is small; a large file is the
- * conversation store, which this has no reason to read.
+ * The match closest to any occurrence of the account id, if one is close enough.
+ *
+ * Closeness is the whole safeguard. The profile's email and name sit beside the
+ * uuid in one small object; a stranger's address, cached from a conversation, is
+ * in a different record and further away. Taking the match nearest the uuid — and
+ * only when it is within a profile-object's reach — keeps the wrong one from
+ * winning, in a way a plain "somewhere in the same file" cannot.
  */
-const MAX_FILE_BYTES = 32 * 1024 * 1024;
+function nearest(
+  text: string,
+  needle: string,
+  pattern: RegExp,
+  pick: (match: RegExpExecArray) => string | undefined,
+): string | undefined {
+  const uuids = occurrences(text.toLowerCase(), needle);
+  if (uuids.length === 0) return undefined;
 
-/** A blob larger than this is a stored document, not a profile record. */
-const MAX_BLOB_BYTES = 4 * 1024 * 1024;
+  const source = new RegExp(pattern.source, 'g');
+  let best: { value: string; distance: number } | undefined;
+
+  for (let match = source.exec(text); match; match = source.exec(text)) {
+    const value = pick(match);
+    if (!value) continue;
+    // Between spans, not between start points: the account id is 36 characters
+    // long, so a field beside it but after it starts far from its beginning while
+    // a neighbour before it starts near — measuring start-to-start would prefer
+    // the neighbour. The gap between the two spans is what "beside" really means.
+    const start = match.index;
+    const end = match.index + match[0].length;
+    const distance = Math.min(...uuids.map((at) => gap(at, at + needle.length, start, end)));
+    if (distance <= MAX_DISTANCE && (!best || distance < best.distance)) {
+      best = { value, distance };
+    }
+  }
+
+  return best?.value;
+}
+
+/** The number of characters between two spans, or 0 when they touch or overlap. */
+function gap(aStart: number, aEnd: number, bStart: number, bEnd: number): number {
+  return Math.max(0, bStart - aEnd, aStart - bEnd);
+}
+
+/** Every index where the account id appears, searched in the lower-cased text. */
+function occurrences(haystack: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let at = haystack.indexOf(needle); at !== -1; at = haystack.indexOf(needle, at + 1)) {
+    out.push(at);
+  }
+  return out;
+}
+
+/**
+ * How far from the account id a match may be and still be its own.
+ *
+ * A profile object — uuid, email, name and a few other fields — is a few hundred
+ * characters at most, so a match beyond this is in some other record and not the
+ * account's. Small enough to exclude a neighbour, generous enough to span the
+ * object the uuid lives in.
+ */
+const MAX_DISTANCE = 600;
+
+/**
+ * The largest file this will read. Nothing being looked for lives in a big file;
+ * a big file is a conversation store or a stored document, and loading one is the
+ * cost — in memory, and in the crash that motivated all of this — that reading
+ * bytes crudely is meant to avoid.
+ */
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 /** How many blob files the walk will look at before giving up — a bound, not a target. */
-const MAX_BLOB_FILES = 2000;
+const MAX_BLOB_FILES = 4000;
 
 function fileSize(file: string): number {
   try {
@@ -181,27 +215,15 @@ function fileSize(file: string): number {
 }
 
 /**
- * The candidate strings a stored value might be.
+ * A breadcrumb before each file is opened, printed only when FOSTER_DEBUG is set.
  *
- * Chromium Local Storage prefixes each value with a one-byte encoding tag — 0 for
- * UTF-16, 1 for Latin-1 — while IndexedDB values carry Blink's own framing. Rather
- * than parse either scheme, every plausible reading is produced and searched: the
- * whole buffer and its tail past a leading byte, each as UTF-8 and as UTF-16LE. A
- * wrong decoding yields text that simply does not match the patterns, so offering
- * several costs nothing and misses less.
+ * The read can be killed in a way no `try` catches — a heap fault, an
+ * out-of-memory abort, a security tool that mistakes reading browser storage for
+ * theft — and a crash that leaves no error is diagnosable only by what was about
+ * to be read. The last line this prints before silence names the file that did it.
  */
-function* decodings(value: Buffer): Generator<string> {
-  yield value.toString('utf8');
-  yield value.toString('utf16le');
-  if (value.length > 1) {
-    yield value.subarray(1).toString('utf8');
-    yield value.subarray(1).toString('utf16le');
-  }
-}
-
-/** Whether a decoded value names the account — matched case-insensitively, bare or braced. */
-function containsUuid(value: string, accountUuid: string): boolean {
-  return value.toLowerCase().includes(accountUuid.toLowerCase());
+function trace(message: string): void {
+  if (process.env.FOSTER_DEBUG) process.stderr.write(`[foster] ${message}\n`);
 }
 
 /**
