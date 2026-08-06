@@ -21,6 +21,14 @@ export class SnappyError extends Error {
   }
 }
 
+/**
+ * The largest block this will decompress. LevelDB blocks are kilobytes; a value
+ * far past that is a corrupt length or a table this reader misparsed, and the
+ * alloc it would trigger is a silent out-of-memory kill. 64 MB is orders of
+ * magnitude above anything real and still safe to refuse rather than allocate.
+ */
+const MAX_OUTPUT = 64 * 1024 * 1024;
+
 const LITERAL = 0;
 const COPY_1_BYTE_OFFSET = 1;
 const COPY_2_BYTE_OFFSET = 2;
@@ -39,6 +47,15 @@ export function snappyDecompress(input: Buffer): Buffer {
     if ((byte & 0x80) === 0) break;
     shift += 7;
     if (shift > 32) throw new SnappyError('length preamble is not a valid varint');
+  }
+
+  // A declared length that is negative (a varint whose high bits set the sign) or
+  // absurdly large is refused before it is allocated. A corrupt or misparsed
+  // block can name a gigabyte, and `Buffer.alloc` of that either throws or — worse
+  // — succeeds and exhausts the heap, which no caller can catch. Nothing foster
+  // reads decompresses anywhere near this, so the cap only ever rejects garbage.
+  if (expected < 0 || expected > MAX_OUTPUT) {
+    throw new SnappyError(`declared length ${expected} is not a plausible block size`);
   }
 
   const output = Buffer.alloc(expected);

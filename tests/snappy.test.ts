@@ -54,4 +54,13 @@ describe('snappy', () => {
       /has not been produced/,
     );
   });
+
+  it('refuses an implausibly large declared length instead of allocating it', () => {
+    // A misparsed or corrupt block can name a gigabyte; allocating it is a silent
+    // out-of-memory kill, so the length is rejected before the buffer is made.
+    // 0xffffffff0f as a varint decodes to a length beyond the cap.
+    const bomb = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x0f, 0x00]);
+    expect(() => snappyDecompress(bomb)).toThrow(SnappyError);
+    expect(() => snappyDecompress(bomb)).toThrow(/plausible block size/);
+  });
 });
