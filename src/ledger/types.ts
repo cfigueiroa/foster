@@ -92,6 +92,19 @@ export interface ReturnedEvent extends BaseEvent {
    * otherwise see foster claiming a deletion it never performed.
    */
   reconciled?: true;
+  /**
+   * True when the copy is still on disk and no longer holds the conversation it
+   * was made for — the app branched it and moved the card onto the branch.
+   *
+   * Distinct from `reconciled`, which says the file was already gone: here it is
+   * very much there, and saying otherwise would send anyone reading the log
+   * looking for a deletion that never happened. Foster stops tracking it, which
+   * has a consequence worth stating: `return` works from the active fosterings,
+   * so it will not remove this file. That is deliberate — the card is now the
+   * app's own row for the branch, and deleting it would take away a conversation
+   * the user can see — but it does mean the file outlives foster's record of it.
+   */
+  repurposed?: true;
 }
 
 /**

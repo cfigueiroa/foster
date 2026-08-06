@@ -49,7 +49,16 @@ export function inspectCopy(fostering: ActiveFostering): CopyState {
     // made for is the only thing that makes it the copy of anything; a card that
     // has moved on is evidence the fostering no longer stands, not that it does.
     const holds = conversationOf(fostering.copyPath);
-    if (fostering.cliSessionId && holds && holds !== fostering.cliSessionId) {
+    // Compared with case folded, as this identifier is everywhere else it is
+    // compared. Reading a difference in capitalisation as a different
+    // conversation would disown a copy that holds exactly the one it was made
+    // for, and mint a second card for it — the duplicate `conversationsHere`
+    // exists to prevent.
+    if (
+      fostering.cliSessionId &&
+      holds &&
+      holds.toLowerCase() !== fostering.cliSessionId.toLowerCase()
+    ) {
       return { kind: 'repurposed', nowHolds: holds };
     }
     return { kind: 'present' };
