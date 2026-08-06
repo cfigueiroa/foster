@@ -8,6 +8,7 @@ import {
   quitDesktop,
   runningStores,
   startDesktop,
+  trayNote,
   desktopExecutable,
   deliverUrl,
   type ProcessRow,
@@ -270,6 +271,21 @@ describe('quitDesktop', () => {
     });
 
     expect(result.outcome).not.toBe('needs-terminate');
+  });
+
+  /**
+   * The note said "Re-run with --terminate" wherever it appeared, but only two
+   * commands have that flag. Printed after "foster foster --yes --restart", it
+   * described an option that command has never had, so doing as it said answered
+   * "unknown option '--terminate'".
+   */
+  it('names the way out in the words of the command that printed it', () => {
+    expect(trayNote('Re-run with --terminate')).toContain(
+      'Re-run with --terminate to do it, or quit from the tray icon yourself.',
+    );
+    expect(trayNote('Run "foster app restart --terminate"')).toContain(
+      'Run "foster app restart --terminate" to do it, or quit from the tray icon yourself.',
+    );
   });
 });
 

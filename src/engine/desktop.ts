@@ -431,6 +431,24 @@ export async function quitDesktop(
 const SETTLE_MS = 3_500;
 
 /**
+ * Why a `needs-terminate` left the app alone, and how to insist.
+ *
+ * The way out is a parameter because it is not the same sentence everywhere:
+ * `--terminate` is an option of "foster app quit" and "foster app restart", and
+ * a write that was merely asked to restart the app has no such flag. Saying
+ * "re-run with --terminate" there sent people to an unknown option.
+ */
+export function trayNote(retry: string): string {
+  return (
+    'Claude Desktop keeps running in its tray icon, so asking the window to close\n' +
+    'would only hide it. Ending the process is the only way, and it skips the\n' +
+    "app's shutdown: a change from the last few seconds may not be saved, and\n" +
+    'Cowork sandboxes will not be stopped cleanly.\n' +
+    `${retry} to do it, or quit from the tray icon yourself.`
+  );
+}
+
+/**
  * End a process and everything it spawned.
  *
  * `/T` matters: a Code session starts children of its own, and killing only the

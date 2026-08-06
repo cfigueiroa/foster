@@ -25,6 +25,7 @@ import {
   readProcesses,
   runningStores,
   startDesktop,
+  trayNote,
 } from '../engine/desktop.js';
 import {
   continuedNote,
@@ -1007,7 +1008,9 @@ async function finish(store: StoreLayout, restart: boolean): Promise<void> {
     );
     return;
   }
-  await restartDesktop(store, false);
+  // Named outright rather than as a flag to add here: --terminate belongs to
+  // "foster app restart", and the writing commands have no such option.
+  await restartDesktop(store, false, 'Run "foster app restart --terminate"');
 }
 
 program
@@ -1812,7 +1815,20 @@ app
     await restartDesktop(store, Boolean(this.opts<{ terminate?: boolean }>().terminate));
   });
 
-async function closeDesktop(store: StoreLayout, terminate: boolean): Promise<boolean> {
+/**
+ * The way out of a refusal, in the words of the command the user actually typed.
+ *
+ * "Re-run with --terminate" is only true where that flag exists. Reached from a
+ * write that was asked to restart the app, it named an option `foster foster`
+ * has never had, so following the advice answered "unknown option '--terminate'".
+ */
+const RERUN_WITH_TERMINATE = 'Re-run with --terminate';
+
+async function closeDesktop(
+  store: StoreLayout,
+  terminate: boolean,
+  retry: string = RERUN_WITH_TERMINATE,
+): Promise<boolean> {
   const result = await quitDesktop(store, { terminate });
   if (result.outcome === 'not-running') {
     console.log('Claude Desktop was not running.');
@@ -1825,15 +1841,7 @@ async function closeDesktop(store: StoreLayout, terminate: boolean): Promise<boo
   if (result.outcome === 'needs-terminate') {
     // Not an escalation this can make on its own: with the tray on there is no
     // way to ask, and ending the process skips the app's own shutdown.
-    console.log(
-      pc.yellow(
-        'Claude Desktop keeps running in its tray icon, so asking the window to close\n' +
-          'would only hide it. Ending the process is the only way, and it skips the\n' +
-          "app's shutdown: a change from the last few seconds may not be saved, and\n" +
-          'Cowork sandboxes will not be stopped cleanly.\n' +
-          'Re-run with --terminate to do it, or quit from the tray icon yourself.',
-      ),
-    );
+    console.log(pc.yellow(trayNote(retry)));
     process.exitCode = 1;
     return false;
   }
@@ -1842,8 +1850,12 @@ async function closeDesktop(store: StoreLayout, terminate: boolean): Promise<boo
   return false;
 }
 
-async function restartDesktop(store: StoreLayout, terminate: boolean): Promise<void> {
-  if (inspectApp(store).running && !(await closeDesktop(store, terminate))) return;
+async function restartDesktop(
+  store: StoreLayout,
+  terminate: boolean,
+  retry?: string,
+): Promise<void> {
+  if (inspectApp(store).running && !(await closeDesktop(store, terminate, retry))) return;
   const started = await startDesktop(store);
   console.log(
     started
