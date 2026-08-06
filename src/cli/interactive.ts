@@ -31,6 +31,7 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import { identityLabel, readIdentityFromCache } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
@@ -342,8 +343,17 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
   );
   if (aborted(picked)) return;
 
+  // For the signed-in account, the app's cache usually knows the name and email
+  // already — offer it as the starting text so the common case is a keystroke.
+  // Read at rest, never over the network; absent when the schema has moved.
+  const suggested =
+    labels.get(picked) ??
+    (picked === target.accountUuid
+      ? identityLabel(readIdentityFromCache(store, picked))
+      : undefined);
+
   const name = await askText('Call it', {
-    ...(labels.get(picked) === undefined ? {} : { initialValue: labels.get(picked)! }),
+    ...(suggested === undefined ? {} : { initialValue: suggested }),
     placeholder: 'work',
   });
   if (aborted(name) || !name.trim()) {

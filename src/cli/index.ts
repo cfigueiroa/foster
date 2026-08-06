@@ -47,6 +47,7 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
+import { identityLabel, readIdentityFromCache } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
 import { scanSources, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
@@ -1071,14 +1072,44 @@ program
   .description('give an account a human name — the one in use, or any you name')
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
+  .option('--from-cache', 'name the signed-in account with its cached name and email')
   .action(function (this: Command, first?: string, second?: string) {
     const { store, ledger } = context(this);
     const accounts = listAccountDirs(store);
+    const currentAccountUuid = readConfig(store).lastKnownAccountUuid;
+
+    // --from-cache is the one-step version of `whoami` then `label`: read the
+    // signed-in account's identity from the app's cache and use it as the name.
+    if (this.opts<{ fromCache?: boolean }>().fromCache) {
+      if (first !== undefined) {
+        throw new Error('--from-cache names the signed-in account; do not also pass one.');
+      }
+      if (!currentAccountUuid) {
+        throw new Error('No account is signed in, so there is nothing to read a name for.');
+      }
+      const identity = readIdentityFromCache(store, currentAccountUuid);
+      const fromCache = identityLabel(identity);
+      if (!fromCache) {
+        throw new Error(
+          "Nothing was found in the app's cache for this account.\n" +
+            'Name it by hand instead: foster label "a name".',
+        );
+      }
+      ledger.append({
+        kind: 'account_labelled',
+        accountUuid: currentAccountUuid,
+        label: fromCache,
+      });
+      console.log(`Labelled ${shortId(currentAccountUuid)} as ${pc.bold(fromCache)}.`);
+      console.log(pc.dim("Read from the app's cache — not over the network."));
+      return;
+    }
+
     const { accountUuid, label } = resolveLabelArgs(
       first,
       second,
       accounts.map((ref) => ref.accountUuid),
-      readConfig(store).lastKnownAccountUuid,
+      currentAccountUuid,
     );
 
     ledger.append({ kind: 'account_labelled', accountUuid, label });
@@ -1088,6 +1119,51 @@ program
     if (first !== undefined && second === undefined) {
       console.log(pc.dim('That is the account the sidebar is reading right now.'));
     }
+  });
+
+program
+  .command('whoami')
+  .description("the signed-in account's name and email, read from the app's own cache")
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store } = context(this);
+    const accountUuid = readConfig(store).lastKnownAccountUuid;
+    const json = this.opts<{ json?: boolean }>().json;
+
+    if (!accountUuid) {
+      if (json) return print({ accountUuid: null, email: null, name: null });
+      console.log('No account is signed in. Open Claude Desktop once first.');
+      return;
+    }
+
+    // Read at rest, never over the network: the app cached its own profile in the
+    // web-origin LevelDB, which is page data rather than a credential. When the
+    // schema has moved and nothing is found, that is reported plainly — the point
+    // of a best-effort read is that its failure is not an error.
+    const identity = readIdentityFromCache(store, accountUuid);
+
+    if (json) {
+      return print({
+        accountUuid,
+        email: identity?.email ?? null,
+        name: identity?.name ?? null,
+      });
+    }
+
+    console.log(`account  ${accountUuid}`);
+    if (identity?.name) console.log(`name     ${pc.bold(identity.name)}`);
+    if (identity?.email) console.log(`email    ${identity.email}`);
+    if (!identity?.email && !identity?.name) {
+      console.log(
+        pc.dim(
+          "Nothing found in the app's cache for this account.\n" +
+            'The profile may be stored differently in this app version. You can still name it by hand:\n' +
+            '  foster label "a name"',
+        ),
+      );
+      return;
+    }
+    console.log(pc.dim(`\nName the account with this in one step:  foster label --from-cache`));
   });
 
 program

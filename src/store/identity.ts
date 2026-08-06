@@ -1,0 +1,144 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { decodeBatch, readLog, scanTable } from '../engine/leveldb.js';
+import type { StoreLayout } from '../domain/types.js';
+import { readConfig } from '../store/config.js';
+import { safeReaddir } from '../util/fs.js';
+
+/**
+ * The human name behind an account UUID, read from the app's own cache.
+ *
+ * The account's email and display name are not in any file foster is allowed to
+ * read outright: the token cache is a credential, and the authoritative copy is
+ * behind the API. But the app, having fetched its own profile once, keeps a copy
+ * at rest — in the web-origin storage under `Local Storage/` and `IndexedDB/`,
+ * which are Chromium LevelDB databases, the same format foster already reads for
+ * the pin list. That copy is not a credential; it is cached page data, the same
+ * category as the session files. So it can be read.
+ *
+ * Two honesties about this. It is **best-effort**: the schema is the app's, not a
+ * contract, and a version that stores the profile differently makes this return
+ * nothing rather than something wrong. And it only ever describes the account
+ * signed in **now** — web storage belongs to the current session, so this pairs
+ * one email with one directory per run, exactly as reading it off the screen
+ * would. When it fails, the caller falls back to asking, or to the opt-in fetch.
+ */
+
+export interface CachedIdentity {
+  email?: string;
+  name?: string;
+}
+
+const EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+const NAME = /"(?:full_name|fullName|display_name|displayName|name)"\s*:\s*"([^"]{1,80})"/;
+
+/**
+ * The account's identity from cache, or undefined when nothing can be tied to it.
+ *
+ * Tied is the word that matters. The cache holds emails that are not the
+ * account's — a correspondent quoted in a conversation, a teammate — so an email
+ * is only taken when it sits in the same cached value as the account's own UUID.
+ * A guess that could label the account with a stranger's address is worse than
+ * no guess, which is why this returns undefined rather than a loose match.
+ */
+export function readIdentityFromCache(
+  store: StoreLayout,
+  accountUuid = readConfig(store).lastKnownAccountUuid,
+): CachedIdentity | undefined {
+  if (!accountUuid) return undefined;
+
+  const dirs = [
+    path.join(store.root, 'Local Storage', 'leveldb'),
+    path.join(store.root, 'IndexedDB', 'https_claude.ai_0.indexeddb.leveldb'),
+  ];
+
+  for (const dir of dirs) {
+    for (const value of readAllValues(dir)) {
+      // Only values that mention this very account are considered, so the email
+      // that comes back belongs to the account being named and not to whoever
+      // else the app has cached.
+      if (!containsUuid(value, accountUuid)) continue;
+
+      const email = value.match(EMAIL)?.[0];
+      const name = value.match(NAME)?.[1]?.trim();
+      if (email || name) {
+        return {
+          ...(email ? { email } : {}),
+          ...(name ? { name } : {}),
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Every value in a LevelDB directory, decoded to the strings it might be.
+ *
+ * Over-reads on purpose: every SSTable and the log are scanned, stale and
+ * superseded records included, because this is a search for whether the profile
+ * is present anywhere rather than for the current value of one key. Following the
+ * manifest to read only live records would be more correct for a Get and is not
+ * worth it here — more haystack only helps when looking for a needle.
+ */
+function* readAllValues(dir: string): Generator<string> {
+  for (const name of safeReaddir(dir)) {
+    const file = path.join(dir, name);
+    try {
+      if (name.endsWith('.ldb')) {
+        const values: Buffer[] = [];
+        scanTable(readFileSync(file), (_entry, value) => {
+          if (value.length > 0) values.push(Buffer.from(value));
+        });
+        for (const value of values) yield* decodings(value);
+      } else if (name.endsWith('.log')) {
+        for (const batch of readLog(readFileSync(file), { tolerant: true })) {
+          for (const entry of decodeBatch(batch.payload).entries) {
+            if (entry.value && entry.value.length > 0) yield* decodings(Buffer.from(entry.value));
+          }
+        }
+      }
+    } catch {
+      // A half-written table, a log torn by a kill, a compression this does not
+      // implement: any one file failing must not stop the search across the rest.
+      // Best-effort means the read that works is what counts.
+    }
+  }
+}
+
+/**
+ * The candidate strings a stored value might be.
+ *
+ * Chromium Local Storage prefixes each value with a one-byte encoding tag — 0 for
+ * UTF-16, 1 for Latin-1 — while IndexedDB values carry Blink's own framing. Rather
+ * than parse either scheme, every plausible reading is produced and searched: the
+ * whole buffer and its tail past a leading byte, each as UTF-8 and as UTF-16LE. A
+ * wrong decoding yields text that simply does not match the patterns, so offering
+ * several costs nothing and misses less.
+ */
+function* decodings(value: Buffer): Generator<string> {
+  yield value.toString('utf8');
+  yield value.toString('utf16le');
+  if (value.length > 1) {
+    yield value.subarray(1).toString('utf8');
+    yield value.subarray(1).toString('utf16le');
+  }
+}
+
+/** Whether a decoded value names the account — matched case-insensitively, bare or braced. */
+function containsUuid(value: string, accountUuid: string): boolean {
+  return value.toLowerCase().includes(accountUuid.toLowerCase());
+}
+
+/**
+ * A one-line label from a cached identity, or undefined when there is nothing.
+ *
+ * Name and email together when both are known — "John — john@…" is what tells
+ * two accounts apart at a glance — and whichever one is present otherwise.
+ */
+export function identityLabel(identity: CachedIdentity | undefined): string | undefined {
+  if (!identity) return undefined;
+  if (identity.name && identity.email) return `${identity.name} — ${identity.email}`;
+  return identity.name ?? identity.email ?? undefined;
+}
