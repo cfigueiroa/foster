@@ -32,7 +32,7 @@ import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { findRestorable } from '../store/restore.js';
-import { scanAccount, summariseAccount } from '../store/scanner.js';
+import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, byRecency, parseSince } from './filters.js';
@@ -725,8 +725,9 @@ function reportHidden(all: DiscoveredSession[], offered: DiscoveredSession[]): v
 
   const reasons = new Map<string, number>();
   for (const session of all) {
-    if (session.reasons.length === 0 && !session.isCopy) continue;
-    const reason = session.isCopy ? 'already a copy' : session.reasons.join(', ');
+    const hiddenAsCopy = session.isCopy && !session.isStranded;
+    if (session.reasons.length === 0 && !hiddenAsCopy) continue;
+    const reason = hiddenAsCopy ? 'already a copy' : session.reasons.join(', ');
     reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
   }
   const detail = [...reasons].map(([reason, count]) => `${count} ${reason}`).join(', ');
@@ -737,7 +738,7 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
   const source = await chooseSource(store, ledger, current);
   if (aborted(source)) return;
 
-  const all = source.refs.flatMap((account) => scanAccount(source.store, account));
+  const all = scanSources(source.store, source.refs);
   const available = byRecency(applyFilter(all, {}));
   reportHidden(all, available);
 

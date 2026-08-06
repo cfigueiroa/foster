@@ -66,6 +66,22 @@ export interface DiscoveredSession {
    * Detected via the _foster marker, so a rescan never mistakes copies for new discoveries.
    */
   isCopy: boolean;
+  /**
+   * A copy that is the only card its conversation has left.
+   *
+   * Copies are normally not sources: fostering one would make a second copy of a
+   * conversation whose original is right there, which is a duplicate with a
+   * longer provenance chain. But the original can stop existing — deleted in the
+   * app, or never there at all because the copy came from `restore` — and then
+   * that rule strands the conversation. It sits in one account, perfectly
+   * readable, and no sweep will ever offer it again.
+   *
+   * So the rule is about the conversation, not the file: a copy is refused while
+   * its conversation still has a card of its own somewhere, and is a legitimate
+   * source once it does not. Only a whole-store scan can answer that, which is
+   * why `scanAccount` always reports false and `scanStore` decides.
+   */
+  isStranded: boolean;
   /** Empty when the session can be fostered normally. */
   reasons: Unfosterable[];
 }

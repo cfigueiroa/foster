@@ -417,6 +417,28 @@ you are already signed into. Sessions that could never appear in the sidebar are
 scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
 refuses to load. `list --all` shows them anyway.
 
+Archived sessions are excluded too, but for a different reason and with a way out. Archiving is a
+decision you made, not a limitation of the file: the session has a place in the app, just not in
+Recents. A sweep should not drag back what you tucked away, so `--archived` is opt-in — and when the
+only card a conversation has left is archived in an account you are not signed into, it is the only
+way to reach it at all. The copy keeps the flag and lands in the destination's archived view, which
+brings the conversation across without undoing your decision about it.
+
+### A copy can be the last card its conversation has
+
+Copies are not sources. Fostering one would make a second copy of a conversation whose original is
+right there, with a longer provenance chain and nothing gained. That rule is right until the
+original stops existing — deleted in the app, or never there at all because the copy came from
+`restore` — and then it strands the conversation: it sits in one account, perfectly readable, and no
+sweep will ever offer it again. Moving to a third account leaves it behind for good.
+
+So the rule is about the conversation rather than the file. A copy is refused while its conversation
+still has a card of its own **somewhere in the store**, and is a legitimate source once it does not.
+That question can only be answered by looking at every account, including the ones not being
+offered — deciding it from the source account alone would call a copy stranded while its original
+sat in the account the copies were going to. Two stranded copies of one conversation are both
+eligible and the destination check still allows only one row, so nothing doubles.
+
 `--store` and `--from-store` take a distinctive piece of a path as well as the whole thing, matched
 against the installations below — `--store work` finds `D:\Claude-Work`. A piece that matches two of
 them is reported rather than guessed at, and one that matches nothing and is not a directory is an

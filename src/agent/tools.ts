@@ -17,7 +17,7 @@ import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
-import { scanAccount, summarise } from '../store/scanner.js';
+import { scanSources, summarise } from '../store/scanner.js';
 import { viewTranscript } from '../store/transcripts.js';
 import { applyFilter, byRecency, selectByIds, type SessionFilter } from '../cli/filters.js';
 
@@ -113,12 +113,7 @@ export function listSessions(ctx: AgentToolContext, args: ListSessionsArgs): unk
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
   const copies = copySessionIds(ledger.read());
-  const all = byRecency(
-    applyFilter(
-      sources.flatMap((account) => scanAccount(store, account, copies)),
-      filter,
-    ),
-  );
+  const all = byRecency(applyFilter(scanSources(store, sources, copies), filter));
 
   const limit = Math.max(1, Math.min(args.limit ?? 100, 500));
   const shown = all.slice(0, limit);
@@ -273,12 +268,7 @@ export function fosterSessionsTool(ctx: AgentToolContext, args: FosterSessionsAr
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
   const copies = copySessionIds(ledger.read());
-  let candidates = byRecency(
-    applyFilter(
-      sources.flatMap((account) => scanAccount(store, account, copies)),
-      filter,
-    ),
-  );
+  let candidates = byRecency(applyFilter(scanSources(store, sources, copies), filter));
 
   if (args.sessionIds?.length) {
     const { selected, unmatched } = selectByIds(candidates, args.sessionIds);

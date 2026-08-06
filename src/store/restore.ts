@@ -69,6 +69,7 @@ export function findRestorable(
         account: tombstone.account,
         data,
         isCopy: false,
+        isStranded: false,
         reasons: unfosterableReasons(data),
       },
     });

@@ -1,5 +1,5 @@
 import { bareSessionId } from '../domain/naming.js';
-import type { DiscoveredSession } from '../domain/types.js';
+import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
 
 export interface SessionFilter {
   /** Case-insensitive substring match against the title. */
@@ -10,6 +10,25 @@ export interface SessionFilter {
   since?: number;
   /** Include sessions that cannot be fostered (scheduled tasks, never opened). */
   includeUnfosterable?: boolean;
+  /**
+   * Treat an archived session as fosterable.
+   *
+   * Archiving is not the same kind of exclusion as the others. A scheduled task
+   * or a never-opened session has no place in the sidebar at all, so a copy of
+   * one would be a file the app silently never lists. An archived session has a
+   * place — the app's own archived view — and the user put it there on purpose.
+   * Refusing it by default keeps a sweep from dragging back what was tucked
+   * away; refusing it always makes a conversation whose only card is archived
+   * unreachable from any other account.
+   */
+  includeArchived?: boolean;
+}
+
+/** The reasons that still stand once the caller has said what it will accept. */
+export function blockingReasons(session: DiscoveredSession, filter: SessionFilter): Unfosterable[] {
+  return filter.includeArchived
+    ? session.reasons.filter((reason) => reason !== 'archived')
+    : session.reasons;
 }
 
 /**
@@ -52,8 +71,11 @@ export function applyFilter(
   filter: SessionFilter,
 ): DiscoveredSession[] {
   return sessions.filter((session) => {
-    if (session.isCopy) return false;
-    if (!filter.includeUnfosterable && session.reasons.length > 0) return false;
+    // A copy is not a source while its conversation still has a card of its own.
+    // When it is the last one left, it is the only way that conversation can
+    // reach another account at all.
+    if (session.isCopy && !session.isStranded) return false;
+    if (!filter.includeUnfosterable && blockingReasons(session, filter).length > 0) return false;
 
     if (filter.title) {
       const title = session.data.title ?? '';

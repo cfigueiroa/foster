@@ -8,6 +8,7 @@ const found = (sessionId: string): DiscoveredSession => ({
   account: OLD_ACCOUNT,
   data: session({ sessionId }),
   isCopy: false,
+  isStranded: false,
   reasons: [],
 });
 

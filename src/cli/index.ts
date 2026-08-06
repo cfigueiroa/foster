@@ -42,7 +42,7 @@ import { readConfig } from '../store/config.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
 import { findRestorable } from '../store/restore.js';
-import { scanAccount, scanStore, summarise } from '../store/scanner.js';
+import { scanSources, scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
@@ -212,8 +212,12 @@ function filterFrom(opts: {
   cwd?: string;
   since?: string;
   all?: boolean;
+  archived?: boolean;
 }): SessionFilter {
-  const filter: SessionFilter = { includeUnfosterable: opts.all ?? false };
+  const filter: SessionFilter = {
+    includeUnfosterable: opts.all ?? false,
+    includeArchived: opts.archived ?? false,
+  };
   if (opts.title) filter.title = opts.title;
   if (opts.cwd) filter.cwd = opts.cwd;
   if (opts.since) {
@@ -229,7 +233,8 @@ function filterOptions(command: Command): Command {
   return command
     .option('--title <text>', 'only sessions whose title contains this text')
     .option('--cwd <text>', 'only sessions whose working directory contains this text')
-    .option('--since <age>', 'only sessions active within this window, e.g. 30d');
+    .option('--since <age>', 'only sessions active within this window, e.g. 30d')
+    .option('--archived', 'include sessions you archived; the copy stays archived');
 }
 
 function sourceOptions(command: Command): Command {
@@ -462,18 +467,17 @@ sourceOptions(
     // account in use need excluding, because there its sessions are already here.
     const current = sameStore(sourceStore, store) ? currentAccount(store, accounts) : undefined;
 
-    // Filter by account before reading files: the current account holds the most
-    // sessions and every one of them would be discarded straight afterwards.
     const sources = resolveSources(
       accounts.filter((account) => account.accountUuid !== current?.accountUuid),
       opts.from,
       opts.fromOrg,
     );
+    // The whole store is read even though only these accounts are offered: what
+    // makes a copy the last card of its conversation is decided by the accounts
+    // that are not on offer.
     const candidates = byRecency(
       applyFilter(
-        sources.flatMap((account) =>
-          scanAccount(sourceStore, account, copySessionIds(ledger.read())),
-        ),
+        scanSources(sourceStore, sources, copySessionIds(ledger.read())),
         filterFrom(this.opts()),
       ),
     );
@@ -526,6 +530,7 @@ sourceOptions(
     title?: string;
     cwd?: string;
     since?: string;
+    archived?: boolean;
     session?: string[];
     from?: string;
     fromOrg?: string;
@@ -562,12 +567,7 @@ sourceOptions(
   // Sessions that can never appear in the sidebar are always excluded here:
   // offering them would only produce copies the app silently never lists.
   let candidates = byRecency(
-    applyFilter(
-      sources.flatMap((account) =>
-        scanAccount(sourceStore, account, copySessionIds(ledger.read())),
-      ),
-      filter,
-    ),
+    applyFilter(scanSources(sourceStore, sources, copySessionIds(ledger.read())), filter),
   );
 
   if (opts.session?.length) {
@@ -594,6 +594,7 @@ sourceOptions(
     sourceStore: sourceStore.root,
     prefix: opts.prefix,
     dryRun,
+    includeArchived: Boolean(opts.archived),
     // Naming sessions one by one is a decision about those sessions, and only
     // that brings back a copy the user deleted in the app.
     explicit: Boolean(opts.session?.length),

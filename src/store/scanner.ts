@@ -68,7 +68,10 @@ export function scanAccount(
     // appears and never explains why, so it is excluded here instead.
     if (sizeOf(file) > SESSION_FILE_MAX_BYTES) reasons.push('too-large');
 
-    out.push({ path: file, account, data, isCopy, reasons });
+    // Always false here. One account cannot answer whether a conversation still
+    // has a card of its own — the original may be sitting in the account next
+    // door — so the judgement is made in scanStore, over everything.
+    out.push({ path: file, account, data, isCopy, isStranded: false, reasons });
   }
 
   return out;
@@ -78,7 +81,62 @@ export function scanStore(
   store: StoreLayout,
   copies: KnownCopies = NOTHING_KNOWN,
 ): DiscoveredSession[] {
-  return listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies));
+  return markStranded(
+    listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies)),
+  );
+}
+
+/**
+ * Sessions from the accounts named, judged against the whole store.
+ *
+ * Reading only the accounts being offered would be cheaper and would get the
+ * answer wrong: whether a copy is the last card of its conversation depends on
+ * the accounts *not* being offered, the destination included. Restricting the
+ * scan first is what made a copy in a source account look stranded while its
+ * original sat in the account the copies were going to.
+ */
+export function scanSources(
+  store: StoreLayout,
+  accounts: AccountRef[],
+  copies: KnownCopies = NOTHING_KNOWN,
+): DiscoveredSession[] {
+  const wanted = new Set(accounts.map(directoryOf));
+  return scanStore(store, copies).filter((session) => wanted.has(directoryOf(session.account)));
+}
+
+function directoryOf(account: AccountRef): string {
+  return `${account.accountUuid}/${account.organizationUuid}`;
+}
+
+/**
+ * Decide which copies are the last card their conversation has.
+ *
+ * A conversation with a card of its own is reachable the ordinary way, so its
+ * copies stay out of the running. A conversation with nothing but copies is
+ * reachable *only* through one of them, and refusing all of them does not keep
+ * anything tidy — it makes the conversation unfosterable for good, which is the
+ * opposite of what this tool is for.
+ *
+ * Exported for tests, and because the rule is worth being able to point at.
+ */
+export function markStranded(sessions: DiscoveredSession[]): DiscoveredSession[] {
+  const withOwnCard = new Set<string>();
+  for (const session of sessions) {
+    if (session.isCopy) continue;
+    if (session.data.cliSessionId) withOwnCard.add(session.data.cliSessionId);
+  }
+
+  return sessions.map((session) => {
+    const conversation = session.data.cliSessionId;
+    if (!session.isCopy || !conversation || withOwnCard.has(conversation)) return session;
+    return {
+      ...session,
+      isStranded: true,
+      // The only reason strandedness lifts. Archived, too-large and the rest
+      // describe the file itself and are as true of a last copy as of anything.
+      reasons: session.reasons.filter((reason) => reason !== 'already-a-copy'),
+    };
+  });
 }
 
 export function summarise(

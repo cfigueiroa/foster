@@ -183,3 +183,95 @@ describe('returnFosterings', () => {
     ).not.toThrow();
   });
 });
+
+describe('a dry run and the write it previews', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000f1';
+
+  /** Two cards, in two source accounts, holding one conversation. */
+  function twoCardsForOneConversation() {
+    const a = session({ sessionId: '00000000-0000-4000-8000-0000000000f2' });
+    const b = session({ sessionId: '00000000-0000-4000-8000-0000000000f3' });
+    a.cliSessionId = CONVERSATION;
+    b.cliSessionId = CONVERSATION;
+    writeSession(store, OLD_ACCOUNT, a);
+    writeSession(store, OLD_ACCOUNT, b);
+    return scanAccount(store, OLD_ACCOUNT);
+  }
+
+  it('agree on the count', () => {
+    // The preview used to record nothing, so it counted one row per source card
+    // while the write produces one row per conversation: "2 would be fostered"
+    // followed by "1 fostered".
+    const sessions = twoCardsForOneConversation();
+    const previewed = summariseOutcomes(
+      fosterSessions(sessions, { store, ledger, target: NEW_ACCOUNT, dryRun: true }),
+    );
+    const written = summariseOutcomes(
+      fosterSessions(sessions, { store, ledger, target: NEW_ACCOUNT }),
+    );
+
+    expect(previewed.fostered).toBe(1);
+    expect(written.fostered).toBe(1);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+  });
+
+  it('leaves the ledger untouched while previewing', () => {
+    fosterSessions(twoCardsForOneConversation(), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      dryRun: true,
+    });
+
+    expect(ledger.read()).toEqual([]);
+  });
+});
+
+describe('archived sessions', () => {
+  function archived() {
+    const data = session({ sessionId: '00000000-0000-4000-8000-0000000000f4', isArchived: true });
+    writeSession(store, OLD_ACCOUNT, data);
+    return scanAccount(store, OLD_ACCOUNT);
+  }
+
+  it('are left alone by default', () => {
+    const [outcome] = fosterSessions(archived(), { store, ledger, target: NEW_ACCOUNT });
+
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.detail).toContain('archived');
+  });
+
+  it('come across when asked for, still archived', () => {
+    // The point is reaching the conversation from the other account, not undoing
+    // the decision to tuck it away: it lands in the destination's archived view.
+    fosterSessions(archived(), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      includeArchived: true,
+    });
+
+    const [copy] = scanAccount(store, NEW_ACCOUNT);
+    expect(copy!.data.isArchived).toBe(true);
+    expect(copy!.data.cliSessionId).toBe('00000000-0000-4000-8000-0000000000f4');
+  });
+
+  it('still refuse for any other reason', () => {
+    const data = session({
+      sessionId: '00000000-0000-4000-8000-0000000000f5',
+      isArchived: true,
+      scheduledTaskId: 'task-1',
+    });
+    writeSession(store, OLD_ACCOUNT, data);
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      includeArchived: true,
+    });
+
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.detail).toBe('scheduled-task');
+  });
+});

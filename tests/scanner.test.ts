@@ -3,7 +3,14 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildFosterCopy } from '../src/domain/fostering.js';
 import { accountDir } from '../src/domain/paths.js';
-import { scanAccount, scanStore, SESSION_FILE_MAX_BYTES, summarise } from '../src/store/scanner.js';
+import {
+  scanAccount,
+  scanSources,
+  scanStore,
+  SESSION_FILE_MAX_BYTES,
+  summarise,
+} from '../src/store/scanner.js';
+import { applyFilter } from '../src/cli/filters.js';
 import { readConfig } from '../src/store/config.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -140,5 +147,76 @@ describe('the app’s own size limit', () => {
 
     const [found] = scanAccount(store, OLD_ACCOUNT);
     expect(found!.reasons).not.toContain('too-large');
+  });
+});
+
+describe('a copy that is the last card its conversation has', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000e1';
+
+  /** A copy in NEW_ACCOUNT of a session belonging to OLD_ACCOUNT. */
+  function copyOf(store: ReturnType<typeof makeStore>, origin: ReturnType<typeof session>) {
+    return writeSession(store, NEW_ACCOUNT, buildFosterCopy(origin, { origin: OLD_ACCOUNT }));
+  }
+
+  it('stays out of the running while the original is still there', () => {
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    writeSession(store, OLD_ACCOUNT, origin);
+    copyOf(store, origin);
+
+    const copy = scanStore(store).find((found) => found.isCopy)!;
+    expect(copy.isStranded).toBe(false);
+    expect(copy.reasons).toContain('already-a-copy');
+    // Fostering it would put a second copy of a conversation that is reachable
+    // the ordinary way.
+    expect(applyFilter(scanStore(store), {})).toHaveLength(1);
+  });
+
+  it('becomes a source once the original is gone', () => {
+    // What restore leaves behind, and what deleting an origin card produces: a
+    // conversation whose only card anywhere is foster's own copy. Refusing it
+    // does not keep anything tidy — it strands the conversation for good.
+    const store = makeStore();
+    copyOf(store, session({ sessionId: CONVERSATION }));
+
+    const [copy] = scanStore(store);
+
+    expect(copy!.isCopy).toBe(true);
+    expect(copy!.isStranded).toBe(true);
+    expect(copy!.reasons).toEqual([]);
+    expect(applyFilter(scanStore(store), {})).toHaveLength(1);
+  });
+
+  it('keeps every reason that is about the file rather than the copying', () => {
+    const store = makeStore();
+    copyOf(store, session({ sessionId: CONVERSATION, isArchived: true }));
+
+    const [copy] = scanStore(store);
+
+    expect(copy!.isStranded).toBe(true);
+    expect(copy!.reasons).toEqual(['archived']);
+  });
+
+  it('is judged across accounts, not within one', () => {
+    // The original sits in an account the sweep is not reading. Deciding from
+    // the source account alone would call the copy stranded and duplicate it.
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    writeSession(store, OLD_ACCOUNT, origin);
+    copyOf(store, origin);
+
+    expect(scanAccount(store, NEW_ACCOUNT)[0]!.isStranded).toBe(false);
+    expect(scanSources(store, [NEW_ACCOUNT])[0]!.isStranded).toBe(false);
+  });
+
+  it('does not strand a copy just because another copy shares the conversation', () => {
+    const store = makeStore();
+    const origin = session({ sessionId: CONVERSATION });
+    copyOf(store, origin);
+    copyOf(store, origin);
+
+    // Both are copies and neither conversation has an own card: both are the
+    // last card, and the destination check is what stops the pair.
+    expect(scanStore(store).every((found) => found.isStranded)).toBe(true);
   });
 });

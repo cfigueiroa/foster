@@ -5,6 +5,7 @@ import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
+import { blockingReasons } from '../cli/filters.js';
 import { errorMessage } from '../util/fs.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
@@ -29,6 +30,13 @@ export interface FosterOptions {
    * the app: a bulk run that resurrected it would undo their decision.
    */
   explicit?: boolean;
+  /**
+   * Accept a session the user archived. The copy keeps the flag, so it arrives
+   * in the destination's archived view rather than quietly reappearing in
+   * Recents — bringing the conversation across is the point, not undoing the
+   * decision to tuck it away.
+   */
+  includeArchived?: boolean;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -81,12 +89,16 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     const title = session.data.title ?? '(untitled)';
     const originId = session.data.sessionId;
 
-    if (session.reasons.length > 0) {
+    // Judged the same way the filter judges it, so a session the caller was
+    // shown as available cannot be refused here for the reason it was shown
+    // despite.
+    const blocking = blockingReasons(session, { includeArchived: options.includeArchived });
+    if (blocking.length > 0) {
       outcomes.push({
         originSessionId: originId,
         title,
         status: 'skipped',
-        detail: session.reasons.join(', '),
+        detail: blocking.join(', '),
       });
       continue;
     }
@@ -137,8 +149,30 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
 
+    /**
+     * What this batch has committed to bringing, whether or not bytes are being
+     * written. Two things can make one run reach the same destination twice: the
+     * same origin session found under two account directories, and two different
+     * cards holding one conversation.
+     */
+    const recordPlanned = (): void => {
+      mintedInBatch.add(key);
+      // Tracked as a conversation too: a sweep across two source accounts that
+      // both hold a card for one conversation would otherwise pass this check
+      // twice and produce the pair itself, in a single run.
+      if (copy.cliSessionId) {
+        conversationsHere.set(copy.cliSessionId, 'this account already has that conversation');
+      }
+    };
+
     if (dryRun) {
       outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
+      // A dry run has to make the same marks a real one does, or it stops
+      // describing the real one. Both of these are batch state, and leaving them
+      // to the write meant a preview counted a second card for a conversation it
+      // had already planned to bring — listing one row per source card where the
+      // write produces one row per conversation.
+      recordPlanned();
       continue;
     }
 
@@ -173,13 +207,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
           : {}),
         prefix,
       });
-      mintedInBatch.add(key);
-      // Tracked as a conversation too: a sweep across two source accounts that
-      // both hold a card for one conversation would otherwise pass this check
-      // twice and produce the pair itself, in a single run.
-      if (copy.cliSessionId) {
-        conversationsHere.set(copy.cliSessionId, 'this account already has that conversation');
-      }
+      recordPlanned();
       outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
     } catch (error) {
       const reason = errorMessage(error);
