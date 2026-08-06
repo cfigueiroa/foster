@@ -373,7 +373,7 @@ The same operations are available as one-shot commands, for scripting:
 foster doctor    # environment check: store location, app state, whether it is running
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
-foster label     # give an opaque account UUID a human name
+foster label     # give an account a human name
 foster labels    # list the names given so far
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
@@ -402,6 +402,27 @@ several accounts fostered into, a bare `return` removes the copies in the one yo
 foster return --to 00000000          # dry run, scoped to that account
 foster return --to 00000000 --yes    # with Claude Desktop closed
 ```
+
+### Naming accounts, and why foster cannot do it for you
+
+Accounts are UUIDs here because that is all the directory names carry. The app knows better — it
+shows the account's email under your avatar — and foster deliberately does not go and look. The only
+copy of that email on this disk is inside `oauth:tokenCache` in the app's config, and reading token
+caches is precisely what the safety model promises not to do. (It is not in the config as plain
+text, not in the logs, and not in any file keyed by account; the one other copy is buried in an
+opaque IndexedDB blob that describes only the account currently signed in.)
+
+So the pairing has to come from you — but only once per account, and only the name, because foster
+already knows which account the sidebar is reading:
+
+```bash
+foster label "Leila — jorgeroberto@…"     # names the account you are signed into
+foster label 00000000 "old personal"      # names any other
+```
+
+An identifier given on its own is refused rather than recorded as a name. From then on the name
+appears in `scan`, `status` and the menu, and "Name an account" starts on the account in use —
+the one whose email you can actually go and read right now.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer

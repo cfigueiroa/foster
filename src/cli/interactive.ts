@@ -317,6 +317,18 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
   const labels = labelsOf(ledger);
   const accounts = [...new Set(listAccountDirs(store).map((ref) => ref.accountUuid))];
 
+  // Said once, here, because this screen is the only place the gap shows: the
+  // app knows the account's email and foster does not, since the only copy on
+  // disk is inside the OAuth token cache — which foster does not read, on
+  // purpose. Pairing the two is the whole job of this screen, and the answer is
+  // on screen in the other window.
+  log.info(
+    pc.dim(
+      'Claude Desktop shows the account email under your avatar. foster cannot read it —\n' +
+        'it lives in the token cache — so this is where the two get introduced.',
+    ),
+  );
+
   const picked = await selectOrBack(
     'Which account?',
     accounts.map((accountUuid) => ({
@@ -324,6 +336,9 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
       label: short(accountUuid) + (accountUuid === target.accountUuid ? pc.green(' (in use)') : ''),
       hint: labels.get(accountUuid) ? `currently "${labels.get(accountUuid)}"` : 'unnamed',
     })),
+    // The account in use is the one whose name you can actually look up right
+    // now, so it is where the cursor starts.
+    target.accountUuid,
   );
   if (aborted(picked)) return;
 

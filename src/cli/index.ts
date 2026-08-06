@@ -13,7 +13,7 @@ import {
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
-import { currentAccount, requireCurrentAccount } from '../engine/account.js';
+import { currentAccount, requireCurrentAccount, resolveLabelArgs } from '../engine/account.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
@@ -1068,13 +1068,26 @@ program
 
 program
   .command('label')
-  .description('give an account UUID a human name')
-  .argument('<accountUuid>')
-  .argument('<label>')
-  .action(function (this: Command, accountUuid: string, name: string) {
-    const { ledger } = context(this);
-    ledger.append({ kind: 'account_labelled', accountUuid, label: name });
-    console.log(`Labelled ${shortId(accountUuid)} as ${pc.bold(name)}.`);
+  .description('give an account a human name — the one in use, or any you name')
+  .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
+  .argument('[label]')
+  .action(function (this: Command, first?: string, second?: string) {
+    const { store, ledger } = context(this);
+    const accounts = listAccountDirs(store);
+    const { accountUuid, label } = resolveLabelArgs(
+      first,
+      second,
+      accounts.map((ref) => ref.accountUuid),
+      readConfig(store).lastKnownAccountUuid,
+    );
+
+    ledger.append({ kind: 'account_labelled', accountUuid, label });
+    console.log(`Labelled ${shortId(accountUuid)} as ${pc.bold(label)}.`);
+    // The pairing foster cannot make for itself is the one the app is showing on
+    // screen: the email lives in the OAuth token cache, which foster does not read.
+    if (first !== undefined && second === undefined) {
+      console.log(pc.dim('That is the account the sidebar is reading right now.'));
+    }
   });
 
 program

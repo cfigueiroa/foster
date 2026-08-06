@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { resolveLabelArgs } from '../src/engine/account.js';
 import {
   accountDir,
   candidateStoreRoots,
@@ -143,5 +144,51 @@ describe('layoutFor', () => {
     const mixed = layoutFor('C:/one/two/../two');
     expect(mixed.root).toBe(path.resolve('C:/one/two'));
     expect(mixed.codeSessionsDir.startsWith(mixed.root)).toBe(true);
+  });
+});
+
+describe('resolveLabelArgs', () => {
+  const ACCOUNTS = ['00000000-0000-4000-8000-0000000000a7', '11111111-1111-4111-8111-111111111111'];
+  const CURRENT = ACCOUNTS[0]!;
+
+  it('takes one argument as the name of the account in use', () => {
+    // The case that comes up most: you are looking at the app, which shows the
+    // email, and foster already knows which directory the sidebar reads.
+    expect(resolveLabelArgs('Leila', undefined, ACCOUNTS, CURRENT)).toEqual({
+      accountUuid: CURRENT,
+      label: 'Leila',
+    });
+  });
+
+  it('still names any account when both are given', () => {
+    expect(resolveLabelArgs('11111111', 'work', ACCOUNTS, CURRENT)).toEqual({
+      accountUuid: '11111111',
+      label: 'work',
+    });
+  });
+
+  it('refuses an identifier given on its own', () => {
+    // Recording "00000000" as the *name* of a different account is the wrong
+    // way to be wrong.
+    expect(() => resolveLabelArgs('00000000', undefined, ACCOUNTS, CURRENT)).toThrow(
+      /is an account id, not a name/,
+    );
+  });
+
+  it('does not mistake a short name for an identifier', () => {
+    expect(resolveLabelArgs('work', undefined, ACCOUNTS, CURRENT).label).toBe('work');
+    expect(resolveLabelArgs('11', undefined, ACCOUNTS, CURRENT).label).toBe('11');
+  });
+
+  it('says what to type when given nothing', () => {
+    expect(() => resolveLabelArgs(undefined, undefined, ACCOUNTS, CURRENT)).toThrow(
+      /foster label <accountUuid>/,
+    );
+  });
+
+  it('refuses the shorthand when no account is signed in', () => {
+    expect(() => resolveLabelArgs('Leila', undefined, ACCOUNTS, undefined)).toThrow(
+      /No account is recorded as signed in/,
+    );
   });
 });
