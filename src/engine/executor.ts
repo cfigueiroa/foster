@@ -37,6 +37,16 @@ export interface FosterOptions {
    * decision to tuck it away.
    */
   includeArchived?: boolean;
+  /**
+   * Conversations a live `claude` process is writing right now, lower-cased.
+   *
+   * Not a gate — fostering one is perfectly sound, and it is the common case when
+   * you copy the session you are working in. It changes what is *said*: a copy of
+   * a conversation with a live writer branches the moment it is opened, which is
+   * the one outcome that looks like foster losing work. Injected rather than
+   * read here so the engine stays free of process inspection.
+   */
+  live?: ReadonlySet<string>;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -48,6 +58,8 @@ export interface Outcome {
   /** Present for skipped and failed entries. */
   detail?: string;
   copyPath?: string;
+  /** True when this copy is of a conversation a live process is still writing. */
+  live?: true;
 }
 
 /**
@@ -148,6 +160,12 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       prefix,
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
+    // Carried on the outcome rather than acted on: the copy is sound either way,
+    // and what a live writer changes is only what the caller should be told.
+    const liveFlag =
+      cliSessionId && options.live?.has(cliSessionId.toLowerCase())
+        ? ({ live: true } as const)
+        : {};
 
     /**
      * What this batch has committed to bringing, whether or not bytes are being
@@ -166,7 +184,13 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     };
 
     if (dryRun) {
-      outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'fostered',
+        copyPath,
+        ...liveFlag,
+      });
       // A dry run has to make the same marks a real one does, or it stops
       // describing the real one. Both of these are batch state, and leaving them
       // to the write meant a preview counted a second card for a conversation it
@@ -208,7 +232,13 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         prefix,
       });
       recordPlanned();
-      outcomes.push({ originSessionId: originId, title, status: 'fostered', copyPath });
+      outcomes.push({
+        originSessionId: originId,
+        title,
+        status: 'fostered',
+        copyPath,
+        ...liveFlag,
+      });
     } catch (error) {
       const reason = errorMessage(error);
       ledger.append({ kind: 'failed', operation: 'foster', originSessionId: originId, reason });
@@ -278,6 +308,25 @@ function resolveExisting(
       detail: 'already fostered, into an installation that is not reachable to check',
       copyPath: active.copyPath,
     };
+  }
+
+  // A repurposed copy is not a copy of this conversation any more, so the
+  // fostering it recorded no longer stands and a fresh one is exactly what the
+  // caller is asking for. The file itself is left alone: the app repointed it,
+  // it is a working card for whatever it now holds, and removing it would delete
+  // a row the user can see. Falling through mints a second card in this account —
+  // one for the branch, one for the conversation that was asked for.
+  if (state.kind === 'repurposed') {
+    if (!context.dryRun) {
+      context.ledger.append({
+        kind: 'returned',
+        originSessionId: active.originSessionId,
+        target: active.target,
+        copySessionId: active.copySessionId,
+        reconciled: true,
+      });
+    }
+    return undefined;
   }
 
   if (state.kind === 'deleted-in-app' && !context.explicit) {

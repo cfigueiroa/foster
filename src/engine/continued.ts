@@ -129,15 +129,49 @@ export function continuedNote(count: number): string {
  *
  * There is nothing to enforce here. The dangerous moment is opening the
  * conversation inside the app, which foster is not part of, and a lock nothing
- * honours would only look like protection. So this is a warning, and it is said
- * only when it applies: within one installation the sidebar reads a single
- * account, so the same conversation cannot be open twice.
+ * honours would only look like protection. So this is a warning.
+ *
+ * It used to be said only for two installations, on the reasoning that one
+ * installation reads a single account and so cannot have the conversation open
+ * twice. That reasoning was wrong, and `LIVE_BRANCHES` below is the case it
+ * missed: a conversation does not need a second *sidebar* to be open twice, only
+ * a second *writer*, and a running Code session is one.
  */
 export const TWO_SIDEBARS = [
   'Both installations are running, and a copy is the same conversation as its original.',
   'Open it in one of them at a time: two apps writing one conversation at once leave it',
   'branched rather than continued.',
 ].join('\n');
+
+/**
+ * The same hazard, in the form that needs no second installation at all.
+ *
+ * A conversation being written right now by a live `claude` process cannot be
+ * continued by anything else: the app, asked to open a card for it, branches
+ * instead — it copies the history into a new transcript with a new id and
+ * repoints that card at the branch. From then on the card and the original
+ * describe different conversations, and the one that keeps growing is the one
+ * with the writer.
+ *
+ * This is what makes the ordinary account switch dangerous. Foster a session you
+ * are working in, sign into the other account, open the copy: the copy branches,
+ * your work continues in the account you left, and the new account holds a
+ * snapshot that stops at the moment you opened it. Nothing is lost — both
+ * transcripts are on disk — but only one of them is still being written.
+ *
+ * Observed on a real store: a copy made at 06:30 for a conversation live since
+ * 04:21 was opened at 09:55 and became a branch that ended at 10:16, while the
+ * original ran on past 10:32.
+ */
+export function liveBranchNote(count: number): string {
+  const one = count === 1;
+  return [
+    `${count} of ${one ? 'these is' : 'these are'} being written right now by a running claude process.`,
+    `Finish there before opening the ${one ? 'copy' : 'copies'}: a conversation with a live writer`,
+    'cannot be continued from a second card, so the app branches it instead — the copy',
+    'follows the branch and your work carries on in the original.',
+  ].join('\n');
+}
 
 export function twoLiveSidebars(source: StoreLayout, target: StoreLayout): boolean {
   if (samePath(source.root, target.root)) return false;

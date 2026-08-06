@@ -612,10 +612,21 @@ commands above do it for free.
   the row itself — the app only writes the sessions of the account it is holding, so the original
   keeps the title and date it had when it was fostered until you open it. `status` marks a
   conversation that carried on, and `return` says so rather than letting an old date read as lost
-  work. The hazard is only this: with two installations running, that one conversation has a row in
-  two live sidebars, and opening it in both at once leaves the record branched instead of continued.
-  `foster` warns when it writes a copy into an installation that is up alongside the one it came
-  from. Work on a conversation in one place at a time.
+  work. The hazard is only this: **a conversation can be continued in one place at a time**, and a
+  second card opened while something else is writing it makes the app branch instead — a new
+  transcript, a new id, and that card moved onto the branch. It takes two installations for two
+  sidebars to be live at once, and `foster` warns about that. But it takes only a **running Code
+  session** for a conversation to have a writer, and that needs no second installation at all: foster
+  a session you are working in, switch account, open the copy, and the copy becomes a snapshot that
+  stops at the moment you opened it while your work carries on where you left it. `foster` warns when
+  a copy it is making has a live writer, before and after writing, in the command and in the menu.
+
+  When it does happen, nothing is lost — both transcripts are on disk — and foster now notices. A
+  copy the app has repointed at another conversation is recognised as **repurposed** rather than
+  counted as still standing, so the conversation it was made for can be fostered again instead of
+  being refused as "already fostered" forever. The branch's card is left exactly where it is: the app
+  made it, it is a working row for the branch, and removing it would delete something you can see.
+
 - **It never ends the app behind your back.** Where a polite close would work (tray off) it uses one;
   where it would not, it says so and waits for an explicit yes rather than quietly escalating, and it
   names what that costs. `foster` refuses outright to close an app it is running inside — detected

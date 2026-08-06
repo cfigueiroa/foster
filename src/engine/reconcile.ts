@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { tombstoneFileName } from '../domain/naming.js';
 import { layoutFor, storeRootOfCopy } from '../domain/paths.js';
@@ -27,15 +27,33 @@ import { isDirectory, readTimestampFile } from '../util/fs.js';
  *    another installation — a profile on a removable drive, a folder that is not
  *    mounted — and "the file is not there" then means "not right now". Concluding
  *    anything would produce a second copy the moment the drive came back.
+ *  - **repurposed.** The file is there and no longer holds the conversation it was
+ *    made for. Opening a copy of a conversation that is live elsewhere makes the
+ *    app branch rather than continue it: it writes a new transcript and repoints
+ *    the card at the branch. The copy is then a perfectly good card for a
+ *    different conversation, and the one it was fostered for has no card here at
+ *    all — while the ledger, which only knows a file was written, keeps answering
+ *    "already fostered" and refuses to bring it again. Measured on a real store:
+ *    a copy made at 06:30 for one conversation pointed at a branch born at 09:55.
  */
 export type CopyState =
   | { kind: 'present' }
   | { kind: 'deleted-in-app'; deletedAt?: number }
   | { kind: 'gone' }
-  | { kind: 'unreachable' };
+  | { kind: 'unreachable' }
+  | { kind: 'repurposed'; nowHolds?: string };
 
 export function inspectCopy(fostering: ActiveFostering): CopyState {
-  if (existsSync(fostering.copyPath)) return { kind: 'present' };
+  if (existsSync(fostering.copyPath)) {
+    // Present is not the same as still-the-same. The conversation the copy was
+    // made for is the only thing that makes it the copy of anything; a card that
+    // has moved on is evidence the fostering no longer stands, not that it does.
+    const holds = conversationOf(fostering.copyPath);
+    if (fostering.cliSessionId && holds && holds !== fostering.cliSessionId) {
+      return { kind: 'repurposed', nowHolds: holds };
+    }
+    return { kind: 'present' };
+  }
 
   // The directory two levels of UUID deep, not the installation root: a removable
   // drive can come back under the same letter holding something else entirely,
@@ -59,4 +77,18 @@ export function inspectCopy(fostering: ActiveFostering): CopyState {
   return deletedAt === undefined
     ? { kind: 'deleted-in-app' }
     : { kind: 'deleted-in-app', deletedAt };
+}
+
+/**
+ * The conversation a card on disk currently points at, or undefined when the file
+ * cannot be read as one. Unreadable means "do not conclude anything": a card
+ * mid-write, or one this cannot parse, must not be mistaken for a repurposed one.
+ */
+function conversationOf(copyPath: string): string | undefined {
+  try {
+    const data = JSON.parse(readFileSync(copyPath, 'utf8')) as { cliSessionId?: unknown };
+    return typeof data.cliSessionId === 'string' ? data.cliSessionId : undefined;
+  } catch {
+    return undefined;
+  }
 }
