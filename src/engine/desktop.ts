@@ -430,6 +430,18 @@ export async function quitDesktop(
 /** Long enough to outlast the app's save debounce (1s idle, 3s while running). */
 const SETTLE_MS = 3_500;
 
+/**
+ * End a process and everything it spawned.
+ *
+ * `/T` matters: a Code session starts children of its own, and killing only the
+ * parent leaves them holding the conversation the kill was meant to release.
+ * There is no gentler form to try first — the CLI has no window to post a close
+ * to — so this is what ending one means, and the callers say so before doing it.
+ */
+export function endProcess(pid: number): void {
+  taskkill(['/F', '/T', '/PID', String(pid)]);
+}
+
 function taskkill(args: string[]): void {
   try {
     execFileSync('taskkill', args, { encoding: 'utf8', windowsHide: true, stdio: 'pipe' });

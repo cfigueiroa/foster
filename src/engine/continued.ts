@@ -163,14 +163,33 @@ export const TWO_SIDEBARS = [
  * 04:21 was opened at 09:55 and became a branch that ended at 10:16, while the
  * original ran on past 10:32.
  */
-export function liveBranchNote(count: number): string {
-  const one = count === 1;
-  return [
-    `${count} of ${one ? 'these is' : 'these are'} being written right now by a running claude process.`,
+export function liveBranchNote(writers: LiveWriter[]): string {
+  const one = writers.length === 1;
+  const lines = [
+    `${writers.length} of ${one ? 'these is' : 'these are'} being written right now by a running claude process.`,
     `Finish there before opening the ${one ? 'copy' : 'copies'}: a conversation with a live writer`,
     'cannot be continued from a second card, so the app branches it instead — the copy',
     'follows the branch and your work carries on in the original.',
-  ].join('\n');
+  ];
+
+  // Named rather than merely counted. "Finish there" is not advice anyone can act
+  // on without knowing where *there* is, and the registry has the answer: which
+  // process, and the directory it was started in, which is what makes a window
+  // recognisable among a dozen.
+  for (const writer of writers) {
+    const self = writer.isSelf ? ' — this one, running foster' : '';
+    lines.push(`  pid ${writer.pid}  ${writer.cwd ?? '(unknown directory)'}${self}`);
+  }
+  lines.push('`foster live --stop <id>` ends one, when finishing is not what you want.');
+  return lines.join('\n');
+}
+
+/** A process holding a conversation open, as the warning needs to describe it. */
+export interface LiveWriter {
+  pid: number;
+  cwd?: string;
+  /** True for the session foster itself is running inside. */
+  isSelf?: boolean;
 }
 
 export function twoLiveSidebars(source: StoreLayout, target: StoreLayout): boolean {

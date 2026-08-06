@@ -58,8 +58,12 @@ export interface Outcome {
   /** Present for skipped and failed entries. */
   detail?: string;
   copyPath?: string;
-  /** True when this copy is of a conversation a live process is still writing. */
-  live?: true;
+  /**
+   * The conversation this copy holds, when a live process is still writing it.
+   * Carried rather than flagged so the caller can name the writer: "finish there"
+   * is not actionable without knowing where there is.
+   */
+  live?: string;
 }
 
 /**
@@ -163,9 +167,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // Carried on the outcome rather than acted on: the copy is sound either way,
     // and what a live writer changes is only what the caller should be told.
     const liveFlag =
-      cliSessionId && options.live?.has(cliSessionId.toLowerCase())
-        ? ({ live: true } as const)
-        : {};
+      cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
 
     /**
      * What this batch has committed to bringing, whether or not bytes are being

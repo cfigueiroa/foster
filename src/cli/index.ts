@@ -18,9 +18,11 @@ import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types
 import {
   DesktopControlError,
   deliverUrl,
+  endProcess,
   inspectDesktopFor,
   packagedAppId,
   quitDesktop,
+  readProcesses,
   runningStores,
   startDesktop,
 } from '../engine/desktop.js';
@@ -55,7 +57,14 @@ import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
-import { liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
+import {
+  describeWriters,
+  isSelfHostedBy,
+  liveSessions,
+  pidAlive,
+  sessionRegistryRoots,
+  type LiveCliSession,
+} from '../store/liveSessions.js';
 import { viewTranscript } from '../store/transcripts.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
@@ -626,13 +635,16 @@ sourceOptions(
 
   // Said on the dry run too: it is the moment before anything is written, which
   // is exactly when knowing changes what someone does next.
-  const live = outcomes.filter((outcome) => outcome.live).length;
+  const writers = describeWriters(
+    outcomes.map((outcome) => outcome.live).filter((id): id is string => Boolean(id)),
+    sessionRegistryRoots(process.env),
+  );
 
   if (dryRun) {
     console.log(
       pc.bold(`\nDry run: ${counts.fostered} would be fostered, ${counts.skipped} skipped.`),
     );
-    if (live > 0) console.log(pc.yellow(`\n${liveBranchNote(live)}`));
+    if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
     console.log(pc.dim('Re-run with --yes to write.'));
     return;
   }
@@ -640,7 +652,7 @@ sourceOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
-  if (live > 0) console.log(pc.yellow(`\n${liveBranchNote(live)}`));
+  if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
   if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
     console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
   }
@@ -1457,10 +1469,18 @@ program
   .command('live')
   .description('conversations a claude process is holding open right now')
   .option('--json', 'machine-readable output')
+  .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
+  .option('--yes', 'actually end them; without it nothing is stopped')
   .action(function (this: Command) {
+    const opts = this.opts<{ json?: boolean; stop?: string[]; yes?: boolean }>();
     const sessions = liveSessions(sessionRegistryRoots(process.env));
 
-    if (this.opts<{ json?: boolean }>().json) {
+    if (opts.stop?.length) {
+      stopWriters(sessions, opts.stop, Boolean(opts.yes));
+      return;
+    }
+
+    if (opts.json) {
       print(
         sessions.map((s) => ({
           pid: s.pid,
@@ -1480,7 +1500,79 @@ program
       console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(s.cwd ?? '')}`);
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
+    console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
   });
+
+/**
+ * End the processes writing the named conversations.
+ *
+ * The only way to release a conversation from outside the session holding it, and
+ * the reason it exists: a copy cannot be opened without branching while a writer
+ * is there, and "finish in the other window" is not always possible — the window
+ * may be one you cannot get back to.
+ *
+ * It is a kill, and says so. There is no polite signal to send: the CLI has no
+ * message loop to close, so ending it is `taskkill /F` and whatever the session
+ * had not yet written is gone. What is already in the transcript stays — the file
+ * is append-only, and a torn final line is what every tolerant reader here
+ * expects. Refusing the session foster is running inside follows the rule the app
+ * already has: a command must not kill the thing it is running in, part-way
+ * through, leaving nobody to report what happened.
+ */
+function stopWriters(sessions: LiveCliSession[], wanted: string[], apply: boolean): void {
+  const selected = sessions.filter((session) =>
+    wanted.some((id) => session.sessionId.toLowerCase().startsWith(id.toLowerCase())),
+  );
+
+  const unmatched = wanted.filter(
+    (id) => !sessions.some((s) => s.sessionId.toLowerCase().startsWith(id.toLowerCase())),
+  );
+  if (unmatched.length > 0) {
+    throw new Error(
+      `No live session matches ${unmatched.join(', ')}.\nRun "foster live" to see what is running.`,
+    );
+  }
+
+  const rows = readProcesses();
+  for (const session of selected) {
+    const self = isSelfHostedBy(session.pid, () => rows);
+    const where = session.cwd ? ` in ${session.cwd}` : '';
+
+    if (self) {
+      console.log(
+        pc.yellow(
+          `  ! ${session.pid}  ${session.sessionId}${where}\n` +
+            '    This is the session foster is running in. Ending it would kill this command\n' +
+            '    part-way through. Close it yourself, or run foster from another terminal.',
+        ),
+      );
+      continue;
+    }
+
+    if (!apply) {
+      console.log(`  × ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
+      continue;
+    }
+
+    endProcess(session.pid);
+    const gone = !pidAlive(session.pid);
+    console.log(
+      gone
+        ? `  ✕ ${session.pid}  ${session.sessionId}${pc.dim(where)}`
+        : pc.yellow(`  ! ${session.pid} did not end.`),
+    );
+  }
+
+  if (!apply) {
+    console.log(
+      pc.red(
+        '\nDry run. Ending a session is a kill: anything it had not written yet is lost,' +
+          '\nand what is already in the transcript stays.',
+      ),
+    );
+    console.log(pc.dim('Re-run with --yes to end them.'));
+  }
+}
 
 program
   .command('agent')
