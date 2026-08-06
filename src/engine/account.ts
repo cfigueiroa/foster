@@ -28,6 +28,62 @@ export function currentAccount(
   );
 }
 
+/**
+ * Which account a `label` call is about, and what to call it.
+ *
+ * The identifier is redundant in the case that comes up most: you are looking at
+ * the app, which shows the account's email under your avatar, and foster already
+ * knows which account the sidebar is reading. Requiring the UUID anyway made the
+ * one thing foster cannot learn for itself — the pairing between that email and
+ * that directory name — cost a copy-paste every time.
+ *
+ * So a single argument is the name, applied to the account in use. An identifier
+ * given alone is refused rather than taken as a name: `foster label 00000000`
+ * reads as an intention to name *that* account, and silently recording "00000000"
+ * as the name of a different one is the wrong way to be wrong.
+ */
+export function resolveLabelArgs(
+  first: string | undefined,
+  second: string | undefined,
+  accountUuids: string[],
+  currentAccountUuid: string | undefined,
+): { accountUuid: string; label: string } {
+  if (first !== undefined && second !== undefined) {
+    return { accountUuid: first, label: second };
+  }
+
+  if (first === undefined) {
+    throw new Error(
+      'Nothing to record. Give the name:\n' +
+        '  foster label "work"                     names the account you are signed into\n' +
+        '  foster label <accountUuid> "work"       names another account',
+    );
+  }
+
+  // Four characters is where a prefix stops being a plausible name and starts
+  // being an abbreviation of an identifier, which is the length the other flags
+  // accept too.
+  const looksLikeId =
+    first.length >= 4 && accountUuids.some((uuid) => uuid.startsWith(first.toLowerCase()));
+  if (looksLikeId) {
+    throw new Error(
+      `"${first}" is an account id, not a name. Say what to call it:\n` +
+        `  foster label ${first} "work"\n` +
+        'Or, to name the account you are signed into:\n' +
+        '  foster label "work"',
+    );
+  }
+
+  if (!currentAccountUuid) {
+    throw new Error(
+      `No account is recorded as signed in, so there is nothing for "${first}" to name.\n` +
+        'Open Claude Desktop once, or name the account outright: foster label <accountUuid> "…".',
+    );
+  }
+
+  return { accountUuid: currentAccountUuid, label: first };
+}
+
 export function requireCurrentAccount(
   store: StoreLayout,
   accounts: AccountRef[],
