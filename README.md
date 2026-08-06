@@ -342,8 +342,8 @@ clone the repo and use `npm run dev -- <command>`.
 
 ## Usage
 
-Run it with no arguments for a guided menu that stays open — pick an account,
-choose sessions, review, confirm, and carry on without relaunching:
+Run it with no arguments for a guided menu that stays open — tick the accounts to
+read from, choose sessions, review, confirm, and carry on without relaunching:
 
 ```bash
 foster
@@ -351,6 +351,11 @@ foster
 
 You do not have to close Claude Desktop first. When the copies are written it
 offers to restart the app so they show up.
+
+The source screen is ticked rather than chosen: an account, one of its
+organizations, several accounts at once, or the row that stands for every account
+in the installation. One pass reads them all, so consolidating three accounts is
+one run rather than three.
 
 Copies go to the account you are signed into by default. The confirmation names
 the destination and the title prefix, and either can be changed from there — any
@@ -360,8 +365,10 @@ account in use only appear once you switch to it.
 Sessions can also come from **another installation or profile**. A second profile
 is a separate store that nothing in this one points at, so the source picker
 offers it as its own entry: the profiles running right now are listed, and one
-that is not running can be given by path. Copies made that way record which store
-they came from, because two installations can hold the same account identifier.
+that is not running can be given by path. It is a scan of its own rather than one
+more tick — a run reads one installation, and asking for both at once is refused
+instead of quietly resolved to one. Copies made that way record which store they
+came from, because two installations can hold the same account identifier.
 
 "Work on another installation" goes further and points the whole menu at a
 different profile — everything after it reads and writes there — so a second
