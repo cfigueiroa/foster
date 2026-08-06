@@ -20,6 +20,7 @@ import {
 import {
   continuedNote,
   continuedSince,
+  liveBranchNote,
   TWO_SIDEBARS,
   twoLiveSidebars,
 } from '../engine/continued.js';
@@ -32,6 +33,7 @@ import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { identityLabel, readIdentityFromCache } from '../store/identity.js';
+import { liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
@@ -875,6 +877,11 @@ async function confirmAndWrite(
       sourceStore: source.store.root,
       prefix,
       explicit,
+      // The menu is where most people foster, so the branching hazard has to be
+      // said here rather than only in the command.
+      live: new Set(
+        liveSessions(sessionRegistryRoots(process.env)).map((s) => s.sessionId.toLowerCase()),
+      ),
     });
     const counts = summariseOutcomes(outcomes);
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
@@ -882,6 +889,8 @@ async function confirmAndWrite(
 
     log.success(`${counts.fostered} written, ${counts.skipped} skipped, ${counts.failed} failed.`);
     if (counts.fostered === 0) return;
+    const live = outcomes.filter((outcome) => outcome.live).length;
+    if (live > 0) log.warn(liveBranchNote(live));
     if (twoLiveSidebars(source.store, store)) log.warn(TWO_SIDEBARS);
 
     if (refKey(target) !== refKey(current)) {

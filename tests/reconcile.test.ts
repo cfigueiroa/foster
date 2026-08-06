@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -305,5 +305,125 @@ describe('a conversation the destination already shows', () => {
 
     expect(outcomes.filter((o) => o.status === 'fostered')).toHaveLength(1);
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
+  });
+});
+
+/**
+ * A copy the app has repointed at a different conversation.
+ *
+ * Opening a copy of a conversation that a live process is writing makes the app
+ * branch it: a new transcript, a new id, and the card moved onto the branch. The
+ * file is still there and still works — for the branch. The conversation it was
+ * fostered for now has no card in that account at all, and the ledger, which only
+ * knows a file was written, kept answering "already fostered".
+ */
+describe('a copy the app repointed at another conversation', () => {
+  const ORIGIN = '00000000-0000-4000-8000-0000000000c1';
+  const TRUNK = '00000000-0000-4000-8000-0000000000c2';
+  const BRANCH = '00000000-0000-4000-8000-0000000000c3';
+
+  function fosterOnce(store: StoreLayout, ledger: Ledger) {
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: ORIGIN, cliSessionId: TRUNK }));
+    return fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+    });
+  }
+
+  it('is seen as repurposed rather than present', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));
+    fosterOnce(store, ledger);
+
+    const [active] = listActive(project(ledger.read()));
+    // The app rewrites the card onto the branch it just made.
+    const copy = JSON.parse(readFileSync(active!.copyPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(active!.copyPath, JSON.stringify({ ...copy, cliSessionId: BRANCH }), 'utf8');
+
+    expect(inspectCopy(active!)).toEqual({ kind: 'repurposed', nowHolds: BRANCH });
+  });
+
+  it('lets the conversation be fostered again, and leaves the branch card alone', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));
+    fosterOnce(store, ledger);
+    const [first] = listActive(project(ledger.read()));
+    const copy = JSON.parse(readFileSync(first!.copyPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(first!.copyPath, JSON.stringify({ ...copy, cliSessionId: BRANCH }), 'utf8');
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+    });
+
+    expect(outcomes[0]!.status).toBe('fostered');
+    // The branch card is a working row for the branch; removing it would delete
+    // something the user can see.
+    expect(existsSync(first!.copyPath)).toBe(true);
+    // And the account now holds a card for the conversation that was asked for.
+    const here = scanAccount(store, NEW_ACCOUNT).map((s) => s.data.cliSessionId);
+    expect(here).toContain(TRUNK);
+    expect(here).toContain(BRANCH);
+  });
+
+  it('still skips a copy that is present and unchanged', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-r-')), 'l.jsonl'));
+    fosterOnce(store, ledger);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+    });
+
+    expect(again[0]!.status).toBe('skipped');
+    expect(again[0]!.detail).toBe('already fostered');
+  });
+});
+
+describe('fostering a conversation that is being written', () => {
+  it('marks the outcome so the caller can warn, and copies it anyway', () => {
+    // Never a refusal: copying the session you are working in is the ordinary
+    // case. What a live writer changes is what the user should be told.
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-l-')), 'l.jsonl'));
+    const cli = '00000000-0000-4000-8000-0000000000d4';
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000d5', cliSessionId: cli }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      live: new Set([cli]),
+    });
+
+    expect(outcome!.status).toBe('fostered');
+    expect(outcome!.live).toBe(true);
+  });
+
+  it('leaves the flag off when nothing is writing it', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-l-')), 'l.jsonl'));
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000d6' }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      live: new Set(['00000000-0000-4000-8000-00000000ffff']),
+    });
+
+    expect(outcome!.live).toBeUndefined();
   });
 });

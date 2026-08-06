@@ -28,6 +28,7 @@ import {
   continuedNote,
   continuedSince,
   TWO_SIDEBARS,
+  liveBranchNote,
   twoLiveSidebars,
 } from '../engine/continued.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
@@ -602,6 +603,14 @@ sourceOptions(
     prefix: opts.prefix,
     dryRun,
     includeArchived: Boolean(opts.archived),
+    // A conversation with a live writer branches when its copy is opened, which
+    // is the one failure that reads as foster losing work. Reported, never
+    // refused: copying the session you are working in is the ordinary case.
+    live: new Set(
+      liveSessions(sessionRegistryRoots(process.env)).map((session) =>
+        session.sessionId.toLowerCase(),
+      ),
+    ),
     // Naming sessions one by one is a decision about those sessions, and only
     // that brings back a copy the user deleted in the app.
     explicit: Boolean(opts.session?.length),
@@ -615,10 +624,15 @@ sourceOptions(
   // exactly the case where "from where?" is not obvious.
   if (crossStore) console.log(pc.dim(`\nfrom ${sourceStore.root}`));
 
+  // Said on the dry run too: it is the moment before anything is written, which
+  // is exactly when knowing changes what someone does next.
+  const live = outcomes.filter((outcome) => outcome.live).length;
+
   if (dryRun) {
     console.log(
       pc.bold(`\nDry run: ${counts.fostered} would be fostered, ${counts.skipped} skipped.`),
     );
+    if (live > 0) console.log(pc.yellow(`\n${liveBranchNote(live)}`));
     console.log(pc.dim('Re-run with --yes to write.'));
     return;
   }
@@ -626,6 +640,7 @@ sourceOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
+  if (live > 0) console.log(pc.yellow(`\n${liveBranchNote(live)}`));
   if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
     console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
   }
