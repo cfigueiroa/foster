@@ -32,7 +32,7 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
-import { identityLabel, readIdentityFromCache } from '../store/identity.js';
+import { identityLabel, readIdentityFromCache, resolveIdentity } from '../store/identity.js';
 import { describeWriters, liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
@@ -348,11 +348,21 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
   // For the signed-in account, the app's cache usually knows the name and email
   // already — offer it as the starting text so the common case is a keystroke.
   // Read at rest, never over the network; absent when the schema has moved.
-  const suggested =
-    labels.get(picked) ??
-    (picked === target.accountUuid
-      ? identityLabel(readIdentityFromCache(store, picked))
-      : undefined);
+  // Known for any account foster has ever looked at, not only the one signed in:
+  // the ledger remembers what the cache forgets, which is what makes naming an
+  // account you are not currently in possible at all.
+  const known = identityLabel(
+    resolveIdentity(
+      picked === target.accountUuid ? readIdentityFromCache(store, picked) : undefined,
+      project(ledger.read()).identities.get(picked),
+    ),
+  );
+  // A saved label wins the prompt, because it was a deliberate choice. But a
+  // known identity that disagrees with it is shown rather than hidden — that is
+  // how a label left stale by an early experiment gets noticed.
+  const saved = labels.get(picked);
+  if (known && saved && saved !== known) log.info(pc.dim(`This account is ${known}.`));
+  const suggested = saved ?? known;
 
   const name = await askText('Call it', {
     ...(suggested === undefined ? {} : { initialValue: suggested }),

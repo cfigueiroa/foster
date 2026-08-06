@@ -7,6 +7,7 @@ import type { AccountRef } from '../domain/types.js';
  */
 export type LedgerEvent =
   | AccountLabelledEvent
+  | AccountIdentitySeenEvent
   | FosteredEvent
   | ReturnedEvent
   | ConversationPurgedEvent
@@ -23,6 +24,32 @@ export interface AccountLabelledEvent extends BaseEvent {
   kind: 'account_labelled';
   accountUuid: string;
   label: string;
+}
+
+/**
+ * Who an account belongs to, as the app's cache said at one moment.
+ *
+ * Recorded because the source is volatile in a way no amount of careful reading
+ * fixes. The profile lands in the web-origin storage when the app fetches it, and
+ * leaves when Chromium compacts that database: measured here, the plan was
+ * readable minutes after signing in and gone from every non-credential file
+ * afterwards. A better parser cannot find what is no longer written down.
+ *
+ * So the answer is kept the moment it is seen. The ledger is foster's own file,
+ * outside anything the app rewrites, which makes it the durable half of a pair
+ * whose other half is a cache. It is also what lets an account be named while you
+ * are signed into a different one: the cache only ever describes the session in
+ * front of you, and this remembers the ones behind.
+ *
+ * Each field is optional because a partial sighting is worth keeping — a run that
+ * saw the name and email but not the plan should not erase a plan seen earlier.
+ */
+export interface AccountIdentitySeenEvent extends BaseEvent {
+  kind: 'account_identity_seen';
+  accountUuid: string;
+  email?: string;
+  name?: string;
+  plan?: string;
 }
 
 export interface FosteredEvent extends BaseEvent {
@@ -115,6 +142,7 @@ type Draft<T extends BaseEvent> = Omit<T, 'v' | 'ts' | 'toolVersion'> & { ts?: n
 
 export type LedgerEventInput =
   | Draft<AccountLabelledEvent>
+  | Draft<AccountIdentitySeenEvent>
   | Draft<FosteredEvent>
   | Draft<ReturnedEvent>
   | Draft<ConversationPurgedEvent>
