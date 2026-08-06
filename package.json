@@ -1,6 +1,6 @@
 {
   "name": "@cfigueiroa/foster",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Bring Claude Desktop Code sessions from a previous local account back into your current account's sidebar — non-destructively and reversibly.",
   "keywords": [
     "claude",
