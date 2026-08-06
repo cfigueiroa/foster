@@ -3,7 +3,7 @@ import path from 'node:path';
 import { decodeBatch, readLog, scanTable } from '../engine/leveldb.js';
 import type { StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
-import { safeReaddir } from '../util/fs.js';
+import { isDirectory, safeReaddir } from '../util/fs.js';
 
 /**
  * The human name behind an account UUID, read from the app's own cache.
@@ -47,30 +47,33 @@ export function readIdentityFromCache(
 ): CachedIdentity | undefined {
   if (!accountUuid) return undefined;
 
-  const dirs = [
-    path.join(store.root, 'Local Storage', 'leveldb'),
-    path.join(store.root, 'IndexedDB', 'https_claude.ai_0.indexeddb.leveldb'),
+  const found: CachedIdentity = {};
+
+  // Every candidate string, from two sources kept deliberately separate. The
+  // Local Storage database is small and holds the display name; it is read
+  // through the LevelDB parser. The IndexedDB database is not — it holds whole
+  // conversations, reaches hundreds of megabytes, and decompressing it to search
+  // for an email is how this crashes. Its large values spill into blob files that
+  // are plain bytes, so those are read raw and capped instead, never parsed.
+  const sources = [
+    readAllValues(path.join(store.root, 'Local Storage', 'leveldb')),
+    readBlobs(path.join(store.root, 'IndexedDB', 'https_claude.ai_0.indexeddb.blob')),
   ];
 
-  for (const dir of dirs) {
-    for (const value of readAllValues(dir)) {
-      // Only values that mention this very account are considered, so the email
-      // that comes back belongs to the account being named and not to whoever
-      // else the app has cached.
+  for (const values of sources) {
+    for (const value of values) {
+      // Only values that name this very account are considered, so the email that
+      // comes back belongs to the account being named and not to whoever else the
+      // app has cached — a correspondent, a teammate.
       if (!containsUuid(value, accountUuid)) continue;
 
-      const email = value.match(EMAIL)?.[0];
-      const name = value.match(NAME)?.[1]?.trim();
-      if (email || name) {
-        return {
-          ...(email ? { email } : {}),
-          ...(name ? { name } : {}),
-        };
-      }
+      found.email ??= value.match(EMAIL)?.[0];
+      found.name ??= value.match(NAME)?.[1]?.trim();
+      if (found.email && found.name) return found;
     }
   }
 
-  return undefined;
+  return found.email || found.name ? found : undefined;
 }
 
 /**
@@ -114,6 +117,35 @@ function* readAllValues(dir: string): Generator<string> {
 }
 
 /**
+ * IndexedDB blob files, decoded to the strings they might hold.
+ *
+ * When an IndexedDB value is large, Blink stores it outside the LevelDB as a
+ * plain file under `…indexeddb.blob/<db>/<dir>/<file>`. Those files are the raw
+ * value bytes — no framing, no compression to bomb — so they can be read
+ * directly, which is exactly what makes them safe where parsing the database is
+ * not. Read capped and counted: a blob past the size limit is skipped, and the
+ * walk stops after a bounded number of files, because this is a search for a
+ * small profile, not a reason to load a conversation archive.
+ */
+function* readBlobs(root: string, budget = { files: MAX_BLOB_FILES }): Generator<string> {
+  for (const entry of safeReaddir(root)) {
+    if (budget.files <= 0) return;
+    const full = path.join(root, entry);
+    try {
+      if (isDirectory(full)) {
+        yield* readBlobs(full, budget);
+        continue;
+      }
+      budget.files -= 1;
+      if (fileSize(full) > MAX_BLOB_BYTES) continue;
+      yield* decodings(readFileSync(full));
+    } catch {
+      // A blob that vanished or cannot be read is skipped like any other file.
+    }
+  }
+}
+
+/**
  * The largest value worth decoding. A profile is a small JSON object; the same
  * database also holds whole conversations, and copying one of those five ways to
  * search it for an email is how a best-effort read turns into an out-of-memory
@@ -133,6 +165,12 @@ function worthSearching(value: Buffer | undefined): value is Buffer {
  * conversation store, which this has no reason to read.
  */
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
+
+/** A blob larger than this is a stored document, not a profile record. */
+const MAX_BLOB_BYTES = 4 * 1024 * 1024;
+
+/** How many blob files the walk will look at before giving up — a bound, not a target. */
+const MAX_BLOB_FILES = 2000;
 
 function fileSize(file: string): number {
   try {
