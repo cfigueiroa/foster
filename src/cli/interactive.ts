@@ -33,7 +33,7 @@ import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { identityLabel, readIdentityFromCache } from '../store/identity.js';
-import { liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
+import { describeWriters, liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
@@ -889,8 +889,11 @@ async function confirmAndWrite(
 
     log.success(`${counts.fostered} written, ${counts.skipped} skipped, ${counts.failed} failed.`);
     if (counts.fostered === 0) return;
-    const live = outcomes.filter((outcome) => outcome.live).length;
-    if (live > 0) log.warn(liveBranchNote(live));
+    const writers = describeWriters(
+      outcomes.map((outcome) => outcome.live).filter((id): id is string => Boolean(id)),
+      sessionRegistryRoots(process.env),
+    );
+    if (writers.length > 0) log.warn(liveBranchNote(writers));
     if (twoLiveSidebars(source.store, store)) log.warn(TWO_SIDEBARS);
 
     if (refKey(target) !== refKey(current)) {

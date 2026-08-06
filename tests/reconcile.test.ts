@@ -405,7 +405,7 @@ describe('fostering a conversation that is being written', () => {
     });
 
     expect(outcome!.status).toBe('fostered');
-    expect(outcome!.live).toBe(true);
+    expect(outcome!.live).toBe(cli);
   });
 
   it('leaves the flag off when nothing is writing it', () => {

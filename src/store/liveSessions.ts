@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { LiveWriter } from '../engine/continued.js';
+import { readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 
 /**
@@ -82,6 +84,62 @@ export function liveSessions(
   }
 
   return out;
+}
+
+/**
+ * Whether foster is running inside this session.
+ *
+ * The registry gives a pid; the question is whether that process is an ancestor
+ * of this one. It matters wherever ending a writer is offered: the session foster
+ * was started from is the one it must never end, for the same reason it refuses
+ * to close the app it runs inside — the kill would take the command with it,
+ * part-way through, and the user would be left guessing what ran.
+ */
+export function isSelfHostedBy(
+  pid: number,
+  list: ProcessLister = readProcesses,
+  selfPid: number = process.pid,
+): boolean {
+  const rows = list();
+  if (rows.length === 0) return false;
+
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  let current = byPid.get(selfPid);
+  for (let depth = 0; current && depth < 64; depth++) {
+    if (current.pid === pid) return true;
+    const parent = byPid.get(current.parentPid);
+    // A recycled pid can point at a process younger than its supposed child.
+    if (parent && current.startedAt !== undefined && parent.startedAt !== undefined) {
+      if (parent.startedAt > current.startedAt) return false;
+    }
+    current = parent;
+  }
+  return false;
+}
+
+/**
+ * The writers behind a set of conversations, described for a warning.
+ *
+ * Shared by the command and the menu so the same fostering is reported the same
+ * way in both, and so "which of these is me" is answered once — the process table
+ * is read a single time however many writers there are.
+ */
+export function describeWriters(
+  cliSessionIds: string[],
+  roots: string[],
+  list: ProcessLister = readProcesses,
+  alive: (pid: number) => boolean = pidAlive,
+): LiveWriter[] {
+  const wanted = new Set(cliSessionIds.map((id) => id.toLowerCase()));
+  const sessions = liveSessions(roots, alive).filter((s) => wanted.has(s.sessionId.toLowerCase()));
+  if (sessions.length === 0) return [];
+
+  const rows = list();
+  return sessions.map((session) => ({
+    pid: session.pid,
+    ...(session.cwd ? { cwd: session.cwd } : {}),
+    ...(isSelfHostedBy(session.pid, () => rows) ? { isSelf: true as const } : {}),
+  }));
 }
 
 /** The live process holding this conversation open, if any. */

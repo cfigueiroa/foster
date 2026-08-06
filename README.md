@@ -385,7 +385,7 @@ foster pin       # pin sessions in the sidebar, or see what is pinned
 foster app       # status | quit | start | restart — drive Claude Desktop itself
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
-foster live      # conversations a claude process is holding open right now
+foster live      # conversations a claude process is holding open right now (--stop ends one)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
@@ -619,7 +619,13 @@ commands above do it for free.
   session** for a conversation to have a writer, and that needs no second installation at all: foster
   a session you are working in, switch account, open the copy, and the copy becomes a snapshot that
   stops at the moment you opened it while your work carries on where you left it. `foster` warns when
-  a copy it is making has a live writer, before and after writing, in the command and in the menu.
+  a copy it is making has a live writer, before and after writing, in the command and in the menu —
+  and names it, with the pid and the directory it was started in, because "finish there first" is not
+  advice anyone can act on without knowing where _there_ is. When finishing is not possible,
+  `foster live --stop <id>` ends the writer. That is a kill and says so: the CLI has no window to
+  close politely, so whatever the session had not yet written is lost, while everything already in
+  the transcript stays. It refuses the session foster is itself running in, for the same reason it
+  refuses to close the app it is running inside.
 
   When it does happen, nothing is lost — both transcripts are on disk — and foster now notices. A
   copy the app has repointed at another conversation is recognised as **repurposed** rather than
