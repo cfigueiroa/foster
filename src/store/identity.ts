@@ -165,7 +165,7 @@ export function readIdentityFromCache(
  * shown as-is. An unrecognised value yields nothing, because a mangled tier on a
  * label is worse than no tier.
  */
-function planName(raw: string | undefined): string | undefined {
+export function planName(raw: string | undefined): string | undefined {
   const value = raw?.toLowerCase() ?? '';
   if (value.includes('enterprise')) return 'Enterprise';
   if (value.includes('team')) return 'Team';

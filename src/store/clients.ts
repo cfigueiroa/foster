@@ -1,0 +1,206 @@
+import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { comparablePath, samePath } from '../domain/paths.js';
+import { isDirectory, safeReaddir } from '../util/fs.js';
+import { configDirCandidates } from './configDirs.js';
+import { planName, type CachedIdentity } from './identity.js';
+import { liveSessions, pidAlive } from './liveSessions.js';
+import { indexTranscripts } from './transcripts.js';
+
+/**
+ * The Claude Code clients on this machine.
+ *
+ * One client is one config directory. Nothing else makes a CLI account: the CLI
+ * reads `CLAUDE_CONFIG_DIR`, and credential, settings, conversations and live
+ * registry all live under whatever it names — so running a second account is
+ * making a second directory, and the machine's client list is its directory
+ * list. This is that list, with what each directory can say for itself: who is
+ * signed in, how much has happened there, and whether a process is in it right
+ * now.
+ *
+ * Everything here reads. The identity comes from the profile the CLI cached in
+ * its own config file; the credential beside it contributes only its existence,
+ * which is what "signed in" means on this machine — the file is never opened.
+ */
+
+export interface ClaudeClient {
+  /** The config directory — the value `CLAUDE_CONFIG_DIR` would be set to. */
+  configDir: string;
+  /** True for `~/.claude`, the directory the CLI uses when nothing points it elsewhere. */
+  isDefault: boolean;
+  /** True for the directory this process's own environment resolves to. */
+  inUse: boolean;
+  /** Whether a login has left its credential here. Presence only; the file is never read. */
+  signedIn: boolean;
+  /** Who is signed in, from the client's own cached profile. */
+  identity?: CachedIdentity;
+  /** Conversations on disk under this client's `projects/` tree. */
+  conversations: number;
+  /** The newest transcript's mtime — when this client last did something. */
+  lastUsedAt?: number;
+  /** Live `claude` processes registered in this client right now. */
+  live: number;
+}
+
+/**
+ * Every client on the machine, the default first.
+ *
+ * The candidates are the shared enumeration's; what is asked of one here is
+ * whether it is a client at all, and then what it says for itself. Two
+ * spellings of one directory — `CLAUDE_CONFIG_DIR` naming the default in a
+ * different capitalisation, say — are folded before reading, because a machine
+ * with one client should not be told it has two.
+ */
+export function listClients(
+  env: NodeJS.ProcessEnv = process.env,
+  extra: string[] = [],
+  alive: (pid: number) => boolean = pidAlive,
+  home: string = homedir(),
+): ClaudeClient[] {
+  const defaultDir = path.join(home, '.claude');
+  const inUseDir = env.CLAUDE_CONFIG_DIR ?? defaultDir;
+
+  const seen = new Set<string>();
+  const clients: ClaudeClient[] = [];
+  for (const dir of configDirCandidates(env, extra, home)) {
+    const key = comparablePath(dir);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!looksLikeClient(dir)) continue;
+    clients.push(readClient(dir, { defaultDir, inUseDir, home, alive }));
+  }
+
+  return clients.sort(
+    (a, b) => Number(b.isDefault) - Number(a.isDefault) || a.configDir.localeCompare(b.configDir),
+  );
+}
+
+/**
+ * Whether a directory is a client at all.
+ *
+ * Inspection, not naming, as everywhere else — but the evidence accepted is
+ * wider than the transcript scan's, because the question is wider: a client
+ * that has never held a conversation is still a client. Any artefact the CLI
+ * itself leaves counts. An empty directory counts too: that is what a client
+ * looks like between `mkdir` and its first run, and refusing to list it would
+ * answer "where is the client I just created?" with silence. What does not
+ * count is a directory holding only unrelated files — a `.claude-notes` full
+ * of markdown is somebody's folder, not an account.
+ */
+const CLIENT_MARKS = ['.claude.json', '.credentials.json', 'settings.json', 'projects', 'sessions'];
+
+function looksLikeClient(dir: string): boolean {
+  if (!isDirectory(dir)) return false;
+  const entries = safeReaddir(dir);
+  return entries.length === 0 || entries.some((entry) => CLIENT_MARKS.includes(entry));
+}
+
+function readClient(
+  dir: string,
+  ctx: { defaultDir: string; inUseDir: string; home: string; alive: (pid: number) => boolean },
+): ClaudeClient {
+  const isDefault = samePath(dir, ctx.defaultDir);
+  const transcripts = indexTranscripts(path.join(dir, 'projects'));
+  const lastUsedAt = newestMtime(transcripts.values());
+  const identity = readClientIdentity(dir, isDefault, ctx.home);
+
+  return {
+    configDir: dir,
+    isDefault,
+    inUse: samePath(dir, ctx.inUseDir),
+    signedIn: fileExists(path.join(dir, '.credentials.json')),
+    ...(identity ? { identity } : {}),
+    conversations: transcripts.size,
+    ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
+    live: liveSessions([path.join(dir, 'sessions')], ctx.alive).length,
+  };
+}
+
+/**
+ * The signed-in identity, from the profile the CLI cached for itself.
+ *
+ * The CLI keeps a copy of the profile it fetched, in its config file under
+ * `oauthAccount` — email, display name, and the rate-limit tier the plan is
+ * read from. That copy is cached page data, the same at-rest category as the
+ * session files; the credential next to it is not read, here or anywhere.
+ *
+ * Parsed rather than scraped, unlike the Desktop cache: this is a small JSON
+ * file in a shape the CLI itself round-trips on every run, not a database
+ * engine's private table, and a parse that fails yields a client with no
+ * identity rather than a crash.
+ *
+ * The default client keeps the file beside its directory, at `~/.claude.json`,
+ * rather than inside it; a directory the variable has pointed at keeps its own
+ * within. For the default both are looked at, home first, because the home copy
+ * is the one the CLI actually writes when nothing redirects it — an in-dir copy
+ * can be a relic of a spell of `CLAUDE_CONFIG_DIR=~/.claude`, months stale.
+ */
+function readClientIdentity(
+  dir: string,
+  isDefault: boolean,
+  home: string,
+): CachedIdentity | undefined {
+  const candidates = isDefault
+    ? [path.join(home, '.claude.json'), path.join(dir, '.claude.json')]
+    : [path.join(dir, '.claude.json')];
+
+  for (const file of candidates) {
+    const account = readOauthAccount(file);
+    if (!account) continue;
+
+    const plan = planName(account.userRateLimitTier) ?? planName(account.organizationRateLimitTier);
+    const identity: CachedIdentity = {
+      ...(account.emailAddress ? { email: account.emailAddress } : {}),
+      ...(account.displayName ? { name: account.displayName } : {}),
+      ...(plan ? { plan } : {}),
+    };
+    if (identity.email || identity.name || identity.plan) return identity;
+  }
+  return undefined;
+}
+
+/** The string fields of `oauthAccount`, or nothing for a file that is missing, torn or foreign. */
+function readOauthAccount(file: string): Record<string, string | undefined> | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as { oauthAccount?: unknown };
+    const account = parsed.oauthAccount;
+    if (typeof account !== 'object' || account === null) return undefined;
+
+    const fields: Record<string, string | undefined> = {};
+    for (const key of [
+      'emailAddress',
+      'displayName',
+      'userRateLimitTier',
+      'organizationRateLimitTier',
+    ]) {
+      const value = (account as Record<string, unknown>)[key];
+      if (typeof value === 'string' && value.length > 0) fields[key] = value;
+    }
+    return fields;
+  } catch {
+    return undefined;
+  }
+}
+
+function newestMtime(files: Iterable<string>): number | undefined {
+  let newest: number | undefined;
+  for (const file of files) {
+    try {
+      const at = statSync(file).mtimeMs;
+      if (newest === undefined || at > newest) newest = at;
+    } catch {
+      // A transcript that vanished between listing and statting is not activity.
+    }
+  }
+  return newest;
+}
+
+/** Presence read from file metadata; the credential's contents stay where they are. */
+function fileExists(file: string): boolean {
+  try {
+    return statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}

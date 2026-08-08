@@ -137,6 +137,7 @@ process happens to be running under. Running a second Claude Code account means 
 its own `CLAUDE_CONFIG_DIR`, and each of those keeps a separate `projects/` tree — searching only one
 would produce a shorter list that looks complete. Siblings of `~/.claude` are picked up when they
 actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
+`foster clients` is the map of those directories, and of who is signed into each.
 
 ## Why a restart is needed
 
@@ -324,6 +325,58 @@ session that started it, not both of them.
 If you are simply moving between accounts on one profile, staging still works and is the shortest
 path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),
 then sign into it. They are waiting when you arrive.
+
+### More than one client at once
+
+The CLI has none of this awkwardness. One `claude` is one config directory — `CLAUDE_CONFIG_DIR`
+when it is set, `~/.claude` otherwise — and credential, settings and conversations all live inside
+it, so a second directory is a second account, and the two run side by side without ceremony. The
+CLI's sign-in never rides `claude://`: the browser hands back a code you paste into the terminal,
+which is exactly the transport the app's second profile is missing.
+
+Two things the pattern does not say out loud. The browser authorizes whichever claude.ai account it
+is already signed into, so the first login of a new client belongs in a private window — the only
+moment it matters. And a second account multiplies usage limits only if it has a plan, or API
+credits, of its own.
+
+`foster clients` lists the directories that exist and who is signed into each:
+
+```
+* ~\.claude        You · you@example.com · Max  (default, 2 live, 348 conversations, used today)
+  ~\.claude-work   not signed in  (0 conversations)
+```
+
+The identity is read from the client's own `.claude.json` — the profile the CLI cached for itself,
+the same at-rest category as the session files — and the credential beside it is not read, here or
+anywhere: its presence is what "signed in" means. The rest of foster already treats clients as
+first-class sources: `restore`, `purge` and `live` search all of them, which is how a machine with
+two clients gets the whole answer rather than the default's half.
+
+Launching stays in the shell, where an interactive program belongs. A function that sets the
+variable, hands every argument through, and puts the environment back whatever happens is all it
+takes — the two halves the obvious one-liner gets wrong are the `finally` and the `@args`:
+
+```powershell
+function claude-as {
+  param([string]$Client)
+  if (-not $Client) { Write-Error 'usage: claude-as <client> [claude args]'; return }
+  $dir = Join-Path $env:USERPROFILE ".claude-$Client"
+  if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+    Write-Error "client '$Client' does not exist ($dir). If it is meant to: mkdir $dir"
+    return
+  }
+  $prev = $env:CLAUDE_CONFIG_DIR
+  try {
+    $env:CLAUDE_CONFIG_DIR = $dir
+    claude @args
+  } finally {
+    $env:CLAUDE_CONFIG_DIR = $prev
+  }
+}
+```
+
+`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — the list
+of clients is the directories that exist, so there is nothing to register anywhere.
 
 ## Install
 
@@ -531,6 +584,12 @@ worked in once never has to be typed again.
   D:\Claude-Work                           (profile, running) not signed in
 ```
 
+`foster clients` is the same list for the CLI: its config directories — one per account — with who
+is signed into each, read from each client's own cached profile; the credential contributes only its
+existence. Everything that reads conversations already searches every client, so this is the map of
+what those commands will look at, and `--config-dir` adds a directory that lives where naming
+cannot find it.
+
 `transcript`, `resume` and `live` are the deterministic counterparts of what the agent (below) does
 with its tools — for when you know exactly what you want and a model in the middle would only add
 cost. `foster transcript <cliSessionId>` prints the most recent part of a conversation (`--head` for
@@ -539,8 +598,8 @@ the start, `--chars` for how much; the id comes from `list --json` or `status --
 has: it refuses while a live `claude` process holds that conversation, because two writers on one
 transcript is how transcripts get corrupted. `foster live` shows exactly what is being held.
 
-`scan`, `list`, `status`, `stores`, `doctor`, `app status`, `transcript`, `live`, `purge` and
-`whoami` take `--json`.
+`scan`, `list`, `status`, `stores`, `clients`, `doctor`, `app status`, `transcript`, `live`,
+`purge` and `whoami` take `--json`.
 
 ## Agent
 
