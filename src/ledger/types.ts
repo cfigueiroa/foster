@@ -1,4 +1,5 @@
 import type { AccountRef } from '../domain/types.js';
+import type { AccountProfile } from '../store/profile.js';
 
 /**
  * The ledger is an append-only JSONL log. Current state is a fold over the
@@ -8,6 +9,7 @@ import type { AccountRef } from '../domain/types.js';
 export type LedgerEvent =
   | AccountLabelledEvent
   | AccountIdentitySeenEvent
+  | AccountIdentityForgottenEvent
   | FosteredEvent
   | ReturnedEvent
   | ConversationPurgedEvent
@@ -50,6 +52,39 @@ export interface AccountIdentitySeenEvent extends BaseEvent {
   email?: string;
   name?: string;
   plan?: string;
+  /**
+   * The rest of the profile, when the profile itself was found: organization,
+   * subscription status, the raw tier, the dates. Nested rather than spread
+   * across the event so that the three fields above keep meaning exactly what
+   * they meant in logs written before this existed.
+   *
+   * This is the half that matters for an account you are not signed into. The
+   * response cache only ever describes the current session, so an account's
+   * subscription is knowable exactly once — while you are in it — and only
+   * because it was written down here on the way past.
+   */
+  profile?: AccountProfile;
+}
+
+/**
+ * A sighting withdrawn: what foster believed about an account, unbelieved.
+ *
+ * Reading a volatile source and remembering the answer has a failure mode that
+ * only remembering creates. A sighting that was wrong outlives the cache that
+ * produced it, and the fold has no way to reach a decision it has already made:
+ * a later sighting can correct a field only by carrying a different value for it,
+ * and the cache that once said something wrong is usually saying nothing at all
+ * by the time anyone notices. That is how a single misread address became this
+ * account's email permanently — the record could not be argued with, only added
+ * to.
+ *
+ * So the withdrawal is an event like any other. The log still says what was seen
+ * and when, which is the point of an append-only log; the fold simply stops
+ * treating it as current, and the next real sighting starts the record over.
+ */
+export interface AccountIdentityForgottenEvent extends BaseEvent {
+  kind: 'account_identity_forgotten';
+  accountUuid: string;
 }
 
 export interface FosteredEvent extends BaseEvent {
@@ -156,6 +191,7 @@ type Draft<T extends BaseEvent> = Omit<T, 'v' | 'ts' | 'toolVersion'> & { ts?: n
 export type LedgerEventInput =
   | Draft<AccountLabelledEvent>
   | Draft<AccountIdentitySeenEvent>
+  | Draft<AccountIdentityForgottenEvent>
   | Draft<FosteredEvent>
   | Draft<ReturnedEvent>
   | Draft<ConversationPurgedEvent>

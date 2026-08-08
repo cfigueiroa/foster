@@ -127,7 +127,9 @@ describe('listClients', () => {
       oauthAccount: { emailAddress: 'stale@example.com' },
     });
     const [client0] = listClients(env, [], () => true, home);
-    expect(client0!.identity).toEqual({ email: 'live@example.com', name: 'Live', plan: 'Max' });
+    // "Max 20x", not "Max": the CLI records the same raw tier the app does, and
+    // the size is the difference between two subscriptions at two prices.
+    expect(client0!.identity).toEqual({ email: 'live@example.com', name: 'Live', plan: 'Max 20x' });
   });
 
   it('falls back to the in-dir copy when the home file has no identity', () => {
