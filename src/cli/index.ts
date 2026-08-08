@@ -49,6 +49,7 @@ import {
 } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import { listClients, type ClaudeClient } from '../store/clients.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
 import {
@@ -436,6 +437,85 @@ function resolveQuietly(
   } catch {
     return undefined;
   }
+}
+
+program
+  .command('clients')
+  .summary('the Claude Code clients on this machine, and who is signed into each')
+  .description(
+    'The Claude Code clients on this machine — one config directory per account.\n\n' +
+      'The CLI reads CLAUDE_CONFIG_DIR, and everything that makes an account — credential,\n' +
+      'settings, conversations — lives under whatever it names. So a second directory is a\n' +
+      'second account, both able to run at once, and this lists the directories that exist,\n' +
+      "with who is signed into each, read from each client's own cached profile. The\n" +
+      'credential is never opened: its presence is what "signed in" means here.',
+  )
+  .option('--config-dir <path...>', 'extra Claude config directories to include')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const opts = this.opts<{ configDir?: string[]; json?: boolean }>();
+    const clients = listClients(process.env, opts.configDir ?? []);
+
+    if (opts.json) {
+      print(
+        clients.map((client) => ({
+          configDir: client.configDir,
+          isDefault: client.isDefault,
+          inUse: client.inUse,
+          signedIn: client.signedIn,
+          email: client.identity?.email ?? null,
+          name: client.identity?.name ?? null,
+          plan: client.identity?.plan ?? null,
+          conversations: client.conversations,
+          lastUsedAt: client.lastUsedAt ?? null,
+          live: client.live,
+        })),
+      );
+      return;
+    }
+
+    if (clients.length === 0) {
+      console.log('No Claude Code client found.');
+      console.log(pc.dim('Run claude once, or pass --config-dir <path> to name a directory.'));
+      return;
+    }
+
+    for (const client of clients) {
+      const marker = client.inUse ? pc.green('*') : ' ';
+      const details = [
+        client.isDefault ? 'default' : undefined,
+        client.live > 0 ? `${client.live} live` : undefined,
+        `${client.conversations} conversation${client.conversations === 1 ? '' : 's'}`,
+        client.lastUsedAt !== undefined ? `used ${formatAge(client.lastUsedAt)}` : undefined,
+      ].filter(Boolean);
+      console.log(
+        `${marker} ${client.configDir}  ${clientIdentityLine(client)}  ${pc.dim(`(${details.join(', ')})`)}`,
+      );
+    }
+
+    const marked = clients.some((client) => client.inUse);
+    console.log(
+      pc.dim(
+        `\n${marked ? '* is the one this process runs under. ' : ''}Run another by setting CLAUDE_CONFIG_DIR to its directory.`,
+      ),
+    );
+    console.log(
+      pc.dim(
+        'restore, purge and live already read all of them; --config-dir adds one from elsewhere.',
+      ),
+    );
+  });
+
+/** The who of a client line: the cached identity when there is one, the credential's word alone otherwise. */
+function clientIdentityLine(client: ClaudeClient): string {
+  const label = identityLabel(client.identity);
+  // A profile without a credential is a client someone signed out of: the
+  // identity still names it usefully, but claiming it is signed in would send
+  // the next `claude` there straight to a login screen.
+  if (label) return client.signedIn ? label : `${label} ${pc.dim('(signed out)')}`;
+  return client.signedIn
+    ? `signed in ${pc.dim('(identity not cached yet)')}`
+    : pc.dim('not signed in');
 }
 
 program

@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { samePath } from '../domain/paths.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
+import { configDirCandidates } from './configDirs.js';
 
 /**
  * The conversation transcripts, which live outside the account tree.
@@ -34,26 +35,18 @@ export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string 
  * for a recovery tool is the worst kind of wrong: a shorter list that looks
  * complete.
  *
- * Siblings are found by inspection, not by naming convention: a directory counts
- * only if it actually contains a `projects/` tree, so an unrelated `.claude-*`
- * folder cannot join in by name alone.
+ * The candidates come from the shared enumeration; the check kept here is the
+ * question transcripts ask of one. Siblings join by inspection, not by naming
+ * convention: a directory counts only if it actually contains a `projects/`
+ * tree, so an unrelated `.claude-*` folder cannot join in by name alone.
  */
 export function transcriptRoots(
   env: NodeJS.ProcessEnv = process.env,
   extra: string[] = [],
 ): string[] {
-  const home = homedir();
-  const roots = new Set<string>();
-
-  for (const dir of [env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), ...extra]) {
-    if (dir) roots.add(path.join(dir, 'projects'));
-  }
-  for (const entry of safeReaddir(home)) {
-    if (!entry.startsWith('.claude')) continue;
-    roots.add(path.join(home, entry, 'projects'));
-  }
-
-  return [...roots].filter(isDirectory);
+  return configDirCandidates(env, extra)
+    .map((dir) => path.join(dir, 'projects'))
+    .filter(isDirectory);
 }
 
 /**

@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import type { LiveWriter } from '../engine/continued.js';
 import { readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
+import { configDirCandidates } from './configDirs.js';
 
 /**
  * The CLI's registry of running sessions.
@@ -29,25 +29,17 @@ export interface LiveCliSession {
 
 /**
  * Every directory that might register live sessions — one per Claude config
- * directory, mirroring how transcripts are discovered: `CLAUDE_CONFIG_DIR`, the
- * default `~/.claude`, and any `~/.claude*` sibling a second subscription uses.
+ * directory, from the same enumeration transcripts are discovered by:
+ * `CLAUDE_CONFIG_DIR`, the default `~/.claude`, and any `~/.claude*` sibling a
+ * second subscription uses.
  */
 export function sessionRegistryRoots(
   env: NodeJS.ProcessEnv = process.env,
   extra: string[] = [],
 ): string[] {
-  const home = homedir();
-  const roots = new Set<string>();
-
-  for (const dir of [env.CLAUDE_CONFIG_DIR, path.join(home, '.claude'), ...extra]) {
-    if (dir) roots.add(path.join(dir, 'sessions'));
-  }
-  for (const entry of safeReaddir(home)) {
-    if (!entry.startsWith('.claude')) continue;
-    roots.add(path.join(home, entry, 'sessions'));
-  }
-
-  return [...roots].filter(isDirectory);
+  return configDirCandidates(env, extra)
+    .map((dir) => path.join(dir, 'sessions'))
+    .filter(isDirectory);
 }
 
 /** Whether a pid names a process that exists. EPERM means it exists but is not ours. */
