@@ -1,4 +1,4 @@
-import { mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { log, select } from '@clack/prompts';
@@ -437,6 +437,28 @@ describe('naming an account', () => {
     await runInteractive(store, ledger);
 
     expect(project(ledger.read()).labels.has(OLD_ACCOUNT.accountUuid)).toBe(false);
+  });
+
+  it('records the identity it read, so the name survives an account switch', async () => {
+    // The app's cache only ever describes the account signed in now; the ledger
+    // is what lets the rename screen name it later, from the other side.
+    const leveldb = path.join(store.root, 'Local Storage', 'leveldb');
+    mkdirSync(leveldb, { recursive: true });
+    writeFileSync(
+      path.join(leveldb, '000003.log'),
+      `{"uuid":"${NEW_ACCOUNT.accountUuid}","email":"me@example.com","displayName":"Someone"}`,
+      'utf8',
+    );
+
+    // Backing out of the prompt still records the sighting: it happens on the
+    // visit, not on the save.
+    answers = ['label', NEW_ACCOUNT.accountUuid, CANCELLED, 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(project(ledger.read()).identities.get(NEW_ACCOUNT.accountUuid)).toMatchObject({
+      email: 'me@example.com',
+      name: 'Someone',
+    });
   });
 });
 
