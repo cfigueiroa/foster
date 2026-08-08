@@ -1,4 +1,5 @@
 import { fosteringKey } from '../domain/fostering.js';
+import type { AccountProfile } from '../store/profile.js';
 import type { ActiveFostering, LedgerEvent } from './types.js';
 
 export interface LedgerState {
@@ -23,6 +24,8 @@ export interface KnownIdentity {
   email?: string;
   name?: string;
   plan?: string;
+  /** The rest of the profile, accumulated the same way and for the same reason. */
+  profile?: AccountProfile;
   /** When any part of this was last confirmed. */
   seenAt: number;
 }
@@ -53,10 +56,22 @@ export function project(events: LedgerEvent[]): LedgerState {
           ...(event.email ? { email: event.email } : {}),
           ...(event.name ? { name: event.name } : {}),
           ...(event.plan ? { plan: event.plan } : {}),
+          // Merged one level down as well, so a sighting that found the profile
+          // but not the billing half keeps the card and renewal date an earlier
+          // one recorded. Replacing the object wholesale would lose them on
+          // every ordinary visit.
+          ...(event.profile ? { profile: { ...known?.profile, ...event.profile } } : {}),
           seenAt: event.ts,
         });
         break;
       }
+
+      // Dropped whole rather than field by field: a sighting is one reading of
+      // one profile, and half-keeping it would leave the name of an account
+      // whose email was wrong — which is the same mistake, quieter.
+      case 'account_identity_forgotten':
+        identities.delete(event.accountUuid);
+        break;
 
       case 'fostered':
         active.set(fosteringKey(event.originSessionId, event.target), {

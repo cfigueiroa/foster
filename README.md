@@ -435,6 +435,9 @@ foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster label     # give an account a human name
 foster labels    # list the names given so far
+foster accounts  # every account here: who, which plan, whether it is still paid for
+foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
+foster renewals  # usage resets and billing dates across every account, in one place
 foster whoami    # the signed-in account's name, email and plan, from the app's own cache
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
@@ -517,6 +520,37 @@ Two honesties beyond that. It is **best-effort**: a version that keeps the profi
 what it extracts is tied to the account by proximity — the email must sit beside the account’s own
 UUID, and the name and plan beside that email — so a correspondent’s address quoted in a conversation
 cannot end up as the account’s name, and a workspace called "Sales" cannot end up as its owner.
+
+**Where it actually reads.** The app keeps its own profile in two places and only one of them is
+current. It used to persist the answer into Local Storage, inside the React Query cache, and that is
+what the byte search was built for; on a machine running today that cache persists _empty_ and the
+live copy is a cached HTTP response body under `Cache/`. So the profile is read from there first —
+gzip or brotli, decompressed, and then **parsed**, because it is JSON and an object either carries
+`account.uuid` equal to the account being asked about or it does not. That is a comparison rather
+than a guess, which is why this source is preferred over everything below it. What it yields is the
+whole profile: name, email, organization, the raw tier, the subscription's status and start date.
+
+`foster accounts` (and **"Who each account is"** in the menu) is that, for every account in the
+installation at once — plan, subscription, card and renewal where they are known, sessions and
+organizations always. One honesty runs through the screen: a response cache holds what was
+_fetched_, and the app only ever fetches the profile of the session it is in, so exactly one row can
+be read fresh. The others show what foster recorded on the visit that saw them, dated. An account
+never signed into on this machine shows its directories and nothing else — not because the read gave
+up, but because that account's profile has never been on this disk. Signing into it once fills the
+row in for good.
+
+Proximity is not the whole of it, because these files are not text. Local Storage is a stack of
+compressed blocks read as raw bytes, so most of what a pattern sees is rubble — and rubble spells
+email addresses: across one real store, 350 of 676 matches for a plain address were decompression
+noise, things like `3@T.tf` and `6@ai.television.ses`. Nearness cannot tell those from a profile,
+since noise is nearer to the account id than the profile ever is. So the email is read only out of a
+field that says it is an email, from a value that is an address all the way to both quotes.
+
+Remembering has its own failure, and it needs a way out. A sighting that was wrong outlives the cache
+that produced it, and a later reading can only correct a field by finding a different value for it —
+which it cannot do once the app has compacted the profile away. `foster label <accountUuid> --forget`
+discards what is remembered about an account and leaves the name you chose alone; the sighting stays
+in the log, and the next real reading starts the record over.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer
@@ -633,9 +667,10 @@ the CLI prints, and the headless resume (`claude -p --resume` against a conversa
 is refused when a live `claude` process is holding that conversation open — two writers on one
 transcript is how transcripts get corrupted.
 
-One honesty note: foster's own engine never reads credentials, and that promise is unchanged — but
-an agent with general read tools is as able to open files on your machine as any Claude Code
-session is. `foster agent` is Claude Code with extra knowledge, not a sandbox.
+One honesty note: foster reads the credential in exactly one command (`foster usage` — see the safety
+model), and nowhere else, including here; the agent is not handed the token or the reader. But an
+agent with general read tools is as able to open files on your machine as any Claude Code session is.
+`foster agent` is Claude Code with extra knowledge, not a sandbox.
 
 The Agent SDK is not part of foster's single-file release — it is megabytes of runtime with a
 per-platform binary. Install it once with:
@@ -737,9 +772,34 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   both from the process tree and from the environment the app stamps on the sessions it spawns,
   because an exited intermediate can break the first signal and the failure mode is killing the
   caller mid-write.
-- **It never reads credentials.** `foster` does not open, parse, copy or log credential files, cookie
-  stores or OAuth token caches. It only touches session metadata. This is also why it cannot switch
-  accounts.
+- **It reads the credential in exactly one place, and only to ask the API about you.** For most of
+  its life foster refused to touch the OAuth token at all, and everything else in this file grew up
+  under that rule. The rule has been relaxed, deliberately and narrowly, and it is worth being exact
+  about what changed and what did not.
+
+  **What now reads it:** one command, `foster usage` (and the matching "Usage right now" in the
+  menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
+  `accounts`, or the agent. The reader lives in one file, `store/credential.ts`, and every other part
+  of the tool is exactly as credential-blind as before.
+
+  **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
+  read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
+  it. The token is never written to disk, never logged, never put on a command line, and never sent
+  to any host but `api.anthropic.com`. What it buys is the only data no cached file holds: your live
+  5-hour and weekly limits, and a profile that is current rather than whatever the app last persisted.
+
+  **What still stops it cold:** the token is not stored in the open. Claude Desktop keeps it the way
+  Chromium keeps a cookie — an AES-256-GCM blob under a key sealed with Windows DPAPI in `Local
+State` — so reading it needs the Windows user who sealed it, on the machine that sealed it. A
+  profile copied to another machine cannot be unsealed there, and neither can foster do it off a
+  backup. It is Windows-only, current-account-only, and returns nothing rather than guessing when the
+  token is absent or expired. `claude.ai`'s own billing endpoints (next charge, card, cancellation)
+  sit behind a browser bot-check that foster does not attempt to defeat, so those remain unreachable
+  from here and only `api.anthropic.com` is used.
+
+  This does not give foster the power to switch accounts, and it changes none of the write-path
+  guarantees above.
+
 - **A copy shares one thing with its original: the conversation.** That is the point — it is what
   makes the copy open the real thing rather than an empty session — but it means the file is not
   private to either of them. `foster` only ever reads it. The app does write to it: renaming a

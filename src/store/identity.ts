@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
+import { readProfileFromResponseCache, type AccountProfile } from './profile.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 
 /**
@@ -35,8 +36,15 @@ import { isDirectory, safeReaddir } from '../util/fs.js';
 export interface CachedIdentity {
   email?: string;
   name?: string;
-  /** The subscription tier as the app would name it — "Max", "Pro" — when the cache says. */
+  /** The subscription tier as the app would name it — "Max 20x", "Pro" — when the cache says. */
   plan?: string;
+  /**
+   * Everything else the account's own profile said, when the profile itself was
+   * found rather than reconstructed from fragments. Absent for an identity that
+   * came from the crude byte search, which can only ever recover the three
+   * fields above, and for the CLI clients, whose config keeps no more than that.
+   */
+  profile?: AccountProfile;
 }
 
 /** Where each part of an identity came from, so a stale answer can say so. */
@@ -59,14 +67,32 @@ export interface ResolvedIdentity extends CachedIdentity {
  */
 export function worthRecording(
   cached: CachedIdentity | undefined,
-  known: { email?: string; name?: string; plan?: string } | undefined,
+  known: { email?: string; name?: string; plan?: string; profile?: AccountProfile } | undefined,
 ): boolean {
-  if (!cached?.email && !cached?.name && !cached?.plan) return false;
+  if (!cached?.email && !cached?.name && !cached?.plan && !cached?.profile) return false;
   if (!known) return true;
   return (
     (Boolean(cached.email) && cached.email !== known.email) ||
     (Boolean(cached.name) && cached.name !== known.name) ||
-    (Boolean(cached.plan) && cached.plan !== known.plan)
+    (Boolean(cached.plan) && cached.plan !== known.plan) ||
+    changedProfileField(cached.profile, known.profile)
+  );
+}
+
+/**
+ * Whether any part of the profile now says something the record does not.
+ *
+ * Needed as its own comparison because the fields that change are exactly the
+ * ones not in the label. A subscription going from active to cancelling moves
+ * `subscriptionStatus` and `planEndingAt` and nothing else — under a name and
+ * plan check alone, the one event worth having in the log is the one that would
+ * never be written.
+ */
+function changedProfileField(fresh: AccountProfile | undefined, known: AccountProfile | undefined) {
+  if (!fresh) return false;
+  if (!known) return true;
+  return Object.entries(fresh).some(
+    ([field, value]) => value !== undefined && value !== known[field as keyof AccountProfile],
   );
 }
 
@@ -85,27 +111,56 @@ export function worthRecording(
  */
 export function resolveIdentity(
   cached: CachedIdentity | undefined,
-  known: { email?: string; name?: string; plan?: string; seenAt: number } | undefined,
+  known:
+    | { email?: string; name?: string; plan?: string; profile?: AccountProfile; seenAt: number }
+    | undefined,
 ): ResolvedIdentity | undefined {
   if (!cached && !known) return undefined;
+
+  // The profile merges field by field for the same reason the identity does: a
+  // fresh read of the bootstrap response knows the subscription but not the
+  // card, and the card was recorded on a visit when the billing screen had been
+  // open. Fresh wins per field; remembered fills the gaps.
+  const profile =
+    cached?.profile || known?.profile ? { ...known?.profile, ...cached?.profile } : undefined;
 
   const merged: ResolvedIdentity = {
     ...((cached?.email ?? known?.email) ? { email: cached?.email ?? known?.email } : {}),
     ...((cached?.name ?? known?.name) ? { name: cached?.name ?? known?.name } : {}),
     ...((cached?.plan ?? known?.plan) ? { plan: cached?.plan ?? known?.plan } : {}),
+    ...(profile ? { profile: profile as AccountProfile } : {}),
   };
-  if (!merged.email && !merged.name && !merged.plan) return undefined;
+  if (!merged.email && !merged.name && !merged.plan && !merged.profile) return undefined;
 
   // Only called remembered when the cache contributed nothing at all. A partial
   // read — the usual case once the plan has aged out — is still a fresh sighting
   // of what it did find, and saying otherwise would age the whole answer wrongly.
-  const fresh = Boolean(cached?.email || cached?.name || cached?.plan);
+  const fresh = Boolean(cached?.email || cached?.name || cached?.plan || cached?.profile);
   if (!fresh && known) return { ...merged, remembered: true, seenAt: known.seenAt };
   if (known && !cached?.plan && known.plan) return { ...merged, seenAt: known.seenAt };
   return merged;
 }
 
-const EMAIL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+/**
+ * An address, shaped strictly enough that noise cannot spell one by accident: no
+ * empty label, no doubled dot, and a trailing label that is letters only.
+ */
+const ADDRESS = String.raw`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,24}`;
+// The account's address specifically — read out of a field that says it is one,
+// and never from a bare address sitting nearby.
+//
+// The bare pattern was the flaw, and the source is why. These are Snappy-
+// compressed LevelDB blocks read as raw bytes, so most of what a pattern scans
+// here is not text at all: across one real store, 350 of 676 matches for a plain
+// address were decompression noise — `3@T.tf`, `v@I.rI`, `6@ai.television.ses`.
+// One of those was recorded as an account's email and, the ledger being what it
+// is, stayed. Requiring the key, and both quotes around the value, asks for
+// something noise does not accidentally produce; distance alone never could,
+// because the noise is nearest of all.
+const EMAIL = new RegExp(
+  String.raw`"(?:email|email_address|emailAddress|primary_email|primaryEmail|account_email|accountEmail)"\s*:\s*"(${ADDRESS})"`,
+  'i',
+);
 // A person's name field specifically — not a bare `"name"`, which the app's cache
 // attaches to organizations, workspaces and a dozen other things, and which is
 // what once put a workspace called "Sales" where the account holder belonged.
@@ -121,7 +176,11 @@ const PLAN =
  *
  * Two anchors, chosen for what each reliably sits beside. The email is tied to
  * the account's own UUID — the profile keeps them in one small object, while a
- * stranger's address quoted in a conversation is off in another record. The name
+ * stranger's address quoted in a conversation is off in another record — and it
+ * must additionally be written down as an email, under a field that names it.
+ * Proximity alone was not enough: nearness is a claim about text, and half of
+ * what these files hold is compressed bytes read as text, which is nearer to
+ * everything than the profile ever is. The name
  * and plan are then tied to the *email*, not the UUID: the cache is live app
  * state, thick with `name` fields for workspaces and organizations near the
  * account id, and only the email marks the one object that is actually the
@@ -133,12 +192,28 @@ export function readIdentityFromCache(
   accountUuid = readConfig(store).lastKnownAccountUuid,
 ): CachedIdentity | undefined {
   if (!accountUuid) return undefined;
+
+  // The response cache first, because it holds the profile itself: an object
+  // that names the account and carries its own email, so nothing is inferred
+  // from proximity and the tier arrives whole rather than as the word "Max".
+  // The search below is the fallback it was always meant to be — for a version
+  // that keeps the profile somewhere else, or a cache already evicted.
+  const profile = readProfileFromResponseCache(store, accountUuid);
+  if (profile) {
+    return {
+      ...(profile.email ? { email: profile.email } : {}),
+      ...(profile.name ? { name: profile.name } : {}),
+      ...planFrom(profile),
+      profile,
+    };
+  }
+
   const needle = accountUuid.toLowerCase();
   const found: CachedIdentity = {};
 
   for (const text of readCandidateFiles(store)) {
     const uuids = occurrences(text, needle, true);
-    const email = found.email ?? nearest(text, uuids, EMAIL, (m) => m[0], MAX_DISTANCE);
+    const email = found.email ?? nearest(text, uuids, EMAIL, (m) => m[1], MAX_DISTANCE);
     if (email) found.email = email;
 
     // The profile object is the one that holds the account's email. Name and plan
@@ -158,6 +233,16 @@ export function readIdentityFromCache(
 }
 
 /**
+ * The tier from a profile, preferring the rate limit tier because it is the only
+ * field that distinguishes the two sizes of Max. The organization's type is the
+ * fallback, and says "claude_max" without saying which.
+ */
+function planFrom(profile: AccountProfile): { plan?: string } {
+  const plan = planName(profile.rateLimitTier) ?? planName(profile.organizationType);
+  return plan ? { plan } : {};
+}
+
+/**
  * The subscription tier as the app would name it, read out of a raw plan value.
  *
  * The stored string is not the label — it is "max", or "default_claude_max_20x",
@@ -167,12 +252,26 @@ export function readIdentityFromCache(
  */
 export function planName(raw: string | undefined): string | undefined {
   const value = raw?.toLowerCase() ?? '';
-  if (value.includes('enterprise')) return 'Enterprise';
-  if (value.includes('team')) return 'Team';
-  if (value.includes('max')) return 'Max';
-  if (value.includes('pro')) return 'Pro';
-  if (value.includes('free')) return 'Free';
-  return undefined;
+  const tier = value.includes('enterprise')
+    ? 'Enterprise'
+    : value.includes('team')
+      ? 'Team'
+      : value.includes('max')
+        ? 'Max'
+        : value.includes('pro')
+          ? 'Pro'
+          : value.includes('free')
+            ? 'Free'
+            : undefined;
+  if (!tier) return undefined;
+
+  // Max is sold in two sizes and they are different subscriptions at different
+  // prices. The raw tier is the only thing on this machine that says which —
+  // `default_claude_max_20x` against `default_claude_max_5x` — so collapsing
+  // both to "Max" threw away the one detail someone comparing two accounts
+  // actually needs. Kept only for Max, because no other tier has a multiple.
+  const multiple = /(\d+)\s*x/.exec(value);
+  return tier === 'Max' && multiple ? `Max ${multiple[1]}x` : tier;
 }
 
 /**
