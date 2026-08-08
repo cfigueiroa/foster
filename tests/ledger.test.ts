@@ -116,6 +116,119 @@ describe('projection', () => {
     expect(state.labels.get(OLD_ACCOUNT.accountUuid)).toBe('work');
     expect(listActive(state)).toHaveLength(0);
   });
+
+  it('accumulates an identity across partial sightings', () => {
+    const state = project([
+      {
+        kind: 'account_identity_seen',
+        v: 1,
+        ts: 1,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        email: 'john@example.com',
+        plan: 'Max',
+      },
+      {
+        kind: 'account_identity_seen',
+        v: 1,
+        ts: 2,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        name: 'John',
+      },
+    ]);
+
+    expect(state.identities.get(OLD_ACCOUNT.accountUuid)).toEqual({
+      email: 'john@example.com',
+      name: 'John',
+      plan: 'Max',
+      seenAt: 2,
+    });
+  });
+
+  it('drops the whole identity when a sighting is withdrawn', () => {
+    // The case this exists for: an address misread out of compressed rubble was
+    // recorded, and no later sighting could correct it — a correction has to
+    // find something, and by then the profile had left the cache. Forgetting is
+    // the only move the fold can offer, and it takes the name with it: a name
+    // kept beside a discredited email is the same mistake, quieter.
+    const state = project([
+      {
+        kind: 'account_identity_seen',
+        v: 1,
+        ts: 1,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        email: '6@ai.television.ses',
+        name: 'John',
+      },
+      {
+        kind: 'account_identity_forgotten',
+        v: 1,
+        ts: 2,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+      },
+    ]);
+
+    expect(state.identities.get(OLD_ACCOUNT.accountUuid)).toBeUndefined();
+  });
+
+  it('leaves the label alone when the identity is withdrawn', () => {
+    // A name you chose is not the thing that was wrong.
+    const state = project([
+      {
+        kind: 'account_labelled',
+        v: 1,
+        ts: 1,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        label: 'work',
+      },
+      {
+        kind: 'account_identity_forgotten',
+        v: 1,
+        ts: 2,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+      },
+    ]);
+
+    expect(state.labels.get(OLD_ACCOUNT.accountUuid)).toBe('work');
+  });
+
+  it('records an identity again after one was forgotten', () => {
+    const state = project([
+      {
+        kind: 'account_identity_seen',
+        v: 1,
+        ts: 1,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        email: 'wrong@example.com',
+      },
+      {
+        kind: 'account_identity_forgotten',
+        v: 1,
+        ts: 2,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+      },
+      {
+        kind: 'account_identity_seen',
+        v: 1,
+        ts: 3,
+        toolVersion: '0.1.0',
+        accountUuid: OLD_ACCOUNT.accountUuid,
+        email: 'john@example.com',
+      },
+    ]);
+
+    expect(state.identities.get(OLD_ACCOUNT.accountUuid)).toEqual({
+      email: 'john@example.com',
+      seenAt: 3,
+    });
+  });
 });
 
 describe('selectByTarget', () => {

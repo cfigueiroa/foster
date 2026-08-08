@@ -1,4 +1,14 @@
-import { cancel, confirm, intro, isCancel, log, note, outro, select } from '@clack/prompts';
+import {
+  cancel,
+  confirm,
+  intro,
+  isCancel,
+  log,
+  note,
+  outro,
+  select,
+  spinner,
+} from '@clack/prompts';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import {
@@ -34,10 +44,14 @@ import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import {
   identityLabel,
+  planName,
   readIdentityFromCache,
   resolveIdentity,
   worthRecording,
 } from '../store/identity.js';
+import { freshIdentityOf, overviewAccounts } from '../store/accounts.js';
+import { readAccessToken } from '../store/credential.js';
+import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { describeWriters, liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
@@ -60,6 +74,9 @@ import {
   formatDate,
   groupByAccount,
   outcomeLine,
+  renderAccount,
+  renderRenewals,
+  renderUsage,
   shortId,
 } from './render.js';
 
@@ -143,6 +160,21 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
           label: 'What is on disk',
           hint: 'accounts, organizations and session counts',
         },
+        {
+          value: 'accounts',
+          label: 'Who each account is',
+          hint: 'plan, subscription and who is behind every account here',
+        },
+        {
+          value: 'usage',
+          label: 'Usage right now',
+          hint: 'live 5-hour and weekly limits, read from the API',
+        },
+        {
+          value: 'renewals',
+          label: 'When things renew',
+          hint: 'usage resets and billing dates across every account',
+        },
         { value: 'label', label: 'Name an account', hint: 'so you stop reading UUIDs' },
         {
           value: 'installation',
@@ -178,6 +210,15 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
         break;
       case 'browse':
         showAccounts(store, ledger, target);
+        break;
+      case 'accounts':
+        showIdentities(store, ledger);
+        break;
+      case 'usage':
+        await showUsage(store);
+        break;
+      case 'renewals':
+        await showRenewals(store, ledger);
         break;
       case 'label':
         await labelFlow(store, ledger, target);
@@ -315,6 +356,131 @@ function showAccounts(store: StoreLayout, ledger: Ledger, target: AccountRef): v
 }
 
 /**
+ * Who each account is, and what is being paid for it.
+ *
+ * The other account screen answers "what is on disk"; this one answers "whose is
+ * it". They stayed separate because the second question has an honesty the first
+ * does not need: a session count is true for every account, while a plan is
+ * known only for accounts foster has seen you signed into, and a screen that
+ * mixed the two would make a blank plan look like a free account rather than
+ * like an account nobody has visited yet.
+ *
+ * The visit itself is what fills the list in, so this records what it read on
+ * the way past — the same gate `whoami` uses, for the same reason.
+ */
+function showIdentities(store: StoreLayout, ledger: Ledger): void {
+  const rows = overviewAccounts(store, ledger);
+  const fresh = freshIdentityOf(rows);
+  const identity = fresh?.identity;
+  if (
+    fresh &&
+    identity &&
+    worthRecording(identity, project(ledger.read()).identities.get(fresh.accountUuid))
+  ) {
+    ledger.append({
+      kind: 'account_identity_seen',
+      accountUuid: fresh.accountUuid,
+      ...(identity.email ? { email: identity.email } : {}),
+      ...(identity.name ? { name: identity.name } : {}),
+      ...(identity.plan ? { plan: identity.plan } : {}),
+      ...(identity.profile ? { profile: identity.profile } : {}),
+    });
+  }
+
+  if (rows.length === 0) {
+    log.info('No accounts in this installation yet.');
+    return;
+  }
+
+  note(
+    rows
+      .flatMap((row, index) => (index === 0 ? renderAccount(row) : ['', ...renderAccount(row)]))
+      .join('\n'),
+    'Who each account is',
+  );
+  log.info(
+    pc.dim(
+      'Only the account in use can be read fresh — the app caches the profile of the\n' +
+        'session it is in. The rest is what foster saw on the visit that saw it.',
+    ),
+  );
+}
+
+/**
+ * The one live screen: the account's usage, read from the API right now.
+ *
+ * Reads the credential and goes to the network — the only place in the menu that
+ * does either — so it is honest about failing, and every way it fails is
+ * ordinary rather than alarming.
+ */
+async function showUsage(store: StoreLayout): Promise<void> {
+  const auth = readAccessToken(store);
+  if (!auth) {
+    log.info(
+      "No usable token for the signed-in account. This reads the app's OAuth token,\n" +
+        'which works only on Windows, only for the account signed in now, and only on\n' +
+        'the machine it was signed in on.',
+    );
+    return;
+  }
+
+  const spin = spinner();
+  spin.start('Asking the API');
+  const [profile, usage] = await Promise.all([fetchLiveProfile(auth), fetchLiveUsage(auth)]);
+  spin.stop('Read live.');
+
+  const header: string[] = [];
+  if (profile) {
+    const plan = planName(profile.rateLimitTier) ?? planName(profile.organizationType);
+    const who = [profile.name, profile.email].filter(Boolean).join(' · ');
+    if (who) header.push(who);
+    if (plan) {
+      header.push(
+        `${plan}${profile.rateLimitTier ? ` (${profile.rateLimitTier})` : ''} · ${profile.subscriptionStatus ?? 'unknown'}`,
+      );
+    }
+  }
+
+  if (!usage) {
+    log.info([...header, '', 'The usage endpoint did not answer.'].join('\n'));
+    return;
+  }
+  note(
+    [...(header.length ? [...header, ''] : []), ...renderUsage(usage)].join('\n'),
+    'Usage right now',
+  );
+}
+
+/**
+ * When every account resets and renews, in one place.
+ *
+ * The current account's usage resets are fetched live; billing dates come from
+ * whatever profile foster holds for each account. Both honesties — live vs
+ * remembered, and the current account's billing date being browser-only — are
+ * carried in the rendering rather than explained here.
+ */
+async function showRenewals(store: StoreLayout, ledger: Ledger): Promise<void> {
+  const rows = overviewAccounts(store, ledger);
+  const auth = readAccessToken(store);
+
+  let usage;
+  if (auth) {
+    const spin = spinner();
+    spin.start('Reading live usage');
+    usage = await fetchLiveUsage(auth);
+    spin.stop(usage ? 'Read live.' : 'No live usage (using stored dates only).');
+  }
+
+  note(renderRenewals(rows, usage).join('\n'), 'When things renew');
+  log.info(
+    pc.dim(
+      'Usage resets are live and belong to the account in use. Billing dates are per\n' +
+        'account, from the profile foster last saw — dated when not read fresh.',
+    ),
+  );
+}
+
+/**
  * Give an account a name.
  *
  * The command existed from the start and nobody found it: the one screen where
@@ -372,15 +538,26 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
       ...(cached.email ? { email: cached.email } : {}),
       ...(cached.name ? { name: cached.name } : {}),
       ...(cached.plan ? { plan: cached.plan } : {}),
+      ...(cached.profile ? { profile: cached.profile } : {}),
     });
   }
 
-  const known = identityLabel(resolveIdentity(cached, remembered));
+  const identity = resolveIdentity(cached, remembered);
+  const known = identityLabel(identity);
   // A saved label wins the prompt, because it was a deliberate choice. But a
   // known identity that disagrees with it is shown rather than hidden — that is
   // how a label left stale by an early experiment gets noticed.
   const saved = labels.get(picked);
-  if (known && saved && saved !== known) log.info(pc.dim(`This account is ${known}.`));
+  if (known && saved && saved !== known) {
+    log.info(pc.dim(`This account is ${known}.`));
+    // Said only for an answer that came out of memory, because that is the one
+    // this screen cannot argue with: the cache it was read from has moved on,
+    // so nothing here will ever contradict it. A reading taken fresh needs no
+    // escape hatch — the next read corrects it by itself.
+    if (identity?.remembered) {
+      log.info(pc.dim(`If that is not this account: foster label ${picked} --forget`));
+    }
+  }
   const suggested = saved ?? known;
 
   const name = await askText('Call it', {

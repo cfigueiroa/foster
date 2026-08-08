@@ -2,9 +2,14 @@ import { readFileSync } from 'node:fs';
 import type { StoreLayout } from '../domain/types.js';
 
 /**
- * Keys in config.json that hold credentials. foster never reads their values —
- * the whitelist below is what it is allowed to look at, and everything else in
- * the file is ignored rather than parsed out.
+ * The settings this reader returns. It is deliberately narrow: it hands back the
+ * handful of plain settings the tool needs and never the credential material in
+ * the same file. That used to be the whole of foster's relationship with
+ * config.json — the token was off-limits, full stop. It no longer is: `usage`
+ * reads and decrypts the OAuth token through `credential.ts`, for the API calls
+ * documented in the README's safety section. This reader stays narrow anyway,
+ * because most of the tool has no business with the token and the one place that
+ * does should be the only place that reaches for it.
  */
 const READABLE_KEYS = ['lastKnownAccountUuid', 'locale', 'updaterLastSeenVersion'] as const;
 
