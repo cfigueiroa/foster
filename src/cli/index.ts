@@ -49,11 +49,15 @@ import {
 } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
+import { readAccessToken } from '../store/credential.js';
+import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
 import { findPurgeable } from '../store/purge.js';
 import {
   identityLabel,
+  planName,
   readIdentityFromCache,
   resolveIdentity,
   worthRecording,
@@ -87,6 +91,9 @@ import {
   groupByAccount,
   outcomeLine,
   purgeLine,
+  renderAccount,
+  renderRenewals,
+  renderUsage,
   sessionLine,
   shortId,
   updateLine,
@@ -1188,10 +1195,42 @@ program
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
   .option('--from-cache', 'name the signed-in account with its cached name and email')
+  .option('--forget', "discard what foster remembers about an account's identity")
   .action(function (this: Command, first?: string, second?: string) {
     const { store, ledger } = context(this);
     const accounts = listAccountDirs(store);
     const currentAccountUuid = readConfig(store).lastKnownAccountUuid;
+
+    // The way out of a wrong sighting. `whoami` reads a volatile source and
+    // writes down what it found, so a misread survives the cache that produced
+    // it — and nothing else can dislodge it, because a correcting sighting has
+    // to *find* something, and by then the profile is usually gone from the
+    // files foster is allowed to read. The label is left alone: a name you chose
+    // is not the thing that was wrong.
+    if (this.opts<{ forget?: boolean }>().forget) {
+      if (second !== undefined) {
+        throw new Error('--forget discards a remembered identity; it does not take a name.');
+      }
+      const accountUuid = first ?? currentAccountUuid;
+      if (!accountUuid) {
+        throw new Error(
+          'No account is recorded as signed in, so there is nothing to forget.\n' +
+            'Name the account outright: foster label <accountUuid> --forget.',
+        );
+      }
+      const known = project(ledger.read()).identities.get(accountUuid);
+      if (!known) {
+        console.log(`foster remembers no identity for ${shortId(accountUuid)}.`);
+        return;
+      }
+      ledger.append({ kind: 'account_identity_forgotten', accountUuid });
+      console.log(`Forgot ${identityLabel(known) ?? 'the identity'} for ${shortId(accountUuid)}.`);
+      console.log(
+        pc.dim('The sighting stays in the log; it is no longer read as current.\n') +
+          pc.dim('Next time the app caches a profile, foster will record it afresh.'),
+      );
+      return;
+    }
 
     // --from-cache is the one-step version of `whoami` then `label`: read the
     // signed-in account's identity from the app's cache and use it as the name.
@@ -1279,6 +1318,7 @@ program
         ...(cached.email ? { email: cached.email } : {}),
         ...(cached.name ? { name: cached.name } : {}),
         ...(cached.plan ? { plan: cached.plan } : {}),
+        ...(cached.profile ? { profile: cached.profile } : {}),
       });
     }
 
@@ -1321,6 +1361,171 @@ program
       return;
     }
     console.log(pc.dim(`\nName the account with this in one step:  foster label --from-cache`));
+  });
+
+program
+  .command('accounts')
+  .description('every account on this machine: who, which plan, and whether it is still paid for')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const rows = overviewAccounts(store, ledger);
+
+    // Recorded here for the same reason `whoami` records: this is the moment the
+    // current account's profile is in hand, and the next time it is asked about
+    // may be from another account, when the cache describes someone else.
+    recordCurrentIdentity(rows, ledger);
+
+    if (this.opts<{ json?: boolean }>().json) {
+      return print(
+        rows.map((row) => ({
+          accountUuid: row.accountUuid,
+          organizationUuids: row.organizationUuids,
+          label: row.label ?? null,
+          isCurrent: row.isCurrent,
+          sessions: row.sessions,
+          fostered: row.copies,
+          coworkOnly: row.agentOnly,
+          name: row.identity?.name ?? null,
+          email: row.identity?.email ?? null,
+          plan: row.identity?.plan ?? null,
+          profile: row.identity?.profile ?? null,
+          remembered: row.remembered,
+          seenAt: row.seenAt ?? null,
+        })),
+      );
+    }
+
+    if (rows.length === 0) {
+      console.log('No accounts in this installation yet.');
+      return;
+    }
+
+    for (const row of rows) {
+      console.log('');
+      for (const line of renderAccount(row)) console.log(line);
+    }
+
+    const unseen = rows.filter((row) => !row.identity).length;
+    console.log('');
+    console.log(
+      pc.dim(
+        `${rows.length} account(s). Only the one in use can be read fresh — the app caches the\n` +
+          'profile of the session it is in, and foster keeps what it saw for the others.',
+      ),
+    );
+    if (unseen > 0) {
+      console.log(
+        pc.dim(
+          `${unseen} of them ${unseen === 1 ? 'has' : 'have'} never been seen signed in here; signing into one fills its row in.`,
+        ),
+      );
+    }
+  });
+
+/** Writes down the current account's profile when it says something the ledger does not. */
+function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {
+  const fresh = freshIdentityOf(rows);
+  const identity = fresh?.identity;
+  if (!fresh || !identity) return;
+  if (!worthRecording(identity, project(ledger.read()).identities.get(fresh.accountUuid))) return;
+
+  ledger.append({
+    kind: 'account_identity_seen',
+    accountUuid: fresh.accountUuid,
+    ...(identity.email ? { email: identity.email } : {}),
+    ...(identity.name ? { name: identity.name } : {}),
+    ...(identity.plan ? { plan: identity.plan } : {}),
+    ...(identity.profile ? { profile: identity.profile } : {}),
+  });
+}
+
+program
+  .command('usage')
+  .description(
+    "the signed-in account's live usage — the 5-hour and weekly limits, read from the API",
+  )
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    const json = this.opts<{ json?: boolean }>().json;
+
+    // The one command that reads the credential and goes to the network. Said
+    // plainly on failure, because every reason it can fail is ordinary: not on
+    // Windows, an older app without the V2 token cache, a profile copied from
+    // another machine that this user cannot unseal, an expired token.
+    const auth = readAccessToken(store);
+    if (!auth) {
+      if (json) return print({ error: 'no-token' });
+      console.log('Could not read a usable token for the signed-in account.');
+      console.log(
+        pc.dim(
+          "This reads the app's own OAuth token, which only works on Windows, only for the\n" +
+            'account signed in now, and only on the machine it was signed in on.',
+        ),
+      );
+      return;
+    }
+
+    const [profile, usage] = await Promise.all([fetchLiveProfile(auth), fetchLiveUsage(auth)]);
+
+    if (json) return print({ profile: profile ?? null, usage: usage ?? null });
+
+    if (profile) {
+      const plan = planName(profile.rateLimitTier) ?? planName(profile.organizationType);
+      const who = [profile.name, profile.email].filter(Boolean).join(' · ');
+      if (who) console.log(who);
+      if (plan) {
+        console.log(
+          `${pc.bold(plan)}${profile.rateLimitTier ? pc.dim(`  (${profile.rateLimitTier})`) : ''} · ${profile.subscriptionStatus ?? 'unknown'}`,
+        );
+      }
+      console.log('');
+    }
+
+    if (!usage) {
+      console.log('The usage endpoint did not answer. Nothing was changed.');
+      return;
+    }
+    for (const line of renderUsage(usage)) console.log(line);
+  });
+
+program
+  .command('renewals')
+  .description('when each account resets and renews — usage windows and billing dates in one place')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const rows = overviewAccounts(store, ledger);
+
+    // The current account's resets are live; fetch them if the token is there,
+    // and carry on without them if it is not. Billing dates come from the rows.
+    const auth = readAccessToken(store);
+    const usage = auth ? await fetchLiveUsage(auth) : undefined;
+
+    if (this.opts<{ json?: boolean }>().json) {
+      return print({
+        usage: usage ?? null,
+        accounts: rows.map((row) => ({
+          accountUuid: row.accountUuid,
+          label: row.label ?? null,
+          isCurrent: row.isCurrent,
+          nextChargeDate: row.identity?.profile?.nextChargeDate ?? null,
+          planEndingAt: row.identity?.profile?.planEndingAt ?? null,
+          subscriptionStatus: row.identity?.profile?.subscriptionStatus ?? null,
+          remembered: row.remembered,
+          seenAt: row.seenAt ?? null,
+        })),
+      });
+    }
+
+    for (const line of renderRenewals(rows, usage)) console.log(line);
+    console.log(
+      pc.dim(
+        '\nUsage resets are live and belong to the account in use. Billing dates are per\n' +
+          'account, from the profile foster last saw — dated when they were not read fresh.',
+      ),
+    );
   });
 
 program
