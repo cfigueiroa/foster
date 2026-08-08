@@ -32,7 +32,12 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
-import { identityLabel, readIdentityFromCache, resolveIdentity } from '../store/identity.js';
+import {
+  identityLabel,
+  readIdentityFromCache,
+  resolveIdentity,
+  worthRecording,
+} from '../store/identity.js';
 import { describeWriters, liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
@@ -351,12 +356,26 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
   // Known for any account foster has ever looked at, not only the one signed in:
   // the ledger remembers what the cache forgets, which is what makes naming an
   // account you are not currently in possible at all.
-  const known = identityLabel(
-    resolveIdentity(
-      picked === target.accountUuid ? readIdentityFromCache(store, picked) : undefined,
-      project(ledger.read()).identities.get(picked),
-    ),
-  );
+  const cached = picked === target.accountUuid ? readIdentityFromCache(store, picked) : undefined;
+  const remembered = project(ledger.read()).identities.get(picked);
+
+  // Written down the way whoami writes it, and gated the same way. This screen
+  // is often the last thing visited before signing out — naming accounts is
+  // what people do on their way somewhere else — and a sighting left
+  // unrecorded is exactly the one the ledger cannot offer after the switch,
+  // when the cache describes the new account and this screen is asked about
+  // the old one.
+  if (cached && worthRecording(cached, remembered)) {
+    ledger.append({
+      kind: 'account_identity_seen',
+      accountUuid: picked,
+      ...(cached.email ? { email: cached.email } : {}),
+      ...(cached.name ? { name: cached.name } : {}),
+      ...(cached.plan ? { plan: cached.plan } : {}),
+    });
+  }
+
+  const known = identityLabel(resolveIdentity(cached, remembered));
   // A saved label wins the prompt, because it was a deliberate choice. But a
   // known identity that disagrees with it is shown rather than hidden — that is
   // how a label left stale by an early experiment gets noticed.
