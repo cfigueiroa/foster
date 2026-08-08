@@ -595,6 +595,27 @@ many transcripts, deciding what is worth fostering — and `--max-turns` bounds 
 And before reaching for the agent at all: if the task is a known, mechanical one, the deterministic
 commands above do it for free.
 
+### Related surface: the app's own session tools
+
+The arrangement `foster agent` reverses is worth knowing in its own right: Claude Desktop injects
+an MCP server of its own, `ccd_session_mgmt`, into every Code and Cowork session it opens (observed
+August 2026 — the surface is undocumented, so treat the details as a snapshot, not a contract). Its
+tools are the running app's view of the current account: list the other sessions, read their
+transcripts, search them full-text — archived ones included — retitle or archive them, even send a
+message into one. From inside a Desktop session, "which of my sessions talked about X" is answered
+natively, with no foster involved.
+
+Its limits are exactly the boundary between the two. It sees one account, only while the app is
+running, and it never touches the store on disk — anything cross-account, anything against a closed
+app, and any write that should carry a ledger entry stays foster's job. `foster agent` never meets
+this server either: it runs headless through the Agent SDK, outside the app, so nothing here is a
+capability the agent gains.
+
+They do compose, though, in one direction: fostering feeds it. A copy, once the app has loaded it,
+is one of the account's sessions like any other, and it opens the original's full transcript — so a
+conversation lived under another account becomes something these tools can list, read and search
+natively. foster adds no API to the app; it widens what the app's own API can know.
+
 ## Safety model
 
 - **Reads and writes are separated.** The scanner never writes. All mutation goes through a single
