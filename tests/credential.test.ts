@@ -31,10 +31,13 @@ describe('decryptOsCrypt', () => {
 });
 
 describe('pickToken', () => {
-  const inference =
-    '9d1c250a:c1efc3c9-0067-4056-94e5-77ad1aa20ab2:https://api.anthropic.com:user:inference user:profile';
-  const profileOnly =
-    'a473d7bb:c1efc3c9-0067-4056-94e5-77ad1aa20ab2:https://api.anthropic.com:user:profile';
+  // Synthetic client and org ids: the key layout is `clientId:orgUuid:audience:scopes`,
+  // and the test only needs the scope substring and the org to be readable back.
+  const CLIENT_INFERENCE = '00000000-0000-4000-8000-0000000000a1';
+  const CLIENT_PROFILE = '00000000-0000-4000-8000-0000000000a2';
+  const ORG = '00000000-0000-4000-8000-0000000000c1';
+  const inference = `${CLIENT_INFERENCE}:${ORG}:https://api.anthropic.com:user:inference user:profile`;
+  const profileOnly = `${CLIENT_PROFILE}:${ORG}:https://api.anthropic.com:user:profile`;
 
   it('prefers the inference-scoped entry, and reads the org from the key', () => {
     const chosen = pickToken({
@@ -44,7 +47,7 @@ describe('pickToken', () => {
 
     expect(chosen).toEqual({
       token: 'broad',
-      organizationUuid: 'c1efc3c9-0067-4056-94e5-77ad1aa20ab2',
+      organizationUuid: ORG,
       rateLimitTier: 'default_claude_max_20x',
       expiresAt: 123,
     });
