@@ -45,7 +45,11 @@ export async function askText(
 ): Promise<Maybe<string>> {
   const answer = await text({ message, ...options });
   if (aborted(answer)) return BACK;
-  return String(answer);
+  // An empty submission resolves as undefined, not '' — the placeholder is
+  // ghost text, not a default. The String() that once stood here turned that
+  // into the word "undefined", which every caller's emptiness check then
+  // waved through: an account really did get named that.
+  return typeof answer === 'string' ? answer : '';
 }
 
 /**

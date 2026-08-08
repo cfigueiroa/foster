@@ -366,7 +366,9 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
 
   const name = await askText('Call it', {
     ...(suggested === undefined ? {} : { initialValue: suggested }),
-    placeholder: 'work',
+    // Worded as an example: a bare "work" here read as a default that Enter
+    // would accept, when accepting it actually submits nothing at all.
+    placeholder: 'e.g. work',
   });
   if (aborted(name) || !name.trim()) {
     log.info('Left as it was.');
