@@ -429,6 +429,15 @@ describe('naming an account', () => {
 
     expect(project(ledger.read()).labels.has(OLD_ACCOUNT.accountUuid)).toBe(false);
   });
+
+  it('does not turn an empty submission into the word "undefined"', async () => {
+    // clack resolves an empty text prompt as undefined rather than '', which a
+    // String() once coerced into a name that passed every emptiness check.
+    answers = ['label', OLD_ACCOUNT.accountUuid, undefined, 'quit'];
+    await runInteractive(store, ledger);
+
+    expect(project(ledger.read()).labels.has(OLD_ACCOUNT.accountUuid)).toBe(false);
+  });
 });
 
 describe('the main menu', () => {
