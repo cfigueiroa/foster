@@ -424,7 +424,7 @@ So the pairing has to come from you — but only once per account, and only the 
 already knows which account the sidebar is reading:
 
 ```bash
-foster label "John · johndoe@…"     # names the account you are signed into
+foster label "John · johndoe@…"           # names the account you are signed into
 foster label 00000000 "old personal"      # names any other
 ```
 

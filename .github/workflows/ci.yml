@@ -64,4 +64,16 @@ jobs:
             status=1
           fi
 
+          # Two personal identifiers that reached the repository once: a first
+          # name and a mailbox prefix. Base64 so this workflow does not itself
+          # publish what it guards; searched without -I because the fixture that
+          # held them is binary to git, and a binary match still names its file.
+          # On a hit, only file names are printed — these logs are public too.
+          for encoded in am9yZ2Vyb2JlcnRv bGVpbGE=; do
+            if git grep -liF -e "$(printf '%s' "$encoded" | base64 -d)" "${scope[@]}" | grep .; then
+              echo "::error::A personal identifier (base64 $encoded) is in the files above."
+              status=1
+            fi
+          done
+
           exit $status

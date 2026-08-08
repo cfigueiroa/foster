@@ -14,6 +14,7 @@
  *
  *   node scripts/privacy.mjs
  */
+import { Buffer } from 'node:buffer';
 import { execFileSync } from 'node:child_process';
 
 const UUID = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}';
@@ -59,6 +60,21 @@ if (found.size > 0) {
     console.error(grep(['-nI', id]).trimEnd());
   }
   failed = true;
+}
+
+// Two personal identifiers that reached the repository once: a first name and a
+// mailbox prefix. Base64 here so the guard does not itself publish what it
+// guards, and searched without -I: the fixture that held them is binary to git
+// (NUL bytes), and a binary match still names its file. On a hit, only file
+// names are printed — CI logs on a public repository are public too.
+const PERSONAL = ['am9yZ2Vyb2JlcnRv', 'bGVpbGE='];
+for (const encoded of PERSONAL) {
+  const files = grep(['-liF', '-e', Buffer.from(encoded, 'base64').toString('utf8')]);
+  if (files.trim()) {
+    console.error(`\nA personal identifier (base64 ${encoded}) is in:\n`);
+    console.error(files.trim());
+    failed = true;
+  }
 }
 
 if (failed) {
