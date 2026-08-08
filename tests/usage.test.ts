@@ -108,7 +108,7 @@ describe('fetchLiveUsage', () => {
 describe('fetchLiveProfile', () => {
   it('maps the account and organization', async () => {
     stubFetch(200, {
-      account: { uuid: 'acc', full_name: 'Chefe', email: 'x@example.com' },
+      account: { uuid: 'acc', full_name: 'Jordan', email: 'x@example.com' },
       organization: {
         uuid: 'org',
         organization_type: 'claude_max',
@@ -120,7 +120,7 @@ describe('fetchLiveProfile', () => {
 
     expect(await fetchLiveProfile(AUTH, 1000)).toEqual({
       accountUuid: 'acc',
-      name: 'Chefe',
+      name: 'Jordan',
       email: 'x@example.com',
       organizationUuid: 'org',
       organizationType: 'claude_max',
