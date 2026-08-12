@@ -61,11 +61,14 @@ describe('slugFor', () => {
 });
 
 describe('surfaceSlug', () => {
-  it('folds two spellings of one config directory into one history', () => {
-    // Splitting them would give one account two histories that each look complete.
-    expect(surfaceSlug('C:\\Users\\Someone\\.claude')).toBe(
-      surfaceSlug('c:\\users\\someone\\.claude'),
-    );
+  it('folds capitalisation into one history where the filesystem does', () => {
+    // Splitting them would give one account two histories that each look
+    // complete. Which spellings are one directory is the filesystem's answer,
+    // not this module's, so the assertion follows the platform rather than
+    // asserting Windows behaviour everywhere.
+    const folded =
+      surfaceSlug('C:\\Users\\Someone\\.claude') === surfaceSlug('c:\\users\\someone\\.claude');
+    expect(folded).toBe(process.platform === 'win32');
   });
 
   it('keeps genuinely different directories apart', () => {
