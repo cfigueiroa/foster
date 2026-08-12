@@ -565,7 +565,6 @@ foster clients   # the CLI's config directories, and who is signed into each
 foster switch    # sign a client in as another account, without a logout
 foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
-foster vault-migrate  # bring records from the first vault layout into the current one
 foster point     # repoint a directory link at another client
 foster client new  # seed a config directory that is a working client
 foster foster    # create the copies

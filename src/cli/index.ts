@@ -49,7 +49,6 @@ import {
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
-import { applyMigration, planMigration } from '../engine/vaultMigrate.js';
 import { Ledger } from '../ledger/log.js';
 import {
   copySessionIds,
@@ -1801,77 +1800,6 @@ program
           ? pc.dim('Recorded — this credential was new.')
           : pc.dim('Already the newest on file; nothing appended.'),
     );
-  });
-
-program
-  .command('vault-migrate')
-  .summary('bring records from the first vault layout into the current one')
-  .description(
-    "Move credentials written by foster's first vault layout into the one that replaced it.\n\n" +
-      'The old layout keyed a credential by account alone; the current one keys by client and\n' +
-      'account, because one account signed into two config directories has two independent\n' +
-      'token families. The old records do not say which client they came from, so this has to\n' +
-      "establish it — from a byte-for-byte match against a client's current credential, or\n" +
-      'from being the only client signed into that account — and refuses rather than guesses\n' +
-      'when neither reaches an answer. `--to-client` settles those.\n\n' +
-      'Nothing is deleted. A migrated record moves under `legacy/`, keeping its bytes; one\n' +
-      'that could not be placed is left exactly where it is, with the reason.',
-  )
-  .option('--to-client <configDir>', 'the client every unplaced record came from')
-  .option('--json', 'machine-readable output')
-  .option('--yes', 'actually migrate; without it nothing is written')
-  .action(function (this: Command) {
-    const opts = this.opts<{ toClient?: string; json?: boolean; yes?: boolean }>();
-    const root = vaultRoot();
-    const plan = planMigration(root, {
-      clients: listClients(),
-      ...(opts.toClient ? { toClient: opts.toClient } : {}),
-    });
-
-    if (opts.json) {
-      return print(
-        plan.items.map((item) => ({
-          file: item.file,
-          email: item.email,
-          surface: item.surface ?? null,
-          evidence: item.evidence ?? null,
-          blocker: item.blocker ?? null,
-        })),
-      );
-    }
-
-    if (plan.items.length === 0) {
-      console.log('Nothing to migrate: no records from the old layout are left.');
-      return;
-    }
-
-    for (const item of plan.items) {
-      if (item.surface) {
-        console.log(`  + ${item.email}  ->  ${item.surface}`);
-        console.log(pc.dim(`      ${item.evidence}`));
-      } else {
-        console.log(pc.yellow(`  ! ${item.email}`));
-        console.log(pc.yellow(`      ${item.blocker}`));
-      }
-    }
-
-    const placed = plan.items.filter((item) => item.surface).length;
-    if (!opts.yes) {
-      console.log(
-        `\nDry run: ${placed} would be migrated, ${plan.items.length - placed} left alone.`,
-      );
-      console.log('Re-run with --yes to migrate.');
-      return;
-    }
-
-    const outcome = applyMigration(plan);
-    for (const failure of outcome.failures) console.log(pc.red(`  ! ${failure}`));
-    console.log(
-      `\n${outcome.migrated} migrated, ${outcome.alreadyPresent} already on file, ` +
-        `${outcome.skipped} left alone, ${outcome.failures.length} failed.`,
-    );
-    console.log(pc.dim(`Migrated records were moved under ${path.join(root, 'legacy')}.`));
-    if (outcome.failures.length > 0) process.exitCode = 1;
   });
 
 program
