@@ -68,12 +68,29 @@ jobs:
           [ "$actual" = "$expected" ] || { echo "::error::bundle reports $actual, expected $expected"; exit 1; }
           node dist/foster.js --help > /dev/null
 
-          # Run it from a directory holding nothing but the bundle, which is what
-          # an install looks like: an unresolvable relative import fails here.
-          isolated="$(mktemp -d)"
+          # Run it from a directory holding nothing but the bundle and the
+          # package.json install.ps1 writes beside it, which is what an install
+          # looks like: an unresolvable relative import fails here. The
+          # directory sits under a package.json that declares no type — the
+          # ordinary state of a Windows home directory, and what Node finds
+          # instead when the install does not declare its own.
+          root="$(mktemp -d)"
+          echo '{ "name": "not-foster" }' > "$root/package.json"
+          isolated="$root/install"
+          mkdir "$isolated"
           cp dist/foster.js "$isolated/"
-          (cd "$isolated" && node foster.js --version > /dev/null)
-          echo "bundle is self-contained and reports $actual"
+          echo '{ "type": "module" }' > "$isolated/package.json"
+
+          # Nothing may reach stderr ahead of the output that was asked for. A
+          # startup warning is not cosmetic here: it prefixes every command,
+          # including the ones whose output gets piped somewhere.
+          noise="$(cd "$isolated" && FOSTER_NO_UPDATE_CHECK=1 node foster.js --version 2>&1 >/dev/null)"
+          if [ -n "$noise" ]; then
+            echo "::error::the bundle wrote to stderr on startup:"
+            echo "$noise"
+            exit 1
+          fi
+          echo "bundle is self-contained, starts quietly, and reports $actual"
 
       - name: Generate checksum
         working-directory: dist
