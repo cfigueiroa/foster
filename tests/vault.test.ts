@@ -32,8 +32,11 @@ function credential(token: string, expiresAt?: number): string {
 
 const ALICE = 'alice@example.test';
 const BOB = 'bob@example.test';
-const ENV = 'C:\\Users\\someone\\.claude';
-const FLEET = 'C:\\Users\\someone\\.claude-accounts\\alice';
+// Deliberately not under `C:\Users\<name>`: the privacy guard rejects that
+// shape in a tracked file, placeholder or not, and these only need to be two
+// distinct directory strings.
+const ENV = 'D:\\profile\\.claude';
+const FLEET = 'D:\\profile\\.claude-accounts\\alice';
 
 describe('vaultRoot', () => {
   it('sits under foster’s own directory, beside the ledger', () => {
@@ -62,12 +65,13 @@ describe('slugFor', () => {
 
 describe('surfaceSlug', () => {
   it('folds capitalisation into one history where the filesystem does', () => {
-    // Splitting them would give one account two histories that each look
-    // complete. Which spellings are one directory is the filesystem's answer,
-    // not this module's, so the assertion follows the platform rather than
-    // asserting Windows behaviour everywhere.
-    const folded =
-      surfaceSlug('C:\\Users\\Someone\\.claude') === surfaceSlug('c:\\users\\someone\\.claude');
+    // Two spellings of one directory must be one history, or an account's
+    // versions split across two files that each look complete. But that is a
+    // Windows truth: where the filesystem is case-sensitive these are two
+    // directories, and merging them would put two clients' credentials in one
+    // history. So the assertion follows the platform instead of asserting the
+    // Windows answer everywhere.
+    const folded = surfaceSlug('D:\\Profile\\.claude') === surfaceSlug('d:\\profile\\.claude');
     expect(folded).toBe(process.platform === 'win32');
   });
 
@@ -243,16 +247,13 @@ describe('the history stays readable by hand', () => {
 
 describe('vaultOutsideProfile', () => {
   it('accepts foster’s own directory under the profile', () => {
-    expect(
-      vaultOutsideProfile(
-        path.join('C:\\Users\\someone', '.foster', 'vault'),
-        'C:\\Users\\someone',
-      ),
-    ).toBe(false);
+    expect(vaultOutsideProfile(path.join('D:\\profile', '.foster', 'vault'), 'D:\\profile')).toBe(
+      false,
+    );
   });
 
   it('flags a vault relocated off the profile', () => {
     // FOSTER_HOME predates the vault and now relocates unencrypted tokens.
-    expect(vaultOutsideProfile('D:\\shared\\foster\\vault', 'C:\\Users\\someone')).toBe(true);
+    expect(vaultOutsideProfile('E:\\shared\\foster\\vault', 'D:\\profile')).toBe(true);
   });
 });

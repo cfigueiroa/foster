@@ -111,23 +111,46 @@ export function vaultRoot(env: NodeJS.ProcessEnv = process.env): string {
  * identity of a record is the `surface` and `email` inside it, and a record
  * whose contents disagree with its path is reported by its contents.
  */
-export function slugFor(value: string): string {
-  const normalised = value.toLowerCase();
-  const readable = normalised.replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  const digest = createHash('sha256').update(normalised).digest('hex').slice(0, 8);
-  return `${readable.length > 0 ? readable : 'unknown'}-${digest}`;
+export function slugFor(email: string): string {
+  // An address is case-insensitive in every way that matters here, so the key
+  // folds case: `Alice@x` and `alice@x` are one account and must be one file.
+  return fragment(email.toLowerCase());
 }
 
 /**
- * A surface's fragment, folded the way every other path comparison here folds.
+ * A surface's fragment, folded exactly as far as the filesystem folds.
  *
  * Two spellings of one config directory are one surface — a different
  * capitalisation on Windows, a trailing separator — and giving them separate
  * histories would split one account's versions across two files that each look
- * complete.
+ * complete. But that is a Windows truth, not a universal one: on a
+ * case-sensitive filesystem `~/.claude` and `~/.Claude` are two directories,
+ * and folding them together would merge two clients' credentials into one
+ * history.
+ *
+ * So the key is `comparablePath`, which folds case only where the filesystem
+ * does — and, unlike `slugFor`, nothing lowercases it afterwards. An earlier
+ * version routed this through `slugFor` and inherited its `toLowerCase`, which
+ * folded every platform down to the Windows answer.
  */
 export function surfaceSlug(configDir: string): string {
-  return slugFor(comparablePath(configDir));
+  return fragment(comparablePath(configDir));
+}
+
+/**
+ * The shared shape: a readable prefix and a digest of the key itself.
+ *
+ * The digest is taken over the key as given, not over the lowercased readable
+ * form, so that two keys this function is meant to keep apart stay apart even
+ * when their readable halves are identical.
+ */
+function fragment(key: string): string {
+  const readable = key
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 8);
+  return `${readable.length > 0 ? readable : 'unknown'}-${digest}`;
 }
 
 function historyFile(root: string, surface: string, email: string): string {
