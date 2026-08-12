@@ -73,6 +73,14 @@ try {
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   Copy-Item -Path $bundle -Destination (Join-Path $InstallDir 'foster.js') -Force
 
+  # The bundle is ES modules, but a .js file only says so through the nearest
+  # package.json. Without this one Node searches upward, out of the install
+  # directory and into whatever unrelated package.json happens to sit above it —
+  # then warns before every command's real output and reparses the bundle on
+  # each run. Declaring the type here keeps that search inside foster's own
+  # directory, rather than depending on what the rest of the tree looks like.
+  Set-Content -Path (Join-Path $InstallDir 'package.json') -Encoding ASCII -Value '{ "type": "module" }'
+
   # A small shim so `foster` works as a command rather than `node <path>`.
   $shim = Join-Path $InstallDir 'foster.cmd'
   Set-Content -Path $shim -Encoding ASCII -Value @"
