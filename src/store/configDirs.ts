@@ -21,6 +21,23 @@ import { safeReaddir } from '../util/fs.js';
  * directory is left to the consumer, as `indexAllTranscripts` does, because
  * only the consumer knows whether the spelling matters.
  */
+/**
+ * The directory this process's own environment resolves to.
+ *
+ * One rule, stated once: `CLAUDE_CONFIG_DIR` when it is set, `~/.claude`
+ * otherwise. It is the same rule the CLI itself follows, and it decides which
+ * client `clients` marks with a star and which one a credential command acts on
+ * by default — two answers that must never disagree, which is the argument for
+ * it living beside the enumeration rather than being written out again wherever
+ * it is needed.
+ */
+export function inUseConfigDir(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  return env.CLAUDE_CONFIG_DIR ?? path.join(home, '.claude');
+}
+
 export function configDirCandidates(
   env: NodeJS.ProcessEnv = process.env,
   extra: string[] = [],

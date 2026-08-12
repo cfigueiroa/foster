@@ -23,6 +23,15 @@ export function isDirectory(target: string): boolean {
   }
 }
 
+/** The same question about a regular file — presence read from metadata, contents left alone. */
+export function fileExists(target: string): boolean {
+  try {
+    return statSync(target).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A file whose whole contents are one epoch-millisecond number, as the app's
  * deletion markers are. Anything else — missing, unreadable, not a number — is

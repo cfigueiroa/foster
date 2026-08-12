@@ -10,6 +10,7 @@ export type LedgerEvent =
   | AccountLabelledEvent
   | AccountIdentitySeenEvent
   | AccountIdentityForgottenEvent
+  | AccountSwitchedEvent
   | FosteredEvent
   | ReturnedEvent
   | ConversationPurgedEvent
@@ -85,6 +86,42 @@ export interface AccountIdentitySeenEvent extends BaseEvent {
 export interface AccountIdentityForgottenEvent extends BaseEvent {
   kind: 'account_identity_forgotten';
   accountUuid: string;
+}
+
+/**
+ * A config directory signed in as somebody else.
+ *
+ * The only write foster makes that changes who a future process *is*, so the
+ * ledger carries it for the same reason it carries a fostering: without a record,
+ * "why is this directory on that account?" has no answer, and a switch that went
+ * half-wrong looks identical to one that never happened.
+ *
+ * What it deliberately does not carry is any part of the credential — not the
+ * token, not the refresh token, not their lengths or shapes. The emails are the
+ * point of the record and are already in this log wherever an identity was seen;
+ * a token would make the ledger a place worth stealing, which it is not today
+ * and should not become.
+ */
+export interface AccountSwitchedEvent extends BaseEvent {
+  kind: 'account_switched';
+  configDir: string;
+  /** Who was signed in before, when foster could establish it. */
+  from?: string;
+  to: string;
+  /**
+   * When the credential that was installed had been taken. The vault is
+   * append-only, so a switch can install something recorded weeks ago; the age
+   * of what was installed is the fact that explains a switch that verified fine
+   * and stopped working shortly after.
+   */
+  takenAt?: number;
+  /**
+   * How many live processes were registered in that directory at the moment of
+   * the write. Not a failure and not a refusal: it is the number that explains
+   * an account mysteriously reverting half an hour later, and it is unknowable
+   * after the fact.
+   */
+  liveWriters: number;
 }
 
 export interface FosteredEvent extends BaseEvent {
@@ -192,6 +229,7 @@ export type LedgerEventInput =
   | Draft<AccountLabelledEvent>
   | Draft<AccountIdentitySeenEvent>
   | Draft<AccountIdentityForgottenEvent>
+  | Draft<AccountSwitchedEvent>
   | Draft<FosteredEvent>
   | Draft<ReturnedEvent>
   | Draft<ConversationPurgedEvent>

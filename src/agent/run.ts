@@ -44,6 +44,12 @@ Domain facts you can rely on:
 - \`foster purge\` destroys conversations on disk and cannot be undone. It is deliberately not one
   of your tools, and you must never run it through the shell either — not with --yes, not with
   --confirm, not to "clean up". If a task seems to call for it, say so and let the user run it.
+- \`foster switch\`, \`foster point\` and \`foster client new\` change which account a config
+  directory is signed in as, and \`foster vault\` holds credentials. None of them are your tools
+  and you must not run them through the shell. Changing who the user is signed in as is not a
+  step on the way to something else, and a credential is not a file for a model to move: say
+  what you would switch and why, and let the user do it. Reading is fine — \`foster clients\`,
+  \`accounts\`, \`usage\` and \`renewals\` answer "which account has quota" without any of this.
 
 You also have Claude Code's general tools. Two rules about them:
 - For anything touching the session store or fostered copies, use the foster_session_mgmt tools,

@@ -39,6 +39,17 @@ import { assertPurgeConfirmed, purgeConversations, summarisePurge } from '../eng
 import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
+import {
+  applySwitch,
+  identify,
+  planSwitch,
+  rememberCurrent,
+  type Identity,
+} from '../engine/switch.js';
+import { applyPointer, planPointer } from '../engine/pointer.js';
+import { applySeed, planSeed } from '../engine/seed.js';
+import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
+import { applyMigration, planMigration } from '../engine/vaultMigrate.js';
 import { Ledger } from '../ledger/log.js';
 import {
   copySessionIds,
@@ -51,6 +62,7 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
+import { inUseConfigDir } from '../store/configDirs.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -1526,6 +1538,430 @@ program
           'account, from the profile foster last saw — dated when they were not read fresh.',
       ),
     );
+  });
+
+/**
+ * The config directory a credential command works on.
+ *
+ * The default is the one this process resolves to, which is the same directory
+ * `clients` marks with a star — so `foster switch` with no `--config-dir`
+ * changes the account a plain `claude` in this terminal would use, and nothing
+ * else. The rule itself belongs to `configDirs`, which owns what a client is.
+ */
+function targetConfigDir(opts: { configDir?: string }): string {
+  return opts.configDir ?? inUseConfigDir();
+}
+
+function describeIdentity(identity: Identity): string {
+  const who = identity.email ?? 'nobody';
+  if (identity.verified) return who;
+  return identity.note ? `${who} (${identity.note})` : `${who} (unverified)`;
+}
+
+program
+  .command('switch')
+  .summary('sign a config directory in as another account, without a logout')
+  .description(
+    'Change which account a Claude Code config directory is signed in as.\n\n' +
+      "The credential that is there goes into foster's vault under its own identity, and the\n" +
+      'one asked for comes out of it — a positional swap, so exactly one copy of each account\n' +
+      'is live at any time. Nothing is logged out, and the next `claude` to start in that\n' +
+      'directory runs as the new account. Foster never logs in: an account it has no vault\n' +
+      'entry for is a login you do once, after which it can be switched to freely.\n\n' +
+      'Run it with no email to see the current account and what the vault holds.',
+  )
+  .argument('[email]', 'the account to switch to')
+  .option('--config-dir <path>', 'the client to switch; defaults to the one in use')
+  .option('--offline', 'skip the API check, and say so instead of claiming it passed')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually switch; without it nothing is written')
+  .action(async function (this: Command, email: string | undefined) {
+    const { ledger } = context(this);
+    const opts = this.opts<{
+      configDir?: string;
+      offline?: boolean;
+      json?: boolean;
+      yes?: boolean;
+    }>();
+    const configDir = targetConfigDir(opts);
+    const root = vaultRoot();
+
+    if (!email) {
+      // Reads, and only reads. This screen used to refresh the rolling copy on
+      // the way past, on the reasoning that it had just verified the identity
+      // and the write was nearly free. The write is not the problem — writing a
+      // live credential to disk from a command that presents as a status screen
+      // is. Every other write in this tool is behind --yes, and someone running
+      // `foster switch` to see who they are has consented to nothing. Keeping
+      // the shadow current belongs to `foster guard`, which says so in its name.
+      const current = await identify(configDir, { ...(opts.offline ? { offline: true } : {}) });
+      // Only this client's accounts. A credential taken from another config
+      // directory belongs to a different token family and cannot be installed
+      // here, so listing it would offer something this screen cannot deliver.
+      const here = listAll(root).filter((entry) => samePath(entry.surface, configDir));
+
+      if (opts.json) {
+        return print({
+          configDir,
+          current: { email: current.email ?? null, verified: current.verified },
+          accounts: here.map((entry) => ({
+            email: entry.email,
+            savedAt: entry.savedAt,
+            versions: entry.versions,
+          })),
+        });
+      }
+
+      console.log(`Client        ${configDir}`);
+      console.log(`Signed in as  ${describeIdentity(current)}`);
+      console.log(
+        `Switchable    ${here.length > 0 ? here.map((e) => e.email).join(', ') : '(none)'}`,
+      );
+      console.log(
+        pc.dim(
+          '\nThe vault keeps every credential foster has seen for this client, newest first;\n' +
+            'a switch installs the newest and removes nothing. `foster guard` records the\n' +
+            'account in use — this screen only reads.',
+        ),
+      );
+      return;
+    }
+
+    const plan = await planSwitch({
+      configDir,
+      target: email,
+      vaultRoot: root,
+      ...(opts.offline ? { offline: true } : {}),
+    });
+
+    if (plan.blockers.length > 0) {
+      for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+      process.exitCode = 1;
+      return;
+    }
+
+    if (plan.clobberers.length > 0) {
+      console.log(
+        pc.yellow(
+          `  ! ${plan.clobberers.length} live session(s) in this client can rewrite the credential:`,
+        ),
+      );
+      for (const one of plan.clobberers) {
+        console.log(pc.yellow(`      pid ${one.pid}${one.cwd ? `  ${one.cwd}` : ''}`));
+      }
+      console.log(
+        pc.dim(
+          '      They hold their token in memory and rewrite the file when it renews,\n' +
+            '      which would put the old account back. Finish there first, or accept it:\n' +
+            '      the vault keeps both, so that is recoverable rather than impossible.',
+        ),
+      );
+    }
+
+    if (plan.incomingExpired) {
+      console.log(
+        pc.yellow(
+          `  ! the stored credential for ${email} says it has expired; the check below decides`,
+        ),
+      );
+    }
+
+    if (!opts.yes) {
+      const taken = plan.takenAt ? `, taken ${formatAge(plan.takenAt)}` : '';
+      const kept = plan.versions > 1 ? ` (${plan.versions} versions on file)` : '';
+      console.log(
+        `Dry run: ${configDir} would go from ${describeIdentity(plan.from)} to ${plan.to}${taken}${kept}.`,
+      );
+      console.log('Re-run with --yes to switch.');
+      return;
+    }
+
+    const outcome = await applySwitch(plan, { vaultRoot: root });
+    if (outcome.ok) {
+      ledger.append({
+        kind: 'account_switched',
+        configDir,
+        ...(plan.from.email ? { from: plan.from.email } : {}),
+        to: outcome.landed ?? plan.to,
+        ...(plan.takenAt ? { takenAt: plan.takenAt } : {}),
+        liveWriters: plan.clobberers.length,
+      });
+      console.log(outcome.message);
+      return;
+    }
+
+    process.exitCode = 1;
+    console.log(pc.red(outcome.message));
+  });
+
+program
+  .command('vault')
+  .summary('the credentials foster is holding, and whose they are')
+  .description(
+    'Every credential foster has kept, grouped by the client it belongs to and read from\n' +
+      "each record's own fields rather than its filename — without opening a credential.\n\n" +
+      'The vault is append-only. Nothing here is ever replaced or removed: a switch installs\n' +
+      'the newest record for a client and account, and every version underneath it stays. So\n' +
+      'a row saying "3 versions" means three distinct credentials were seen for that pair,\n' +
+      'and all three are still on disk.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const entries = listAll(vaultRoot());
+
+    if (this.opts<{ json?: boolean }>().json) {
+      return print(
+        entries.map((entry) => ({
+          surface: entry.surface,
+          email: entry.email,
+          accountUuid: entry.accountUuid ?? null,
+          savedAt: entry.savedAt,
+          expiresAt: entry.expiresAt ?? null,
+          versions: entry.versions,
+        })),
+      );
+    }
+
+    if (entries.length === 0) {
+      console.log('The vault is empty.');
+      console.log(
+        pc.dim(
+          'It fills as you use it: `foster guard` records the account in use, and a switch\n' +
+            'records the account it displaces.',
+        ),
+      );
+    }
+
+    let surface = '';
+    for (const entry of entries) {
+      if (entry.surface !== surface) {
+        surface = entry.surface;
+        console.log(`  ${surface}`);
+      }
+      // formatAge answers "how long since this was last used", and returns
+      // "never used" for a timestamp of zero — which is what a record without a
+      // savedAt folds to. On a row about when something was *taken* that reads
+      // as a contradiction of the row it is on.
+      const age = entry.savedAt ? `taken ${formatAge(entry.savedAt)}` : 'taken at an unknown time';
+      const kept = entry.versions > 1 ? `, ${entry.versions} versions kept` : '';
+      console.log(`      ${entry.email}  (${age}${kept})`);
+    }
+
+    const root = vaultRoot();
+    console.log(pc.dim(`\n${root}`));
+    if (vaultOutsideProfile(root)) {
+      console.log(
+        pc.yellow(
+          '  ! FOSTER_HOME puts this outside your user profile. Credentials here are\n' +
+            '    unencrypted, and foster cannot vouch for who else can read that path.',
+        ),
+      );
+    }
+  });
+
+program
+  .command('guard')
+  .summary('record whoever is signed into a client, so the vault can put them back')
+  .description(
+    'Add the credential a client currently holds to its history, if it is not already the\n' +
+      'newest one there.\n\n' +
+      'This is what makes an account switchable: foster can only install a credential it has\n' +
+      'seen, and it only sees one by being pointed at a client while that account is signed\n' +
+      'in. It is also what makes a clobber survivable — another process overwriting the live\n' +
+      'file cannot reach what is already recorded.\n\n' +
+      'Foster is one-shot, so this is the seam for anything that wants a fixed cadence: a\n' +
+      'scheduled task, a watchdog, a shell prompt. A token that has not rotated since the\n' +
+      'last look records nothing, so calling it often is cheap.',
+  )
+  .option('--config-dir <path>', 'the client to guard; defaults to the one in use')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command) {
+    const opts = this.opts<{ configDir?: string; json?: boolean }>();
+    const configDir = targetConfigDir(opts);
+    const root = vaultRoot();
+
+    const identity = await identify(configDir);
+    const { recorded, appended } = rememberCurrent(configDir, identity, root);
+
+    if (opts.json) {
+      return print({
+        configDir,
+        email: identity.email ?? null,
+        verified: identity.verified,
+        recorded,
+        appended,
+      });
+    }
+
+    console.log(`${configDir}  ${describeIdentity(identity)}`);
+    console.log(
+      !recorded
+        ? pc.dim('Nothing recorded: the vault only files a credential under a verified identity.')
+        : appended
+          ? pc.dim('Recorded — this credential was new.')
+          : pc.dim('Already the newest on file; nothing appended.'),
+    );
+  });
+
+program
+  .command('vault-migrate')
+  .summary('bring records from the first vault layout into the current one')
+  .description(
+    "Move credentials written by foster's first vault layout into the one that replaced it.\n\n" +
+      'The old layout keyed a credential by account alone; the current one keys by client and\n' +
+      'account, because one account signed into two config directories has two independent\n' +
+      'token families. The old records do not say which client they came from, so this has to\n' +
+      "establish it — from a byte-for-byte match against a client's current credential, or\n" +
+      'from being the only client signed into that account — and refuses rather than guesses\n' +
+      'when neither reaches an answer. `--to-client` settles those.\n\n' +
+      'Nothing is deleted. A migrated record moves under `legacy/`, keeping its bytes; one\n' +
+      'that could not be placed is left exactly where it is, with the reason.',
+  )
+  .option('--to-client <configDir>', 'the client every unplaced record came from')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually migrate; without it nothing is written')
+  .action(function (this: Command) {
+    const opts = this.opts<{ toClient?: string; json?: boolean; yes?: boolean }>();
+    const root = vaultRoot();
+    const plan = planMigration(root, {
+      clients: listClients(),
+      ...(opts.toClient ? { toClient: opts.toClient } : {}),
+    });
+
+    if (opts.json) {
+      return print(
+        plan.items.map((item) => ({
+          file: item.file,
+          email: item.email,
+          surface: item.surface ?? null,
+          evidence: item.evidence ?? null,
+          blocker: item.blocker ?? null,
+        })),
+      );
+    }
+
+    if (plan.items.length === 0) {
+      console.log('Nothing to migrate: no records from the old layout are left.');
+      return;
+    }
+
+    for (const item of plan.items) {
+      if (item.surface) {
+        console.log(`  + ${item.email}  ->  ${item.surface}`);
+        console.log(pc.dim(`      ${item.evidence}`));
+      } else {
+        console.log(pc.yellow(`  ! ${item.email}`));
+        console.log(pc.yellow(`      ${item.blocker}`));
+      }
+    }
+
+    const placed = plan.items.filter((item) => item.surface).length;
+    if (!opts.yes) {
+      console.log(
+        `\nDry run: ${placed} would be migrated, ${plan.items.length - placed} left alone.`,
+      );
+      console.log('Re-run with --yes to migrate.');
+      return;
+    }
+
+    const outcome = applyMigration(plan);
+    for (const failure of outcome.failures) console.log(pc.red(`  ! ${failure}`));
+    console.log(
+      `\n${outcome.migrated} migrated, ${outcome.alreadyPresent} already on file, ` +
+        `${outcome.skipped} left alone, ${outcome.failures.length} failed.`,
+    );
+    console.log(pc.dim(`Migrated records were moved under ${path.join(root, 'legacy')}.`));
+    if (outcome.failures.length > 0) process.exitCode = 1;
+  });
+
+program
+  .command('point')
+  .summary('repoint a directory link at another client')
+  .description(
+    'Flip a junction so that whatever runs with CLAUDE_CONFIG_DIR set to it follows a\n' +
+      'different account.\n\n' +
+      'This is the other way to change accounts, and it changes them for one consumer rather\n' +
+      'than for the machine: each account keeps its own config directory, logged into once,\n' +
+      'and the link decides which of them is live. No credential moves and nothing is logged\n' +
+      'out.\n\n' +
+      'The path is resolved on every file open, so a process that started before the flip\n' +
+      'writes through it after — a link does not isolate a running process from a switch.',
+  )
+  .argument('<link>', 'the junction to repoint')
+  .option('--to <configDir>', 'the client it should point at')
+  .option('--yes', 'actually repoint; without it nothing is written')
+  .action(function (this: Command, link: string) {
+    const opts = this.opts<{ to?: string; yes?: boolean }>();
+    if (!opts.to) throw new Error('--to names the client the link should point at');
+
+    const plan = planPointer(link, opts.to);
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      const now = plan.state.target ?? `(${plan.state.kind})`;
+      console.log(`Dry run: ${link} would go from ${now} to ${opts.to}.`);
+      console.log('Re-run with --yes to repoint.');
+      return;
+    }
+
+    const outcome = applyPointer(plan);
+    if (!outcome.ok) process.exitCode = 1;
+    console.log(outcome.ok ? outcome.message : pc.red(outcome.message));
+  });
+
+const client = program
+  .command('client')
+  .description('make a config directory that is a working client');
+
+client
+  .command('new')
+  .summary('seed a new config directory from an existing one')
+  .description(
+    'Create a config directory that behaves like the one it was seeded from.\n\n' +
+      'A bare mkdir plus a login authenticates, but the sessions run there quietly have\n' +
+      'fewer capabilities than sessions anywhere else: no settings, no project\n' +
+      'instructions, no skills, and nothing in any output saying so.\n\n' +
+      'Settings, CLAUDE.md, agents, commands and output styles are copied. Skills are\n' +
+      'linked rather than copied, because they are a warehouse and a copy starts drifting\n' +
+      'the day either side changes. The credential, `projects/` and the cached profile in\n' +
+      '`.claude.json` are never copied — the first would put one account in two places, the\n' +
+      'second is the whole conversation history, and the third would make the new directory\n' +
+      "report somebody else's identity before anyone had signed into it.",
+  )
+  .argument('<path>', 'the config directory to create')
+  .option('--from <configDir>', 'the client to seed from; defaults to the one in use')
+  .option('--yes', 'actually create it; without it nothing is written')
+  .action(function (this: Command, target: string) {
+    const opts = this.opts<{ from?: string; yes?: boolean }>();
+    const plan = planSeed(target, opts.from ?? targetConfigDir({}));
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${target} would be seeded from ${plan.from}.`);
+      if (plan.copies.length > 0) console.log(`  copy  ${plan.copies.join(', ')}`);
+      if (plan.links.length > 0) console.log(`  link  ${plan.links.join(', ')}`);
+      console.log('Re-run with --yes to create it.');
+      return;
+    }
+
+    const outcome = applySeed(plan);
+    if (!outcome.ok) {
+      process.exitCode = 1;
+      console.log(pc.red(outcome.message));
+      return;
+    }
+    if (outcome.copied.length > 0) console.log(`  copied  ${outcome.copied.join(', ')}`);
+    if (outcome.linked.length > 0) console.log(`  linked  ${outcome.linked.join(', ')}`);
+    console.log(outcome.message);
   });
 
 program
