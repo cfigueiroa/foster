@@ -114,10 +114,11 @@ jobs:
           ## Safety
 
           - The originals are never modified; fostering only adds files to the current account's folder.
-          - \`foster\`, \`restore\`, \`return\` and \`purge\` are dry runs unless you pass \`--yes\`.
+          - \`foster\`, \`restore\`, \`return\`, \`purge\`, \`switch\`, \`point\` and \`client new\` are dry runs unless you pass \`--yes\`.
           - Adding copies works while Claude Desktop is open. Removing them refuses for copies a running app has already loaded, since deleting one it holds in memory only makes it write the file back.
           - \`purge\` destroys conversations on disk and cannot be undone. It takes \`--confirm <count>\` as well as \`--yes\`, and only ever considers conversations whose session the app has already deleted and that nothing still points at.
-          - Credential files, cookie stores and OAuth token caches are never read.
+          - The Claude Desktop app's OAuth token cache is read by one command, \`usage\`, and only to ask the API about your own limits. Cookie stores are never read, and the app's account cannot be switched by anything on your disk.
+          - \`switch\` moves the **CLI's** credential between a config directory and foster's own vault under \`~/.foster\`, so an account can be changed without a logout that discards a working credential. Foster never logs in, never mints or refreshes a token, and never sends one anywhere but \`api.anthropic.com\` to ask who it belongs to. The vault is append-only and unencrypted: it keeps every credential it has seen rather than the minimum, which is a deliberate trade — nothing foster does can make one unrecoverable. None of these commands are available to \`foster agent\`.
 
           Changes appear after you restart Claude Desktop — the sidebar is built at startup and does not watch the directory.
 
