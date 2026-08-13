@@ -249,8 +249,11 @@ while every other multi-byte field in the file is little-endian.
 
 ## What about switching accounts?
 
-`foster` cannot switch accounts, and nothing else on your disk can either. This is worth stating
-precisely, because it is the first thing people try.
+Nothing on your disk can switch **the app's** account — not `foster`, not anything else. This is
+worth stating precisely, because it is the first thing people try, and because the answer for the
+CLI is now the opposite one: a config directory's account is a file, `foster` moves it, and
+[Switching a client's account](#switching-a-clients-account) is that section. The two answers differ
+because the two programs keep the account in different places, and the rest of this section is why.
 
 Inside one installation the account is not stored anywhere. The app keeps it in memory only —
 deliberately non-persistent, and cleared whenever its web view navigates — and just three things ever
@@ -378,6 +381,125 @@ function claude-as {
 `claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — the list
 of clients is the directories that exist, so there is nothing to register anywhere.
 
+`foster client new` makes a better one than `mkdir` does. A bare directory plus a login
+authenticates, but sessions run there quietly have fewer capabilities than sessions run anywhere
+else: no settings, no `CLAUDE.md`, no agents, and — the one that actually bites — no skills, with
+nothing in any output saying so. So settings, instructions, agents, commands and output styles are
+copied, and `skills/` is **linked** rather than copied, because skills are a warehouse and a copy
+starts drifting the day either side changes.
+
+Three things are never copied, and each exclusion is load-bearing. The credential, because one
+account living in two directories is the exact state the vault rule below exists to prevent.
+`projects/`, because that is the whole conversation history and a second copy of it is a second set
+of transcripts for every other command here to find. And `.claude.json`, because it holds the cached
+profile `foster clients` reads — copy it and a directory nobody has signed into reports somebody
+else's identity.
+
+```bash
+foster client new ~\.claude-work            # dry run
+foster client new ~\.claude-work --yes      # make it, signed out
+```
+
+### Switching a client's account
+
+A client's account is one file. `<configDir>/.credentials.json` is plain JSON of about 1.4 KB, every
+`claude` process reads it at birth, and nothing else binds a directory to an account — so replacing
+it replaces who the next process runs as, with no logout, no restart, and nothing else touched.
+
+The obvious way to do that by hand is a logout and a login, and it is the wrong way: a logout throws
+away a working credential to make room for one you then have to go and get. `foster switch` moves
+them instead.
+
+```bash
+foster switch                               # who is here, and what the vault holds
+foster switch alice@example.com             # dry run
+foster switch alice@example.com --yes       # swap
+```
+
+The credential that was there is recorded in foster's vault; the one asked for is installed from it.
+Two rules decide the shape of that vault, and both were arrived at the hard way.
+
+**The identity of a credential is `(client, account)`, not an account.** One account signed into two
+config directories has two independent token families, from two separate logins, whose refresh tokens
+rotate separately — so a credential taken from one client cannot be installed into another, and
+foster will not offer it. Keyed by account alone, a single `guard` on the second client would
+overwrite the first's copy with a credential that does not work there.
+
+**Nothing in the vault is ever replaced or removed.** The obvious design is positional — one live
+copy per account, a swap trades one for the other — and foster implemented that first, for a real
+reason: a refresh token can be rotated on every renewal, so a copy left on a shelf quietly stops
+working. But positional means destructive. Every swap deletes a credential, and a deleted credential
+is one that no later feature can reach and no operator can fall back on. So the vault is
+**append-only**, in the same idiom as foster's ledger: one JSONL file per `(client, account)`, newest
+line wins, and every version before it stays legible underneath.
+
+> **The cost, plainly.** This keeps more credentials at rest than the minimum, for ever, and
+> unencrypted — which makes the vault a more valuable target than a positional one would be. It also
+> means a stale record can be installed and fail. Both are accepted deliberately: staleness is
+> detectable, because every record carries when it was taken and a switch verifies before it commits,
+> while deletion is not detectable at all — and nothing foster does can make a credential
+> unrecoverable.
+
+Foster never logs in. An account it has no record of is a login you do once, in that directory, after
+which it can be switched to freely. Two things write to the vault, and no command that merely reads
+does: **a switch** records the account it displaces, and **`foster guard`** records the account in
+use. So the first account to become switchable is the one `guard` sees. A credential that has not
+changed since the last look appends nothing, so `guard` is cheap to run on a timer.
+
+A credential that has sat unused can expire on its own, so the swap is **verified against the API**,
+not against the file it just wrote: a stored credential that no longer authenticates is put back, and
+you are asked for a fresh login rather than told it worked. For the same reason foster **refuses to
+switch at all** while it cannot verify who is signed in — an unverified answer is not good enough to
+file the outgoing credential under, and filing it wrong would overwrite another account's entry. That
+is also why `--offline` plans but never applies.
+
+One thing a switch cannot fix, and says so instead: the CLI caches its own profile in `.claude.json`
+and only rewrites it when it next runs, so `foster clients` keeps naming the previous account until
+then. Foster will not edit the app's cache to cover for itself.
+
+**The failure the vault is really for** is the one with no other answer: another `claude` process,
+started before the switch, holds its token in memory and rewrites the credential file when it
+renews — putting its account back over yours, minutes later, silently. Foster cannot prevent that; no
+lock exists to take. So it does the two things it can. It names the processes that could do it, with
+pids and working directories, before writing:
+
+```
+  ! 2 live session(s) in this client can rewrite the credential:
+      pid 4242  D:\work\api-gateway
+```
+
+And the account that gets overwritten is already recorded, so the damage is a command to undo rather
+than a login to redo. That is the whole argument for keeping history: the process that clobbers you
+cannot reach what the vault has already written down.
+
+`foster vault` lists what is held — grouped by client, newest first, with how many versions stand
+behind each — read from each record's own fields rather than its filename, and without opening a
+credential. `foster guard` records the account a client currently holds, for anything that wants a
+fixed cadence; it is what makes an account switchable in the first place, since foster can only
+install a credential it has seen.
+
+The record shape is documented because it is the way back if foster is ever gone. Each line is a JSON
+object with `surface`, `email`, `savedAt` and the credential verbatim under `credential`, so
+recovering one by hand is one command in any shell:
+
+```powershell
+(Get-Content <file> | Select-Object -Last 1 | ConvertFrom-Json).credential |
+  Set-Content ~\.claude\.credentials.json
+```
+
+**The other kind of switch changes it for one consumer rather than for the machine.** Give each
+account its own directory, log into each once, and point a junction at whichever is active:
+
+```bash
+foster point ~\.claude-live --to ~\.claude-accounts\alice --yes
+```
+
+Anything running with `CLAUDE_CONFIG_DIR` set to the link follows the flip; your own terminals carry
+on wherever they were. No credential moves and nothing is logged out. One property is worth knowing
+because it is counter-intuitive: the path is resolved on **every** file open, so a process that
+started before the flip writes through it after. A link does not isolate a running process from a
+switch — only a directory that the process's own environment names does that.
+
 ## Install
 
 ```powershell
@@ -439,6 +561,12 @@ foster accounts  # every account here: who, which plan, whether it is still paid
 foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
 foster renewals  # usage resets and billing dates across every account, in one place
 foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster clients   # the CLI's config directories, and who is signed into each
+foster switch    # sign a client in as another account, without a logout
+foster vault     # the credentials foster is holding, and whose they are
+foster guard     # record the account a client holds, so it can be put back later
+foster point     # repoint a directory link at another client
+foster client new  # seed a config directory that is a working client
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 foster purge     # destroy the conversations behind deleted sessions, permanently
@@ -723,7 +851,9 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
   It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,
   `--yes` alone will not run it, and the agent is not allowed near it. Every other command in
-  foster adds a file or removes one foster itself wrote.
+  foster adds a file, removes one foster itself wrote, or — in the case of `switch` — replaces one
+  whose previous contents it put in the vault first, in that order, so that the step after the
+  crash is always a command rather than a login.
 - **Adding is safe while the app runs; removing is the case that is not.** Every copy carries a
   session id the app has never seen, so a running app neither reads that file (it is past its one
   read) nor writes it (it only writes sessions it holds) — it is simply invisible until the app
@@ -772,15 +902,50 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   both from the process tree and from the environment the app stamps on the sessions it spawns,
   because an exited intermediate can break the first signal and the failure mode is killing the
   caller mid-write.
-- **It reads the credential in exactly one place, and only to ask the API about you.** For most of
-  its life foster refused to touch the OAuth token at all, and everything else in this file grew up
-  under that rule. The rule has been relaxed, deliberately and narrowly, and it is worth being exact
-  about what changed and what did not.
+- **It handles credentials in named places, for named reasons, and never mints one.** For most of
+  its life foster refused to touch an OAuth token at all, and everything else in this file grew up
+  under that rule. The rule has been widened twice — first to read one, then to move one — and both
+  times deliberately, so it is worth being exact about what changed and what did not.
 
-  **What now reads it:** one command, `foster usage` (and the matching "Usage right now" in the
+  **The two credentials are not the same file, and the difference decides everything.** The Desktop
+  app's token is a sealed blob in its config; foster reads it and could not usefully write it,
+  because the app holds its account in memory and re-seals on its own schedule. The CLI's token is
+  plain JSON at `<configDir>/.credentials.json`; every `claude` reads it at birth, which is what
+  makes replacing it a switch and what makes it worth handling at all.
+
+  **What reads the app's:** one command, `foster usage` (and the matching "Usage right now" in the
   menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
-  `accounts`, or the agent. The reader lives in one file, `store/credential.ts`, and every other part
-  of the tool is exactly as credential-blind as before.
+  `accounts`, or the agent. The reader lives in one file, `store/credential.ts`.
+
+  **What copies the CLI's:** `switch` and `guard`. Both go through `store/cliCredential.ts` and
+  `engine/vault.ts`, and what they do is _copy bytes_: foster never mints a credential, never
+  refreshes one, never removes one, and never signs anyone in. OAuth is interactive and stays yours.
+  The bytes are copied verbatim rather than re-serialised, because a field this version does not know
+  about is a field a rewrite would drop — and a dropped field in a credential produces a file that
+  parses, looks right and does not authenticate.
+
+  **Where the copies rest:** `~/.foster/vault`, under your own profile, one append-only JSONL file
+  per `(client, account)`, each record naming whose it is so the vault can be listed without opening
+  anything. It is not encrypted, and that is a choice rather than an omission: the file it copies is
+  sitting unencrypted in the config directory already, so encrypting the copy would protect the shelf
+  and not the shop, while adding a key foster would then have to keep somewhere.
+
+  **The honest shape of the risk**, since it grew: the vault keeps every credential it has ever seen
+  rather than the minimum, which is a deliberate trade of a larger at-rest footprint for the property
+  that nothing foster does can make a credential unrecoverable. That makes it worth more to an
+  attacker who already has your user account than a positional vault would be — and worth exactly
+  nothing to one who does not, since it never leaves your machine, is never written to the
+  repository, never logged, never printed, and never put on a command line. `foster vault` warns when
+  `FOSTER_HOME` has moved it outside your profile. The credential object refuses to serialise itself
+  through either of Node's two paths, so a future `--json` or stray `console.log` cannot leak one by
+  accident. The ledger records that a switch happened, between which addresses, and how old the
+  installed credential was; it never records a token, a refresh token, or their shape.
+
+  **The agent is fenced off from all of it**, on the same footing as `purge`: `switch`, `point`,
+  `client new` and `vault` are not among its tools and it is told not to reach for them through the
+  shell. Changing who you are signed in as is not a step on the way to something else, and a
+  credential is not a file for a model to move. The read-only half — `clients`, `accounts`, `usage`,
+  `renewals` — answers "which account has quota" without any of it.
 
   **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
   read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
@@ -797,7 +962,8 @@ State` — so reading it needs the Windows user who sealed it, on the machine th
   sit behind a browser bot-check that foster does not attempt to defeat, so those remain unreachable
   from here and only `api.anthropic.com` is used.
 
-  This does not give foster the power to switch accounts, and it changes none of the write-path
+  None of this reaches the app's account, which stays unswitchable for the reasons in
+  [What about switching accounts?](#what-about-switching-accounts), and it changes none of the write-path
   guarantees above.
 
 - **A copy shares one thing with its original: the conversation.** That is the point — it is what

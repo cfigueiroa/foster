@@ -2,8 +2,8 @@ import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { comparablePath, samePath } from '../domain/paths.js';
-import { isDirectory, safeReaddir } from '../util/fs.js';
-import { configDirCandidates } from './configDirs.js';
+import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
+import { configDirCandidates, inUseConfigDir } from './configDirs.js';
 import { planName, type CachedIdentity } from './identity.js';
 import { liveSessions, pidAlive } from './liveSessions.js';
 import { indexTranscripts } from './transcripts.js';
@@ -59,7 +59,7 @@ export function listClients(
   home: string = homedir(),
 ): ClaudeClient[] {
   const defaultDir = path.join(home, '.claude');
-  const inUseDir = env.CLAUDE_CONFIG_DIR ?? defaultDir;
+  const inUseDir = inUseConfigDir(env, home);
 
   const seen = new Set<string>();
   const clients: ClaudeClient[] = [];
@@ -136,7 +136,7 @@ function readClient(
  * is the one the CLI actually writes when nothing redirects it — an in-dir copy
  * can be a relic of a spell of `CLAUDE_CONFIG_DIR=~/.claude`, months stale.
  */
-function readClientIdentity(
+export function readClientIdentity(
   dir: string,
   isDefault: boolean,
   home: string,
@@ -194,13 +194,4 @@ function newestMtime(files: Iterable<string>): number | undefined {
     }
   }
   return newest;
-}
-
-/** Presence read from file metadata; the credential's contents stay where they are. */
-function fileExists(file: string): boolean {
-  try {
-    return statSync(file).isFile();
-  } catch {
-    return false;
-  }
 }
