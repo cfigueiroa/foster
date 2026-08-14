@@ -1,3 +1,4 @@
+import { uniquePrefix } from '../domain/prefix.js';
 import { listAgentAccountDirs, pickActiveOrganization } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
@@ -13,15 +14,14 @@ import { readConfig } from '../store/config.js';
  * the `foster label 00000000 "…"` case, and there is nothing to resolve it to.
  */
 function resolveAccountPrefix(id: string, accountUuids: string[]): string {
-  const needle = id.toLowerCase();
-  const matches = [...new Set(accountUuids.filter((uuid) => uuid.startsWith(needle)))];
-  if (matches.length > 1) {
+  const result = uniquePrefix(accountUuids, id, (uuid) => uuid);
+  if (result.kind === 'ambiguous') {
     throw new Error(
-      `"${id}" is ambiguous: it matches ${matches.length} accounts.\n` +
-        matches.map((uuid) => `  ${uuid}`).join('\n'),
+      `"${id}" is ambiguous: it matches ${result.ids.length} accounts.\n` +
+        result.ids.map((uuid) => `  ${uuid}`).join('\n'),
     );
   }
-  return matches[0] ?? id;
+  return result.kind === 'one' ? result.id : id;
 }
 
 /**
@@ -35,18 +35,25 @@ export function currentAccount(
   store: StoreLayout,
   accounts: AccountRef[],
   organizationUuid?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): AccountRef | undefined {
   const accountUuid = readConfig(store).lastKnownAccountUuid;
   if (!accountUuid) return undefined;
   if (organizationUuid) return { accountUuid, organizationUuid };
 
+  const candidates = accounts.filter((account) => account.accountUuid === accountUuid);
+  // The app sets this from the organization it is actually using, so it beats
+  // guessing — but only for a directory that exists, so a stale value cannot
+  // point the copies at nothing.
+  const fromEnv = env.CLAUDE_CODE_ORGANIZATION_UUID;
+  const declared = fromEnv && candidates.find((account) => account.organizationUuid === fromEnv);
+  if (declared) return declared;
+
   // An account can own several organizations; only one is the directory the
   // sidebar reads, and the config does not record which.
   return (
-    pickActiveOrganization(
-      accounts.filter((account) => account.accountUuid === accountUuid),
-      store,
-    ) ?? listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
+    pickActiveOrganization(candidates, store) ??
+    listAgentAccountDirs(store).find((account) => account.accountUuid === accountUuid)
   );
 }
 

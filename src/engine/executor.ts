@@ -5,7 +5,7 @@ import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
-import { blockingReasons } from '../cli/filters.js';
+import { blockingReasons } from '../domain/filter.js';
 import { errorMessage } from '../util/fs.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { removeSafely, writeFileAtomic } from './fsatomic.js';

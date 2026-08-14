@@ -1,5 +1,5 @@
-import { bareSessionId } from '../domain/naming.js';
-import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
+import { bareSessionId } from './naming.js';
+import type { DiscoveredSession, Unfosterable } from './types.js';
 
 export interface SessionFilter {
   /** Case-insensitive substring match against the title. */
@@ -32,6 +32,42 @@ export function blockingReasons(session: DiscoveredSession, filter: SessionFilte
 }
 
 /**
+ * Narrows to named items by identifier prefix.
+ *
+ * Identifiers may be given bare or with the app's `local_` prefix, and abbreviated
+ * to any unique prefix. An id that matches nothing is reported rather than an
+ * empty result: a typo and "that session is gone" look identical otherwise.
+ *
+ * `matchOn` is what the typed id is compared to. `identity` is how a hit is
+ * de-duplicated when two arguments name the same row — for sessions that is the
+ * same field; for fostered copies the match is the origin and the identity is
+ * the copy, because one origin can have a copy in two accounts.
+ */
+export function selectByKey<T>(
+  items: T[],
+  ids: string[],
+  matchOn: (item: T) => string,
+  identity: (item: T) => string = matchOn,
+): { selected: T[]; unmatched: string[] } {
+  const selected = new Map<string, T>();
+  const unmatched: string[] = [];
+
+  for (const id of ids) {
+    const needle = bareSessionId(id).toLowerCase();
+    const matches = items.filter((item) =>
+      bareSessionId(matchOn(item)).toLowerCase().startsWith(needle),
+    );
+    if (matches.length === 0) {
+      unmatched.push(id);
+      continue;
+    }
+    for (const match of matches) selected.set(identity(match), match);
+  }
+
+  return { selected: [...selected.values()], unmatched };
+}
+
+/**
  * Narrows to named sessions, refusing rather than guessing.
  *
  * Identifiers may be given bare or with the app's `local_` prefix, and abbreviated
@@ -43,22 +79,7 @@ export function selectByIds(
   sessions: DiscoveredSession[],
   ids: string[],
 ): { selected: DiscoveredSession[]; unmatched: string[] } {
-  const selected = new Map<string, DiscoveredSession>();
-  const unmatched: string[] = [];
-
-  for (const id of ids) {
-    const needle = bareSessionId(id).toLowerCase();
-    const matches = sessions.filter((session) =>
-      bareSessionId(session.data.sessionId).toLowerCase().startsWith(needle),
-    );
-    if (matches.length === 0) {
-      unmatched.push(id);
-      continue;
-    }
-    for (const match of matches) selected.set(match.data.sessionId, match);
-  }
-
-  return { selected: [...selected.values()], unmatched };
+  return selectByKey(sessions, ids, (session) => session.data.sessionId);
 }
 
 /**

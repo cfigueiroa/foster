@@ -108,6 +108,21 @@ describe('list_sessions', () => {
     const ctx = makeContext();
     expect(() => listSessions(ctx, { accountUuid: 'ffff' })).toThrow(/No account matches/);
   });
+
+  it('refuses an ambiguous account prefix rather than listing both', () => {
+    const ctx = makeContext();
+    const other = {
+      accountUuid: '00000000-0000-4000-8000-000000000099',
+      organizationUuid: '00000000-0000-4000-8000-000000000098',
+    };
+    writeSession(ctx.store, other, session({ sessionId: 'aaaa0000-0000-4000-8000-0000000000ab' }));
+    writeSession(
+      ctx.store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'aaaa0000-0000-4000-8000-0000000000ac' }),
+    );
+    expect(() => listSessions(ctx, { accountUuid: '00000000' })).toThrow(/ambiguous/);
+  });
 });
 
 describe('scan_accounts and label_account', () => {
@@ -139,6 +154,21 @@ describe('scan_accounts and label_account', () => {
     expect(() => labelAccount(ctx, { accountUuid: OLD_ACCOUNT.accountUuid, label: '  ' })).toThrow(
       /must not be empty/,
     );
+  });
+
+  it('records the name against the account a prefix names', () => {
+    const ctx = makeContext();
+    writeSession(
+      ctx.store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'aaaa0000-0000-4000-8000-0000000000aa' }),
+    );
+    const result = labelAccount(ctx, {
+      accountUuid: OLD_ACCOUNT.accountUuid.slice(0, 8),
+      label: 'personal',
+    }) as { labelled: string; label: string };
+    expect(result.labelled).toBe(OLD_ACCOUNT.accountUuid);
+    expect(project(ctx.ledger.read()).labels.get(OLD_ACCOUNT.accountUuid)).toBe('personal');
   });
 });
 

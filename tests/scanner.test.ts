@@ -10,7 +10,7 @@ import {
   SESSION_FILE_MAX_BYTES,
   summarise,
 } from '../src/store/scanner.js';
-import { applyFilter } from '../src/cli/filters.js';
+import { applyFilter } from '../src/domain/filter.js';
 import { readConfig } from '../src/store/config.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
