@@ -164,6 +164,10 @@ export function fosterStatus(ctx: AgentToolContext): unknown {
       inThisStore: samePath(storeRootOfCopy(f.copyPath), store.root),
     })),
     duplicateCopies: duplicates.copies.length,
+    // Reported apart from the duplicates and with no command attached: a branch
+    // is not the same conversation twice but one piece of work that forked, and
+    // which half to keep is a reading decision, not a cleanup.
+    branchCopies: duplicates.branches.length,
     ...(duplicates.copies.length > 0
       ? { note: 'duplicate copies can be removed with return_fosterings duplicatesOnly' }
       : {}),
