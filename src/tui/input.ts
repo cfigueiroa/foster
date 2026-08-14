@@ -1,8 +1,10 @@
 /**
  * Bytes from a raw TTY, turned into the keys the TUI actually handles.
  *
- * Windows Terminal and the VS Code family send xterm CSI. A lone ESC is only
- * an Escape after a short wait — otherwise it is the start of an arrow.
+ * Windows is the reason this is not "just CSI". In raw mode the console
+ * often delivers arrows as a scan-code prefix (0xE0 or 0x00) plus a
+ * second byte, not as ESC [ A. Decoding stdin as UTF-8 turns 0xE0 into a
+ * replacement character and the arrow never arrives.
  */
 
 export type Key =
@@ -20,75 +22,127 @@ export type Key =
 
 export interface ParseResult {
   key: Key;
-  rest: string;
+  rest: Buffer;
+}
+
+/** Node's `readline` keypress payload — the live TTY path uses this. */
+export interface ReadlineKey {
+  name?: string;
+  ctrl?: boolean;
+  meta?: boolean;
+  shift?: boolean;
+  sequence?: string;
 }
 
 /**
- * Pull one key off the front of a buffer. Returns null when the buffer is
- * empty, or when it is a prefix that might still grow (ESC, incomplete CSI).
+ * Pull one key off the front of a byte buffer. Returns null when the buffer
+ * is empty, or when it is a prefix that might still grow.
  */
-export function parseKey(buffer: string): ParseResult | null {
+export function parseKey(input: string | Buffer | Uint8Array): ParseResult | null {
+  const buffer = toBuffer(input);
   if (buffer.length === 0) return null;
 
   const first = buffer[0]!;
 
-  if (first === '\x1b') {
+  // Windows scan-code arrows. A lone prefix waits for the second byte.
+  if (first === 0xe0 || first === 0x00) {
+    if (buffer.length < 2) return null;
+    const mapped = windowsScan(buffer[1]!);
+    if (mapped) return { key: mapped, rest: buffer.subarray(2) };
+    return { key: { type: 'esc' }, rest: buffer.subarray(2) };
+  }
+
+  if (first === 0x1b) {
     if (buffer.length === 1) return null;
     return parseEsc(buffer);
   }
 
-  if (first === '\r' || first === '\n') {
-    // Swallow a following LF after CR so Windows Enter is one key.
-    const rest = first === '\r' && buffer[1] === '\n' ? buffer.slice(2) : buffer.slice(1);
+  if (first === 0x0d || first === 0x0a) {
+    const rest = first === 0x0d && buffer[1] === 0x0a ? buffer.subarray(2) : buffer.subarray(1);
     return { key: { type: 'enter' }, rest };
   }
-  if (first === '\t') return { key: { type: 'tab' }, rest: buffer.slice(1) };
-  if (first === '\x7f' || first === '\b')
-    return { key: { type: 'backspace' }, rest: buffer.slice(1) };
-  if (first === ' ') return { key: { type: 'space' }, rest: buffer.slice(1) };
+  if (first === 0x09) return { key: { type: 'tab' }, rest: buffer.subarray(1) };
+  if (first === 0x7f || first === 0x08)
+    return { key: { type: 'backspace' }, rest: buffer.subarray(1) };
+  if (first === 0x20) return { key: { type: 'space' }, rest: buffer.subarray(1) };
 
-  const code = first.charCodeAt(0);
-  if (code < 32) {
-    if (code === 0) return { key: { type: 'ctrl', value: 'space' }, rest: buffer.slice(1) };
-    return { key: { type: 'ctrl', value: String.fromCharCode(code + 96) }, rest: buffer.slice(1) };
+  if (first < 32) {
+    return {
+      key: { type: 'ctrl', value: String.fromCharCode(first + 96) },
+      rest: buffer.subarray(1),
+    };
   }
 
-  // UTF-8 already decoded by the stream; take one Unicode scalar.
-  return { key: { type: 'char', value: first }, rest: buffer.slice(1) };
+  const utf8 = takeUtf8(buffer);
+  if (!utf8) return null;
+  return { key: { type: 'char', value: utf8.value }, rest: utf8.rest };
 }
 
-function parseEsc(buffer: string): ParseResult | null {
+/**
+ * Map a `readline` keypress. That is what Node already decodes on Windows,
+ * including the scan-code arrows that a UTF-8 `data` listener never sees.
+ */
+export function keyFromReadline(str: string | undefined, key: ReadlineKey): Key | null {
+  if (key.ctrl && key.name) {
+    if (key.name === 'c' || key.name === 'd' || key.name === 'q' || key.name === 'p') {
+      return { type: 'ctrl', value: key.name };
+    }
+    return { type: 'ctrl', value: key.name };
+  }
+
+  switch (key.name) {
+    case 'up':
+      return { type: 'up' };
+    case 'down':
+      return { type: 'down' };
+    case 'left':
+      return { type: 'left' };
+    case 'right':
+      return { type: 'right' };
+    case 'return':
+      return { type: 'enter' };
+    case 'escape':
+      return { type: 'esc' };
+    case 'backspace':
+      return { type: 'backspace' };
+    case 'tab':
+      return { type: 'tab', shift: key.shift };
+    case 'space':
+      return { type: 'space' };
+    default:
+      break;
+  }
+
+  if (str === ' ') return { type: 'space' };
+  if (str && str.length > 0 && !key.ctrl) return { type: 'char', value: str };
+  return null;
+}
+
+function parseEsc(buffer: Buffer): ParseResult | null {
   const second = buffer[1];
 
-  if (second === '[') {
+  if (second === 0x5b) {
+    const text = buffer.toString('latin1');
     // ESC is a control character; the sequence is what terminals send for arrows.
-    // eslint-disable-next-line no-control-regex
-    const csi = /^(\x1b\[)([0-9;]*)([A-Za-z~])/.exec(buffer);
-    if (!csi) {
-      // Incomplete CSI — wait for more, unless it has gone on too long to be one.
-      return buffer.length > 12 ? { key: { type: 'esc' }, rest: buffer.slice(1) } : null;
-    }
-    const params = csi[2] ?? '';
-    const cmd = csi[3]!;
-    const rest = buffer.slice(csi[0].length);
-    const key = csiKey(params, cmd);
-    return { key, rest };
+    // eslint-disable-next-line no-control-regex -- CSI starts with ESC
+    const csi = /^\x1b\[([0-9;]*)([A-Za-z~])/.exec(text);
+    if (!csi) return buffer.length > 12 ? { key: { type: 'esc' }, rest: buffer.subarray(1) } : null;
+    const params = csi[1] ?? '';
+    const cmd = csi[2]!;
+    return { key: csiKey(params, cmd), rest: buffer.subarray(csi[0].length) };
   }
 
-  // SS3 (application cursor keys): ESC O A
-  if (second === 'O' && buffer.length >= 3) {
-    const key = ss3Key(buffer[2]!);
-    return { key, rest: buffer.slice(3) };
+  if (second === 0x4f) {
+    if (buffer.length < 3) return null;
+    return { key: ss3Key(String.fromCharCode(buffer[2]!)), rest: buffer.subarray(3) };
   }
-  if (second === 'O') return null;
 
-  // Alt+key arrives as ESC then the key. Treat it as the key; we do not bind Alt.
   if (second !== undefined) {
-    const inner = parseKey(buffer.slice(1));
-    return inner ?? { key: { type: 'esc' }, rest: buffer.slice(1) };
+    const inner = parseKey(buffer.subarray(1));
+    return inner ?? { key: { type: 'esc' }, rest: buffer.subarray(1) };
   }
 
-  return { key: { type: 'esc' }, rest: buffer.slice(1) };
+  return { key: { type: 'esc' }, rest: buffer.subarray(1) };
 }
 
 function csiKey(params: string, cmd: string): Key {
@@ -109,7 +163,39 @@ function ss3Key(cmd: string): Key {
   return { type: 'esc' };
 }
 
-/** True when the buffer is only an ESC that might still become a sequence. */
-export function isEscPrefix(buffer: string): boolean {
-  return buffer === '\x1b' || buffer === '\x1b[' || buffer === '\x1bO';
+function windowsScan(code: number): Key | undefined {
+  if (code === 0x48) return { type: 'up' };
+  if (code === 0x50) return { type: 'down' };
+  if (code === 0x4b) return { type: 'left' };
+  if (code === 0x4d) return { type: 'right' };
+  if (code === 0x53) return { type: 'backspace' };
+  return undefined;
+}
+
+export function isEscPrefix(input: string | Buffer | Uint8Array): boolean {
+  const buffer = toBuffer(input);
+  if (buffer.length === 1 && (buffer[0] === 0x1b || buffer[0] === 0xe0 || buffer[0] === 0x00)) {
+    return true;
+  }
+  if (buffer.length === 2 && buffer[0] === 0x1b && (buffer[1] === 0x5b || buffer[1] === 0x4f)) {
+    return true;
+  }
+  return false;
+}
+
+function toBuffer(input: string | Buffer | Uint8Array): Buffer {
+  if (typeof input === 'string') return Buffer.from(input, 'latin1');
+  return Buffer.isBuffer(input) ? input : Buffer.from(input);
+}
+
+function takeUtf8(buffer: Buffer): { value: string; rest: Buffer } | null {
+  const first = buffer[0]!;
+  const needed = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : first < 0xf8 ? 4 : 1;
+  if (buffer.length < needed) return null;
+  const slice = buffer.subarray(0, needed);
+  const value = slice.toString('utf8');
+  if (value === '\uFFFD' && first >= 0x80) {
+    return { value: String.fromCharCode(first), rest: buffer.subarray(1) };
+  }
+  return { value, rest: buffer.subarray(needed) };
 }

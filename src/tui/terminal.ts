@@ -1,4 +1,5 @@
-import { isEscPrefix, parseKey, type Key } from './input.js';
+import readline from 'node:readline';
+import { keyFromReadline, type Key } from './input.js';
 
 /**
  * The only thing the TUI asks of a screen. A real TTY implements this with
@@ -15,17 +16,9 @@ export interface Terminal {
   canRun(): boolean;
 }
 
-const ESC_WAIT_MS = 50;
-
 export class NodeTerminal implements Terminal {
-  private buffer = '';
-  private waiters: Array<(chunk: string | null) => void> = [];
-  private onData = (chunk: string | Buffer) => {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-    const waiter = this.waiters.shift();
-    if (waiter) waiter(text);
-    else this.buffer += text;
-  };
+  private keys: Key[] = [];
+  private waiters: Array<(key: Key | null) => void> = [];
   private resizeHandler: (() => void) | undefined;
   private onResizeEvent = () => this.resizeHandler?.();
   private restored = true;
@@ -48,13 +41,13 @@ export class NodeTerminal implements Terminal {
 
   enter(): void {
     if (!this.canRun()) return;
-    process.stdin.setEncoding('utf8');
+    // readline already knows Windows scan-code arrows. A UTF-8 `data`
+    // listener does not — 0xE0 is not a character, so the key vanishes.
+    readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode?.(true);
     process.stdin.resume();
-    process.stdin.on('data', this.onData);
+    process.stdin.on('keypress', this.onKeypress);
     process.stdout.on('resize', this.onResizeEvent);
-    // Alt-screen, hide cursor, clear. OSC 12 tints the cursor with the theme
-    // accent so an active foster session is visible the way Grok's is.
     process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H');
     this.restored = false;
     process.on('exit', this.leave);
@@ -65,7 +58,7 @@ export class NodeTerminal implements Terminal {
   leave = (): void => {
     if (this.restored) return;
     this.restored = true;
-    process.stdin.off('data', this.onData);
+    process.stdin.off('keypress', this.onKeypress);
     process.stdout.off('resize', this.onResizeEvent);
     process.off('exit', this.leave);
     process.off('SIGINT', this.sigint);
@@ -84,6 +77,14 @@ export class NodeTerminal implements Terminal {
     if (waiter) waiter(null);
   };
 
+  private onKeypress = (str: string | undefined, key: readline.Key): void => {
+    const mapped = keyFromReadline(str, key);
+    if (!mapped) return;
+    const waiter = this.waiters.shift();
+    if (waiter) waiter(mapped);
+    else this.keys.push(mapped);
+  };
+
   onResize(handler: () => void): () => void {
     this.resizeHandler = handler;
     return () => {
@@ -91,50 +92,10 @@ export class NodeTerminal implements Terminal {
     };
   }
 
-  async readKey(): Promise<Key | null> {
-    for (;;) {
-      const parsed = parseKey(this.buffer);
-      if (parsed) {
-        this.buffer = parsed.rest;
-        return parsed.key;
-      }
-      if (isEscPrefix(this.buffer)) {
-        const more = await this.waitChunk(ESC_WAIT_MS);
-        if (more === null && this.buffer.startsWith('\x1b')) {
-          this.buffer = this.buffer.slice(1);
-          return { type: 'esc' };
-        }
-        if (more) this.buffer += more;
-        continue;
-      }
-      const chunk = await this.waitChunk();
-      if (chunk === null)
-        return this.buffer.length ? (parseKey(this.buffer + '\x1b')?.key ?? null) : null;
-      this.buffer += chunk;
-    }
-  }
-
-  private waitChunk(timeoutMs?: number): Promise<string | null> {
-    return new Promise((resolve) => {
-      if (this.buffer.length > 0 && timeoutMs === undefined) {
-        // Data already arrived while we were painting.
-        resolve('');
-        return;
-      }
-      const timer =
-        timeoutMs === undefined
-          ? undefined
-          : setTimeout(() => {
-              const i = this.waiters.indexOf(onChunk);
-              if (i >= 0) this.waiters.splice(i, 1);
-              resolve(null);
-            }, timeoutMs);
-      const onChunk = (chunk: string | null) => {
-        if (timer) clearTimeout(timer);
-        resolve(chunk);
-      };
-      this.waiters.push(onChunk);
-    });
+  readKey(): Promise<Key | null> {
+    const next = this.keys.shift();
+    if (next) return Promise.resolve(next);
+    return new Promise((resolve) => this.waiters.push(resolve));
   }
 }
 

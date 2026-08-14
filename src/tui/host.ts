@@ -287,6 +287,15 @@ export class TuiHost implements Ui {
       return undefined;
     }
     if (key.type === 'up' || key.type === 'down') {
+      // The old menu was a list; arrows moved it. An empty prompt that
+      // swallows arrows feels broken. Opening `/` puts the same list on
+      // screen; the first stroke only opens, the next ones move.
+      if (this.promptText.length === 0) {
+        this.promptText = '/';
+        const items = this.slashItems();
+        this.slashIndex = key.type === 'down' ? 0 : Math.max(0, items.length - 1);
+        return undefined;
+      }
       const items = this.slashItems();
       if (items.length === 0) return undefined;
       this.slashIndex =
@@ -305,8 +314,8 @@ export class TuiHost implements Ui {
   }
 
   private slashItems(): Command[] {
-    if (!this.promptText.startsWith('/')) return [];
-    return filterCommands(this.promptText);
+    if (this.promptText.length > 0 && !this.promptText.startsWith('/')) return [];
+    return filterCommands(this.promptText || '/');
   }
 
   private takeKey(): Promise<Key | null> {
