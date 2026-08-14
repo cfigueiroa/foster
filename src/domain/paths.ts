@@ -157,9 +157,14 @@ export interface StoreIdentity {
 }
 
 export function storeIdentity(root: string, env: NodeJS.ProcessEnv = process.env): StoreIdentity {
+  const resolved = path.resolve(root);
   const candidates = candidateStoreRoots(env);
-  const isDefault = candidates.some((dir) => samePath(dir, root));
-  return { roots: isDefault ? candidates : [root], isDefault };
+  const key = directoryKey(resolved);
+  const aliases = candidates.filter((dir) => {
+    if (samePath(dir, resolved)) return true;
+    return key !== undefined && directoryKey(dir) === key;
+  });
+  return { roots: aliases.length > 0 ? aliases : [resolved], isDefault: aliases.length > 0 };
 }
 
 /**

@@ -3,6 +3,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    setupFiles: ['tests/setup.ts'],
     // Tests build synthetic stores in temp dirs; they must never touch a real Claude install.
     environment: 'node',
     coverage: {

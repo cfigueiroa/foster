@@ -109,6 +109,24 @@ describe('findRestorable', () => {
     expect(findRestorable(store, env)).toEqual([]);
   });
 
+  it('skips a conversation a Cowork card still points at', () => {
+    tombstone([DELETED_CLI]);
+    transcript(DELETED_CLI, [{ type: 'user', cwd: '/work/project' }]);
+    const dir = path.join(
+      store.agentSessionsDir,
+      NEW_ACCOUNT.accountUuid,
+      NEW_ACCOUNT.organizationUuid,
+    );
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `local_${DELETED_CLI}.json`),
+      JSON.stringify({ sessionId: `local_${DELETED_CLI}`, cliSessionId: DELETED_CLI }),
+      'utf8',
+    );
+
+    expect(findRestorable(store, env)).toEqual([]);
+  });
+
   it('reads the deletion time from the marker', () => {
     tombstone([DELETED_CLI], 1_699_999_000_000);
     transcript(DELETED_CLI, [{ type: 'user', cwd: '/work/project' }]);

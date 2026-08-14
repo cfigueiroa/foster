@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { tombstoneFileName } from '../domain/naming.js';
 import { layoutFor, storeRootOfCopy } from '../domain/paths.js';
 import type { ActiveFostering } from '../ledger/types.js';
+import { readCliSessionId } from '../store/sessionFile.js';
 import { isDirectory, readTimestampFile } from '../util/fs.js';
 
 /**
@@ -94,10 +95,5 @@ export function inspectCopy(fostering: ActiveFostering): CopyState {
  * mid-write, or one this cannot parse, must not be mistaken for a repurposed one.
  */
 function conversationOf(copyPath: string): string | undefined {
-  try {
-    const data = JSON.parse(readFileSync(copyPath, 'utf8')) as { cliSessionId?: unknown };
-    return typeof data.cliSessionId === 'string' ? data.cliSessionId : undefined;
-  } catch {
-    return undefined;
-  }
+  return readCliSessionId(copyPath);
 }

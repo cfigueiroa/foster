@@ -1,9 +1,14 @@
 import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import type { AccountSighting, KnownIdentity, ResolvedIdentity } from '../domain/identity.js';
+import type { AccountProfile } from '../domain/profile.js';
 import type { StoreLayout } from '../domain/types.js';
-import { readConfig } from '../store/config.js';
-import { readProfileFromResponseCache, type AccountProfile } from './profile.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
+import { readConfig } from '../store/config.js';
+import { readProfileFromResponseCache } from './profile.js';
+
+export type CachedIdentity = AccountSighting;
+export type { ResolvedIdentity };
 
 /**
  * The human name behind an account UUID, read from the app's own cache.
@@ -33,28 +38,6 @@ import { isDirectory, safeReaddir } from '../util/fs.js';
  * that saw it, so a name is available for an account you are not in.
  */
 
-export interface CachedIdentity {
-  email?: string;
-  name?: string;
-  /** The subscription tier as the app would name it — "Max 20x", "Pro" — when the cache says. */
-  plan?: string;
-  /**
-   * Everything else the account's own profile said, when the profile itself was
-   * found rather than reconstructed from fragments. Absent for an identity that
-   * came from the crude byte search, which can only ever recover the three
-   * fields above, and for the CLI clients, whose config keeps no more than that.
-   */
-  profile?: AccountProfile;
-}
-
-/** Where each part of an identity came from, so a stale answer can say so. */
-export interface ResolvedIdentity extends CachedIdentity {
-  /** True when nothing was in the cache and every part came from the ledger. */
-  remembered?: boolean;
-  /** When the remembered part was last confirmed, for anything not read fresh. */
-  seenAt?: number;
-}
-
 /**
  * Whether a sighting is worth writing down.
  *
@@ -67,7 +50,7 @@ export interface ResolvedIdentity extends CachedIdentity {
  */
 export function worthRecording(
   cached: CachedIdentity | undefined,
-  known: { email?: string; name?: string; plan?: string; profile?: AccountProfile } | undefined,
+  known: AccountSighting | undefined,
 ): boolean {
   if (!cached?.email && !cached?.name && !cached?.plan && !cached?.profile) return false;
   if (!known) return true;
@@ -111,9 +94,7 @@ function changedProfileField(fresh: AccountProfile | undefined, known: AccountPr
  */
 export function resolveIdentity(
   cached: CachedIdentity | undefined,
-  known:
-    | { email?: string; name?: string; plan?: string; profile?: AccountProfile; seenAt: number }
-    | undefined,
+  known: KnownIdentity | undefined,
 ): ResolvedIdentity | undefined {
   if (!cached && !known) return undefined;
 
