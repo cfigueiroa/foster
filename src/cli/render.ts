@@ -234,7 +234,7 @@ function usageBar(percent: number, severity: string | undefined): string {
  * "resets in 1h 16m (18:50)" is what the app shows and what someone waiting on a
  * limit actually wants; a bare ISO timestamp makes them do the subtraction.
  */
-function untilWhen(iso: string, now: number): string {
+export function untilWhen(iso: string, now: number = Date.now()): string {
   const at = Date.parse(iso);
   if (Number.isNaN(at)) return iso;
   const minutes = Math.round((at - now) / 60_000);
