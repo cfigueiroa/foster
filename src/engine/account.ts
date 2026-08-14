@@ -3,6 +3,28 @@ import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { readConfig } from '../store/config.js';
 
 /**
+ * Resolves an account identifier that may be an abbreviated prefix, the way the
+ * `--to` and `--from` flags do, so `foster label <prefix> "name"` records the
+ * name against the account the prefix names rather than against the prefix
+ * itself. A prefix matching exactly one account on disk becomes that account's
+ * full UUID; an ambiguous prefix is refused rather than guessed at. An id that
+ * matches nothing here is returned untouched: `label` can name an account that
+ * is not present on this machine — an old one, or another machine's — which is
+ * the `foster label 00000000 "…"` case, and there is nothing to resolve it to.
+ */
+function resolveAccountPrefix(id: string, accountUuids: string[]): string {
+  const needle = id.toLowerCase();
+  const matches = [...new Set(accountUuids.filter((uuid) => uuid.startsWith(needle)))];
+  if (matches.length > 1) {
+    throw new Error(
+      `"${id}" is ambiguous: it matches ${matches.length} accounts.\n` +
+        matches.map((uuid) => `  ${uuid}`).join('\n'),
+    );
+  }
+  return matches[0] ?? id;
+}
+
+/**
  * The account the app currently populates its sidebar from.
  *
  * The organization is only discoverable from a directory name, so a brand-new
@@ -49,7 +71,7 @@ export function resolveLabelArgs(
   currentAccountUuid: string | undefined,
 ): { accountUuid: string; label: string } {
   if (first !== undefined && second !== undefined) {
-    return { accountUuid: first, label: second };
+    return { accountUuid: resolveAccountPrefix(first, accountUuids), label: second };
   }
 
   if (first === undefined) {
