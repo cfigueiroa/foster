@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
+import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { DiscoveredSession } from '../domain/types.js';
 import type { AccountOverview } from '../store/accounts.js';
@@ -472,5 +473,26 @@ export function outcomeLine(outcome: Outcome): string {
     failed: pc.red('x'),
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
-  return `  ${marks[outcome.status]} ${outcome.title}${detail}`;
+  const line = `  ${marks[outcome.status]} ${outcome.title}${detail}`;
+  const standing = outcome.standing ? standingLine(outcome.standing) : '';
+  return standing ? `${line}\n${standing}` : line;
+}
+
+/**
+ * What refusing the second row costs, when it costs anything.
+ *
+ * Only printed for the half the account is *behind*. A sweep offering the branch
+ * that stopped is right to skip it and has nothing to add, and a line under every
+ * refusal would bury the handful that matter — one store had eight forks among
+ * five hundred conversations.
+ */
+function standingLine(standing: BranchStanding): string {
+  if (!standing.ahead) return '';
+  return [
+    pc.yellow(
+      `      the row here holds ${standing.hereOnly} record(s) this one does not; ` +
+        `this one holds ${standing.theirOnly} it does not`,
+    ),
+    pc.dim(`      foster consolidate --session ${shortId(standing.here)} --yes`),
+  ].join('\n');
 }

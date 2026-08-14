@@ -37,6 +37,12 @@ import {
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { assertPurgeConfirmed, purgeConversations, summarisePurge } from '../engine/purge.js';
 import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
+import {
+  DEFAULT_MAX_LOST,
+  planConsolidation,
+  type ConsolidationEntry,
+} from '../engine/consolidate.js';
+import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import {
@@ -53,11 +59,12 @@ import { Ledger } from '../ledger/log.js';
 import {
   copySessionIds,
   listActive,
+  listRepointed,
   project,
   selectByTarget,
   whereCopiesAre,
 } from '../ledger/project.js';
-import type { LedgerEvent } from '../ledger/types.js';
+import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
@@ -700,11 +707,25 @@ sourceOptions(
     sessionRegistryRoots(process.env),
   );
 
+  // Refusing a second row for one piece of work is right. Leaving the account on
+  // the half that stopped without saying so was not — and a per-line note scrolls
+  // off the screen on a sweep of a few hundred, so it is counted here too.
+  const behind = outcomes.filter((outcome) => outcome.standing?.ahead).length;
+  const forkNote =
+    behind === 0
+      ? ''
+      : pc.yellow(
+          `\n${behind} of the skipped ${behind === 1 ? 'is' : 'are'} the half of a fork that carried on; ` +
+            `this account is showing the half that stopped.\n` +
+            'foster consolidate lists them with their record counts, and needs the app closed.',
+        );
+
   if (dryRun) {
     console.log(
       pc.bold(`\nDry run: ${counts.fostered} would be fostered, ${counts.skipped} skipped.`),
     );
     if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
+    if (forkNote) console.log(forkNote);
     console.log(pc.dim('Re-run with --yes to write.'));
     return;
   }
@@ -713,6 +734,7 @@ sourceOptions(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
   if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
+  if (forkNote) console.log(forkNote);
   if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
     console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
   }
@@ -1005,6 +1027,299 @@ ${continuedNote(continued.length)}`),
       );
     await finish(store, Boolean(opts.restart));
   });
+
+program
+  .command('consolidate')
+  .description('one row per piece of work, on the branch that carried on')
+  .option('--to <accountUuid>', 'only cards in this account')
+  .option('--session <id...>', 'only forks involving these conversations or cards')
+  .option(
+    '--max-lost <n>',
+    'leave a fork alone when the halves not kept hold more records than this',
+    String(DEFAULT_MAX_LOST),
+  )
+  .option('--undo', 'put repointed cards back where the app had them')
+  .option('--restart', 'restart Claude Desktop afterwards')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      to?: string;
+      session?: string[];
+      maxLost?: string;
+      undo?: boolean;
+      restart?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (opts.undo) {
+      await undoConsolidation(store, ledger, opts, dryRun);
+      return;
+    }
+
+    const maxLost = Number(opts.maxLost);
+    if (!Number.isInteger(maxLost) || maxLost < 0) {
+      throw new Error(`--max-lost wants a whole number of records, not "${opts.maxLost}".`);
+    }
+
+    const entries = planConsolidation({
+      store,
+      ledger,
+      maxLost,
+      ...(opts.to === undefined ? {} : { to: opts.to }),
+      ...(opts.session === undefined ? {} : { sessionIds: opts.session }),
+    });
+    const acting = entries.filter((entry) => entry.status === 'consolidate');
+    const diverged = entries.filter((entry) => entry.status === 'diverged');
+    const appMade = entries.filter((entry) => entry.status === 'app-made');
+
+    if (opts.json) {
+      print(entries.filter((entry) => entry.status !== 'settled').map(consolidationJson));
+      return;
+    }
+
+    if (acting.length === 0 && diverged.length === 0 && appMade.length === 0) {
+      console.log('Nothing is forked here — every conversation has one card per account.');
+      return;
+    }
+
+    for (const entry of acting) console.log(consolidationLines(entry).join('\n'));
+    for (const entry of diverged) console.log(divergedLines(entry).join('\n'));
+    for (const entry of appMade) console.log(appMadeLines(entry).join('\n'));
+
+    const rows = acting.length;
+    const moves = acting.filter((entry) => entry.repoint).length;
+    const drops = acting.reduce((sum, entry) => sum + entry.remove.length, 0);
+
+    if (dryRun) {
+      console.log(
+        pc.bold(
+          `\nDry run: ${rows} ${rows === 1 ? 'row' : 'rows'} would be consolidated ` +
+            `(${moves} moved, ${drops} removed).`,
+        ),
+      );
+      if (diverged.length > 0) {
+        console.log(pc.dim(`${diverged.length} left alone — raise --max-lost to include them.`));
+      }
+      if (appMade.length > 0) {
+        console.log(pc.dim(`${appMade.length} left to the app — see above.`));
+      }
+      console.log(pc.dim('Re-run with --yes to write. Claude Desktop has to be closed.'));
+      return;
+    }
+
+    // Repoint before removing. Both want a closed app, and doing the write that
+    // keeps a row before the one that drops a row means a refusal half-way leaves
+    // more rows than it should rather than fewer.
+    const moved = repointCards(
+      acting.flatMap((entry) => (entry.repoint ? [entry.repoint] : [])),
+      { store, ledger },
+    );
+    const removed = returnFosterings(
+      acting.flatMap((entry) => entry.remove),
+      { store, ledger },
+    );
+
+    for (const outcome of moved) console.log(repointLine(outcome));
+    for (const outcome of removed) console.log(outcomeLine(outcome));
+
+    const counts = summariseOutcomes(removed);
+    const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
+    console.log(
+      pc.bold(
+        `\n${moved.filter((o) => o.status === 'repointed').length} moved, ` +
+          `${counts.returned} removed, ${failed} failed.`,
+      ),
+    );
+    if (diverged.length > 0) {
+      console.log(pc.dim(`${diverged.length} fork(s) left alone — see above.`));
+    }
+    if (appMade.length > 0) {
+      console.log(pc.dim(`${appMade.length} left to the app — see above.`));
+    }
+    console.log(pc.dim('Undo the moves with: foster consolidate --undo --yes'));
+    await finish(store, Boolean(opts.restart));
+  });
+
+async function undoConsolidation(
+  store: StoreLayout,
+  ledger: Ledger,
+  opts: { to?: string; session?: string[]; restart?: boolean; json?: boolean },
+  dryRun: boolean,
+): Promise<void> {
+  let cards = listRepointed(project(ledger.read()));
+  if (opts.to !== undefined) {
+    const to = opts.to;
+    cards = cards.filter((card) => card.target.accountUuid.startsWith(to));
+  }
+
+  // Narrowing the undo has to narrow it. Reading only --to meant a run that named
+  // one fork put every card foster had ever moved back where it started, silently
+  // reversing consolidations the user meant to keep. Matched against the card and
+  // both ends of its move, which is every id the run that made it printed.
+  if (opts.session?.length) {
+    const named = opts.session;
+    const matches = (card: RepointedCard): boolean =>
+      named.some(
+        (prefix) =>
+          card.sessionId.startsWith(prefix) ||
+          bareSessionId(card.sessionId).startsWith(prefix) ||
+          card.from.startsWith(prefix) ||
+          card.to.startsWith(prefix),
+      );
+    const hits = cards.filter(matches);
+    if (hits.length === 0) {
+      throw new Error(`No repointed card matches ${named.join(', ')}.`);
+    }
+    cards = hits;
+  }
+
+  if (opts.json) {
+    print(cards);
+    return;
+  }
+
+  if (cards.length === 0) {
+    console.log('No cards are repointed — there is nothing to put back.');
+    return;
+  }
+
+  const outcomes = repointCards(undoRequests(cards), { store, ledger, dryRun });
+  for (const outcome of outcomes) console.log(repointLine(outcome));
+
+  if (dryRun) {
+    console.log(pc.bold(`\nDry run: ${outcomes.length} would be put back.`));
+    console.log(pc.dim('Re-run with --yes to write. Claude Desktop has to be closed.'));
+    return;
+  }
+
+  const back = outcomes.filter((outcome) => outcome.status === 'repointed').length;
+  console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+  await finish(store, Boolean(opts.restart));
+}
+
+/** Enough of a conversation id to recognise it, which is all these lines need. */
+function shortConversation(id: string): string {
+  return id.slice(0, 8);
+}
+
+function consolidationLines(entry: ConsolidationEntry): string[] {
+  const tip = entry.fork.branches[0]!;
+  const lines = [`${pc.green('+')} ${entry.title}  ${pc.dim(shortId(entry.account.accountUuid))}`];
+
+  if (entry.repoint) {
+    lines.push(
+      `    ${pc.dim(shortId(entry.repoint.sessionId))}  ` +
+        `${shortConversation(entry.repoint.from)} → ${pc.bold(shortConversation(entry.repoint.to))}`,
+    );
+  } else {
+    lines.push(`    already on ${pc.bold(shortConversation(tip.cliSessionId))}`);
+  }
+
+  // The trade, on the line that proposes it. "Keeps 2802, hides 105" is the whole
+  // decision, and printing only the first half would be an advertisement.
+  const hides = entry.hides;
+  lines.push(
+    pc.dim(
+      `    keeps ${tip.total} records` +
+        (hides > 0
+          ? `, hides ${hides} the other ${entry.fork.branches.length > 2 ? 'halves hold' : 'half holds'}`
+          : ''),
+    ),
+  );
+
+  if (entry.remove.length > 0) {
+    lines.push(
+      pc.dim(
+        `    removes ${entry.remove.length} surplus cop${entry.remove.length === 1 ? 'y' : 'ies'}`,
+      ),
+    );
+  }
+  for (const kept of entry.keptApart) {
+    lines.push(
+      pc.yellow(
+        `    leaves ${shortId(kept.sessionId)} on ${shortConversation(kept.cliSessionId)} — the app wrote that card`,
+      ),
+    );
+  }
+
+  return lines;
+}
+
+/**
+ * A pair foster can see and must not touch.
+ *
+ * Both rows were written by the app, so neither is foster's to remove and the
+ * one that would be kept is already where it should be. Printed with the reason
+ * rather than counted as work, and told plainly whose the decision is.
+ */
+function appMadeLines(entry: ConsolidationEntry): string[] {
+  return [
+    `${pc.dim('·')} ${entry.title}  ${pc.dim(shortId(entry.account.accountUuid))}`,
+    ...entry.keptApart.map((kept) =>
+      pc.dim(`    also on ${shortConversation(kept.cliSessionId)} as ${shortId(kept.sessionId)}`),
+    ),
+    pc.dim('    the app wrote both cards, so foster leaves them — delete the spare row there'),
+  ];
+}
+
+function divergedLines(entry: ConsolidationEntry): string[] {
+  const held = entry.fork.branches
+    .map((branch) => `${shortConversation(branch.cliSessionId)} holds ${branch.only}`)
+    .join(', ');
+  return [
+    `${pc.dim('·')} ${entry.title}  ${pc.dim(shortId(entry.account.accountUuid))}`,
+    pc.dim(`    left alone: ${held} records no other half has`),
+    pc.dim(
+      `    one row would hide ${entry.fork.lost} of them — --max-lost ${entry.fork.lost} to do it anyway`,
+    ),
+  ];
+}
+
+function repointLine(outcome: RepointOutcome): string {
+  const mark =
+    outcome.status === 'repointed'
+      ? pc.green('+')
+      : outcome.status === 'failed'
+        ? pc.red('!')
+        : pc.dim('·');
+  const where =
+    outcome.from === undefined
+      ? shortConversation(outcome.to)
+      : `${shortConversation(outcome.from)} → ${shortConversation(outcome.to)}`;
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${outcome.title}  ${pc.dim(where)}${detail}`;
+}
+
+function consolidationJson(entry: ConsolidationEntry): Record<string, unknown> {
+  return {
+    account: entry.account,
+    title: entry.title,
+    status: entry.status,
+    root: entry.fork.root,
+    // Both numbers, because they answer different questions: `lost` is what the
+    // fork holds outside its tip anywhere and is what --max-lost is measured
+    // against; `hides` is what this account would stop showing.
+    lost: entry.fork.lost,
+    hides: entry.hides,
+    branches: entry.fork.branches,
+    repoint: entry.repoint
+      ? {
+          path: entry.repoint.path,
+          from: entry.repoint.from,
+          to: entry.repoint.to,
+          native: entry.repoint.native,
+        }
+      : null,
+    remove: entry.remove.map((fostering) => fostering.copySessionId),
+    keptApart: entry.keptApart,
+  };
+}
 
 /**
  * Two rows for one conversation, and who put them there.

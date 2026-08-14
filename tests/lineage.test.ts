@@ -1,15 +1,16 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findDuplicates } from '../src/engine/duplicates.js';
-import { fosterSessions } from '../src/engine/executor.js';
+import { FOLLOWED_BRANCH, fosterSessions } from '../src/engine/executor.js';
 import { lineageAt } from '../src/engine/lineage.js';
 import { Ledger } from '../src/ledger/log.js';
-import { listActive, project } from '../src/ledger/project.js';
+import { listActive, listRepointed, project } from '../src/ledger/project.js';
+import { selectReturnTargets } from '../src/ops/active.js';
 import { conversationRoot } from '../src/store/transcripts.js';
 import { scanAccount } from '../src/store/scanner.js';
-import type { StoreLayout } from '../src/domain/types.js';
+import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 /**
@@ -26,6 +27,8 @@ const ROOT = '00000000-0000-4000-8000-0000000000e0';
 const ORIGINAL = '00000000-0000-4000-8000-0000000000e1';
 const BRANCH = '00000000-0000-4000-8000-0000000000e2';
 const UNRELATED = '00000000-0000-4000-8000-0000000000e3';
+/** A second fork of the same work, for the case where a card is moved twice. */
+const SECOND = '00000000-0000-4000-8000-0000000000f2';
 
 /** A config directory with transcripts in it, as CLAUDE_CONFIG_DIR points at. */
 function transcripts(files: Record<string, string[]>): NodeJS.ProcessEnv {
@@ -45,12 +48,28 @@ function record(uuid: string): string {
   return JSON.stringify({ uuid, type: 'user', timestamp: '2026-08-06T05:12:01.370Z' });
 }
 
-/** One conversation and the branch the app forked out of it. */
+/**
+ * One conversation and the branch the app forked out of it.
+ *
+ * The branch carries the history it was given and then two records of its own,
+ * while the original got one more after the fork — the shape a real one has, and
+ * the only shape in which "which half carried on?" has an answer. Both halves
+ * holding one record each would be a genuine tie, which is a different test.
+ */
 function forked(): NodeJS.ProcessEnv {
   return transcripts({
     [ORIGINAL]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000e4')],
-    [BRANCH]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000e5')],
+    [BRANCH]: [
+      META,
+      record(ROOT),
+      record('00000000-0000-4000-8000-0000000000e5'),
+      record('00000000-0000-4000-8000-0000000000ea'),
+      record('00000000-0000-4000-8000-0000000000eb'),
+    ],
     [UNRELATED]: [META, record('00000000-0000-4000-8000-0000000000e6')],
+    // No card points at this one, so it is invisible to every weighing until
+    // something moves a card onto it.
+    [SECOND]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000f3')],
   });
 }
 
@@ -205,6 +224,242 @@ describe('fostering a branch', () => {
   });
 });
 
+/**
+ * What the app does to a copy it cannot continue: it writes the history into a
+ * new transcript and moves this card onto it.
+ *
+ * The marker goes with the save, which is the detail that makes this worth
+ * simulating rather than asserting about. The app rebuilds a session from a fixed
+ * list of fields, so `_foster` does not survive — and a file read afterwards
+ * cannot say who wrote it. Only the ledger can.
+ */
+function appBranches(copyPath: string, to: string): void {
+  const data = JSON.parse(readFileSync(copyPath, 'utf8')) as CodeSessionData;
+  delete data._foster;
+  writeFileSync(copyPath, JSON.stringify({ ...data, cliSessionId: to }), 'utf8');
+}
+
+describe('a copy the app branched', () => {
+  /** One card in the destination, holding the original conversation. */
+  function fostered(): {
+    store: StoreLayout;
+    ledger: Ledger;
+    projectsDirs: string[];
+    copyPath: string;
+  } {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f1', cliSessionId: ORIGINAL }),
+    );
+    const ledger = ledgerIn();
+    const projectsDirs = projects(forked());
+    const first = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+    return { store, ledger, projectsDirs, copyPath: first[0]!.copyPath! };
+  }
+
+  it('is followed rather than replaced by a second card', () => {
+    const { store, ledger, projectsDirs, copyPath } = fostered();
+    appBranches(copyPath, BRANCH);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again[0]!.status).toBe('skipped');
+    expect(again[0]!.detail).toBe(FOLLOWED_BRANCH);
+    // The whole point. Re-minting here is what turned one piece of work into two
+    // rows in one sidebar, in the run that was meant to tidy up.
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+    expect(listActive(project(ledger.read()))[0]!.cliSessionId).toBe(BRANCH);
+  });
+
+  it('is not offered back as something foster moved', () => {
+    const { ledger, projectsDirs, store, copyPath } = fostered();
+    appBranches(copyPath, BRANCH);
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // The app moved this card, not foster. `consolidate --undo` works from this
+    // list, and offering to put back a move foster never made would promise
+    // something it has no business promising.
+    expect(listRepointed(project(ledger.read()))).toHaveLength(0);
+  });
+
+  it('settles: sweeping again adds nothing', () => {
+    const { store, ledger, projectsDirs, copyPath } = fostered();
+    appBranches(copyPath, BRANCH);
+
+    for (let run = 0; run < 3; run++) {
+      fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+        store,
+        ledger,
+        target: NEW_ACCOUNT,
+        projectsDirs,
+      });
+    }
+
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
+    expect(listActive(project(ledger.read()))).toHaveLength(1);
+  });
+
+  it('is left out of a bulk return, and still reachable by name', () => {
+    const { store, ledger, projectsDirs, copyPath } = fostered();
+    appBranches(copyPath, BRANCH);
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // The card is foster's file, so removing it is within the rules — but what it
+    // holds is a conversation born from opening that row, with no other card
+    // anywhere. A sweep-wide return would take the work out of every sidebar and
+    // leave nothing for `restore`, which only sees what the *app* deleted.
+    expect(selectReturnTargets(store, ledger).selected).toHaveLength(0);
+
+    // `return --session` names the origin session, as its own help says.
+    const originSessionId = listActive(project(ledger.read()))[0]!.originSessionId;
+    expect(
+      selectReturnTargets(store, ledger, { sessionIds: [originSessionId] }).selected,
+    ).toHaveLength(1);
+  });
+
+  it('ends foster’s claim to undo a move the app has overtaken', () => {
+    const { store, ledger, projectsDirs, copyPath } = fostered();
+    const copy = listActive(project(ledger.read()))[0]!;
+
+    // Consolidate moves the card once, which is a move foster can put back.
+    ledger.append({
+      kind: 'card_repointed',
+      sessionId: copy.copySessionId,
+      target: NEW_ACCOUNT,
+      path: copyPath,
+      from: ORIGINAL,
+      to: BRANCH,
+      native: false,
+    });
+    appBranches(copyPath, BRANCH);
+    expect(listRepointed(project(ledger.read()))).toHaveLength(1);
+
+    // Then the app forks it again and takes the card somewhere foster never put
+    // it. "Put it back where the app had it" no longer describes anything foster
+    // is responsible for, and doing it would drop the newest branch's only card.
+    appBranches(copyPath, SECOND);
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(listRepointed(project(ledger.read()))).toHaveLength(0);
+  });
+
+  it('is replaced when the card holds unrelated work', () => {
+    const { store, ledger, projectsDirs, copyPath } = fostered();
+    appBranches(copyPath, UNRELATED);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // Not a branch of anything foster brought: the conversation it was fostered
+    // for has no card here at all, and writing one is the whole command.
+    expect(again[0]!.status).toBe('fostered');
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(2);
+  });
+});
+
+describe('which half of a fork the account is on', () => {
+  it('is counted when the half turned away is the one that carried on', () => {
+    const { store, ledger } = branchWaiting();
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+    });
+
+    // The branch holds three records the original never got; the original holds
+    // one the branch never got. Refusing it is still right — what was missing is
+    // any way to find out that the row being kept is the one that stopped.
+    expect(outcomes[0]!.standing).toEqual({
+      here: ORIGINAL,
+      theirOnly: 3,
+      hereOnly: 1,
+      ahead: true,
+    });
+  });
+
+  it('says so without alarm when the account already has the better half', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f5', cliSessionId: BRANCH }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f6', cliSessionId: ORIGINAL }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+    });
+
+    expect(outcomes[0]!.standing!.ahead).toBe(false);
+  });
+
+  it('is left off a session the account simply already has', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f7', cliSessionId: ORIGINAL }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f8', cliSessionId: ORIGINAL }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+    });
+
+    // Two cards for one conversation open the same transcript. There is no half
+    // to be on the wrong side of, and weighing would read whole transcripts to
+    // say nothing.
+    expect(outcomes[0]!.standing).toBeUndefined();
+  });
+});
+
 describe('findDuplicates', () => {
   it('reports a branch pair apart from an exact one', () => {
     const store = makeStore();
@@ -258,14 +513,19 @@ describe('findDuplicates', () => {
     for (const card of scanAccount(store, OLD_ACCOUNT)) {
       fosterSessions([card], { store, ledger, target: NEW_ACCOUNT, projectsDirs, explicit: true });
     }
-    const branchFile = path.join(
+    // The half that stopped, given the newer file. This is not a contrivance: the
+    // app rewrites its bookkeeping into a transcript whenever the card is opened,
+    // so the stale half gets a fresh mtime from being looked at — and the rule
+    // that used to decide this read exactly that timestamp, which meant clicking
+    // the wrong row was enough to make foster keep it.
+    const staleFile = path.join(
       env.CLAUDE_CONFIG_DIR!,
       'projects',
       '-workspace-project',
-      `${BRANCH}.jsonl`,
+      `${ORIGINAL}.jsonl`,
     );
     const later = new Date(Date.now() + 60_000);
-    utimesSync(branchFile, later, later);
+    utimesSync(staleFile, later, later);
 
     const active = listActive(project(ledger.read()));
     const report = findDuplicates(store, active, lineageAt(projectsDirs));
@@ -277,7 +537,8 @@ describe('findDuplicates', () => {
     const removed = new Set(report.branches.map((f) => f.copySessionId));
     const kept = active.filter((f) => !removed.has(f.copySessionId));
     expect(kept).toHaveLength(1);
-    // And the survivor is the branch that carried on, not whichever came first.
+    // And the survivor is the branch that carried on — measured by the records it
+    // holds that the other half never got, not by whichever file was touched last.
     expect(kept[0]!.cliSessionId).toBe(BRANCH);
   });
 

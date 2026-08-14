@@ -64,6 +64,16 @@ export function selectReturnTargets(
     selected = selectByTarget(selected, opts.to, opts.toOrg);
   }
 
+  // A copy the app branched is left out of every bulk return. It is foster's
+  // file, so removing it is within the rules, but what it holds is a conversation
+  // born from opening that row and held by no other card anywhere — deleting it
+  // takes the work out of every sidebar and leaves nothing for `restore` to find.
+  // Naming it with --session still reaches it, which is the same line `foster`
+  // draws around a copy deleted in the app.
+  if (!opts.sessionIds?.length) {
+    selected = selected.filter((fostering) => !fostering.followedBranch);
+  }
+
   if (opts.duplicates || opts.branches) {
     const report = findDuplicates(store, selected);
     const wanted = new Set(

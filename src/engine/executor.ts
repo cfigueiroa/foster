@@ -9,8 +9,8 @@ import { blockingReasons } from '../domain/filter.js';
 import { errorMessage } from '../util/fs.js';
 
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
-import { lineage, lineageAt } from './lineage.js';
-import { sidebarOf } from './sidebar.js';
+import { lineage, lineageAt, type Lineage } from './lineage.js';
+import { BRANCH_HERE, sidebarOf, type BranchStanding } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
 
@@ -60,6 +60,13 @@ export interface FosterOptions {
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
 
+/**
+ * Said out loud because it looks like nothing happened and something did: the
+ * copy this account already has is the one that carried on.
+ */
+export const FOLLOWED_BRANCH =
+  'already fostered; the app branched it and the copy here follows the branch';
+
 export interface Outcome {
   originSessionId: string;
   title: string;
@@ -73,6 +80,13 @@ export interface Outcome {
    * is not actionable without knowing where there is.
    */
   live?: string;
+  /**
+   * Set on a session refused because the destination already shows a branch of
+   * it. Weighed here rather than by the caller because the engine is holding the
+   * per-run transcript cache; the caller would reread whole transcripts to say
+   * the same thing.
+   */
+  standing?: BranchStanding;
 }
 
 /**
@@ -146,7 +160,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
 
     const active = state.active.get(key);
     if (active) {
-      const skip = resolveExisting(active, { explicit, dryRun, ledger });
+      const skip = resolveExisting(active, { explicit, dryRun, ledger, kin });
       if (skip) {
         outcomes.push({ originSessionId: originId, title, ...skip });
         continue;
@@ -162,11 +176,15 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     const cliSessionId = session.data.cliSessionId;
     const shownHere = here.reason(cliSessionId);
     if (shownHere !== undefined && !explicit) {
+      // Only a branch is worth weighing. Two cards for the *same* conversation
+      // open the same transcript, so there is no half to be on the wrong side of.
+      const standing = shownHere.startsWith(BRANCH_HERE) ? here.standing(cliSessionId) : undefined;
       outcomes.push({
         originSessionId: originId,
         title,
         status: 'skipped',
         detail: shownHere,
+        ...(standing ? { standing } : {}),
       });
       continue;
     }
@@ -280,7 +298,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
  */
 function resolveExisting(
   active: ActiveFostering,
-  context: { explicit: boolean; dryRun: boolean; ledger: Ledger },
+  context: { explicit: boolean; dryRun: boolean; ledger: Ledger; kin: Lineage },
 ): Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined {
   const state = inspectCopy(active);
 
@@ -298,13 +316,33 @@ function resolveExisting(
     };
   }
 
-  // A repurposed copy is not a copy of this conversation any more, so the
-  // fostering it recorded no longer stands and a fresh one is exactly what the
-  // caller is asking for. The file itself is left alone: the app repointed it,
-  // it is a working card for whatever it now holds, and removing it would delete
-  // a row the user can see. Falling through mints a second card in this account —
-  // one for the branch, one for the conversation that was asked for.
   if (state.kind === 'repurposed') {
+    // Moved onto a branch of the very work it was fostered for. The row is still
+    // there and still shows this piece of work, so there is nothing to replace —
+    // and replacing it is precisely what produced pairs of rows for one piece of
+    // work. Foster follows the card instead, and the fostering goes on tracking
+    // the file it wrote. Which half of the fork the card ended up on is a separate
+    // question, and `consolidate` is where it is asked.
+    if (state.nowHolds && context.kin.sameWork(active.cliSessionId, state.nowHolds)) {
+      if (!context.dryRun) {
+        context.ledger.append({
+          kind: 'fostering_followed',
+          originSessionId: active.originSessionId,
+          target: active.target,
+          copySessionId: active.copySessionId,
+          // Present whenever the state is `repurposed`: the comparison that
+          // produces it reads both sides.
+          from: active.cliSessionId ?? '',
+          to: state.nowHolds,
+        });
+      }
+      return { status: 'skipped', detail: FOLLOWED_BRANCH, copyPath: active.copyPath };
+    }
+
+    // Unrelated work, then. The fostering it recorded no longer stands and a
+    // fresh copy is exactly what the caller is asking for. The file itself is
+    // left alone: the app repointed it, it is a working card for whatever it now
+    // holds, and removing it would delete a row the user can see.
     if (!context.dryRun) {
       context.ledger.append({
         kind: 'returned',

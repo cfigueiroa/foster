@@ -1,6 +1,6 @@
 import { fosteringKey } from '../domain/fostering.js';
 import type { KnownIdentity } from '../domain/identity.js';
-import type { ActiveFostering, LedgerEvent } from './types.js';
+import type { ActiveFostering, LedgerEvent, RepointedCard } from './types.js';
 
 export type { KnownIdentity };
 
@@ -10,6 +10,8 @@ export interface LedgerState {
   labels: Map<string, string>;
   /** Who each account belongs to, as last seen — see KnownIdentity. */
   identities: Map<string, KnownIdentity>;
+  /** Cards sitting on a conversation the app did not put them on, keyed by session id. */
+  repointed: Map<string, RepointedCard>;
 }
 
 /**
@@ -20,6 +22,10 @@ export function project(events: LedgerEvent[]): LedgerState {
   const active = new Map<string, ActiveFostering>();
   const labels = new Map<string, string>();
   const identities = new Map<string, KnownIdentity>();
+  const repointed = new Map<string, RepointedCard>();
+  // Which fostering a copy belongs to, so a repoint can find it. The fold is
+  // keyed on the origin session, and a repoint knows only the card it rewrote.
+  const fosteringOfCopy = new Map<string, string>();
 
   for (const event of events) {
     switch (event.kind) {
@@ -55,8 +61,9 @@ export function project(events: LedgerEvent[]): LedgerState {
         identities.delete(event.accountUuid);
         break;
 
-      case 'fostered':
-        active.set(fosteringKey(event.originSessionId, event.target), {
+      case 'fostered': {
+        const key = fosteringKey(event.originSessionId, event.target);
+        active.set(key, {
           originSessionId: event.originSessionId,
           origin: event.origin,
           target: event.target,
@@ -67,11 +74,68 @@ export function project(events: LedgerEvent[]): LedgerState {
           originStore: event.originStore,
           fosteredAt: event.ts,
         });
+        fosteringOfCopy.set(event.copySessionId, key);
         break;
+      }
 
       case 'returned':
         active.delete(fosteringKey(event.originSessionId, event.target));
+        fosteringOfCopy.delete(event.copySessionId);
         break;
+
+      case 'fostering_followed': {
+        // The copy is the same file in the same account; only the conversation it
+        // holds has moved. Keeping the fostering and moving its pointer is the
+        // whole point — dropping it is what used to make the next sweep write a
+        // second card for work that already had a row.
+        const key = fosteringKey(event.originSessionId, event.target);
+        const fostering = active.get(key);
+        if (fostering) {
+          active.set(key, { ...fostering, cliSessionId: event.to, followedBranch: true });
+        }
+
+        // Foster's own claim on this card lapses here. `repointed` is what
+        // `--undo` reads, and it means "foster moved this, and can put it back";
+        // once the app has moved the same card somewhere foster never put it,
+        // putting it back would not restore a state foster is responsible for —
+        // it would drop the branch the app just made, which is the one thing on
+        // that card nothing else holds.
+        repointed.delete(event.copySessionId);
+        break;
+      }
+
+      case 'card_repointed': {
+        // The conversation a copy holds moves with it. Without this the next
+        // command reads the file, finds a pointer that disagrees with the ledger,
+        // and calls the copy `repurposed` — dropping the tracking of the very
+        // card foster had just put right.
+        const key = fosteringOfCopy.get(event.sessionId);
+        const fostering = key === undefined ? undefined : active.get(key);
+        if (key !== undefined && fostering) {
+          active.set(key, { ...fostering, cliSessionId: event.to });
+        }
+
+        // `from` is where the app had it, which the first repoint is the only one
+        // to know. Later ones carry it forward, so putting a card back is always
+        // the same destination however many times it has moved.
+        const known = repointed.get(event.sessionId);
+        const origin = known?.from ?? event.from;
+        const originActivity = known ? known.fromActivityAt : event.fromActivityAt;
+        if (event.to === origin) repointed.delete(event.sessionId);
+        else {
+          repointed.set(event.sessionId, {
+            sessionId: event.sessionId,
+            path: event.path,
+            target: event.target,
+            from: origin,
+            to: event.to,
+            ...(originActivity === undefined ? {} : { fromActivityAt: originActivity }),
+            native: event.native,
+            repointedAt: event.ts,
+          });
+        }
+        break;
+      }
 
       case 'account_switched':
       case 'conversation_purged':
@@ -82,7 +146,12 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels, identities };
+  return { active, labels, identities, repointed };
+}
+
+/** Cards currently pointed somewhere the app did not point them, oldest move first. */
+export function listRepointed(state: LedgerState): RepointedCard[] {
+  return [...state.repointed.values()].sort((a, b) => a.repointedAt - b.repointedAt);
 }
 
 /**

@@ -1,5 +1,10 @@
-import { statSync } from 'node:fs';
-import { conversationRoot, indexTranscripts, transcriptRoots } from '../store/transcripts.js';
+import {
+  conversationRoot,
+  indexTranscripts,
+  scanConversation,
+  transcriptRoots,
+  type ConversationScan,
+} from '../store/transcripts.js';
 
 /**
  * Which conversations are the same work, when their identifiers disagree.
@@ -27,11 +32,20 @@ export interface Lineage {
   /** True when both ids resolve, and to the same root. */
   sameWork(a: string | undefined, b: string | undefined): boolean;
   /**
-   * When the conversation was last written, from the transcript's `mtime` — the
-   * question "which of these two branches kept going?" in the form a `stat`
-   * answers. Undefined when there is no transcript to ask.
+   * The whole transcript, read once per run.
+   *
+   * This replaced a `lastWriteOf` that answered "which of these branches kept
+   * going?" with the file's `mtime` — a question `stat` cannot answer, because
+   * the app rewrites its own bookkeeping into a transcript every time a card is
+   * opened. Reading the records is the only honest form of that question, and
+   * `branches.ts` is where the reading is interpreted.
+   *
+   * Memoised here rather than there because this is already the per-run memo, and
+   * the alternative is measurable: `status` builds one sidebar per account, so a
+   * store with six accounts asks about the same handful of forked transcripts
+   * six times over. Undefined when there is no transcript to read.
    */
-  lastWriteOf(cliSessionId: string | undefined): number | undefined;
+  scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
 }
 
 /**
@@ -48,6 +62,7 @@ export function useTranscriptRoots(dirs: string[] | undefined): void {
 export function lineageAt(projectsDirs: string[]): Lineage {
   let transcripts: Map<string, string> | undefined;
   const roots = new Map<string, string | undefined>();
+  const scans = new Map<string, ConversationScan | undefined>();
 
   const fileOf = (cliSessionId: string | undefined): string | undefined => {
     if (cliSessionId === undefined || cliSessionId === '') return undefined;
@@ -76,14 +91,15 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       const rootA = rootOf(a);
       return rootA !== undefined && rootA === rootOf(b);
     },
-    lastWriteOf(cliSessionId) {
+
+    scanOf(cliSessionId) {
+      if (cliSessionId === undefined || cliSessionId === '') return undefined;
+      if (scans.has(cliSessionId)) return scans.get(cliSessionId);
+
       const file = fileOf(cliSessionId);
-      if (file === undefined) return undefined;
-      try {
-        return statSync(file).mtimeMs;
-      } catch {
-        return undefined;
-      }
+      const scan = file === undefined ? undefined : scanConversation(file);
+      scans.set(cliSessionId, scan);
+      return scan;
     },
   };
 }

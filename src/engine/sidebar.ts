@@ -1,5 +1,6 @@
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
+import { weighBranches } from './branches.js';
 import type { Lineage } from './lineage.js';
 
 /**
@@ -30,6 +31,31 @@ export interface Sidebar {
   extras(): Map<string, 'copy' | 'branch'>;
   /** Conversations with more than one card, none of them foster's. */
   appMade(): number;
+  /**
+   * How a conversation being offered compares with the branch of it this account
+   * already shows. Undefined when the account shows no other branch of that work,
+   * which is every ordinary case.
+   */
+  standing(cliSessionId: string | undefined): BranchStanding | undefined;
+}
+
+/**
+ * The two halves of a fork, counted against each other.
+ *
+ * Refusing the second row is right, and saying nothing else about it was not: the
+ * account keeps whichever half reached it first, and nothing in the sweep ever
+ * mentions that the half it turned away is the one the work continued in. One
+ * store had an account showing 1468 records while 2981 waited outside it.
+ */
+export interface BranchStanding {
+  /** The branch this account shows — the heaviest of them, if it shows several. */
+  here: string;
+  /** Records the offered branch holds that no branch here does. */
+  theirOnly: number;
+  /** Records the branch here holds that the offered one does not. */
+  hereOnly: number;
+  /** True when the offered branch is the one that carried on. */
+  ahead: boolean;
 }
 
 const BRANCH_HERE = 'this account already has a branch of that conversation';
@@ -86,6 +112,34 @@ export function sidebarOf(
       });
     },
 
+    standing(cliSessionId) {
+      if (cliSessionId === undefined) return undefined;
+      const work = kin.rootOf(cliSessionId);
+      if (work === undefined) return undefined;
+
+      const theirs = new Set(
+        cards
+          .filter((card) => workOf(card.cliSessionId) === work)
+          .map((card) => card.cliSessionId)
+          .filter((id) => id !== cliSessionId),
+      );
+      if (theirs.size === 0) return undefined;
+
+      // Sorted heaviest first, so the first entry that is not the offered branch
+      // is the strongest thing this account shows for that work.
+      const weights = weighBranches([cliSessionId, ...theirs], kin);
+      const offered = weights.find((weight) => weight.cliSessionId === cliSessionId);
+      const best = weights.find((weight) => weight.cliSessionId !== cliSessionId);
+      if (offered === undefined || best === undefined) return undefined;
+
+      return {
+        here: best.cliSessionId,
+        theirOnly: offered.only,
+        hereOnly: best.only,
+        ahead: weights[0] === offered,
+      };
+    },
+
     extras() {
       const groups = new Map<string, SidebarCard[]>();
       for (const card of cards) {
@@ -125,14 +179,35 @@ export function sidebarOf(
   };
 }
 
+/**
+ * The one row of a group to keep.
+ *
+ * A card the app made wins outright, for the reason it always has: foster
+ * removes what foster wrote.
+ *
+ * Among copies, the choice used to be the newest file `mtime`, which was wrong
+ * in a way that hid itself. The app rewrites bookkeeping into a transcript every
+ * time its card is opened, so the stale half of a fork gets a fresh timestamp
+ * from being *looked at* — and the cleanup would then keep the row somebody had
+ * clicked and drop the one that had been running all morning. Ranking by the
+ * records a branch holds alone cannot be moved by reading it.
+ */
 function survivor(rows: SidebarCard[], kin: Lineage): SidebarCard {
   const native = rows.find((row) => !row.isCopy);
   if (native) return native;
-  return rows.reduce((best, row) =>
-    (kin.lastWriteOf(row.cliSessionId) ?? 0) > (kin.lastWriteOf(best.cliSessionId) ?? 0)
-      ? row
-      : best,
+
+  // One conversation, several cards: every row opens the same transcript, so any
+  // of them will do and none is more advanced than another. Asked first because
+  // this is the common shape by far, and weighing reads whole transcripts.
+  const conversations = new Set(rows.map((row) => row.cliSessionId));
+  if (conversations.size < 2) return rows[0]!;
+
+  const rank = new Map(
+    weighBranches([...conversations], kin).map((weight, index) => [weight.cliSessionId, index]),
   );
+  const placeOf = (row: SidebarCard): number =>
+    rank.get(row.cliSessionId) ?? Number.MAX_SAFE_INTEGER;
+  return rows.reduce((best, row) => (placeOf(row) < placeOf(best) ? row : best));
 }
 
 export { BRANCH_HERE };
