@@ -1,5 +1,5 @@
 import { bareSessionId } from '../domain/naming.js';
-import { listAccountDirs, samePath, storeRootOfCopy } from '../domain/paths.js';
+import { listAccountDirs, storeRootOfCopy } from '../domain/paths.js';
 import type { DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { currentAccount, requireCurrentAccount } from '../engine/account.js';
 import { inspectDesktopFor } from '../engine/desktop.js';
@@ -14,12 +14,20 @@ import { resumeConversation, type ResumeRunner } from '../engine/resume.js';
 import { AppRunningError, inspectApp, type RemovalGuard } from '../engine/safety.js';
 import { storeIdentity } from '../domain/paths.js';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
+import type { SessionFilter } from '../domain/filter.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import { readConfig } from '../store/config.js';
-import { scanSources, summarise } from '../store/scanner.js';
+import { summarise } from '../store/scanner.js';
 import { viewTranscript } from '../store/transcripts.js';
-import { applyFilter, byRecency, selectByIds, type SessionFilter } from '../cli/filters.js';
+import {
+  listFosterable,
+  liveConversationIds,
+  matchAccountPrefix,
+  selectFosterSessions,
+} from '../ops/foster.js';
+import { inThisStore, selectReturnTargets } from '../ops/active.js';
+import { applyLabel } from '../ops/label.js';
 
 /**
  * The operations `foster agent` hands to the model, as plain functions.
@@ -101,8 +109,7 @@ export function listSessions(ctx: AgentToolContext, args: ListSessionsArgs): unk
   // an account — any account, the current one included — lists exactly it.
   let sources = accounts;
   if (args.accountUuid) {
-    sources = accounts.filter((ref) => ref.accountUuid.startsWith(args.accountUuid!));
-    if (sources.length === 0) throw new Error(`No account matches "${args.accountUuid}".`);
+    sources = matchAccountPrefix(accounts, args.accountUuid, 'accountUuid');
   } else {
     sources = accounts.filter((ref) => ref.accountUuid !== current?.accountUuid);
   }
@@ -112,8 +119,7 @@ export function listSessions(ctx: AgentToolContext, args: ListSessionsArgs): unk
   if (args.cwd) filter.cwd = args.cwd;
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
-  const copies = copySessionIds(ledger.read());
-  const all = byRecency(applyFilter(scanSources(store, sources, copies), filter));
+  const all = listFosterable(store, sources, ledger, filter);
 
   const limit = Math.max(1, Math.min(args.limit ?? 100, 500));
   const shown = all.slice(0, limit);
@@ -149,7 +155,7 @@ function iso(ms: number | undefined): string | null {
 export function fosterStatus(ctx: AgentToolContext): unknown {
   const { store, ledger } = ctx;
   const active = listActive(project(ledger.read()));
-  const here = active.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
+  const here = active.filter((f) => inThisStore(f, store));
   const duplicates = findDuplicates(store, here);
 
   return {
@@ -161,7 +167,7 @@ export function fosterStatus(ctx: AgentToolContext): unknown {
       fosteredAt: iso(f.fosteredAt),
       fromAccountUuid: f.origin.accountUuid,
       store: storeRootOfCopy(f.copyPath),
-      inThisStore: samePath(storeRootOfCopy(f.copyPath), store.root),
+      inThisStore: inThisStore(f, store),
     })),
     duplicateCopies: duplicates.copies.length,
     // Reported apart from the duplicates and with no command attached: a branch
@@ -235,9 +241,15 @@ export interface LabelAccountArgs {
 export function labelAccount(ctx: AgentToolContext, args: LabelAccountArgs): unknown {
   // Not gated on --yes deliberately: this writes only to foster's own ledger,
   // never to the app's store — the same reason the CLI's `label` has no --yes.
-  if (!args.label.trim()) throw new Error('The label must not be empty.');
-  ctx.ledger.append({ kind: 'account_labelled', accountUuid: args.accountUuid, label: args.label });
-  return { labelled: args.accountUuid, label: args.label };
+  const accounts = listAccountDirs(ctx.store);
+  const { accountUuid, label } = applyLabel(
+    ctx.ledger,
+    args.accountUuid,
+    args.label,
+    accounts.map((ref) => ref.accountUuid),
+    readConfig(ctx.store).lastKnownAccountUuid,
+  );
+  return { labelled: accountUuid, label };
 }
 
 export interface FosterSessionsArgs {
@@ -262,8 +274,7 @@ export function fosterSessionsTool(ctx: AgentToolContext, args: FosterSessionsAr
       !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
   );
   if (args.fromAccountUuid) {
-    sources = sources.filter((ref) => ref.accountUuid.startsWith(args.fromAccountUuid!));
-    if (sources.length === 0) throw new Error(`No account matches "${args.fromAccountUuid}".`);
+    sources = matchAccountPrefix(sources, args.fromAccountUuid, 'fromAccountUuid');
   }
 
   const filter: SessionFilter = { includeUnfosterable: false };
@@ -271,15 +282,15 @@ export function fosterSessionsTool(ctx: AgentToolContext, args: FosterSessionsAr
   if (args.cwd) filter.cwd = args.cwd;
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
-  const copies = copySessionIds(ledger.read());
-  let candidates = byRecency(applyFilter(scanSources(store, sources, copies), filter));
+  let candidates = listFosterable(store, sources, ledger, filter);
 
   if (args.sessionIds?.length) {
-    const { selected, unmatched } = selectByIds(candidates, args.sessionIds);
-    if (unmatched.length > 0) {
-      throw new Error(`No session matches ${unmatched.join(', ')} — check with list_sessions.`);
+    try {
+      candidates = selectFosterSessions(candidates, args.sessionIds);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message} — check with list_sessions.`);
     }
-    candidates = byRecency(selected);
   }
 
   if (candidates.length === 0) return { dryRun: true, counts: {}, note: 'nothing matches' };
@@ -293,6 +304,7 @@ export function fosterSessionsTool(ctx: AgentToolContext, args: FosterSessionsAr
     prefix: args.prefix ?? DEFAULT_PREFIX,
     dryRun,
     explicit: Boolean(args.sessionIds?.length),
+    live: liveConversationIds(envOf(ctx)),
   });
 
   return mutationReport(outcomes, dryRun, gated, RESTART_NOTE);
@@ -312,27 +324,12 @@ export interface ReturnFosteringsArgs {
 
 export function returnFosteringsTool(ctx: AgentToolContext, args: ReturnFosteringsArgs): unknown {
   const { store, ledger } = ctx;
-  let active = listActive(project(ledger.read()));
-  let elsewhere = 0;
-
-  if (!args.allStores) {
-    elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root)).length;
-    active = active.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
-  }
-  if (args.duplicatesOnly) {
-    const duplicated = new Set(findDuplicates(store, active).copies.map((f) => f.copySessionId));
-    active = active.filter((f) => duplicated.has(f.copySessionId));
-  }
-  if (args.title) {
-    const needle = args.title.toLowerCase();
-    active = active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(needle));
-  }
-  if (args.sessionIds?.length) {
-    const wanted = args.sessionIds.map((id) => bareSessionId(id).toLowerCase());
-    active = active.filter((f) =>
-      wanted.some((id) => bareSessionId(f.originSessionId).toLowerCase().startsWith(id)),
-    );
-  }
+  const { selected: active, elsewhere } = selectReturnTargets(store, ledger, {
+    allStores: args.allStores,
+    duplicates: args.duplicatesOnly,
+    title: args.title,
+    sessionIds: args.sessionIds,
+  });
 
   if (active.length === 0) {
     return {

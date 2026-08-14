@@ -15,7 +15,6 @@ import {
   storeIdentity,
   listAccountDirs,
   listAgentAccountDirs,
-  pickActiveOrganization,
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
@@ -34,6 +33,7 @@ import {
   TWO_SIDEBARS,
   twoLiveSidebars,
 } from '../engine/continued.js';
+import { currentAccount } from '../engine/account.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { findDuplicates } from '../engine/duplicates.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
@@ -41,7 +41,6 @@ import { AppRunningError, inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
-import { readConfig } from '../store/config.js';
 import {
   identityLabel,
   planName,
@@ -52,12 +51,15 @@ import {
 import { freshIdentityOf, overviewAccounts } from '../store/accounts.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
-import { describeWriters, liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
+import { describeWriters, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
-import { scanAccount, scanSources, summariseAccount } from '../store/scanner.js';
+import { scanAccount, summariseAccount, type KnownCopies } from '../store/scanner.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
-import { applyFilter, byRecency, parseSince } from './filters.js';
+import { applyFilter, byRecency, parseSince } from '../domain/filter.js';
+import { liveConversationIds, scanFosterable } from '../ops/foster.js';
+import { partitionByStore } from '../ops/active.js';
+import { applyLabel } from '../ops/label.js';
 import {
   aborted,
   askText,
@@ -117,7 +119,7 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
 
   nameEverything(store);
 
-  let target = resolveTarget(store);
+  let target = currentAccount(store, listAccountDirs(store));
   if (!target) {
     log.error('Could not determine which account is signed in. Open Claude Desktop once first.');
     outro('Nothing to do.');
@@ -244,36 +246,6 @@ export async function runInteractive(initialStore: StoreLayout, ledger: Ledger):
         return;
     }
   }
-}
-
-/**
- * The account and organization directory the sidebar is currently reading.
- *
- * The config records the account but not the organization. When foster is
- * running inside a Code session the app spawned, the app has already put the
- * answer in the environment; otherwise it falls back to the heuristic in
- * pickActiveOrganization.
- */
-function resolveTarget(
-  store: StoreLayout,
-  env: NodeJS.ProcessEnv = process.env,
-): AccountRef | undefined {
-  const accountUuid = readConfig(store).lastKnownAccountUuid;
-  if (!accountUuid) return undefined;
-
-  const candidates = listAccountDirs(store).filter((a) => a.accountUuid === accountUuid);
-
-  // The app sets this from the organization it is actually using, so it beats
-  // guessing — but only for a directory that exists, so a stale value cannot
-  // point the copies at nothing.
-  const fromEnv = env.CLAUDE_CODE_ORGANIZATION_UUID;
-  const declared = fromEnv && candidates.find((a) => a.organizationUuid === fromEnv);
-  if (declared) return declared;
-
-  return (
-    pickActiveOrganization(candidates, store) ??
-    listAgentAccountDirs(store).find((a) => a.accountUuid === accountUuid)
-  );
 }
 
 function labelsOf(ledger: Ledger): Map<string, string> {
@@ -577,7 +549,7 @@ async function labelFlow(store: StoreLayout, ledger: Ledger, target: AccountRef)
     return;
   }
 
-  ledger.append({ kind: 'account_labelled', accountUuid: picked, label: name.trim() });
+  applyLabel(ledger, picked, name.trim(), accounts, target.accountUuid);
   log.success(`${short(picked)} is now "${name.trim()}".`);
 }
 
@@ -588,8 +560,8 @@ interface SourceOption {
 }
 
 /** What a directory of sessions offers, as the picker needs to describe it. */
-function summariseSource(store: StoreLayout, ref: AccountRef) {
-  const sessions = scanAccount(store, ref);
+function summariseSource(store: StoreLayout, ref: AccountRef, copies: KnownCopies) {
+  const sessions = scanAccount(store, ref, copies);
   // Counted with the same filter the next screen applies, so the number here is
   // the number the user will actually be offered.
   const fosterable = applyFilter(sessions, {});
@@ -677,6 +649,7 @@ async function chooseOtherStore(
   // granularity: a profile with two accounts is no less worth narrowing.
   const refs = await chooseAccounts(store, labels, {
     message: 'Which account in that installation?',
+    copies: copySessionIds(ledger.read()),
   });
   if (aborted(refs) || refs === OTHER_STORE) return BACK;
   return { store, refs };
@@ -696,7 +669,7 @@ async function switchInstallation(
   const store = await pickStore(current, ledger, 'Work on which installation?');
   if (aborted(store)) return BACK;
 
-  const target = resolveTarget(store);
+  const target = currentAccount(store, listAccountDirs(store));
   if (!target) {
     log.error(
       'That installation has no signed-in account yet — open Claude Desktop on it once first.',
@@ -723,7 +696,13 @@ const TYPE_A_PATH = '__type_a_path';
 async function chooseAccounts(
   store: StoreLayout,
   labels: Map<string, string>,
-  options: { exclude?: AccountRef; currentAccountUuid?: string; message: string; extra?: Choice[] },
+  options: {
+    exclude?: AccountRef;
+    currentAccountUuid?: string;
+    message: string;
+    extra?: Choice[];
+    copies?: KnownCopies;
+  },
 ): Promise<Maybe<AccountRef[] | typeof OTHER_STORE>> {
   // Callers check for emptiness before asking. Conflating "nothing to offer"
   // with BACK sent someone who pressed Back into the other-profile picker.
@@ -733,7 +712,8 @@ async function chooseAccounts(
     byAccount.set(ref.accountUuid, [...(byAccount.get(ref.accountUuid) ?? []), ref]);
   }
 
-  const stats = new Map(sources.map((ref) => [refKey(ref), summariseSource(store, ref)]));
+  const copies = options.copies ?? new Set<string>();
+  const stats = new Map(sources.map((ref) => [refKey(ref), summariseSource(store, ref, copies)]));
   const totals = (refs: AccountRef[]) =>
     refs.reduce(
       (sum, ref) => {
@@ -852,6 +832,7 @@ async function chooseSource(
   const picked = await chooseAccounts(store, labels, {
     exclude: target,
     currentAccountUuid: target.accountUuid,
+    copies: copySessionIds(ledger.read()),
     message: 'Where should the sessions come from?',
     extra: [
       {
@@ -1021,7 +1002,7 @@ async function fosterFlow(store: StoreLayout, ledger: Ledger, current: AccountRe
   const source = await chooseSource(store, ledger, current);
   if (aborted(source)) return;
 
-  const all = scanSources(source.store, source.refs);
+  const all = scanFosterable(source.store, source.refs, ledger);
   const available = byRecency(applyFilter(all, {}));
   reportHidden(all, available);
 
@@ -1135,9 +1116,7 @@ async function confirmAndWrite(
       explicit,
       // The menu is where most people foster, so the branching hazard has to be
       // said here rather than only in the command.
-      live: new Set(
-        liveSessions(sessionRegistryRoots(process.env)).map((s) => s.sessionId.toLowerCase()),
-      ),
+      live: liveConversationIds(),
     });
     const counts = summariseOutcomes(outcomes);
     for (const outcome of outcomes.slice(0, 10)) log.message(outcomeLine(outcome));
@@ -1216,8 +1195,8 @@ async function returnFlow(store: StoreLayout, ledger: Ledger): Promise<void> {
   // The ledger spans every installation foster has written into. Undoing here
   // should not reach into another profile's store without being asked, so the
   // rest are counted rather than silently included.
-  const active = everything.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
-  const elsewhere = everything.length - active.length;
+  const { here: active, elsewhere: elsewhereCopies } = partitionByStore(everything, store);
+  const elsewhere = elsewhereCopies.length;
 
   if (active.length === 0) {
     log.info(

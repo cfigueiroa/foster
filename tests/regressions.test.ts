@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { fosterSessions } from '../src/engine/executor.js';
 import { writeFileAtomic } from '../src/engine/fsatomic.js';
 import { Ledger } from '../src/ledger/log.js';
-import { activityOf, applyFilter } from '../src/cli/filters.js';
+import { activityOf, applyFilter } from '../src/domain/filter.js';
 import { scanAccount } from '../src/store/scanner.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 

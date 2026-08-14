@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { selectByIds } from '../src/cli/filters.js';
+import { selectByIds } from '../src/domain/filter.js';
 import type { DiscoveredSession } from '../src/domain/types.js';
 import { OLD_ACCOUNT, session } from './helpers/store.js';
 

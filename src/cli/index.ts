@@ -13,7 +13,7 @@ import {
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
-import { currentAccount, requireCurrentAccount, resolveLabelArgs } from '../engine/account.js';
+import { currentAccount, requireCurrentAccount } from '../engine/account.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
@@ -74,7 +74,7 @@ import {
   worthRecording,
 } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
-import { scanSources, scanStore, summarise } from '../store/scanner.js';
+import { scanStore, summarise } from '../store/scanner.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
@@ -90,7 +90,16 @@ import {
 import { viewTranscript } from '../store/transcripts.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
-import { applyFilter, byRecency, parseSince, selectByIds, type SessionFilter } from './filters.js';
+import { applyFilter, parseSince, selectByIds, type SessionFilter } from '../domain/filter.js';
+import {
+  matchAccountPrefix,
+  matchOrganizationPrefix,
+  listFosterable,
+  liveConversationIds,
+  selectFosterSessions,
+} from '../ops/foster.js';
+import { partitionByStore, selectReturnTargets } from '../ops/active.js';
+import { applyLabel } from '../ops/label.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
@@ -200,53 +209,12 @@ function resolveSources(
   let sources = candidates;
 
   if (accountPrefix !== undefined) {
-    sources = matchOrExplain(
-      sources,
-      accountPrefix,
-      'account',
-      flags.account,
-      (r) => r.accountUuid,
-    );
+    sources = matchAccountPrefix(sources, accountPrefix, flags.account);
   }
   if (organizationPrefix !== undefined) {
-    sources = matchOrExplain(
-      sources,
-      organizationPrefix,
-      'organization',
-      flags.organization,
-      (ref) => ref.organizationUuid,
-    );
+    sources = matchOrganizationPrefix(sources, organizationPrefix, flags.organization);
   }
   return sources;
-}
-
-/**
- * Narrows by identifier prefix, refusing rather than guessing.
- *
- * A bare prefix match would silently take every identifier sharing those leading
- * characters, and a typo would be indistinguishable from an empty result.
- */
-function matchOrExplain(
-  refs: AccountRef[],
-  prefix: string,
-  kind: 'account' | 'organization',
-  flag: string,
-  identifier: (ref: AccountRef) => string,
-): AccountRef[] {
-  const matches = refs.filter((ref) => identifier(ref).startsWith(prefix));
-  const distinct = new Set(matches.map(identifier));
-
-  if (distinct.size === 0) throw new Error(`No ${kind} matches ${flag} "${prefix}".`);
-  if (distinct.size > 1) {
-    // Full identifiers, not shortened ones: values that collide on a prefix
-    // usually collide on their first characters too, so an abbreviation here
-    // would print the same string twice and help nobody.
-    const names = [...distinct].map((uuid) => `  ${uuid}`).join('\n');
-    throw new Error(
-      `${flag} "${prefix}" is ambiguous: it matches ${distinct.size} ${kind}s.\n${names}`,
-    );
-  }
-  return matches;
 }
 
 function filterFrom(opts: {
@@ -596,12 +564,7 @@ sourceOptions(
     // The whole store is read even though only these accounts are offered: what
     // makes a copy the last card of its conversation is decided by the accounts
     // that are not on offer.
-    const candidates = byRecency(
-      applyFilter(
-        scanSources(sourceStore, sources, copySessionIds(ledger.read())),
-        filterFrom(this.opts()),
-      ),
-    );
+    const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()));
 
     if (opts.json) {
       print(
@@ -687,18 +650,15 @@ sourceOptions(
 
   // Sessions that can never appear in the sidebar are always excluded here:
   // offering them would only produce copies the app silently never lists.
-  let candidates = byRecency(
-    applyFilter(scanSources(sourceStore, sources, copySessionIds(ledger.read())), filter),
-  );
+  let candidates = listFosterable(sourceStore, sources, ledger, filter);
 
   if (opts.session?.length) {
-    const { selected, unmatched } = selectByIds(candidates, opts.session);
-    if (unmatched.length > 0) {
-      throw new Error(
-        `No session matches --session ${unmatched.join(', ')}.\nRun "foster list" to see the ids.`,
-      );
+    try {
+      candidates = selectFosterSessions(candidates, opts.session);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message}\nRun "foster list" to see the ids.`);
     }
-    candidates = byRecency(selected);
   }
 
   if (candidates.length === 0) {
@@ -719,11 +679,7 @@ sourceOptions(
     // A conversation with a live writer branches when its copy is opened, which
     // is the one failure that reads as foster losing work. Reported, never
     // refused: copying the session you are working in is the ordinary case.
-    live: new Set(
-      liveSessions(sessionRegistryRoots(process.env)).map((session) =>
-        session.sessionId.toLowerCase(),
-      ),
-    ),
+    live: liveConversationIds(),
     // Naming sessions one by one is a decision about those sessions, and only
     // that brings back a copy the user deleted in the app.
     explicit: Boolean(opts.session?.length),
@@ -1004,48 +960,20 @@ program
       dryRun?: boolean;
     }>();
 
-    let active = listActive(project(ledger.read()));
+    const { selected: active, elsewhere } = selectReturnTargets(store, ledger, {
+      allStores: opts.allStores,
+      to: opts.to,
+      toOrg: opts.toOrg,
+      duplicates: opts.duplicates,
+      branches: opts.branches,
+      title: opts.title,
+      sessionIds: opts.session,
+    });
 
-    // The ledger spans every installation foster has written into, so without
-    // this a return run in one profile would quietly delete copies sitting in
-    // another. Scoped to the store in use, and the rest are counted out loud.
-    if (!opts.allStores) {
-      const elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root));
-      active = active.filter((f) => samePath(storeRootOfCopy(f.copyPath), store.root));
-      if (elsewhere.length > 0) {
-        console.log(
-          pc.dim(
-            `${elsewhere.length} more ${elsewhere.length === 1 ? 'copy is' : 'copies are'} in other installations — pass --all-stores to include them.`,
-          ),
-        );
-      }
-    }
-    if (opts.to !== undefined || opts.toOrg !== undefined) {
-      active = selectByTarget(active, opts.to, opts.toOrg);
-    }
-    if (opts.duplicates || opts.branches) {
-      const report = findDuplicates(store, active);
-      // Both flags together read as "everything this account already shows",
-      // which is the one sensible meaning for asking for both.
-      const wanted = new Set(
-        [...(opts.duplicates ? report.copies : []), ...(opts.branches ? report.branches : [])].map(
-          (f) => f.copySessionId,
-        ),
-      );
-      active = active.filter((f) => wanted.has(f.copySessionId));
-    }
-    if (opts.title) {
-      const needle = opts.title.toLowerCase();
-      active = active.filter((f) => (f.originalTitle ?? '').toLowerCase().includes(needle));
-    }
-    if (opts.session?.length) {
-      const wanted = opts.session.map((id) => id.replace(/^local_/, '').toLowerCase());
-      active = active.filter((f) =>
-        wanted.some((id) =>
-          f.originSessionId
-            .replace(/^local_/, '')
-            .toLowerCase()
-            .startsWith(id),
+    if (elsewhere > 0) {
+      console.log(
+        pc.dim(
+          `${elsewhere} more ${elsewhere === 1 ? 'copy is' : 'copies are'} in other installations — pass --all-stores to include them.`,
         ),
       );
     }
@@ -1167,7 +1095,7 @@ program
     // The ledger spans every installation, so with two profiles in play the list
     // silently mixed them: a copy sitting in the other profile read exactly like
     // one in the store being worked on. Only said when it is true of the run.
-    const elsewhere = active.filter((f) => !samePath(storeRootOfCopy(f.copyPath), store.root));
+    const { elsewhere } = partitionByStore(active, store);
     // Marked here for the same reason it is said after a return: the row in the
     // original account still carries the date it had the day it was fostered.
     const continued = new Set(continuedSince(store, active).map((c) => c.fostering.copySessionId));
@@ -1294,14 +1222,13 @@ program
       return;
     }
 
-    const { accountUuid, label } = resolveLabelArgs(
+    const { accountUuid, label } = applyLabel(
+      ledger,
       first,
       second,
       accounts.map((ref) => ref.accountUuid),
       currentAccountUuid,
     );
-
-    ledger.append({ kind: 'account_labelled', accountUuid, label });
     console.log(`Labelled ${shortId(accountUuid)} as ${pc.bold(label)}.`);
     // The pairing foster cannot make for itself is the one the app is showing on
     // screen: the email lives in the OAuth token cache, which foster does not read.
