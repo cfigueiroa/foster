@@ -8,7 +8,7 @@ import type { ActiveFostering } from '../ledger/types.js';
 import { blockingReasons } from '../domain/filter.js';
 import { errorMessage } from '../util/fs.js';
 
-import { removeSafely, writeFileAtomic } from './fsatomic.js';
+import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
 import { lineage, lineageAt } from './lineage.js';
 import { sidebarOf } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';

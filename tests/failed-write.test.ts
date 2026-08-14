@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type * as FsAtomic from '../src/engine/fsatomic.js';
+import type * as FsAtomic from '../src/util/fsatomic.js';
 import { Ledger } from '../src/ledger/log.js';
 import { isFostered, project } from '../src/ledger/project.js';
 import { scanAccount } from '../src/store/scanner.js';
@@ -11,7 +11,7 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './he
 /** Flipped per test to make the next write fail, without touching the real implementation. */
 let failNextWrite = false;
 
-vi.mock('../src/engine/fsatomic.js', async (importOriginal) => {
+vi.mock('../src/util/fsatomic.js', async (importOriginal) => {
   const actual = await importOriginal<typeof FsAtomic>();
   return {
     ...actual,

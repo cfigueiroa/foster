@@ -44,6 +44,21 @@ describe('Ledger', () => {
 
     expect(ledger.read()).toHaveLength(1);
   });
+
+  it('skips a well-formed JSON line that is not an event, and keeps the neighbor', () => {
+    const ledger = makeLedger();
+    ledger.append(fostered);
+    appendFileSync(ledger.path, `${JSON.stringify({ title: 'no kind' })}\n`, 'utf8');
+    ledger.append({
+      ...fostered,
+      originSessionId: 'local_origin-2',
+      copySessionId: 'local_copy-2',
+    });
+
+    const events = ledger.read();
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => event.kind)).toEqual(['fostered', 'fostered']);
+  });
 });
 
 describe('projection', () => {

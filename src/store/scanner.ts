@@ -1,15 +1,11 @@
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import path from 'node:path';
 import { unfosterableReasons } from '../domain/fostering.js';
 import { isSessionFileName } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
-import type {
-  AccountRef,
-  CodeSessionData,
-  DiscoveredSession,
-  StoreLayout,
-} from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
+import { readSessionFile } from './sessionFile.js';
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -53,7 +49,7 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const data = readSession(file);
+    const data = readSessionFile(file);
     if (!data) continue;
 
     // A copy foster wrote, not a session the app created. Classifying before
@@ -176,15 +172,5 @@ function sizeOf(file: string): number {
     return statSync(file).size;
   } catch {
     return 0;
-  }
-}
-
-function readSession(file: string): CodeSessionData | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(file, 'utf8')) as CodeSessionData;
-    return typeof parsed?.sessionId === 'string' ? parsed : undefined;
-  } catch {
-    // A malformed or half-written file is skipped rather than crashing a scan.
-    return undefined;
   }
 }

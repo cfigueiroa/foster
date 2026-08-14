@@ -1,7 +1,7 @@
 import { lstatSync, readlinkSync, statSync, symlinkSync } from 'node:fs';
 import { samePath } from '../domain/paths.js';
 import { isDirectory } from '../util/fs.js';
-import { removeSafely } from './fsatomic.js';
+import { removeSafely } from '../util/fsatomic.js';
 
 /**
  * Repointing a directory link at a different client.

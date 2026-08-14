@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SnappyError, snappyDecompress } from '../src/engine/snappy.js';
+import { SnappyError, snappyDecompress } from '../src/store/format/snappy.js';
 
 /**
  * The vectors here are written by hand from the format description rather than

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { comparablePath, layoutFor, storeIdentity, storeRootOfCopy } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
@@ -38,38 +37,23 @@ export interface AppState {
 }
 
 /**
- * Process names alone are unreliable (Electron spawns helpers, the updater has
- * its own name, and packaging changes them), so this is a corroborating signal
- * rather than the primary one.
- */
-function desktopProcessRunning(): boolean {
-  if (process.platform !== 'win32') return false;
-  try {
-    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq Claude.exe', '/NH', '/FO', 'CSV'], {
-      encoding: 'utf8',
-      windowsHide: true,
-    });
-    return out.toLowerCase().includes('claude.exe');
-  } catch {
-    return false;
-  }
-}
-
-/**
- * The cheap check: no process table, no parent links, just "is it up".
+ * The cheap check: lockfile first, then the same process table everything else
+ * reads.
  *
- * The lockfile lives in the store, so it answers about that store. A bare
- * process name does not: with two profiles up, any Claude.exe would make every
- * store look busy — which had a closed profile refusing an undo and asking the
- * user to close an app that was not running. The corroborating signal is
- * therefore only allowed to speak for the installed app, whose processes are the
- * ones it can actually see.
+ * A name scan (`Claude.exe`) cannot tell the Desktop app from the Code CLI it
+ * spawns — they share the image name. The table already knows the difference
+ * (the CLI lives under `claude-code`). Asking it here means a live `claude` on
+ * a closed store cannot make that store look busy.
  */
-export function inspectApp(store: StoreLayout, env: NodeJS.ProcessEnv = process.env): AppState {
+export function inspectApp(
+  store: StoreLayout,
+  env: NodeJS.ProcessEnv = process.env,
+  list: ProcessLister = readProcesses,
+): AppState {
   const evidence: string[] = [];
   if (lockfileHeld(store)) evidence.push('userData lockfile is held by a running app');
-  if (storeIdentity(store.root, env).isDefault && desktopProcessRunning()) {
-    evidence.push('a Claude.exe process is running');
+  if (inspectDesktopFor(storeIdentity(store.root, env), list, env).running) {
+    evidence.push('Claude Desktop is running');
   }
   return { running: evidence.length > 0, evidence };
 }

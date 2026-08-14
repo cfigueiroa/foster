@@ -1,9 +1,13 @@
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { layoutFor, samePath, sessionPath } from '../domain/paths.js';
 import type { CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
+import type { LiveWriter } from '../store/liveSessions.js';
+import { readSessionFile } from '../store/sessionFile.js';
 import { indexTranscripts, transcriptRoots } from '../store/transcripts.js';
 import { lockfileHeld } from './lockfile.js';
+
+export type { LiveWriter };
 
 /**
  * Conversations that carried on after they were fostered.
@@ -95,11 +99,7 @@ function originCard(store: StoreLayout, fostering: ActiveFostering): string {
 }
 
 function readCard(file: string): CodeSessionData | undefined {
-  try {
-    return JSON.parse(readFileSync(file, 'utf8')) as CodeSessionData;
-  } catch {
-    return undefined;
-  }
+  return readSessionFile(file);
 }
 
 /**
@@ -182,14 +182,6 @@ export function liveBranchNote(writers: LiveWriter[]): string {
   }
   lines.push('`foster live --stop <id>` ends one, when finishing is not what you want.');
   return lines.join('\n');
-}
-
-/** A process holding a conversation open, as the warning needs to describe it. */
-export interface LiveWriter {
-  pid: number;
-  cwd?: string;
-  /** True for the session foster itself is running inside. */
-  isSelf?: boolean;
 }
 
 export function twoLiveSidebars(source: StoreLayout, target: StoreLayout): boolean {

@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { removeSafely, writeFileAtomic } from '../src/engine/fsatomic.js';
+import { removeSafely, writeFileAtomic } from '../src/util/fsatomic.js';
 
 function scratch(): string {
   return mkdtempSync(path.join(tmpdir(), 'foster-fs-'));

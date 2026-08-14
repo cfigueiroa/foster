@@ -209,6 +209,21 @@ describe('inspectApp', () => {
     // Whatever is running on the machine, this store is not it.
     expect(inspectApp(makeStore(), {})).toEqual({ running: false, evidence: [] });
   });
+
+  it('does not treat a Code CLI process as Desktop running', () => {
+    // The store is the "default" for this environment, so a name scan would
+    // have counted any claude.exe. The table says this one is the CLI.
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const onlyCli: ProcessRow[] = rows({
+      pid: 42,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: CLI,
+      commandLine: `"${CLI}"`,
+    });
+    expect(inspectApp(store, env, () => onlyCli)).toEqual({ running: false, evidence: [] });
+  });
 });
 
 describe('quitDesktop', () => {

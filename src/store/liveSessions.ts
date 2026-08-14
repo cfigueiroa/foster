@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import type { LiveWriter } from '../engine/continued.js';
-import { readProcesses, type ProcessLister } from '../engine/desktop.js';
+import { readProcesses, type ProcessLister } from '../util/processes.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { configDirCandidates } from './configDirs.js';
 
@@ -17,6 +16,14 @@ import { configDirCandidates } from './configDirs.js';
  * outside: a transcript with a live writer must not get a second one, and the
  * registry is the only place that says whether one exists right now.
  */
+
+/** A process holding a conversation open, as a warning needs to describe it. */
+export interface LiveWriter {
+  pid: number;
+  cwd?: string;
+  /** True for the session foster itself is running inside. */
+  isSelf?: boolean;
+}
 
 export interface LiveCliSession {
   /** The registry file the entry came from. */

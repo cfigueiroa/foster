@@ -2,7 +2,7 @@ import { statSync } from 'node:fs';
 import type { Ledger } from '../ledger/log.js';
 import type { Purgeable } from '../store/purge.js';
 import { errorMessage } from '../util/fs.js';
-import { removeSafely } from './fsatomic.js';
+import { removeSafely } from '../util/fsatomic.js';
 
 /**
  * Destroy the conversations behind deleted sessions.

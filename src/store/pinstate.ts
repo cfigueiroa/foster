@@ -11,8 +11,8 @@ import {
   readManifest,
   scanTable,
   type BatchEntry,
-} from '../engine/leveldb.js';
-import { appendSynced } from '../engine/fsatomic.js';
+} from './format/leveldb.js';
+import { appendSynced } from '../util/fsatomic.js';
 import { safeReaddir } from '../util/fs.js';
 import type { StoreLayout } from '../domain/types.js';
 

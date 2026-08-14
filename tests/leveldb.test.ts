@@ -17,7 +17,7 @@ import {
   scanTable,
   splitInternalKey,
   unmaskCrc,
-} from '../src/engine/leveldb.js';
+} from '../src/store/format/leveldb.js';
 import {
   internalKey,
   makeTable,
