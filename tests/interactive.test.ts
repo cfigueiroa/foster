@@ -1,7 +1,6 @@
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { log, select } from '@clack/prompts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as Safety from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -9,33 +8,18 @@ import { listActive, project } from '../src/ledger/project.js';
 import { accountDir } from '../src/domain/paths.js';
 import { scanAccount } from '../src/store/scanner.js';
 import type { StoreLayout } from '../src/domain/types.js';
+import { CANCEL } from '../src/tui/ui.js';
+import { ScriptedUi, offeredBy as listedBy } from '../src/tui/scripted.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
-/** Scripted answers, consumed in order by the mocked prompts. */
+/** Scripted answers, consumed in order by the Ui double. */
 let answers: unknown[] = [];
-const CANCELLED = Symbol('cancelled');
+let ui: ScriptedUi;
 
-vi.mock('@clack/prompts', () => {
-  const next = () => Promise.resolve(answers.shift());
-  return {
-    intro: vi.fn(),
-    outro: vi.fn(),
-    note: vi.fn(),
-    cancel: vi.fn(),
-    select: vi.fn(next),
-    confirm: vi.fn(next),
-    text: vi.fn(next),
-    multiselect: vi.fn(next),
-    isCancel: (value: unknown) => value === CANCELLED,
-    log: {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-      success: vi.fn(),
-      message: vi.fn(),
-    },
-  };
-});
+async function play(): Promise<void> {
+  ui = new ScriptedUi(answers);
+  await runInteractive(store, ledger, ui);
+}
 
 // The real probe reports whatever Claude Desktop is doing on the machine running
 // the tests, which has nothing to do with the flow under test. Both entry points
@@ -55,6 +39,7 @@ vi.mock('../src/engine/safety.js', async (importOriginal) => {
 // "Restart it" and take down the machine's running app mid-suite.
 vi.mock('../src/engine/desktop.js', () => ({
   inspectDesktop: () => ({ running: false, codeSessions: 0, selfHosted: false }),
+  inspectDesktopFor: () => ({ running: false, codeSessions: 0, selfHosted: false }),
   quitDesktop: () => Promise.resolve({ outcome: 'not-running' }),
   startDesktop: () => Promise.resolve(true),
   packagedAppId: () => undefined,
@@ -103,7 +88,7 @@ describe('the guided menu', () => {
       'quit', // back at the menu
     ];
 
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(2);
     expect(listActive(project(ledger.read()))).toHaveLength(2);
@@ -113,7 +98,7 @@ describe('the guided menu', () => {
   it('narrows the batch by title before writing', async () => {
     answers = ['foster', ['0'], 'title', 'refactor', 'go', 'later', 'quit'];
 
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(1);
@@ -130,7 +115,7 @@ describe('the guided menu', () => {
       'quit',
     ];
 
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(answers).toHaveLength(0);
@@ -140,7 +125,7 @@ describe('the guided menu', () => {
     // Ticking nothing is how you leave a multiselect: there is no Back row to press.
     answers = ['foster', [], 'quit'];
 
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(answers).toHaveLength(0);
@@ -149,7 +134,7 @@ describe('the guided menu', () => {
   it('returns fostered copies, leaving the origin untouched', async () => {
     answers = ['foster', ['0'], 'all', 'go', 'later', 'return', 'all', true, 'later', 'quit'];
 
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(listActive(project(ledger.read()))).toHaveLength(0);
@@ -160,9 +145,9 @@ describe('the guided menu', () => {
   });
 
   it('treats Ctrl+C at the menu as quit', async () => {
-    answers = [CANCELLED];
+    answers = [CANCEL];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
   });
 });
 
@@ -191,7 +176,7 @@ describe('organizations within an account', () => {
 
     // 0 = the whole account, 1 = its first organization, 2 = its second.
     answers = ['foster', ['2'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(1);
@@ -206,7 +191,7 @@ describe('organizations within an account', () => {
     );
 
     answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     // Two from the first organization plus one from the second.
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(3);
@@ -231,7 +216,7 @@ describe('organizations within an account', () => {
     // be offered at all: excluding the entire current account would make that
     // session permanently unreachable.
     answers = ['foster', ['2'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(1);
@@ -242,7 +227,7 @@ describe('organizations within an account', () => {
     // Only the old account's single organization is a valid source here, so any
     // index beyond the first would mean the target itself was on the list.
     answers = ['foster', ['1'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
   });
@@ -268,7 +253,7 @@ describe('taking more than one source at once', () => {
 
     // 0 = the row that stands for both accounts.
     answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(3);
@@ -290,19 +275,17 @@ describe('taking more than one source at once', () => {
     // 0 = the whole account, 1 = its first organization: overlapping, not
     // contradictory, and the overlap must not produce a second copy.
     answers = ['foster', ['0', '1'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(3);
   });
 
   it('refuses to read this installation and another one in the same pass', async () => {
     answers = ['foster', ['0', '__other_store'], 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
-    expect(vi.mocked(log.error).mock.calls.flat()).toContainEqual(
-      expect.stringMatching(/one installation at a time/i),
-    );
+    expect(ui.errors.join('\n')).toMatch(/one installation at a time/i);
     expect(answers).toHaveLength(0);
   });
 });
@@ -316,7 +299,7 @@ describe('backing out of any step', () => {
   it('returns to the menu from the filter step instead of crashing', async () => {
     answers = ['foster', ['0'], '__back', 'quit'];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(answers).toHaveLength(0);
@@ -338,7 +321,7 @@ describe('backing out of any step', () => {
 
     answers = ['foster', ['0'], '__back', 'quit'];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
     expect(answers).toHaveLength(0);
   });
 });
@@ -359,7 +342,7 @@ describe('choosing where the copies go', () => {
     // account/organization rather than by position, so it is named outright.
     const destination = `${ELSEWHERE.accountUuid}/${ELSEWHERE.organizationUuid}`;
     answers = ['foster', ['1'], 'all', 'elsewhere', destination, 'go', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     // Nothing landed where the sidebar reads; it all went to the chosen place.
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
@@ -370,7 +353,7 @@ describe('choosing where the copies go', () => {
     // Only the old account's organization is a source, and nothing else exists,
     // so the flow must not consume an answer for a question with one option.
     answers = ['foster', ['0'], 'all', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(2);
     expect(answers).toHaveLength(0);
@@ -381,7 +364,7 @@ describe('picking sessions individually', () => {
   it('takes only the ticked ones', async () => {
     // Sessions are offered most recently used first, so index 0 is deterministic.
     answers = ['foster', ['0'], 'pick', ['0'], 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
     expect(answers).toHaveLength(0);
@@ -389,7 +372,7 @@ describe('picking sessions individually', () => {
 
   it('treats ticking nothing as a change of mind rather than a batch of zero', async () => {
     answers = ['foster', ['0'], 'pick', [], 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(answers).toHaveLength(0);
@@ -399,7 +382,7 @@ describe('picking sessions individually', () => {
 describe('the confirmation screen', () => {
   it('changes the prefix without leaving it', async () => {
     answers = ['foster', ['0'], 'all', 'prefix', '[old] ', 'go', 'later', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(2);
@@ -410,7 +393,7 @@ describe('the confirmation screen', () => {
     // A prompt that returns something unexpected used to spin the loop forever.
     answers = ['foster', ['0'], 'all', 'something-else', 'quit'];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
   });
 });
@@ -418,14 +401,14 @@ describe('the confirmation screen', () => {
 describe('naming an account', () => {
   it('records the label and uses it afterwards', async () => {
     answers = ['label', OLD_ACCOUNT.accountUuid, 'the old one', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(project(ledger.read()).labels.get(OLD_ACCOUNT.accountUuid)).toBe('the old one');
   });
 
   it('keeps the old name when the answer is blank', async () => {
     answers = ['label', OLD_ACCOUNT.accountUuid, '   ', 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(project(ledger.read()).labels.has(OLD_ACCOUNT.accountUuid)).toBe(false);
   });
@@ -434,7 +417,7 @@ describe('naming an account', () => {
     // clack resolves an empty text prompt as undefined rather than '', which a
     // String() once coerced into a name that passed every emptiness check.
     answers = ['label', OLD_ACCOUNT.accountUuid, undefined, 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(project(ledger.read()).labels.has(OLD_ACCOUNT.accountUuid)).toBe(false);
   });
@@ -452,8 +435,8 @@ describe('naming an account', () => {
 
     // Backing out of the prompt still records the sighting: it happens on the
     // visit, not on the save.
-    answers = ['label', NEW_ACCOUNT.accountUuid, CANCELLED, 'quit'];
-    await runInteractive(store, ledger);
+    answers = ['label', NEW_ACCOUNT.accountUuid, CANCEL, 'quit'];
+    await play();
 
     expect(project(ledger.read()).identities.get(NEW_ACCOUNT.accountUuid)).toMatchObject({
       email: 'me@example.com',
@@ -467,7 +450,7 @@ describe('the main menu', () => {
     // Exhausting the scripted answers yields undefined, which matches no case.
     answers = ['not-a-menu-entry'];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
   });
 });
 
@@ -501,7 +484,7 @@ describe('bringing sessions from another installation', () => {
       'later',
       'quit',
     ];
-    await runInteractive(store, ledger);
+    await play();
 
     const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
     expect(copies).toHaveLength(1);
@@ -520,7 +503,7 @@ describe('bringing sessions from another installation', () => {
       'quit',
     ];
 
-    await expect(runInteractive(store, ledger)).resolves.toBeUndefined();
+    await expect(play()).resolves.toBeUndefined();
     expect(scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(0);
     expect(answers).toHaveLength(0);
   });
@@ -562,7 +545,7 @@ describe('working on another installation', () => {
       'later',
       'quit',
     ];
-    await runInteractive(store, ledger);
+    await play();
 
     // The copies landed in the other store, and the one we started in is untouched.
     expect(scanAccount(other, OLD_ACCOUNT).filter((s) => s.isCopy)).toHaveLength(1);
@@ -574,7 +557,7 @@ describe('working on another installation', () => {
     const empty = makeStore();
 
     answers = ['installation', '__type_a_path', empty.root, 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
     expect(answers).toHaveLength(0);
   });
@@ -597,19 +580,8 @@ describe('working on another installation', () => {
     });
 
     answers = ['installation', other.root, 'quit'];
-    await runInteractive(store, ledger);
+    await play();
 
-    expect(offeredBy('Work on which installation?')).toContain(other.root);
+    expect(listedBy(ui, 'Work on which installation?')).toContain(other.root);
   });
 });
-
-/** The values a scripted screen actually offered, for asserting on a menu. */
-function offeredBy(message: string): string[] {
-  const calls = vi.mocked(select).mock.calls as unknown as Array<
-    [{ message: string; options: Array<{ value: string }> }]
-  >;
-  // The mock is shared across the file, so its calls accumulate: the screen this
-  // test opened is the last one with that message, not the first.
-  const prompt = calls.map(([only]) => only).findLast((arg) => arg.message === message);
-  return (prompt?.options ?? []).map((option) => option.value);
-}

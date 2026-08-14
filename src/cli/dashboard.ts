@@ -1,0 +1,53 @@
+import { samePath, storeRootOfCopy } from '../domain/paths.js';
+import type { AccountRef, StoreLayout } from '../domain/types.js';
+import { inspectApp } from '../engine/safety.js';
+import type { Ledger } from '../ledger/log.js';
+import { listActive, project } from '../ledger/project.js';
+import { overviewAccounts } from '../store/accounts.js';
+import { VERSION } from '../version.js';
+import type { Dashboard, DashboardAccount } from '../tui/ui.js';
+import { formatDate, shortId } from './render.js';
+
+/**
+ * What the home screen needs: counts and labels. Transcript walks and the
+ * usage API belong to /status and /usage — they are too expensive (and too
+ * honest-about-staleness) to run every time the menu comes back.
+ */
+export function buildDashboard(store: StoreLayout, ledger: Ledger, target: AccountRef): Dashboard {
+  const labels = project(ledger.read()).labels;
+  const rows = overviewAccounts(store, ledger);
+  const active = listActive(project(ledger.read()));
+  const app = inspectApp(store);
+  const signedLabel = labels.get(target.accountUuid) ?? shortId(target.accountUuid);
+
+  const accounts: DashboardAccount[] = rows.map((row) => ({
+    accountUuid: row.accountUuid,
+    shortId: shortId(row.accountUuid),
+    ...(row.label ? { label: row.label } : {}),
+    isCurrent: row.isCurrent,
+    ...(row.identity?.plan ? { plan: row.identity.plan } : {}),
+    ...(row.identity?.profile?.subscriptionStatus
+      ? { subscription: row.identity.profile.subscriptionStatus }
+      : {}),
+    sessions: row.sessions,
+    copies: row.copies,
+    paymentNeedsAuth: row.identity?.profile?.paymentNeedsAuth === true,
+  }));
+
+  return {
+    version: VERSION,
+    store: store.root,
+    signedIn: signedLabel,
+    appRunning: app.running,
+    accounts,
+    fostered: active.map((item) => {
+      const root = storeRootOfCopy(item.copyPath);
+      const elsewhere = samePath(root, store.root) ? undefined : root;
+      return {
+        title: item.originalTitle || shortId(item.originSessionId),
+        date: formatDate(item.fosteredAt),
+        ...(elsewhere ? { elsewhere } : {}),
+      };
+    }),
+  };
+}
