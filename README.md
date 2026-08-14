@@ -869,6 +869,22 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   `--session` still overrides. For pairs already on disk, `status` counts them and
   `foster return --duplicates` removes the copies. Note that a `↪ ` in a title no longer proves a row
   is foster's: the app carries the title over when it makes a card of its own from one.
+- **Nor the same conversation under two identifiers.** The check above compares `cliSessionId`, which
+  is the one field a branch changes — so for a while the pair it existed to prevent was arriving
+  through the branch. One conversation is forked (see below), each half ends up in a different
+  account, and fostering both puts two identical-looking rows in one sidebar with nothing to tell
+  them apart. What a branch cannot change is the conversation it was forked from: the two transcripts
+  share every record up to the moment they parted, so the first `uuid` in the file identifies the
+  work rather than the file. Fostering compares that too, and refuses with `already has a branch`
+  rather than pretending it is the same conversation — because it is not, quite. Each side holds
+  turns the other never got, so read both before choosing; `--session` overrides, and for pairs
+  already on disk `status` counts them and `foster return --branches` removes them.
+
+  Removal keeps one row per piece of work, always: a card foster did not write if there is one,
+  otherwise the half whose conversation was written last — the one that carried on after the fork.
+  Reporting every row of a group is true of each and ruinous together, and would have taken the work
+  out of the sidebar entirely.
+
 - **A copy is the same conversation, which is the point and the one hazard.** The copy carries the
   original's `cliSessionId`, so both rows open one transcript: work done under the other account is
   there when you open the original, and returning the copy loses none of it. What does not travel is

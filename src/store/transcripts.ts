@@ -20,6 +20,16 @@ import { configDirCandidates } from './configDirs.js';
 /** How much of a transcript to read when recovering its facts. */
 const HEAD_BYTES = 256 * 1024;
 
+/**
+ * How much to read to find the record a conversation starts from.
+ *
+ * Far less than the facts need: the answer is the first record carrying a `uuid`,
+ * which is the first thing said. The budget is for the records in front of it —
+ * a title, a mode, a queued prompt — none of which are large, and for the one
+ * case that is, a first message someone pasted a file into.
+ */
+const ROOT_BYTES = 64 * 1024;
+
 export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
   const configDir = env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), '.claude');
   return path.join(configDir, 'projects');
@@ -98,6 +108,31 @@ export function indexAllTranscripts(projectsDirs: string | string[]): Map<string
   }
 
   return index;
+}
+
+/**
+ * What a conversation keeps when the app branches it.
+ *
+ * A branch is not a new conversation: the app copies the history into a new file
+ * with a new `cliSessionId` and carries on there, so the two transcripts share
+ * every record up to the moment they parted — including the first one. That
+ * first `uuid` is therefore the one identifier a branch cannot change, and it is
+ * what lets two rows that look unrelated by id be recognised as the same work.
+ *
+ * Records before it have no `uuid` at all — `ai-title`, `custom-title`, `mode`,
+ * `queue-operation` are the app's own bookkeeping, rewritten on every save — so
+ * the scan skips them rather than trusting the first line.
+ *
+ * Undefined when the file cannot be read, holds nothing with a `uuid`, or is not
+ * on disk at all. Callers must treat that as "no answer" rather than as "not the
+ * same": guessing either way from a missing transcript is worse than the id
+ * comparison it would replace.
+ */
+export function conversationRoot(file: string): string | undefined {
+  for (const record of headRecords(file, ROOT_BYTES)) {
+    if (typeof record.uuid === 'string' && record.uuid !== '') return record.uuid;
+  }
+  return undefined;
 }
 
 export interface TranscriptFacts {
@@ -219,7 +254,7 @@ function readPart(
  * recovering are written near the start, and a restore that had to read every
  * conversation in full would be unusable.
  */
-function headRecords(file: string): Record<string, unknown>[] {
+function headRecords(file: string, bytes = HEAD_BYTES): Record<string, unknown>[] {
   let buffer: Buffer;
   let complete: boolean;
 
@@ -230,10 +265,10 @@ function headRecords(file: string): Record<string, unknown>[] {
     return [];
   }
   try {
-    buffer = Buffer.alloc(HEAD_BYTES);
-    const read = readSync(fd, buffer, 0, HEAD_BYTES, 0);
+    buffer = Buffer.alloc(bytes);
+    const read = readSync(fd, buffer, 0, bytes, 0);
     buffer = buffer.subarray(0, read);
-    complete = read < HEAD_BYTES;
+    complete = read < bytes;
   } catch {
     return [];
   } finally {

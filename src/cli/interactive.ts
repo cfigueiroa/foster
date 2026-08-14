@@ -325,6 +325,12 @@ function showStatus(ledger: Ledger, store: StoreLayout): void {
         '"Send them back" offers to remove just those.',
     );
   }
+  if (duplicates.branches.length > 0) {
+    log.warn(
+      `${duplicates.branches.length} of these are branches of a conversation this account already had. ` +
+        'Same work, forked: each side holds turns the other never got.',
+    );
+  }
   if (duplicates.appMade > 0) {
     log.info(
       pc.dim(

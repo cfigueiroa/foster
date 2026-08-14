@@ -985,6 +985,7 @@ program
   .option('--to-org <organizationUuid>', 'only copies written into this organization')
   .option('--all-stores', 'include copies written into other installations')
   .option('--duplicates', 'only copies of a conversation their account already had')
+  .option('--branches', 'only copies of a conversation their account already had a branch of')
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually remove; without it nothing is removed')
   .addOption(new Option('--dry-run', 'show what would happen and remove nothing').conflicts('yes'))
@@ -997,6 +998,7 @@ program
       toOrg?: string;
       allStores?: boolean;
       duplicates?: boolean;
+      branches?: boolean;
       restart?: boolean;
       yes?: boolean;
       dryRun?: boolean;
@@ -1021,9 +1023,16 @@ program
     if (opts.to !== undefined || opts.toOrg !== undefined) {
       active = selectByTarget(active, opts.to, opts.toOrg);
     }
-    if (opts.duplicates) {
-      const duplicated = new Set(findDuplicates(store, active).copies.map((f) => f.copySessionId));
-      active = active.filter((f) => duplicated.has(f.copySessionId));
+    if (opts.duplicates || opts.branches) {
+      const report = findDuplicates(store, active);
+      // Both flags together read as "everything this account already shows",
+      // which is the one sensible meaning for asking for both.
+      const wanted = new Set(
+        [...(opts.duplicates ? report.copies : []), ...(opts.branches ? report.branches : [])].map(
+          (f) => f.copySessionId,
+        ),
+      );
+      active = active.filter((f) => wanted.has(f.copySessionId));
     }
     if (opts.title) {
       const needle = opts.title.toLowerCase();
@@ -1083,6 +1092,16 @@ function reportDuplicates(report: DuplicateReport): void {
       pc.yellow(
         `${report.copies.length} of them duplicate${one ? 's' : ''} a conversation this account already had.` +
           `\nRemove ${one ? 'it' : 'them'} with: foster return --duplicates`,
+      ),
+    );
+  }
+  if (report.branches.length > 0) {
+    const one = report.branches.length === 1;
+    console.log(
+      pc.yellow(
+        `${report.branches.length} of them ${one ? 'is a branch' : 'are branches'} of a conversation this account already had.` +
+          '\nSame work, forked: each side holds turns the other never got, so read both before' +
+          `\nchoosing. Remove ${one ? 'it' : 'them'} with: foster return --branches`,
       ),
     );
   }
