@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { fosterSessions } from '../src/engine/executor.js';
-import { writeFileAtomic } from '../src/engine/fsatomic.js';
+import { writeFileAtomic } from '../src/util/fsatomic.js';
 import { Ledger } from '../src/ledger/log.js';
 import { activityOf, applyFilter } from '../src/domain/filter.js';
 import { scanAccount } from '../src/store/scanner.js';

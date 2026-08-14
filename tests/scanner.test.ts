@@ -39,6 +39,21 @@ describe('scanAccount', () => {
     expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
   });
 
+  it('skips valid JSON that is not a session, and still loads the neighbor', () => {
+    const store = makeStore();
+    const good = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-00000000001c' }),
+    );
+    const dir = accountDir(store, OLD_ACCOUNT);
+    writeFileSync(path.join(dir, 'local_notes.json'), JSON.stringify({ title: 'no id' }), 'utf8');
+
+    const found = scanAccount(store, OLD_ACCOUNT);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.path).toBe(good);
+  });
+
   it('ignores tombstones and unrelated files', () => {
     const store = makeStore();
     writeSession(store, OLD_ACCOUNT, session());

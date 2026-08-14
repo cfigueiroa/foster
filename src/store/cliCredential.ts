@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { inspect } from 'node:util';
-import { writeFileAtomic } from '../engine/fsatomic.js';
+import { writeFileAtomic } from '../util/fsatomic.js';
 import { fileExists } from '../util/fs.js';
 
 /**

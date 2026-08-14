@@ -1,4 +1,4 @@
-import { encodeVarint32 } from '../../src/engine/leveldb.js';
+import { encodeVarint32 } from '../../src/store/format/leveldb.js';
 
 /**
  * Builds LevelDB sorted tables for tests.

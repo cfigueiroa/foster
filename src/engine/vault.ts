@@ -5,7 +5,7 @@ import path from 'node:path';
 import { comparablePath } from '../domain/paths.js';
 import { parseCredential, type CliCredential } from '../store/cliCredential.js';
 import { safeReaddir } from '../util/fs.js';
-import { appendSynced } from './fsatomic.js';
+import { appendSynced } from '../util/fsatomic.js';
 
 /**
  * Every credential foster has ever seen, kept.

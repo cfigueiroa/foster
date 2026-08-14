@@ -4,6 +4,34 @@ import path from 'node:path';
 import { VERSION } from '../version.js';
 import type { LedgerEvent, LedgerEventInput } from './types.js';
 
+const EVENT_KINDS = new Set<string>([
+  'account_labelled',
+  'account_identity_seen',
+  'account_identity_forgotten',
+  'account_switched',
+  'fostered',
+  'returned',
+  'conversation_purged',
+  'failed',
+]);
+
+/**
+ * A ledger line is only an event when it names a kind we fold. Valid JSON
+ * without that discriminant is a neighbor, not history — skip it, keep the rest.
+ */
+export function parseLedgerEvent(raw: string): LedgerEvent | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.kind !== 'string' || !EVENT_KINDS.has(record.kind)) return undefined;
+  return record as unknown as LedgerEvent;
+}
+
 export function defaultLedgerPath(env: NodeJS.ProcessEnv = process.env): string {
   const base = env.FOSTER_HOME ?? path.join(homedir(), '.foster');
   return path.join(base, 'ledger.jsonl');
@@ -63,12 +91,8 @@ export class Ledger {
     for (const line of raw.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      try {
-        events.push(JSON.parse(trimmed) as LedgerEvent);
-      } catch {
-        // A torn final line (power loss mid-append) must not make the whole
-        // ledger unreadable; skip it and keep the rest.
-      }
+      const event = parseLedgerEvent(trimmed);
+      if (event) events.push(event);
     }
     return events;
   }
