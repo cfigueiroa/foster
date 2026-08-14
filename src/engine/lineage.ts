@@ -1,6 +1,4 @@
 import { statSync } from 'node:fs';
-import path from 'node:path';
-import { isDirectory } from '../util/fs.js';
 import { conversationRoot, indexTranscripts, transcriptRoots } from '../store/transcripts.js';
 
 /**
@@ -11,11 +9,6 @@ import { conversationRoot, indexTranscripts, transcriptRoots } from '../store/tr
  * transcript with a new id and moves the card onto that. Everything downstream of
  * a branch reads as two unrelated conversations — different `cliSessionId`,
  * different files — while being one piece of work that happened to fork.
- *
- * That is how a sidebar ends up with two identical rows even though fostering
- * already refuses to add a conversation the account has: the second row is a
- * branch, its id has never been seen here, and the check that would have caught
- * it compares the one field a branch changes.
  *
  * The answer is the first record both files still share. See `conversationRoot`.
  *
@@ -41,13 +34,24 @@ export interface Lineage {
   lastWriteOf(cliSessionId: string | undefined): number | undefined;
 }
 
-export function lineage(env: NodeJS.ProcessEnv = process.env): Lineage {
+/**
+ * Test seam: an empty list so unit tests never walk the real `~/.claude`.
+ * Production never calls this. A test that is asking about branches passes
+ * its own tree to `lineageAt` / `projectsDirs` instead.
+ */
+let installedRoots: string[] | undefined;
+
+export function useTranscriptRoots(dirs: string[] | undefined): void {
+  installedRoots = dirs;
+}
+
+export function lineageAt(projectsDirs: string[]): Lineage {
   let transcripts: Map<string, string> | undefined;
   const roots = new Map<string, string | undefined>();
 
   const fileOf = (cliSessionId: string | undefined): string | undefined => {
     if (cliSessionId === undefined || cliSessionId === '') return undefined;
-    transcripts ??= indexTranscripts(rootsOf(env));
+    transcripts ??= indexTranscripts(projectsDirs);
     return transcripts.get(cliSessionId);
   };
 
@@ -84,30 +88,6 @@ export function lineage(env: NodeJS.ProcessEnv = process.env): Lineage {
   };
 }
 
-/**
- * A root as a map key that cannot collide with a `cliSessionId`.
- *
- * Both are uuids and both are keyed in one map, so the namespaces are kept apart
- * by construction rather than by hoping a conversation never shares an id with
- * some other conversation's first record.
- */
-export function rootKey(root: string | undefined): string | undefined {
-  return root === undefined ? undefined : `root:${root}`;
-}
-
-/**
- * Where the transcripts are, without walking a real Claude install from a test.
- *
- * A test that hands us a `CLAUDE_CONFIG_DIR` of its own is pointing at a tree;
- * look only there. A test that did not is not asking about branches, and the
- * vitest config forbids touching the real home. Production has no `VITEST` and
- * still sees every account's `projects/`.
- */
-function rootsOf(env: NodeJS.ProcessEnv): string[] {
-  if (process.env.VITEST && env === process.env) return [];
-  if (env !== process.env && env.CLAUDE_CONFIG_DIR) {
-    const dir = path.join(env.CLAUDE_CONFIG_DIR, 'projects');
-    return isDirectory(dir) ? [dir] : [];
-  }
-  return transcriptRoots(env);
+export function lineage(env: NodeJS.ProcessEnv = process.env): Lineage {
+  return lineageAt(installedRoots ?? transcriptRoots(env));
 }

@@ -135,6 +135,13 @@ describe('storeIdentity', () => {
     expect(identity.isDefault).toBe(false);
     expect(identity.roots).toHaveLength(1);
   });
+
+  it('does not treat another candidate store as the same installation', () => {
+    const one = makeStore();
+    const two = makeStore();
+    const identity = storeIdentity(one.root, { CLAUDE_USER_DATA_DIR: one.root });
+    expect(identity.roots.every((root) => !samePath(root, two.root))).toBe(true);
+  });
 });
 
 describe('layoutFor', () => {

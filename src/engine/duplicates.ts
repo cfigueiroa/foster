@@ -1,8 +1,8 @@
-import { readFileSync } from 'node:fs';
-import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
+import type { StoreLayout } from '../domain/types.js';
 import type { ActiveFostering } from '../ledger/types.js';
-import { scanAccount, type KnownCopies } from '../store/scanner.js';
+import { readCliSessionId } from '../store/sessionFile.js';
 import { lineage, type Lineage } from './lineage.js';
+import { sidebarOf } from './sidebar.js';
 
 /**
  * Two rows in one sidebar for one conversation.
@@ -16,7 +16,7 @@ import { lineage, type Lineage } from './lineage.js';
  * The same row appears for a *branch* too, and by the same route: the app forks a
  * conversation that has a live writer, the fork gets an id nothing has seen, and
  * the two halves of one piece of work are fostered from two accounts as if they
- * were unrelated. `lineage.ts` is how they are recognised.
+ * were unrelated.
  *
  * Fostering now refuses to add the second row. This is for the ones already
  * there, and it draws a line that matters: foster removes only what foster wrote.
@@ -45,16 +45,16 @@ export interface DuplicateReport {
 export function findDuplicates(
   store: StoreLayout,
   fosterings: ActiveFostering[],
-  env: NodeJS.ProcessEnv = process.env,
+  source?: NodeJS.ProcessEnv | Lineage,
 ): DuplicateReport {
   const report: DuplicateReport = { copies: [], branches: [], appMade: 0 };
-  const kin = lineage(env);
+  const kin = resolveLineage(source);
   const accounts = new Map<string, ActiveFostering[]>();
   // Which rows are foster's own is settled here rather than by the marker on the
   // file: the app drops unknown fields when it saves a session, so a copy that
   // has been opened looks native. Counting those as the app's would blame it for
   // pairs foster made, and offer no way to remove them.
-  const known: KnownCopies = new Set(fosterings.map((f) => f.copySessionId));
+  const known = new Set(fosterings.map((f) => f.copySessionId));
 
   for (const fostering of fosterings) {
     const key = `${fostering.target.accountUuid}/${fostering.target.organizationUuid}`;
@@ -63,7 +63,8 @@ export function findDuplicates(
 
   for (const group of accounts.values()) {
     const target = group[0]!.target;
-    const surplus = surplusIn(cardsIn(store, target, known), kin);
+    const bar = sidebarOf(store, target, known, kin);
+    const surplus = bar.extras();
 
     for (const fostering of group) {
       // Asked of the ledger entry rather than of the scan, and kept from when
@@ -75,111 +76,20 @@ export function findDuplicates(
       if (kind === 'copy') report.copies.push(fostering);
       else if (kind === 'branch') report.branches.push(fostering);
     }
-  }
 
-  // Counted across the account directories in play, once each.
-  for (const key of accounts.keys()) {
-    const [accountUuid, organizationUuid] = key.split('/');
-    const byConversation = new Map<string, Card[]>();
-    for (const card of cardsIn(
-      store,
-      { accountUuid: accountUuid!, organizationUuid: organizationUuid! },
-      known,
-    )) {
-      byConversation.set(card.cliSessionId, [
-        ...(byConversation.get(card.cliSessionId) ?? []),
-        card,
-      ]);
-    }
-    for (const rows of byConversation.values()) {
-      if (rows.length > 1 && rows.every((row) => !row.isCopy)) report.appMade++;
-    }
+    report.appMade += bar.appMade();
   }
 
   return report;
 }
 
-interface Card {
-  sessionId: string;
-  isCopy: boolean;
-  cliSessionId: string;
-}
-
-/**
- * Which rows are the extra ones, and never all of them.
- *
- * The question is asked per piece of work rather than per card, because the
- * answer has to leave something behind. Reporting "this row duplicates another"
- * of every row in a group is true of each and useless together: `return
- * --duplicates` would act on the lot and the work would vanish from the sidebar
- * entirely — which is exactly what the first version of the branch report did,
- * where both halves are usually copies fostered from two different accounts.
- *
- * So one row survives every group:
- *
- * - a card foster did not write, if there is one. It is not foster's to remove,
- *   and it is the row that was here first.
- * - otherwise the copy whose conversation was written last. Between two branches
- *   that is the one that kept going after the fork; between two copies of one
- *   conversation it is a coin toss that costs nothing, since both open the same
- *   transcript.
- *
- * Work is keyed by root, so a conversation and its branch are one group. A
- * transcript that cannot be read falls back to its own id, which puts it in a
- * group by itself — unanswerable is never treated as "the same".
- */
-function surplusIn(cards: Card[], kin: Lineage): Map<string, 'copy' | 'branch'> {
-  const groups = new Map<string, Card[]>();
-  for (const card of cards) {
-    const key = kin.rootOf(card.cliSessionId) ?? card.cliSessionId;
-    groups.set(key, [...(groups.get(key) ?? []), card]);
-  }
-
-  const surplus = new Map<string, 'copy' | 'branch'>();
-  for (const rows of groups.values()) {
-    if (rows.length < 2) continue;
-
-    const keep = survivor(rows, kin);
-    for (const row of rows) {
-      if (row === keep || !row.isCopy) continue;
-      // Exact when something else in the group holds the very same conversation;
-      // a branch when the group is held together by the root alone.
-      const exact = rows.some((other) => other !== row && other.cliSessionId === row.cliSessionId);
-      surplus.set(row.sessionId, exact ? 'copy' : 'branch');
-    }
-  }
-
-  return surplus;
-}
-
-function survivor(rows: Card[], kin: Lineage): Card {
-  const native = rows.find((row) => !row.isCopy);
-  if (native) return native;
-  return rows.reduce((best, row) =>
-    (kin.lastWriteOf(row.cliSessionId) ?? 0) > (kin.lastWriteOf(best.cliSessionId) ?? 0)
-      ? row
-      : best,
-  );
-}
-
-function cardsIn(store: StoreLayout, account: AccountRef, copies: KnownCopies): Card[] {
-  const cards: Card[] = [];
-
-  for (const session of scanAccount(store, account, copies)) {
-    const id = session.data.cliSessionId;
-    if (!id) continue;
-    cards.push({ sessionId: session.data.sessionId, isCopy: session.isCopy, cliSessionId: id });
-  }
-
-  return cards;
+function resolveLineage(source?: NodeJS.ProcessEnv | Lineage): Lineage {
+  if (source && typeof (source as Lineage).rootOf === 'function') return source as Lineage;
+  return lineage(source as NodeJS.ProcessEnv | undefined);
 }
 
 /** From the ledger where it was recorded, and from the copy where it was not. */
 function conversationOf(fostering: ActiveFostering): string | undefined {
   if (fostering.cliSessionId) return fostering.cliSessionId;
-  try {
-    return (JSON.parse(readFileSync(fostering.copyPath, 'utf8')) as CodeSessionData).cliSessionId;
-  } catch {
-    return undefined;
-  }
+  return readCliSessionId(fostering.copyPath);
 }

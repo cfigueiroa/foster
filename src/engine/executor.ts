@@ -7,9 +7,10 @@ import { copySessionIds, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { blockingReasons } from '../domain/filter.js';
 import { errorMessage } from '../util/fs.js';
-import { scanAccount, type KnownCopies } from '../store/scanner.js';
+
 import { removeSafely, writeFileAtomic } from './fsatomic.js';
-import { lineage, rootKey, type Lineage } from './lineage.js';
+import { lineage, lineageAt } from './lineage.js';
+import { sidebarOf } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
 
@@ -53,6 +54,8 @@ export interface FosterOptions {
    * so a test can point at its own tree; production reads the real one.
    */
   env?: NodeJS.ProcessEnv;
+  /** Transcript `projects/` directories. Wins over `env` when both are given. */
+  projectsDirs?: string[];
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -103,8 +106,8 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // Keyed by branch as well, because the id is exactly what a branch changes: the
   // pair this check exists to prevent is most often made *by* the branch, one
   // account holding the conversation and the other holding what it forked into.
-  const kin = lineage(options.env);
-  const conversationsHere = conversationsIn(store, target, copySessionIds(ledger.read()), kin);
+  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env);
+  const here = sidebarOf(store, target, copySessionIds(ledger.read()), kin);
 
   // No gate here on purpose. Every copy gets a session id the app has never seen,
   // so a running app neither reads nor writes the file: it is invisible to the
@@ -157,7 +160,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // the destination rather than about anything foster has done: a conversation
     // already showing here would gain a second row for the same work.
     const cliSessionId = session.data.cliSessionId;
-    const shownHere = alreadyShown(conversationsHere, cliSessionId, kin);
+    const shownHere = here.reason(cliSessionId);
     if (shownHere !== undefined && !explicit) {
       outcomes.push({
         originSessionId: originId,
@@ -193,14 +196,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // both hold a card for one conversation would otherwise pass this check
       // twice and produce the pair itself, in a single run.
       if (copy.cliSessionId) {
-        conversationsHere.set(copy.cliSessionId, 'this account already has that conversation');
-        // And as a branch: an account holding a conversation and the branch it
-        // forked into is the ordinary shape of this, so a sweep that found both
-        // would otherwise bring the pair itself in one run.
-        const key = rootKey(kin.rootOf(copy.cliSessionId));
-        if (key !== undefined && !conversationsHere.has(key)) {
-          conversationsHere.set(key, BRANCH_HERE);
-        }
+        here.markPlanned(copy.cliSessionId);
       }
     };
 
@@ -268,67 +264,6 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   }
 
   return outcomes;
-}
-
-/**
- * The conversations the destination already shows, and how each got there.
- *
- * Archived counts as present: the row exists, and the answer to wanting it back
- * is to unarchive rather than to add a second one. A tombstone does not — a
- * deleted card is not a row, and bringing that conversation back is exactly what
- * fostering (or `restore`) is for.
- */
-function conversationsIn(
-  store: StoreLayout,
-  target: AccountRef,
-  copies: KnownCopies,
-  kin: Lineage,
-): Map<string, string> {
-  const here = new Map<string, string>();
-
-  for (const session of scanAccount(store, target, copies)) {
-    const id = session.data.cliSessionId;
-    if (!id) continue;
-    const how = session.isCopy
-      ? 'this account already has a copy of that conversation'
-      : session.data.isArchived
-        ? 'this account already has that conversation, archived'
-        : 'this account already has that conversation';
-    here.set(id, how);
-
-    // First card wins the branch key. Which of several branches is named hardly
-    // matters — the message says a branch is here, not which — and rewriting it
-    // per card would cost a transcript read for an answer already given.
-    const key = rootKey(kin.rootOf(id));
-    if (key !== undefined && !here.has(key)) {
-      here.set(key, session.data.isArchived ? `${BRANCH_HERE}, archived` : BRANCH_HERE);
-    }
-  }
-
-  return here;
-}
-
-/**
- * Said differently from the exact match on purpose.
- *
- * "The same conversation" is a claim the two rows would open the same transcript;
- * a branch is the weaker and more awkward truth — one piece of work that forked,
- * where each side holds something the other does not. Naming it lets `--session`
- * be an informed override rather than a shrug.
- */
-const BRANCH_HERE = 'this account already has a branch of that conversation';
-
-/** The conversation, then the work it belongs to. */
-function alreadyShown(
-  here: Map<string, string>,
-  cliSessionId: string | undefined,
-  kin: Lineage,
-): string | undefined {
-  if (cliSessionId === undefined) return undefined;
-  const exact = here.get(cliSessionId);
-  if (exact !== undefined) return exact;
-  const key = rootKey(kin.rootOf(cliSessionId));
-  return key === undefined ? undefined : here.get(key);
 }
 
 /**

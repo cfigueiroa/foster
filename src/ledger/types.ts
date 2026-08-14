@@ -1,5 +1,5 @@
+import type { AccountProfile } from '../domain/profile.js';
 import type { AccountRef } from '../domain/types.js';
-import type { AccountProfile } from '../store/profile.js';
 
 /**
  * The ledger is an append-only JSONL log. Current state is a fold over the

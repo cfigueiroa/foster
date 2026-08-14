@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findDuplicates } from '../src/engine/duplicates.js';
 import { fosterSessions } from '../src/engine/executor.js';
-import { lineage } from '../src/engine/lineage.js';
+import { lineageAt } from '../src/engine/lineage.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, project } from '../src/ledger/project.js';
 import { conversationRoot } from '../src/store/transcripts.js';
@@ -54,6 +54,10 @@ function forked(): NodeJS.ProcessEnv {
   });
 }
 
+function projects(env: NodeJS.ProcessEnv): string[] {
+  return [path.join(env.CLAUDE_CONFIG_DIR!, 'projects')];
+}
+
 function ledgerIn(): Ledger {
   return new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-lin-l-')), 'l.jsonl'));
 }
@@ -82,13 +86,13 @@ describe('conversationRoot', () => {
   });
 
   it('is shared by a conversation and the branch forked out of it', () => {
-    const kin = lineage(forked());
+    const kin = lineageAt(projects(forked()));
     expect(kin.sameWork(ORIGINAL, BRANCH)).toBe(true);
     expect(kin.sameWork(ORIGINAL, UNRELATED)).toBe(false);
   });
 
   it('answers nothing for a conversation with no transcript on disk', () => {
-    const kin = lineage(forked());
+    const kin = lineageAt(projects(forked()));
     expect(kin.rootOf('00000000-0000-4000-8000-0000000000e9')).toBeUndefined();
     // Unanswerable is not "the same": a missing transcript must not make two
     // unrelated conversations collide on undefined.
@@ -104,7 +108,7 @@ describe('fostering a branch', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
     });
 
     expect(outcomes).toHaveLength(1);
@@ -119,7 +123,7 @@ describe('fostering a branch', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
       explicit: true,
     });
 
@@ -146,7 +150,7 @@ describe('fostering a branch', () => {
       store,
       ledger: ledgerIn(),
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
     });
 
     expect(outcomes[0]!.status).toBe('fostered');
@@ -169,7 +173,7 @@ describe('fostering a branch', () => {
       store,
       ledger: ledgerIn(),
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
     });
 
     expect(outcomes.filter((o) => o.status === 'fostered')).toHaveLength(1);
@@ -193,7 +197,7 @@ describe('fostering a branch', () => {
       store,
       ledger: ledgerIn(),
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
       dryRun: true,
     });
 
@@ -216,7 +220,7 @@ describe('findDuplicates', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
     });
     writeSession(
       store,
@@ -224,7 +228,11 @@ describe('findDuplicates', () => {
       session({ sessionId: '00000000-0000-4000-8000-0000000000d2', cliSessionId: ORIGINAL }),
     );
 
-    const report = findDuplicates(store, listActive(project(ledger.read())), forked());
+    const report = findDuplicates(
+      store,
+      listActive(project(ledger.read())),
+      lineageAt(projects(forked())),
+    );
     expect(report.branches).toHaveLength(1);
     expect(report.copies).toHaveLength(0);
     expect(report.appMade).toBe(0);
@@ -244,10 +252,11 @@ describe('findDuplicates', () => {
     );
     const ledger = ledgerIn();
     const env = forked();
+    const projectsDirs = projects(env);
     // Fostered one at a time, as two accounts' sweeps would have done it before
     // the refusal existed: neither run could see the other half arriving.
     for (const card of scanAccount(store, OLD_ACCOUNT)) {
-      fosterSessions([card], { store, ledger, target: NEW_ACCOUNT, env, explicit: true });
+      fosterSessions([card], { store, ledger, target: NEW_ACCOUNT, projectsDirs, explicit: true });
     }
     const branchFile = path.join(
       env.CLAUDE_CONFIG_DIR!,
@@ -259,7 +268,7 @@ describe('findDuplicates', () => {
     utimesSync(branchFile, later, later);
 
     const active = listActive(project(ledger.read()));
-    const report = findDuplicates(store, active, env);
+    const report = findDuplicates(store, active, lineageAt(projectsDirs));
 
     // Both are copies and each is a branch of the other. Reporting both would be
     // true of each and ruinous together: --branches would take the work out of
@@ -284,7 +293,7 @@ describe('findDuplicates', () => {
       store,
       ledger,
       target: NEW_ACCOUNT,
-      env: forked(),
+      projectsDirs: projects(forked()),
     });
     writeSession(
       store,
@@ -292,7 +301,11 @@ describe('findDuplicates', () => {
       session({ sessionId: '00000000-0000-4000-8000-0000000000d4', cliSessionId: ORIGINAL }),
     );
 
-    const report = findDuplicates(store, listActive(project(ledger.read())), forked());
+    const report = findDuplicates(
+      store,
+      listActive(project(ledger.read())),
+      lineageAt(projects(forked())),
+    );
     expect(report.branches).toHaveLength(0);
     expect(report.copies).toHaveLength(0);
   });

@@ -1,6 +1,8 @@
 import { fosteringKey } from '../domain/fostering.js';
-import type { AccountProfile } from '../store/profile.js';
+import type { KnownIdentity } from '../domain/identity.js';
 import type { ActiveFostering, LedgerEvent } from './types.js';
+
+export type { KnownIdentity };
 
 export interface LedgerState {
   /** Keyed by origin session + target account: one active copy per pair. */
@@ -8,26 +10,6 @@ export interface LedgerState {
   labels: Map<string, string>;
   /** Who each account belongs to, as last seen — see KnownIdentity. */
   identities: Map<string, KnownIdentity>;
-}
-
-/**
- * An account's identity as the ledger remembers it.
- *
- * Accumulated field by field rather than replaced wholesale: the cache gives up
- * different parts at different moments — the name and email persist, the plan
- * appears after a sign-in and vanishes when the database is compacted — and a
- * later sighting that found less must not erase what an earlier one found. Each
- * field carries when it was seen, because "Max, seen three weeks ago" is a
- * different claim from "Max" and the difference is worth showing.
- */
-export interface KnownIdentity {
-  email?: string;
-  name?: string;
-  plan?: string;
-  /** The rest of the profile, accumulated the same way and for the same reason. */
-  profile?: AccountProfile;
-  /** When any part of this was last confirmed. */
-  seenAt: number;
 }
 
 /**
@@ -91,15 +73,11 @@ export function project(events: LedgerEvent[]): LedgerState {
         active.delete(fosteringKey(event.originSessionId, event.target));
         break;
 
+      case 'account_switched':
       case 'conversation_purged':
-        // Deliberately no state. A purge destroys a conversation, not a
-        // fostering: the cards that pointed at it were already gone — that is
-        // the precondition for purging at all — so there is nothing here to fold
-        // away. The event is history, and history is all it can be.
-        break;
-
       case 'failed':
-        // Failures are recorded for the audit trail but do not change state.
+        // History, not state. A switch, a purge and a failure are recorded so
+        // the log can say what happened; none of them change the fold.
         break;
     }
   }
