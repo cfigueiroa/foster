@@ -160,11 +160,31 @@ describe('resolveLabelArgs', () => {
     });
   });
 
-  it('still names any account when both are given', () => {
+  it('resolves an abbreviated prefix to the account it names', () => {
+    // The two-argument form takes a prefix like every other identifier does, so
+    // the name is recorded against the account's full UUID — not against the
+    // prefix, which would leave a label no lookup by account ever finds.
     expect(resolveLabelArgs('11111111', 'work', ACCOUNTS, CURRENT)).toEqual({
-      accountUuid: '11111111',
+      accountUuid: '11111111-1111-4111-8111-111111111111',
       label: 'work',
     });
+  });
+
+  it('names an account that is not present here verbatim', () => {
+    // `label` can name an account foster cannot see on this machine; a prefix
+    // that matches nothing is that intent, not a typo to resolve away.
+    expect(resolveLabelArgs('99999999', 'old personal', ACCOUNTS, CURRENT)).toEqual({
+      accountUuid: '99999999',
+      label: 'old personal',
+    });
+  });
+
+  it('refuses an ambiguous prefix rather than guessing', () => {
+    const ambiguous = [
+      'aaaa1111-0000-4000-8000-000000000001',
+      'aaaa2222-0000-4000-8000-000000000002',
+    ];
+    expect(() => resolveLabelArgs('aaaa', 'work', ambiguous, ambiguous[0])).toThrow(/ambiguous/);
   });
 
   it('refuses an identifier given on its own', () => {
