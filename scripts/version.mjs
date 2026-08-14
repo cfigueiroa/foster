@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
- * Keeps the version honest across the three files that carry it.
+ * Keeps the version honest across the four files that carry it.
  *
  * package.json is the manifest, src/version.ts is stamped into every copy foster
  * writes (so support triage can tell which build produced a file), and
  * install.ps1 pins the release it downloads. A release where these disagree
  * either installs the wrong bundle or mislabels its own output, so the release
  * workflow refuses to publish until they match the tag.
+ *
+ * package-lock.json restates the manifest version twice, and npm rewrites both
+ * on its next install. Left behind, it reports a version the release never had.
  *
  *   node scripts/version.mjs check [vX.Y.Z]
  *   node scripts/version.mjs set X.Y.Z
@@ -17,12 +20,31 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+const lockManifest = /(^\{[^}]*?"version":\s*")([^"]+)(")/;
+const lockRootEntry = /("packages":\s*\{\s*"":\s*\{[^}]*?"version":\s*")([^"]+)(")/;
+
 const sources = [
   {
     label: 'package.json',
     file: 'package.json',
     read: (text) => JSON.parse(text).version,
     write: (text, version) => text.replace(/("version":\s*")[^"]+(")/, `$1${version}$2`),
+  },
+  {
+    label: 'package-lock.json',
+    file: 'package-lock.json',
+    // Both copies sit ahead of any nested object: the manifest's own, and the
+    // root entry npm keeps first under "packages". Rewriting the text rather
+    // than the parsed tree keeps the diff to those two lines.
+    read: (text) => {
+      const [manifest, entry] = [lockManifest, lockRootEntry].map((at) => text.match(at)?.[2]);
+      if (manifest !== entry) {
+        throw new Error(`package-lock.json disagrees with itself: ${manifest} and ${entry}`);
+      }
+      return manifest;
+    },
+    write: (text, version) =>
+      [lockManifest, lockRootEntry].reduce((out, at) => out.replace(at, `$1${version}$3`), text),
   },
   {
     label: 'src/version.ts',
@@ -50,7 +72,7 @@ function readAll() {
 
 function check(expectedTag) {
   const found = readAll();
-  for (const entry of found) console.log(`  ${entry.label.padEnd(16)} ${entry.version}`);
+  for (const entry of found) console.log(`  ${entry.label.padEnd(18)} ${entry.version}`);
 
   const distinct = new Set(found.map((entry) => entry.version));
   if (distinct.size > 1) {
