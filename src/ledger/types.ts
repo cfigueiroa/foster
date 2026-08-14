@@ -13,6 +13,8 @@ export type LedgerEvent =
   | AccountSwitchedEvent
   | FosteredEvent
   | ReturnedEvent
+  | FosteringFollowedEvent
+  | CardRepointedEvent
   | ConversationPurgedEvent
   | OperationFailedEvent;
 
@@ -165,18 +167,91 @@ export interface ReturnedEvent extends BaseEvent {
    */
   reconciled?: true;
   /**
-   * True when the copy is still on disk and no longer holds the conversation it
-   * was made for — the app branched it and moved the card onto the branch.
+   * True when the copy is still on disk and holds a conversation that is not the
+   * one it was made for, and not a branch of it either — the app reused the card
+   * for unrelated work.
    *
    * Distinct from `reconciled`, which says the file was already gone: here it is
    * very much there, and saying otherwise would send anyone reading the log
    * looking for a deletion that never happened. Foster stops tracking it, which
    * has a consequence worth stating: `return` works from the active fosterings,
    * so it will not remove this file. That is deliberate — the card is now the
-   * app's own row for the branch, and deleting it would take away a conversation
-   * the user can see — but it does mean the file outlives foster's record of it.
+   * app's own row for something else, and deleting it would take away a
+   * conversation the user can see — but it does mean the file outlives foster's
+   * record of it.
+   *
+   * A card moved onto a *branch* of the conversation it was made for is not this.
+   * See `FosteringFollowedEvent`.
    */
   repurposed?: true;
+}
+
+/**
+ * The app branched a copy, and foster followed it there.
+ *
+ * A copy opened while its conversation is being written elsewhere does not
+ * continue it: the app writes a new transcript and moves the card onto that. The
+ * card is still one row, still showing that work, and now further along than the
+ * original — nothing was lost and nothing needs replacing.
+ *
+ * Treating it as a lost copy is what had to stop. The fold dropped the fostering,
+ * the next sweep found the origin session untracked, and wrote a *second* copy of
+ * the half the card had just moved off — so one conversation became two rows in
+ * one sidebar, and the run that did it was the tidy-up. Measured on a real store:
+ * every one of the six copies the app had branched came back as a duplicate row.
+ *
+ * Recorded apart from `CardRepointedEvent` on purpose. That one is a move foster
+ * made and can undo; this is a move the app made, and offering to put it back
+ * would promise something foster has no business promising.
+ */
+export interface FosteringFollowedEvent extends BaseEvent {
+  kind: 'fostering_followed';
+  originSessionId: string;
+  target: AccountRef;
+  copySessionId: string;
+  /** The conversation the copy was made for. */
+  from: string;
+  /** The branch the app moved it onto, which the fostering now tracks. */
+  to: string;
+}
+
+/**
+ * A card moved onto a different conversation.
+ *
+ * The one write foster makes to a file it did not create. A fork leaves an
+ * account holding a card for the half that stopped, and there is no way to show
+ * the half that carried on without either adding a second row — which is the
+ * thing the sidebar is already too full of — or moving the row it has. Moving it
+ * changes one field and keeps everything else about the card: its identity, its
+ * pins, its place in the app's own records.
+ *
+ * Which makes this the event that has to be reversible, and reversible without
+ * reading anything but the log. `from` is where the app had it, `to` is where
+ * foster put it, and `path` is where to find it — so an undo needs no scan, and
+ * works even for a card whose account is no longer signed in.
+ */
+export interface CardRepointedEvent extends BaseEvent {
+  kind: 'card_repointed';
+  /** The card's own session id, which the repoint does not change. */
+  sessionId: string;
+  /** The account directory it sits in. */
+  target: AccountRef;
+  path: string;
+  /** The conversation it pointed at before. */
+  from: string;
+  /** The conversation it points at now. */
+  to: string;
+  /** The `lastActivityAt` it wore before, so an undo restores its place in Recents. */
+  fromActivityAt?: number;
+  /**
+   * True when the app made this card rather than foster.
+   *
+   * Recorded because it is the fact that decides how careful the next command
+   * has to be, and it cannot be recovered afterwards: the `_foster` marker does
+   * not survive the app saving a copy, so a file read later cannot say who wrote
+   * it.
+   */
+  native: boolean;
 }
 
 /**
@@ -232,8 +307,33 @@ export type LedgerEventInput =
   | Draft<AccountSwitchedEvent>
   | Draft<FosteredEvent>
   | Draft<ReturnedEvent>
+  | Draft<FosteringFollowedEvent>
+  | Draft<CardRepointedEvent>
   | Draft<ConversationPurgedEvent>
   | Draft<OperationFailedEvent>;
+
+/**
+ * A card that is currently pointed somewhere other than where the app had it.
+ *
+ * `from` is the *original* pointer, carried across repeated repoints rather than
+ * replaced by each one. That is what makes "put it back" mean the same thing
+ * however many times a card has been moved, and it is why a card moved back to
+ * where it started stops being one of these at all rather than becoming an entry
+ * that says nothing changed.
+ */
+export interface RepointedCard {
+  sessionId: string;
+  path: string;
+  target: AccountRef;
+  /** Where the app had it before foster touched it at all. */
+  from: string;
+  /** Where it points now. */
+  to: string;
+  /** The date it wore before foster touched it, carried across repeated moves like `from`. */
+  fromActivityAt?: number;
+  native: boolean;
+  repointedAt: number;
+}
 
 /** A fostering that is currently in place, derived by folding the log. */
 export interface ActiveFostering {
@@ -248,4 +348,15 @@ export interface ActiveFostering {
   /** The installation the original lives in, when it is not the one holding the copy. */
   originStore?: string;
   fosteredAt: number;
+  /**
+   * True once the app has branched this copy and foster followed it there.
+   *
+   * The card is foster's file, but what it holds now is a conversation that
+   * exists nowhere else — the branch was born from opening this very row, so
+   * this is usually the only card it has in any account. Deleting it would take
+   * that conversation out of every sidebar, and `restore` could not offer it back
+   * because a file foster unlinks leaves no deletion marker. So a sweep-wide
+   * `return` leaves it alone; see `selectReturnTargets`.
+   */
+  followedBranch?: true;
 }

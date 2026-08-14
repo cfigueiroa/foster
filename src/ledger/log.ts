@@ -11,6 +11,8 @@ const EVENT_KINDS = new Set<string>([
   'account_switched',
   'fostered',
   'returned',
+  'fostering_followed',
+  'card_repointed',
   'conversation_purged',
   'failed',
 ]);

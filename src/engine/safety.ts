@@ -92,6 +92,60 @@ export function heldInMemory(
  */
 export type RemovalGuard = (store: StoreLayout, fosterings: ActiveFostering[]) => void;
 
+/** Gate for rewriting a card in place. Injectable for the same reason as above. */
+export type WriteGuard = (store: StoreLayout, paths: string[]) => void;
+
+/**
+ * Refuse to rewrite cards while an app that holds them is running.
+ *
+ * Stricter than removal, and deliberately so. Removal can reason about *which*
+ * copies the app could be holding, because a copy written after it started was
+ * never read. A card being repointed is the opposite case by definition: it is a
+ * row the user can see, which means the app read it at startup and has it in
+ * memory. Anything it writes back — a focus timestamp is enough — carries the
+ * pointer the app remembers and quietly undoes the write.
+ *
+ * So the question is only whether an app holds the installation, and the answer
+ * needs no process start time to be trustworthy.
+ */
+export function assertCardsWritable(
+  store: StoreLayout,
+  paths: string[],
+  list: ProcessLister = readProcesses,
+): void {
+  // Grouped by the installation each card lives in, not by the store foster
+  // resolved: cards can sit in another profile, and asking this app about a file
+  // another app is holding answers about the wrong process.
+  const counts = new Map<string, number>();
+  for (const file of paths) {
+    if (!existsSync(file)) continue;
+    const root = comparablePath(storeRootOfCopy(file));
+    counts.set(root, (counts.get(root) ?? 0) + 1);
+  }
+
+  let held = 0;
+  const busy = new Set<string>();
+  for (const [root, count] of counts) {
+    if (!lockfileHeld(layoutFor(root))) continue;
+    if (!inspectDesktopFor(storeIdentity(root), list).running) continue;
+    held += count;
+    busy.add(root);
+  }
+
+  if (held === 0) return;
+
+  const where =
+    busy.size === 1 && busy.has(comparablePath(store.root))
+      ? 'Claude Desktop is running'
+      : `Claude Desktop is running on ${busy.size === 1 ? 'the installation holding them' : `${busy.size} installations holding them`}`;
+
+  throw new AppRunningError(
+    `${where} and has ${held} of these ${held === 1 ? 'card' : 'cards'} loaded.\n` +
+      'A card it holds is one it will write back from memory, pointer and all, so the change ' +
+      'would not survive. Close the app first — foster can do that for you.',
+  );
+}
+
 export function assertRemovable(
   store: StoreLayout,
   fosterings: ActiveFostering[],

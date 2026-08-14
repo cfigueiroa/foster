@@ -173,6 +173,104 @@ export function readTranscriptFacts(file: string, cliSessionId: string): Transcr
   return facts;
 }
 
+/** What a whole transcript says about itself, in the terms a fork is judged by. */
+export interface ConversationScan {
+  /**
+   * Every record's `uuid`. A branch is a copy of the history, so the records it
+   * shares with its sibling carry the same ids — which makes set difference the
+   * measure of what each side holds alone.
+   */
+  uuids: Set<string>;
+  /**
+   * The last record carrying a timestamp, which is the last thing *said*.
+   *
+   * Deliberately not the file's `mtime`. The app rewrites its own bookkeeping —
+   * `custom-title`, `mode`, `last-prompt` — every time a card is opened, so mtime
+   * moves for a conversation nobody added a word to. Measured on a real store: a
+   * transcript whose last message was a day old had a newer mtime than the branch
+   * that had been running all morning, because its card had just been clicked.
+   */
+  lastMessageAt?: number;
+}
+
+/**
+ * Read a transcript end to end, which nothing else here does.
+ *
+ * Every other reader takes the head, because these files reach hundreds of
+ * megabytes and the facts worth recovering are written near the start. This one
+ * cannot: what it answers is which records a branch holds that its sibling never
+ * got, and that is a question about the whole file. It is affordable because of
+ * who asks — only conversations already known to be forked, which is a handful
+ * out of thousands.
+ *
+ * Read in chunks rather than whole so a large transcript costs a buffer, not its
+ * own size in memory.
+ */
+export function scanConversation(file: string): ConversationScan {
+  const uuids = new Set<string>();
+  let lastMessageAt: number | undefined;
+
+  for (const record of streamRecords(file)) {
+    if (typeof record.uuid === 'string' && record.uuid !== '') uuids.add(record.uuid);
+    if (typeof record.timestamp === 'string') {
+      const at = Date.parse(record.timestamp);
+      if (Number.isFinite(at)) lastMessageAt = at;
+    }
+  }
+
+  return { uuids, ...(lastMessageAt === undefined ? {} : { lastMessageAt }) };
+}
+
+/** How much of a transcript to hold in memory at once while streaming it. */
+const CHUNK_BYTES = 1024 * 1024;
+
+function* streamRecords(file: string): Generator<Record<string, unknown>> {
+  let fd: number;
+  try {
+    fd = openSync(file, 'r');
+  } catch {
+    return;
+  }
+
+  try {
+    const buffer = Buffer.alloc(CHUNK_BYTES);
+    // Whatever followed the last newline of the previous chunk: a record is only
+    // complete once its newline arrives, and a line can straddle any boundary.
+    let pending = '';
+
+    for (;;) {
+      const read = readSync(fd, buffer, 0, CHUNK_BYTES, null);
+      if (read === 0) break;
+
+      const lines = (pending + buffer.subarray(0, read).toString('utf8')).split('\n');
+      pending = lines.pop() ?? '';
+      for (const line of lines) {
+        const record = parseRecord(line);
+        if (record) yield record;
+      }
+    }
+
+    // The last line of a file that does not end in a newline is still a record.
+    const record = parseRecord(pending);
+    if (record) yield record;
+  } catch {
+    // A transcript that vanished or turned unreadable mid-read yields what it
+    // gave. Callers treat a short answer as "no answer" rather than as a fork.
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseRecord(line: string): Record<string, unknown> | undefined {
+  if (!line.trim()) return undefined;
+  try {
+    return JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    // Individual malformed lines are skipped; the rest of the file still counts.
+    return undefined;
+  }
+}
+
 export interface TranscriptView {
   cliSessionId: string;
   path: string;

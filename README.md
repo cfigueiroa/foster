@@ -139,6 +139,80 @@ would produce a shorter list that looks complete. Siblings of `~/.claude` are pi
 actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
 `foster clients` is the map of those directories, and of who is signed into each.
 
+## When one conversation becomes two
+
+A conversation that already has a writer cannot be continued from a second card. Asked to open one,
+the app forks instead: it copies the history into a new transcript with a new `cliSessionId` and
+points that card at the fork. From then on there are two conversations where there was one, the two
+halves usually live in different accounts, and fostering between those accounts puts both in the same
+sidebar — one piece of work, several rows, nothing to tell them apart but a date.
+
+`foster consolidate` reduces that to one row per account, on the half that carried on:
+
+```bash
+foster consolidate                  # what it would do, writing nothing
+foster consolidate --yes            # do it, with Claude Desktop closed
+foster consolidate --undo --yes     # put every moved card back
+```
+
+It moves the card rather than adding one. A copy of the other half would be a second row, which is
+the problem; the row you already have simply starts opening the conversation that kept going. The
+card keeps its identity, its title and its pins, and only two fields change: the pointer, and the
+date, so it stops sorting in Recents by the day it was interrupted.
+
+### Which half carried on
+
+The measure is **records a branch holds that no sibling holds**. The two obvious alternatives are
+both wrong, and were measured to be wrong on a real store rather than reasoned about:
+
+- **The file's modification time.** The app rewrites its own bookkeeping — `custom-title`, `mode`,
+  `last-prompt` — into a transcript every time its card is opened, so a conversation nobody has added
+  a word to gets a fresh timestamp. One fork here had its stale half stamped a day _after_ the half
+  that had been running all morning, purely because the stale row had just been clicked. Anything
+  ranked by mtime can be flipped by looking at the wrong answer.
+- **The common prefix.** A branch is a copy of the history, so walking both files in step until they
+  differ looks exact. It is not — the app does not write the copy in the original's order. On one
+  fork the ordered prefix ran 169 records while the two files had 1255 in common.
+
+`foster return --branches` used to pick its survivor by mtime and now uses the same measure, which
+means it can no longer keep the row you happened to open and drop the one holding the work.
+
+### What one row costs, and when it is not worth paying
+
+Choosing a half hides what the others hold alone — from the sidebar, and only from the sidebar. The
+transcripts stay on disk and `foster transcript <cliSessionId>` still reads them. Every line of the
+dry run says both numbers, because "keeps 2802 records, hides 105" is the whole decision and printing
+only the first half would be an advertisement.
+
+When both halves are substantial that trade is not one to make quietly, so it is not made. A fork
+whose losing halves hold more than `--max-lost` records between them (200 by default) is reported
+with its numbers and left exactly as it is. The gap turns out to be wide: across a store of 591
+conversations, the seven forks worth collapsing left between 3 and 158 records behind, while the one
+that was genuinely two pieces of work — 2352 records on one side, 3609 on the other, 770 in common —
+left 2352. Merging the two would be the only way to keep everything, and rewriting the record of a
+conversation is not something this tool does.
+
+### The one write to a card foster did not make
+
+Everywhere else, foster removes only what foster wrote. A repoint is the exception, and it carries
+the guarantees that exception has to earn.
+
+It refuses while an app holding the card is running — stricter than `return`, which can reason about
+which copies the app could have loaded. A card being repointed is by definition a row you can see,
+which means the app read it at startup and will write it back from memory, pointer and all. The
+ledger records where the card was, the date it wore and where to find it, so `--undo` needs no scan
+and works for an account nobody is signed into. A card moved twice still goes back to where the app
+had it, not to where it stopped along the way.
+
+What it will not touch is a second card the _app_ made for the same work. Those are reported and left
+alone, for the reason `return` leaves them alone: deleting somebody else's file on the strength of a
+heuristic is exactly the kind of help nobody asked for.
+
+One shape is out of reach by construction. A fork is visible here only while both halves have a card
+somewhere in the store, because that is where the list of conversations comes from. A branch nothing
+points at is a conversation with no row at all, which is `foster restore`'s question rather than this
+one's.
+
 ## Why a restart is needed
 
 Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
@@ -571,6 +645,7 @@ foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 foster purge     # destroy the conversations behind deleted sessions, permanently
 foster return    # remove fostered copies, restoring the previous state
+foster consolidate # one row per piece of work, on the branch that carried on
 foster status    # what is currently fostered
 foster pin       # pin sessions in the sidebar, or see what is pinned
 foster app       # status | quit | start | restart — drive Claude Desktop itself
@@ -880,10 +955,27 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   turns the other never got, so read both before choosing; `--session` overrides, and for pairs
   already on disk `status` counts them and `foster return --branches` removes them.
 
+  Refusing it is right and refusing it silently was not, because the account keeps whichever half
+  reached it first. When the half being turned away is the one that carried on, the sweep now weighs
+  the two and says so — how many records each holds that the other does not — and names
+  `foster consolidate`, which is what moves the row you have onto the half that kept going. The other
+  direction gets no such line: skipping the half that stopped is simply correct, and a note under
+  every refusal would bury the handful that matter.
+
   Removal keeps one row per piece of work, always: a card foster did not write if there is one,
-  otherwise the half whose conversation was written last — the one that carried on after the fork.
+  otherwise the half that carried on after the fork — measured by the records it holds that no
+  sibling holds, not by which file was written last, which the app moves whenever a card is opened.
   Reporting every row of a group is true of each and ruinous together, and would have taken the work
   out of the sidebar entirely.
+
+- **One card may be rewritten, and only in one field.** `foster consolidate` moves a card onto the
+  half of a fork that carried on, which is the single place foster writes to a file it did not
+  create. It changes the pointer and the date and carries every other key through untouched; it
+  refuses outright while an app holding the card is running, because a card in memory is written back
+  from memory; it records where the card was, so `--undo` restores it without reading anything but
+  the ledger; and it leaves a second card the _app_ made for the same work alone, reported rather
+  than removed. It also refuses to collapse a fork whose halves are both substantial — see
+  [When one conversation becomes two](#when-one-conversation-becomes-two).
 
 - **A copy is the same conversation, which is the point and the one hazard.** The copy carries the
   original's `cliSessionId`, so both rows open one transcript: work done under the other account is
@@ -906,11 +998,33 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   the transcript stays. It refuses the session foster is itself running in, for the same reason it
   refuses to close the app it is running inside.
 
-  When it does happen, nothing is lost — both transcripts are on disk — and foster now notices. A
-  copy the app has repointed at another conversation is recognised as **repurposed** rather than
-  counted as still standing, so the conversation it was made for can be fostered again instead of
-  being refused as "already fostered" forever. The branch's card is left exactly where it is: the app
-  made it, it is a working row for the branch, and removing it would delete something you can see.
+  When it does happen, nothing is lost — both transcripts are on disk — and foster notices. A copy
+  the app has repointed at another conversation is recognised rather than counted as still standing,
+  and what happens next depends on **what it now holds**:
+
+  - **A branch of the very work it was fostered for.** The card is still one row, still showing that
+    work, and further along than the original — so foster follows it. The fostering goes on tracking
+    the same file, with its pointer moved onto the branch, and the sweep says
+    `the app branched it and the copy here follows the branch`. This is a fix, and the bug it fixes
+    was foster's worst: the fostering used to be dropped, the next sweep found the origin session
+    untracked, and it wrote a **second** copy of the half the card had just moved off. One
+    conversation, two rows in one sidebar, created by the run that was meant to tidy up. Measured on
+    a real store, every one of the six copies the app had branched came back as a duplicate row. The
+    record of the move is deliberately not the one `consolidate --undo` reads: the app moved that
+    card, not foster, and offering to put it back would promise something foster cannot honour — and
+    where foster _had_ moved that card earlier, the app overtaking it ends the undo claim rather than
+    leaving a stale one for `--undo` to act on.
+
+    Tracking it again does not make it ordinary. A sweep-wide `foster return` skips it, because the
+    conversation on that card was born from opening that row and usually has no other card anywhere:
+    removing it would take the work out of every sidebar, and `restore` could not offer it back,
+    since a file foster unlinks leaves no deletion marker for that scan to find. Naming it with
+    `--session` still reaches it — the same line foster draws around a copy you deleted in the app.
+
+  - **Anything else.** Then the copy really is gone as a copy — it is a working card for unrelated
+    work — and the conversation it was made for can be fostered again instead of being refused as
+    "already fostered" forever. The card itself is left exactly where it is: the app made it what it
+    is now, and removing it would delete something you can see.
 
 - **It never ends the app behind your back.** Where a polite close would work (tray off) it uses one;
   where it would not, it says so and waits for an explicit yes rather than quietly escalating, and it
