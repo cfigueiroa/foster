@@ -131,6 +131,7 @@ export function fuzzyScore(text: string, query: string): number {
 
 export function filterCommands(query: string, commands: Command[] = COMMANDS): Command[] {
   const raw = query.replace(/^\//, '').trim();
+  if (!raw) return commands;
   const alias = COMMAND_ALIASES[raw.toLowerCase()];
   const scored = commands
     .map((command) => {

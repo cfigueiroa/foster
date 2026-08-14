@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseKey } from '../src/tui/input.js';
+import { keyFromReadline, parseKey } from '../src/tui/input.js';
 import { filterChoices, filterCommands, fuzzyScore } from '../src/tui/slash.js';
 import { MemoryTerminal } from '../src/tui/terminal.js';
 import { TuiHost } from '../src/tui/host.js';
@@ -23,9 +23,26 @@ describe('parseKey', () => {
     expect(parseKey('\x1b[Z')?.key).toEqual({ type: 'tab', shift: true });
   });
 
+  it('reads the Windows scan-code arrows a UTF-8 listener would drop', () => {
+    expect(parseKey(Buffer.from([0xe0, 0x48]))?.key).toEqual({ type: 'up' });
+    expect(parseKey(Buffer.from([0xe0, 0x50]))?.key).toEqual({ type: 'down' });
+    expect(parseKey(Buffer.from([0x00, 0x4b]))?.key).toEqual({ type: 'left' });
+    expect(parseKey(Buffer.from([0x00, 0x4d]))?.key).toEqual({ type: 'right' });
+    expect(parseKey(Buffer.from([0xe0]))).toBeNull();
+  });
+
   it('waits on a lone ESC rather than inventing a key', () => {
     expect(parseKey('\x1b')).toBeNull();
     expect(parseKey('\x1b[')).toBeNull();
+  });
+});
+
+describe('keyFromReadline', () => {
+  it('maps what Node reports for arrows on Windows', () => {
+    expect(keyFromReadline(undefined, { name: 'up' })).toEqual({ type: 'up' });
+    expect(keyFromReadline(undefined, { name: 'down' })).toEqual({ type: 'down' });
+    expect(keyFromReadline('\r', { name: 'return' })).toEqual({ type: 'enter' });
+    expect(keyFromReadline('c', { name: 'c', ctrl: true })).toEqual({ type: 'ctrl', value: 'c' });
   });
 });
 
@@ -122,6 +139,28 @@ describe('TuiHost', () => {
     expect(term.lastFrame()).toMatch(/foster/i);
     expect(term.lastFrame()).toMatch(/work/);
     expect(term.lastFrame()).toMatch(/\/quit|Quit/i);
+  });
+
+  it('opens the command list when an arrow is pressed on an empty prompt', async () => {
+    const term = new MemoryTerminal();
+    const host = new TuiHost(term);
+    const done = host.home({
+      message: 'What would you like to do?',
+      options: [
+        { value: 'foster', label: 'Bring sessions here' },
+        { value: 'quit', label: 'Quit' },
+      ],
+      dashboard: {
+        version: '0.0.0',
+        store: 'x',
+        signedIn: 'me',
+        appRunning: false,
+        accounts: [],
+        fostered: [],
+      },
+    });
+    term.push([{ type: 'down' }, { type: 'enter' }]);
+    await expect(done).resolves.toBe('foster');
   });
 
   it('runs a hotkey on an empty prompt', async () => {
