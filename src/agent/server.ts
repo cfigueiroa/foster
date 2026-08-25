@@ -11,6 +11,7 @@ import {
   resumeHeadless,
   returnFosteringsTool,
   scanAccounts,
+  sweepEverything,
   type AgentToolContext,
 } from './tools.js';
 
@@ -140,6 +141,25 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
       wrap((args) => fosterSessionsTool(ctx, args)),
     ),
     tool(
+      'sweep_everything',
+      'The whole job in one call: copy every fosterable session from the other accounts into ' +
+        'the current one — archived included, and the copies stay archived — then bring back ' +
+        'conversations the app deleted that nothing points at, then re-scan to confirm both are ' +
+        'exhausted. Use this for "bring everything here", rather than foster_sessions, which ' +
+        'leaves archived sessions behind and cannot reach deleted ones. It never purges and ' +
+        'never consolidates: forks are counted and reported for the user to decide. The result ' +
+        `carries the restart command, and says when foster must not run it itself. ${mutationGate}`,
+      {
+        prefix: z.string().optional().describe('title prefix marking the copies'),
+        configDirs: z
+          .array(z.string())
+          .optional()
+          .describe('extra Claude config directories to search for deleted conversations'),
+        apply: z.boolean().optional().describe('actually write; see the gate above'),
+      },
+      wrap((args) => sweepEverything(ctx, args)),
+    ),
+    tool(
       'return_fosterings',
       'Remove fostered copies, restoring the previous state. Refuses copies a running Claude ' +
         `Desktop may hold in memory — the user must close the app first. ${mutationGate}`,
@@ -176,7 +196,7 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
     // alwaysLoad: with the full Claude Code toolset the harness defers MCP tools
     // behind tool search, and the cheap default model reliably fumbled the
     // load-then-call dance (observed: three ToolSearch calls, zero tool calls,
-    // then giving up). Nine tools are cheap enough to keep in the prompt.
+    // then giving up). Ten tools are cheap enough to keep in the prompt.
     server: createSdkMcpServer({ name: SERVER_NAME, version: '1.0.0', tools, alwaysLoad: true }),
     allowedTools: [
       'scan_accounts',
@@ -186,6 +206,7 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
       'read_transcript',
       'label_account',
       'foster_sessions',
+      'sweep_everything',
       'return_fosterings',
       'resume_headless',
     ].map((name) => `mcp__${SERVER_NAME}__${name}`),

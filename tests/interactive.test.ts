@@ -95,6 +95,36 @@ describe('the guided menu', () => {
     expect(answers).toHaveLength(0);
   });
 
+  it('sweeps everything, archived included, from one answer', async () => {
+    // The row exists because "bring everything" used to mean three screens plus a
+    // flag nobody knew about: without --archived this session stays behind.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000a3',
+        title: 'Tucked away',
+        isArchived: true,
+      }),
+    );
+
+    answers = [
+      'sweep', // menu
+      'go', // confirm
+      'later', // decline the offer to restart the app
+      'quit',
+    ];
+
+    await play();
+
+    const copies = scanAccount(store, NEW_ACCOUNT).filter((s) => s.isCopy);
+    expect(copies).toHaveLength(3);
+    const tucked = copies.find((s) => s.data.title?.includes('Tucked away'));
+    // It arrives in the archived view rather than quietly reappearing in Recents.
+    expect(tucked?.data.isArchived).toBe(true);
+    expect(answers).toHaveLength(0);
+  });
+
   it('narrows the batch by title before writing', async () => {
     answers = ['foster', ['0'], 'title', 'refactor', 'go', 'later', 'quit'];
 

@@ -55,6 +55,40 @@ and recording it.
 The original file is never touched. `foster return` deletes the copy and the session is simply gone
 from the current account again.
 
+## The whole sweep
+
+The request behind most runs never varies — _bring everything here_ — and answering it used to
+mean three commands in the right order plus one flag that was easy to miss. `foster sweep` is that
+sequence as a command:
+
+```bash
+foster sweep          # what it would do, writing nothing
+foster sweep --yes    # do it
+```
+
+It copies every fosterable session from the other accounts, **archived ones included**, brings back
+conversations the app deleted that nothing still points at, and then re-scans to say whether either
+pass has anything left. That last part is the reason it exists as a command rather than as advice:
+measured on one real store, the same sweep offered 15 sessions without `--archived` and 141 with it,
+so anyone who did not know the flag finished with a tenth of the work done and no way to tell.
+
+Archived copies **stay archived**. They arrive in the app's archived view rather than reappearing in
+Recents — bringing the conversation across is the point, not undoing the decision to tuck it away.
+
+It also counts what can never come: scheduled tasks, sessions never opened, and files over the
+10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
+unmentioned reads as having brought everything.
+
+Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
+transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
+choosing which half of a fork survives hides records, and that is a reading decision — forks are
+counted, reported, and left alone.
+
+`--restart` restarts Claude Desktop at the end, which is what makes the copies visible. A Claude
+Code session started from the app's sidebar is a child process of the app, so restarting from
+inside one would kill the caller part-way through; the sweep asks first and ends with the command
+to run from a terminal outside the app instead of failing after writing everything.
+
 ## Undoing a deletion
 
 Deleting a session in the app removes the pointer and **keeps the conversation**. The transcript
@@ -641,6 +675,7 @@ foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
 foster point     # repoint a directory link at another client
 foster client new  # seed a config directory that is a working client
+foster sweep     # the whole job: every account, archived and deleted included
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 foster purge     # destroy the conversations behind deleted sessions, permanently
@@ -872,15 +907,20 @@ carries foster's operations as first-class tools:
 ```bash
 foster agent "which of my old accounts has sessions about the billing rework, and what state was that work left in?"
 foster agent --yes "foster everything from my old account that touched the api-gateway repo, then clean up any duplicate copies"
+foster agent --yes "bring everything here, archived and deleted included"
 ```
+
+That last one used to be unanswerable: `restore` was never one of the agent's tools, so an agent
+asked for the deleted ones could only tell you to run a command yourself. The sweep is a tool, so
+it is one call.
 
 It works the way Claude Desktop itself runs Code sessions, with the roles reversed: foster is the
 parent process, it spawns the agent headlessly via the
 [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), and serves it an in-process
-MCP server (`foster_session_mgmt`) over the same stdio pair. That server carries nine tools —
+MCP server (`foster_session_mgmt`) over the same stdio pair. That server carries ten tools —
 account and session inventory, fostering status, app status, transcript reading, labelling,
-fostering, returning, and a headless resume — and alongside it the agent has Claude Code's full
-toolset: shell, files, web. The foster tools remain the required path for anything touching the
+fostering, [sweeping](#the-whole-sweep), returning, and a headless resume — and alongside it the
+agent has Claude Code's full toolset: shell, files, web. The foster tools remain the required path for anything touching the
 session store, because they are what goes through the engine's gates and ledger; the general tools
 are there for whatever else the task turns out to need.
 

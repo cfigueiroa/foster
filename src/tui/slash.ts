@@ -19,6 +19,13 @@ export const COMMANDS: Command[] = [
     hint: "copy another account's sessions into this one",
   },
   {
+    value: 'sweep',
+    slash: 'sweep',
+    hotkey: 'e',
+    label: 'Bring everything here',
+    hint: 'archived and deleted included, then check nothing is left',
+  },
+  {
     value: 'return',
     slash: 'return',
     hotkey: 'r',
@@ -105,6 +112,8 @@ export const COMMAND_ALIASES: Record<string, string> = {
   t: 'theme',
   store: 'installation',
   cost: 'usage',
+  everything: 'sweep',
+  all: 'sweep',
   welcome: 'home',
 };
 
