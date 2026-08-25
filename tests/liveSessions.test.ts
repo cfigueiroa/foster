@@ -274,6 +274,16 @@ describe('ending a writer', () => {
     expect(verdict.reason).toContain('does not kill what it cannot name');
   });
 
+  it('says so plainly where there is no process table to read', () => {
+    // An empty table on Windows is a failed read and worth retrying. Anywhere
+    // else it is the platform, and the same sentence would send somebody to
+    // debug PowerShell on a machine that has none.
+    const verdict = endableWriter(identity, [], false);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.reason).toContain('only reads the process table on Windows');
+  });
+
   it('is allowed for an older record whose process is consistent with it', () => {
     // No creation time to prove anything with, but nothing contradicts the
     // record either: refusing here would leave those sessions unstoppable.

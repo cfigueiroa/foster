@@ -844,7 +844,16 @@ record kept for its writer (`procStart`, Windows' own clock): two processes can 
 a pid and a creation instant. Records too old to carry one fall back to what the pid is now and
 whether it is even older than the record describing it. An entry that fails is not a live writer,
 and `foster live --stop` will not end a process it cannot identify — the kill is `taskkill /F /T`,
-and the tree it takes with it would be a stranger's.
+and the tree it takes with it would be a stranger's. Reading the process table is the Windows half
+of foster: anywhere else there is none, every entry stays listed, and `--stop` refuses everything
+rather than guessing.
+
+The session foster is running in is never ended, for the same reason it refuses to close the app it
+runs inside — the kill would take the command with it, part-way through. That used to be answered by
+walking parent links, which breaks the moment any process in the chain has exited: launched through
+a wrapper whose shell was gone, `--stop` offered to end the session it was running in. The CLI marks
+every process it starts with the conversation and the pid holding it, however deep, so the question
+is now answered outright.
 
 `foster live --prune` clears the files whose process is provably gone or provably somebody else;
 without `--yes` it only lists them. That includes the peer key a session leaves beside its record —

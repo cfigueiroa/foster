@@ -138,6 +138,18 @@ export function cachedProcesses(): ProcessRow[] {
   return rows;
 }
 
+/**
+ * Whether this machine can report a process table at all.
+ *
+ * `readProcesses` answers an unreadable table and an unsupported platform the
+ * same way, with nothing, because every caller has to cope with nothing either
+ * way. The difference is only in what a refusal should say about it: "the read
+ * failed" is worth retrying, and "not on this platform" is not.
+ */
+export function processTableReadable(): boolean {
+  return installedTable !== undefined || process.platform === 'win32';
+}
+
 /** Drops the memoised table, so the next ask reaches the machine again. */
 function clearProcessCache(): void {
   cached = undefined;

@@ -3,6 +3,7 @@ import path from 'node:path';
 import {
   cachedProcesses,
   isCodeCliProcess,
+  processTableReadable,
   readProcesses,
   type ProcessLister,
   type ProcessRow,
@@ -247,6 +248,7 @@ export function writerAliveWith(
 export function endableWriter(
   identity: WriterIdentity,
   rows: ProcessRow[],
+  readable: boolean = processTableReadable(),
 ): { ok: true } | { ok: false; reason: string } {
   const { verdict, note } = inspectWriter(identity, rows);
   if (verdict === 'confirmed' || verdict === 'plausible') return { ok: true };
@@ -259,6 +261,19 @@ export function endableWriter(
         'something unrelated. Run "foster live --prune" to clear entries like it.',
     };
   }
+  // Separated because the two read completely differently to whoever is holding
+  // the terminal. On Windows an empty table is a failure worth retrying; on any
+  // other machine it is the platform, and sending someone to debug PowerShell
+  // for it would waste an afternoon.
+  if (!readable) {
+    return {
+      ok: false,
+      reason:
+        'foster only reads the process table on Windows, so it cannot tell whether this pid\n' +
+        'is still this session. It does not kill what it cannot name; end the session from\n' +
+        'its own window instead.',
+    };
+  }
   return {
     ok: false,
     reason:
@@ -266,6 +281,34 @@ export function endableWriter(
       'tell whether the pid is still this session. It does not kill what it cannot name;\n' +
       'end the session from its own window instead.',
   };
+}
+
+/**
+ * Whether foster is running inside this conversation, from the session's own
+ * marking of its children.
+ *
+ * The ancestry walk answers the same question and is wrong more often than it
+ * looks: it follows parent links, and a link dies with the process holding it.
+ * Launch foster through a wrapper whose shell has since exited and the chain
+ * breaks at the gap — measured here, a four-deep shell chain lost its third
+ * link, and `--stop` offered to end the session the command was running in.
+ *
+ * The CLI marks every process it starts, however deep, with both the
+ * conversation and the pid holding it. Either match is enough and both are
+ * asked: a session id is a uuid, so unlike a pid it cannot come back as somebody
+ * else, and a pid that matches means the kill takes this command with it whatever
+ * the record calls itself. An id inherited from a session that has since ended
+ * names a conversation with no registry entry left to match, and a stale pid
+ * costs a refusal — the direction everything here errs in anyway.
+ */
+export function isSelfSession(
+  session: { sessionId: string; pid: number },
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const id = env.CLAUDE_CODE_SESSION_ID;
+  if (id && id.toLowerCase() === session.sessionId.toLowerCase()) return true;
+  const pid = Number(env.CLAUDE_PID);
+  return Number.isInteger(pid) && pid === session.pid;
 }
 
 /**
