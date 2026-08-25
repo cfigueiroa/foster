@@ -18,11 +18,9 @@ import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types
 import {
   DesktopControlError,
   deliverUrl,
-  endProcess,
   inspectDesktopFor,
   packagedAppId,
   quitDesktop,
-  readProcesses,
   runningStores,
   startDesktop,
   trayNote,
@@ -88,12 +86,13 @@ import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
 import {
   describeWriters,
-  isSelfHostedBy,
   liveSessions,
-  pidAlive,
+  pruneRegistry,
   sessionRegistryRoots,
+  staleRegistryEntries,
   type LiveCliSession,
 } from '../store/liveSessions.js';
+import { selectWriters, stopWriters } from '../ops/writers.js';
 import { viewTranscript } from '../store/transcripts.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
@@ -2424,13 +2423,21 @@ program
   .description('conversations a claude process is holding open right now')
   .option('--json', 'machine-readable output')
   .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
-  .option('--yes', 'actually end them; without it nothing is stopped')
+  .option('--prune', 'remove registry entries whose process is gone or has been replaced')
+  .option('--yes', 'actually do it; without it nothing is stopped or removed')
   .action(async function (this: Command) {
-    const opts = this.opts<{ json?: boolean; stop?: string[]; yes?: boolean }>();
-    const sessions = liveSessions(sessionRegistryRoots(process.env));
+    const opts = this.opts<{ json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }>();
+    const roots = sessionRegistryRoots(process.env);
+
+    if (opts.prune) {
+      pruneStale(roots, Boolean(opts.yes), Boolean(opts.json));
+      return;
+    }
+
+    const sessions = liveSessions(roots);
 
     if (opts.stop?.length) {
-      await stopWriters(sessions, opts.stop, Boolean(opts.yes), Boolean(opts.json));
+      await reportStopped(sessions, opts.stop, Boolean(opts.yes), Boolean(opts.json));
       return;
     }
 
@@ -2448,6 +2455,7 @@ program
 
     if (sessions.length === 0) {
       console.log('No live claude sessions.');
+      sayIfStale(roots);
       return;
     }
     for (const s of sessions) {
@@ -2455,98 +2463,162 @@ program
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
+    sayIfStale(roots);
   });
 
 /**
- * End the processes writing the named conversations.
+ * Mention the files this list had to disregard.
  *
- * The only way to release a conversation from outside the session holding it, and
- * the reason it exists: a copy cannot be opened without branching while a writer
- * is there, and "finish in the other window" is not always possible — the window
- * may be one you cannot get back to.
- *
- * It is a kill, and says so. There is no polite signal to send: the CLI has no
- * message loop to close, so ending it is `taskkill /F` and whatever the session
- * had not yet written is gone. What is already in the transcript stays — the file
- * is append-only, and a torn final line is what every tolerant reader here
- * expects. Refusing the session foster is running inside follows the rule the app
- * already has: a command must not kill the thing it is running in, part-way
- * through, leaving nobody to report what happened.
+ * Said here because this is where someone is standing when the registry is what
+ * they are thinking about, and because the alternative — a list that quietly
+ * omits four entries somebody saw yesterday — is the shape of a bug report. The
+ * scan is free: the process table it needs was read a moment ago and is still in
+ * hand. Nothing is removed on the way past; `--prune` is a separate ask.
  */
-async function stopWriters(
+function sayIfStale(roots: string[]): void {
+  // Records only, though `--prune` sweeps more. The question this answers is
+  // "where did the entry I saw yesterday go", and only a record was ever an
+  // entry. The peer keys beside them are never swept by anyone, so a count that
+  // included them would be non-zero on every machine with a history — a line
+  // that is always there is one nobody reads, and it would be sitting under the
+  // one list foster needs people to trust.
+  const records = staleRegistryEntries(roots).filter((entry) => entry.sessionId !== undefined);
+  if (records.length === 0) return;
+  console.log(
+    pc.dim(
+      `\n${records.length} registry ${records.length === 1 ? 'entry names' : 'entries name'} a ` +
+        'process that is gone or has been replaced.\n`foster live --prune` clears them.',
+    ),
+  );
+}
+
+/**
+ * Drop registry entries that describe nothing.
+ *
+ * The registry is only tidied by the sessions that wrote it, so a crash — or a
+ * reboot, which is every session at once — leaves files behind for as long as
+ * nobody clears them. They are not inert: each one is a pid, and a pid Windows
+ * has since handed to something else reads as a live writer until it is checked.
+ * Removing them is offered rather than done, and only for entries whose process
+ * is provably gone or provably somebody else.
+ */
+function pruneStale(roots: string[], apply: boolean, json: boolean): void {
+  const stale = staleRegistryEntries(roots);
+  const described = stale.map((item) => ({
+    pid: item.pid,
+    cliSessionId: item.sessionId ?? null,
+    cwd: item.cwd ?? null,
+    registryFile: item.file,
+    why: item.why,
+  }));
+  // The records name conversations and are worth a line each; the peer keys
+  // beside them are the same fact repeated in bulk, and printing seventy of them
+  // would bury the few lines someone is actually reading.
+  const records = described.filter((row) => row.cliSessionId !== null);
+  const keyFiles = described.filter((row) => row.cliSessionId === null);
+  const plural = (n: number) => (n === 1 ? 'key' : 'keys');
+
+  if (!apply) {
+    if (json) {
+      print(described.map((row) => ({ ...row, removed: false })));
+      return;
+    }
+    if (stale.length === 0) {
+      console.log('Every registry entry still names its own process.');
+      return;
+    }
+    for (const row of records) {
+      console.log(`  ${String(row.pid).padStart(6)}  ${row.cliSessionId}  ${pc.dim(row.why)}`);
+    }
+    if (keyFiles.length > 0) {
+      const n = keyFiles.length;
+      console.log(
+        pc.dim(`  ${n} peer ${plural(n)} from ${n === 1 ? 'a process' : 'processes'} that ended`),
+      );
+    }
+    console.log(
+      pc.dim(
+        `\n${stale.length} stale ${stale.length === 1 ? 'file' : 'files'}. ` +
+          'Re-run with --yes to remove them.',
+      ),
+    );
+    return;
+  }
+
+  const { removed, failed } = pruneRegistry(stale);
+  const gone = new Set(removed);
+
+  if (json) {
+    print(described.map((row) => ({ ...row, removed: gone.has(row.registryFile) })));
+    return;
+  }
+
+  for (const row of records) {
+    const mark = gone.has(row.registryFile) ? pc.dim('removed') : pc.yellow('could not remove');
+    console.log(`  ${String(row.pid).padStart(6)}  ${row.cliSessionId}  ${mark}`);
+  }
+  const keysGone = keyFiles.filter((row) => gone.has(row.registryFile)).length;
+  if (keysGone > 0) console.log(pc.dim(`  ${keysGone} peer ${plural(keysGone)}`));
+  console.log(`\nRemoved ${removed.length} of ${stale.length}.`);
+  if (failed.length > 0) {
+    console.log(
+      pc.yellow(
+        `${failed.length} stayed: another client's directory, or a file that went on its own.`,
+      ),
+    );
+  }
+}
+
+/**
+ * Report what ending each named writer did, or why it was not attempted.
+ *
+ * The operation itself is `ops/writers`: which conversation a prefix names, what
+ * must never be killed, and what could not be identified are decisions, and they
+ * are made where they can be put to the test. What is left here is how the
+ * answer reads — a refusal has to say enough that somebody can act on it without
+ * running the command again.
+ */
+async function reportStopped(
   sessions: LiveCliSession[],
   wanted: string[],
   apply: boolean,
   json: boolean,
 ): Promise<void> {
-  // Resolved one prefix at a time, refusing rather than guessing — the rule every
-  // other identifier flag here follows, and the one this command needs most. A
-  // prefix that matched several used to end all of them, so a short id typed for
-  // the session someone had in mind killed the others silently, and a kill is not
-  // an operation anyone gets to take back.
-  const selected = new Map<string, LiveCliSession>();
-  for (const id of wanted) {
-    const matches = sessions.filter((s) => s.sessionId.toLowerCase().startsWith(id.toLowerCase()));
-    if (matches.length === 0) {
-      throw new Error(`No live session matches ${id}.\nRun "foster live" to see what is running.`);
-    }
-    if (matches.length > 1) {
-      throw new Error(
-        `"${id}" is ambiguous: it matches ${matches.length} live sessions.\n` +
-          matches.map((s) => `  ${s.sessionId}  ${s.cwd ?? ''}`).join('\n'),
-      );
-    }
-    selected.set(matches[0]!.sessionId, matches[0]!);
-  }
-
-  const rows = readProcesses();
-  const results: { pid: number; cliSessionId: string; cwd: string | null; outcome: string }[] = [];
-  for (const session of selected.values()) {
-    const self = isSelfHostedBy(session.pid, () => rows);
-    const where = session.cwd ? ` in ${session.cwd}` : '';
-
-    const row = { pid: session.pid, cliSessionId: session.sessionId, cwd: session.cwd ?? null };
-
-    if (self) {
-      results.push({ ...row, outcome: 'refused-self' });
-      if (!json) {
-        console.log(
-          pc.yellow(
-            `  ! ${session.pid}  ${session.sessionId}${where}\n` +
-              '    This is the session foster is running in. Ending it would kill this command\n' +
-              '    part-way through. Close it yourself, or run foster from another terminal.',
-          ),
-        );
-      }
-      continue;
-    }
-
-    if (!apply) {
-      results.push({ ...row, outcome: 'would-end' });
-      if (!json) console.log(`  × ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
-      continue;
-    }
-
-    endProcess(session.pid);
-    // Waited for rather than asked once. `taskkill /F` returns when termination
-    // has been requested, not when the process object is gone, so the pid can
-    // still answer for a moment afterwards — and reporting a kill that worked as
-    // "did not end" sends someone hunting for a window that has already closed.
-    // `quitDesktop` waits for the same reason.
-    const gone = await settles(() => !pidAlive(session.pid));
-    results.push({ ...row, outcome: gone ? 'ended' : 'still-running' });
-    if (!json) {
-      console.log(
-        gone
-          ? `  ✕ ${session.pid}  ${session.sessionId}${pc.dim(where)}`
-          : pc.yellow(`  ! ${session.pid} did not end.`),
-      );
-    }
-  }
+  const results = await stopWriters(selectWriters(sessions, wanted), { apply });
 
   if (json) {
-    print(results);
+    print(
+      results.map(({ session, outcome }) => ({
+        pid: session.pid,
+        cliSessionId: session.sessionId,
+        cwd: session.cwd ?? null,
+        outcome,
+      })),
+    );
     return;
+  }
+
+  for (const { session, outcome, reason } of results) {
+    const where = session.cwd ? ` in ${session.cwd}` : '';
+    const head = `  ! ${session.pid}  ${session.sessionId}${where}`;
+
+    if (outcome === 'refused-self') {
+      console.log(
+        pc.yellow(
+          `${head}\n` +
+            '    This is the session foster is running in. Ending it would kill this command\n' +
+            '    part-way through. Close it yourself, or run foster from another terminal.',
+        ),
+      );
+    } else if (outcome === 'refused-unidentified') {
+      console.log(pc.yellow(`${head}\n${indented(reason ?? '')}`));
+    } else if (outcome === 'would-end') {
+      console.log(`  × ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
+    } else if (outcome === 'ended') {
+      console.log(`  ✕ ${session.pid}  ${session.sessionId}${pc.dim(where)}`);
+    } else {
+      console.log(pc.yellow(`  ! ${session.pid} did not end.`));
+    }
   }
 
   if (!apply) {
@@ -2560,14 +2632,11 @@ async function stopWriters(
   }
 }
 
-/** Polls a condition briefly, for a state change that is requested rather than immediate. */
-async function settles(done: () => boolean, timeoutMs = 3_000): Promise<boolean> {
-  const until = Date.now() + timeoutMs;
-  for (;;) {
-    if (done()) return true;
-    if (Date.now() >= until) return false;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+function indented(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n');
 }
 
 program
