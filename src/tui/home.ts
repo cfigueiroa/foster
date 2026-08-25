@@ -66,7 +66,13 @@ export function renderHome(
   for (const [offset, account] of dashboard.accounts.slice(start, start + maxVisible).entries()) {
     const index = start + offset;
     const selected = index === selectedAccount;
-    const name = account.label ?? account.shortId;
+    // A label is a deliberate choice and reads bold; a remembered identity
+    // name is a fallback and reads plain, the same honesty as `as of`.
+    const name = account.label
+      ? bold(account.label)
+      : account.identityName
+        ? paintFg(level, theme.fg, account.identityName)
+        : bold(account.shortId);
     const marker = account.isCurrent
       ? accent('●')
       : account.paymentNeedsAuth
@@ -92,7 +98,7 @@ export function renderHome(
         : undefined,
       account.paymentNeedsAuth ? paintFg(level, theme.warning, 'payment needs auth') : undefined,
     ].filter((part): part is string => part !== undefined);
-    const left = `${caret} ${marker} ${bold(name)}${meta.length ? `  ${meta.join(dim(' · '))}` : ''}`;
+    const left = `${caret} ${marker} ${name}${meta.length ? `  ${meta.join(dim(' · '))}` : ''}`;
     const right =
       counted(account.sessions, sessionDigits, 'session', 'sessions') +
       dim(' · ') +

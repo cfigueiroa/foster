@@ -30,6 +30,11 @@ export function buildDashboard(
     accountUuid: row.accountUuid,
     shortId: shortId(row.accountUuid),
     ...(row.label ? { label: row.label } : {}),
+    // The identity's own name, so an account foster has seen signed in never
+    // shows as a bare uuid just because nobody gave it a label yet.
+    ...(row.identity?.name || row.identity?.email
+      ? { identityName: row.identity.name ?? row.identity.email }
+      : {}),
     isCurrent: row.isCurrent,
     ...(row.identity?.plan ? { plan: row.identity.plan } : {}),
     ...(row.identity?.profile?.subscriptionStatus

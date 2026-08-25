@@ -201,7 +201,7 @@ export class TuiHost implements Ui {
     const account = this.dashboard?.accounts[this.accountIndex];
     if (!account) return undefined;
     const picked = await this.select({
-      message: account.label ?? account.shortId,
+      message: account.label ?? account.identityName ?? account.shortId,
       options: accountActions(account),
     });
     if (picked === CANCEL) return undefined;
