@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { currentAccount } from '../engine/account.js';
 import { inspectApp } from '../engine/safety.js';
+import { identifyAccount } from '../engine/identify.js';
 import { overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
@@ -123,6 +124,8 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
       if (accountUuid) showAccountDetails(ctx.ui, ctx.ledger, rows, accountUuid);
       return Promise.resolve();
     },
+    identify: (ctx, accountUuid) =>
+      accountUuid ? identifyFlow(ctx.ui, ctx.store, ctx.ledger, accountUuid) : Promise.resolve(),
     installation: async (ctx) => {
       const next = await switchInstallation(ctx.ui, ctx.store, ctx.ledger);
       if (aborted(next)) return;
@@ -164,6 +167,32 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
     if (!action) continue;
     await action({ ui, store, ledger, target }, accountUuid);
   }
+}
+
+/**
+ * Ask the API to name one account, with a spinner and an honest result line.
+ * The heavy identity work and every failure explanation live in the engine;
+ * this only drives the UI around it.
+ */
+async function identifyFlow(
+  ui: Ui,
+  store: StoreLayout,
+  ledger: Ledger,
+  accountUuid: string,
+): Promise<void> {
+  const spin = ui.spinner();
+  spin.start('Asking the API who this is');
+  const outcome = await identifyAccount(store, ledger, accountUuid);
+  const name = outcome.profile?.name ?? outcome.profile?.email;
+  if (name) {
+    spin.stop(`This account is ${name}.`);
+    return;
+  }
+  spin.stop(
+    outcome.reason === 'expired-only'
+      ? 'The only credential for it has expired; its CLI renews on the next run.'
+      : 'foster holds no credential for this account. Sign into it once, or run foster guard while it is.',
+  );
 }
 
 async function themeFlow(ui: Ui): Promise<void> {

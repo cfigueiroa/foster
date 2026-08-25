@@ -115,6 +115,7 @@ export function accountActions(account: {
   isCurrent: boolean;
   label?: string;
   identityName?: string;
+  canIdentify?: boolean;
   shortId: string;
   sessions: number;
 }): Choice[] {
@@ -129,6 +130,11 @@ export function accountActions(account: {
     label: 'Who is this?',
     hint: 'plan, subscription and sessions — everything foster knows',
   };
+  // Only when foster has no identity yet and holds a key it could ask with:
+  // the API names the account without a sign-in.
+  const identify: Choice[] = account.canIdentify
+    ? [{ value: 'identify', label: 'Identify it', hint: 'ask the API who this is' }]
+    : [];
   if (account.isCurrent) {
     return [
       details,
@@ -137,6 +143,7 @@ export function accountActions(account: {
     ];
   }
   return [
+    ...identify,
     // Only offered when there is something to bring: a Cowork-only or empty
     // account would turn this entry into a promise that can only fail.
     ...(account.sessions > 0

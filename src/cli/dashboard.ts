@@ -4,6 +4,7 @@ import { inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import { overviewAccounts, type AccountOverview } from '../store/accounts.js';
+import { canIdentify } from '../engine/identify.js';
 import { VERSION } from '../version.js';
 import type { Dashboard, DashboardAccount } from '../tui/ui.js';
 import { formatDate, shortId } from './render.js';
@@ -23,6 +24,9 @@ export function buildDashboard(
 ): Dashboard {
   const labels = project(ledger.read()).labels;
   const active = listActive(project(ledger.read()));
+  // Whether the API path has anything to offer is a single machine-wide fact
+  // (does foster hold a live credential at all), computed once, not per row.
+  const identifiable = canIdentify(store);
   const app = inspectApp(store);
   const signedLabel = labels.get(target.accountUuid) ?? shortId(target.accountUuid);
 
@@ -35,6 +39,9 @@ export function buildDashboard(
     ...(row.identity?.name || row.identity?.email
       ? { identityName: row.identity.name ?? row.identity.email }
       : {}),
+    // Offer the API path only where it could help: no identity yet, and foster
+    // holds a live credential to ask with.
+    ...(!row.identity && identifiable ? { canIdentify: true } : {}),
     isCurrent: row.isCurrent,
     ...(row.identity?.plan ? { plan: row.identity.plan } : {}),
     ...(row.identity?.profile?.subscriptionStatus
