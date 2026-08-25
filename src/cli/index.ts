@@ -2480,12 +2480,18 @@ program
  * hand. Nothing is removed on the way past; `--prune` is a separate ask.
  */
 function sayIfStale(roots: string[]): void {
-  const stale = staleRegistryEntries(roots);
-  if (stale.length === 0) return;
+  // Records only, though `--prune` sweeps more. The question this answers is
+  // "where did the entry I saw yesterday go", and only a record was ever an
+  // entry. The peer keys beside them are never swept by anyone, so a count that
+  // included them would be non-zero on every machine with a history — a line
+  // that is always there is one nobody reads, and it would be sitting under the
+  // one list foster needs people to trust.
+  const records = staleRegistryEntries(roots).filter((entry) => entry.sessionId !== undefined);
+  if (records.length === 0) return;
   console.log(
     pc.dim(
-      `\n${stale.length} registry ${stale.length === 1 ? 'file names' : 'files name'} a process ` +
-        'that is gone or has been replaced.\n`foster live --prune` clears them.',
+      `\n${records.length} registry ${records.length === 1 ? 'entry names' : 'entries name'} a ` +
+        'process that is gone or has been replaced.\n`foster live --prune` clears them.',
     ),
   );
 }
