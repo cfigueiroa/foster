@@ -30,6 +30,7 @@ import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { applyFilter, byRecency, parseSince } from '../domain/filter.js';
 import { liveConversationIds, scanFosterable } from '../ops/foster.js';
 import { partitionByStore } from '../ops/active.js';
+import { restartPlan, runSweep } from '../ops/sweep.js';
 import { applyLabel } from '../ops/label.js';
 import {
   aborted,
@@ -40,7 +41,14 @@ import {
   pickMany,
   selectOrBack,
 } from './prompts.js';
-import { formatAge, formatDate, outcomeLine, shortId } from './render.js';
+import {
+  formatAge,
+  formatDate,
+  neverComesLine,
+  outcomeLine,
+  shortId,
+  sweepSummary,
+} from './render.js';
 import { describeRef, labelsOf, short } from './names.js';
 import { offerRestart } from './desktopUi.js';
 
@@ -502,6 +510,9 @@ async function chooseTarget(
 
 const PICK_LIMIT = 40;
 
+/** How many outcome lines a sweep prints before it starts counting instead. */
+const PREVIEW_LIMIT = 10;
+
 /**
  * Which of the available sessions to take, and whether the user named them one
  * by one. Ticking a session is a decision about that session, which is what lets
@@ -750,6 +761,101 @@ async function confirmAndWrite(
         `These went to ${describeRef(labelsOf(ledger), target)}, which is not the account in use.\n` +
           'They appear once you sign into that account.',
         'One more step',
+      );
+      return;
+    }
+    await offerRestart(
+      ui,
+      store,
+      'The sidebar is built when the app starts, so it has not changed yet.',
+    );
+  } catch (error) {
+    if (error instanceof AppRunningError) ui.log.error(error.message);
+    else throw error;
+  }
+}
+
+/**
+ * The whole job, from the menu.
+ *
+ * The same engine the command drives, so the menu cannot bring less than
+ * `foster sweep` does — which is the failure this replaces. Fostering here has
+ * always meant picking a source and a batch, and the answer to "bring everything"
+ * was three screens plus a flag nobody knew about; one row that means all of it
+ * is the point.
+ *
+ * The plan is computed as a dry run first, because the number is the decision:
+ * "bring 141 sessions" and "bring 15" are different answers to the same
+ * question.
+ */
+export async function sweepFlow(
+  ui: Ui,
+  store: StoreLayout,
+  ledger: Ledger,
+  current: AccountRef,
+): Promise<void> {
+  const spin = ui.spinner();
+  spin.start('Reading every account on disk');
+  const plan = runSweep({ store, ledger, target: current, dryRun: true });
+  spin.stop('Read.');
+
+  const wouldFoster = plan.fostered.counts.fostered;
+  const wouldRestore = plan.restored.counts.fostered;
+  const never = neverComesLine(plan.neverComes);
+
+  if (wouldFoster === 0 && wouldRestore === 0) {
+    ui.log.info('Nothing to sweep: everything that can be in this account already is.');
+    // Still said. "Nothing to do" and "nothing to do, and 13 sessions will never
+    // come" are different states, and only one of them explains a gap the user
+    // can see in the sidebar.
+    if (never) ui.log.info(never);
+    return;
+  }
+
+  ui.note(
+    [
+      `${wouldFoster} session(s) to copy from the other accounts, archived included.`,
+      `${wouldRestore} deleted conversation(s) to bring back.`,
+      '',
+      'Archived ones stay archived: they arrive in the app’s archived view, not in',
+      'Recents. Nothing is destroyed and nothing is merged — "Send them back" undoes',
+      'all of it.',
+      ...(never ? ['', never] : []),
+    ].join('\n'),
+    'What the sweep would do',
+  );
+
+  const decision = await ui.select({
+    message: `Bring all of it into ${describeRef(labelsOf(ledger), current)}?`,
+    options: [
+      { value: 'go', label: 'Yes, bring everything' },
+      { value: 'cancel', label: 'Cancel' },
+    ],
+    initialValue: 'go',
+  });
+  if (isCancel(decision) || decision !== 'go') {
+    ui.log.info('Nothing written.');
+    return;
+  }
+
+  try {
+    const report = runSweep({ store, ledger, target: current, dryRun: false });
+    const written = [...report.fostered.outcomes, ...report.restored.outcomes];
+    for (const outcome of written.slice(0, PREVIEW_LIMIT)) ui.log.message(outcomeLine(outcome));
+    if (written.length > PREVIEW_LIMIT) {
+      ui.log.message(pc.dim(`… and ${written.length - PREVIEW_LIMIT} more`));
+    }
+
+    ui.note(sweepSummary(report).join('\n\n'), 'Swept');
+    if (report.fostered.counts.fostered + report.restored.counts.fostered === 0) return;
+
+    // Asked before offering, not after trying: restarting from a session the app
+    // started would kill this one part-way through, and an offer that can only
+    // end in a refusal is worse than the command to run somewhere else.
+    const restart = restartPlan(store);
+    if (!restart.possible) {
+      ui.log.warn(
+        `${restart.reason}\nRun this from a terminal outside the app to finish:\n  ${restart.command}`,
       );
       return;
     }

@@ -32,7 +32,12 @@ import {
   liveBranchNote,
   twoLiveSidebars,
 } from '../engine/continued.js';
-import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
+import {
+  fosterSessions,
+  returnFosterings,
+  summariseOutcomes,
+  type Outcome,
+} from '../engine/executor.js';
 import { assertPurgeConfirmed, purgeConversations, summarisePurge } from '../engine/purge.js';
 import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import {
@@ -105,7 +110,9 @@ import {
   selectFosterSessions,
 } from '../ops/foster.js';
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
+import { RESTART_COMMAND, restartPlan, runSweep, type SweepReport } from '../ops/sweep.js';
 import { applyLabel } from '../ops/label.js';
+import { labelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
@@ -122,6 +129,7 @@ import {
   renderUsage,
   sessionLine,
   shortId,
+  sweepSummary,
   updateLine,
 } from './render.js';
 
@@ -739,6 +747,213 @@ sourceOptions(
   }
   await finish(store, Boolean(opts.restart));
 });
+
+/**
+ * The whole job as one command.
+ *
+ * Everything below is what `foster foster --archived` and `foster restore`
+ * already do, chained in the order that makes the second question meaningful,
+ * with the two things a hand-run sequence never produced: a re-scan that says the
+ * sweep is finished, and a count of what will never come at all.
+ */
+program
+  .command('sweep')
+  .summary('bring everything into this account — archived and deleted included')
+  .description(
+    // Wrapped short on purpose: commander re-wraps to the terminal width and
+    // keeps these newlines as well, so a long line comes out ragged.
+    'Copy every fosterable session from the other accounts into the account\n' +
+      'signed in now, archived included, then bring back conversations the app\n' +
+      'deleted that nothing points at — and confirm both are exhausted.\n\n' +
+      'Archived copies stay archived: they arrive in the archived view rather\n' +
+      'than in Recents.\n\n' +
+      'purge and consolidate are deliberately not part of this. purge destroys\n' +
+      'transcripts, and choosing which half of a fork survives hides records —\n' +
+      'forks are counted, reported and left alone.',
+  )
+  .option('--to <accountUuid>', 'write the copies into this account instead')
+  .option('--to-org <organizationUuid>', 'write the copies into this organization')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
+  .option('--prefix <text>', 'title prefix marking the copies', DEFAULT_PREFIX)
+  .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      to?: string;
+      toOrg?: string;
+      configDir?: string[];
+      prefix: string;
+      restart?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const dryRun = opts.dryRun || !opts.yes;
+    const report = runSweep({
+      store,
+      ledger,
+      target,
+      prefix: opts.prefix,
+      dryRun,
+      configDirs: opts.configDir ?? [],
+    });
+
+    // Asked for even on a dry run: a run that writes nothing has nothing to
+    // restart for, and sweepRestart says so without touching the app.
+    const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
+
+    if (opts.json) {
+      print({ ...sweepJson(report), restart });
+      return;
+    }
+
+    const labels = labelsOf(ledger);
+    console.log(
+      pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
+    );
+
+    printPhase('Fostering, archived included', report.fostered.outcomes);
+    printPhase('Restoring what the app deleted', report.restored.outcomes);
+
+    console.log('');
+    for (const line of sweepSummary(report)) console.log(line);
+
+    if (dryRun) {
+      console.log(pc.dim('\nRe-run with --yes to write.'));
+      return;
+    }
+
+    reportSweepRestart(restart);
+  });
+
+function printPhase(heading: string, outcomes: Outcome[]): void {
+  console.log(pc.bold(`\n${heading}`));
+  if (outcomes.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  for (const outcome of outcomes) console.log(outcomeLine(outcome));
+}
+
+function sweepJson(report: SweepReport): Record<string, unknown> {
+  const phase = (entry: SweepReport['fostered']) => ({
+    counts: entry.counts,
+    outcomes: entry.outcomes.map((outcome) => ({
+      originSessionId: outcome.originSessionId,
+      title: outcome.title,
+      status: outcome.status,
+      ...(outcome.detail ? { detail: outcome.detail } : {}),
+      ...(outcome.copyPath ? { copyPath: outcome.copyPath } : {}),
+    })),
+  });
+
+  return {
+    store: report.store,
+    target: report.target,
+    dryRun: report.dryRun,
+    fostered: phase(report.fostered),
+    restored: phase(report.restored),
+    archived: report.archived,
+    forks: report.forks,
+    liveWriters: report.liveWriters,
+    neverComes: report.neverComes,
+    ...(report.confirmation ? { confirmation: report.confirmation } : {}),
+  };
+}
+
+/**
+ * What the sweep did about the restart, as data rather than as printing.
+ *
+ * One routine for both outputs, so `--json` cannot report a restart the text
+ * output would have refused. The refusal that matters is the app hosting this
+ * very session: `quitDesktop` throws on it, and a sweep that ended in a thrown
+ * error after writing everything would read as a failed run. Asked first, it ends
+ * with the line to paste into a terminal outside the app instead.
+ */
+interface SweepRestart {
+  requested: boolean;
+  done: boolean;
+  reason?: string;
+  command: string;
+}
+
+async function sweepRestart(store: StoreLayout, requested: boolean): Promise<SweepRestart> {
+  // Asked for only when it matters: working out whether foster is inside the app
+  // means reading the process table, which is a second of PowerShell that a run
+  // nobody asked to restart has no use for.
+  if (!requested) return { requested: false, done: false, command: RESTART_COMMAND };
+
+  const plan = restartPlan(store);
+  if (!plan.possible) {
+    return {
+      requested: true,
+      done: false,
+      reason: `${plan.reason}\nRun it from a terminal outside the app:`,
+      command: plan.command,
+    };
+  }
+
+  try {
+    if (plan.running) {
+      const quit = await quitDesktop(store);
+      if (quit.outcome === 'needs-terminate') {
+        return {
+          requested: true,
+          done: false,
+          reason: trayNote('Finish it with'),
+          command: 'foster app restart --terminate',
+        };
+      }
+      if (quit.outcome !== 'quit' && quit.outcome !== 'not-running') {
+        return {
+          requested: true,
+          done: false,
+          reason: 'Claude Desktop is still running. Quit it from the tray icon.',
+          command: plan.command,
+        };
+      }
+    }
+    const started = await startDesktop(store);
+    return started
+      ? { requested: true, done: true, command: plan.command }
+      : {
+          requested: true,
+          done: false,
+          reason: 'Started it; it has not taken the store yet.',
+          command: plan.command,
+        };
+  } catch (error) {
+    return {
+      requested: true,
+      done: false,
+      reason: error instanceof Error ? error.message : String(error),
+      command: plan.command,
+    };
+  }
+}
+
+function reportSweepRestart(restart: SweepRestart): void {
+  if (restart.done) {
+    console.log(pc.bold('\nClaude Desktop is up, with the sidebar rebuilt.'));
+    return;
+  }
+  if (restart.reason) {
+    console.log(pc.yellow(`\n${restart.reason}`));
+    console.log(`  ${restart.command}`);
+    return;
+  }
+  console.log(
+    pc.dim(
+      `\nThe copies are invisible until the app re-reads its directory: ${restart.command}` +
+        ' — or re-run with --restart.',
+    ),
+  );
+}
 
 program
   .command('restore')

@@ -2,7 +2,7 @@ import { bareSessionId } from '../domain/naming.js';
 import { listAccountDirs, storeRootOfCopy } from '../domain/paths.js';
 import type { DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { currentAccount, requireCurrentAccount } from '../engine/account.js';
-import { inspectDesktopFor } from '../engine/desktop.js';
+import { inspectDesktopFor, type ProcessLister } from '../engine/desktop.js';
 import { findDuplicates } from '../engine/duplicates.js';
 import {
   fosterSessions,
@@ -27,6 +27,7 @@ import {
   selectFosterSessions,
 } from '../ops/foster.js';
 import { inThisStore, selectReturnTargets } from '../ops/active.js';
+import { restartPlan, runSweep } from '../ops/sweep.js';
 import { applyLabel } from '../ops/label.js';
 
 /**
@@ -49,6 +50,11 @@ export interface AgentToolContext {
   removalGuard?: RemovalGuard;
   /** Injectable for tests; production runs the real `claude -p --resume`. */
   resumeRunner?: ResumeRunner;
+  /**
+   * Injectable for tests; production reads the real process table. Only the
+   * sweep asks, and only to work out whether foster may restart the app itself.
+   */
+  processes?: ProcessLister;
 }
 
 export type { ResumeRunner } from '../engine/resume.js';
@@ -382,6 +388,100 @@ function mutationReport(
       status: outcome.status,
       ...(outcome.detail ? { detail: outcome.detail } : {}),
     })),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * The whole sweep
+ * ------------------------------------------------------------------ */
+
+export interface SweepEverythingArgs {
+  prefix?: string;
+  /** Extra Claude config directories to search for deleted conversations. */
+  configDirs?: string[];
+  /** Actually write. Only honoured when the user started the agent with --yes. */
+  apply?: boolean;
+}
+
+/** How many outcome rows a sweep hands back before it stops listing and counts. */
+const SWEEP_OUTCOME_LIMIT = 50;
+
+/**
+ * "Bring everything here", as one tool.
+ *
+ * The gap this closes is not convenience. `restore` was never one of the agent's
+ * tools, so a task phrased as "bring it all, including the deleted ones" was
+ * literally unanswerable — the model could foster and then had to tell the user
+ * to run a command itself. And `foster_sessions` sweeps without archived
+ * sessions, which on a real store is the difference between 15 and 141.
+ */
+export function sweepEverything(ctx: AgentToolContext, args: SweepEverythingArgs): unknown {
+  const { store, ledger } = ctx;
+  const env = envOf(ctx);
+  const target = requireCurrentAccount(store, listAccountDirs(store));
+
+  const gated = Boolean(args.apply) && !ctx.allowWrites;
+  const dryRun = !args.apply || gated;
+
+  const report = runSweep({
+    store,
+    ledger,
+    target,
+    dryRun,
+    env,
+    ...(args.prefix ? { prefix: args.prefix } : {}),
+    ...(args.configDirs ? { configDirs: args.configDirs } : {}),
+  });
+
+  const outcomes = [...report.fostered.outcomes, ...report.restored.outcomes];
+  const restart = restartPlan(store, env, ctx.processes);
+
+  return {
+    dryRun,
+    ...(gated ? { note: WRITES_DISABLED } : dryRun ? {} : { note: RESTART_NOTE }),
+    target,
+    counts: {
+      fostered: report.fostered.counts.fostered,
+      restored: report.restored.counts.fostered,
+      skipped: report.fostered.counts.skipped + report.restored.counts.skipped,
+      failed: report.fostered.counts.failed + report.restored.counts.failed,
+    },
+    archived: report.archived,
+    archivedNote:
+      'Copies of archived sessions stay archived: they are in the app’s archived view, not in Recents.',
+    ...(report.confirmation ? { confirmation: report.confirmation } : {}),
+    neverComes: report.neverComes,
+    forks: report.forks,
+    ...(report.forks > 0
+      ? {
+          forksNote:
+            'A fork is one piece of work with two rows, and choosing which half survives hides ' +
+            'records. That is the user’s decision: report it and stop, never run consolidate.',
+        }
+      : {}),
+    ...(report.liveWriters.length > 0
+      ? {
+          liveWriters: report.liveWriters,
+          liveWritersNote:
+            'Reported, not verified: a live writer is a pid read from a registry file, and pids ' +
+            'get recycled. Pass this on as something to check, not as a fact.',
+        }
+      : {}),
+    restart: {
+      possible: restart.possible,
+      appRunning: restart.running,
+      command: restart.command,
+      ...(restart.reason ? { reason: restart.reason } : {}),
+    },
+    outcomes: outcomes.slice(0, SWEEP_OUTCOME_LIMIT).map((outcome) => ({
+      originSessionId: outcome.originSessionId,
+      title: outcome.title,
+      status: outcome.status,
+      ...(outcome.detail ? { detail: outcome.detail } : {}),
+    })),
+    ...(outcomes.length > SWEEP_OUTCOME_LIMIT
+      ? { outcomesNote: `${outcomes.length - SWEEP_OUTCOME_LIMIT} more not listed; see counts` }
+      : {}),
   };
 }
 

@@ -13,7 +13,14 @@ import { THEMES, type ThemeName } from '../tui/theme.js';
 import { isCancel, type Ui } from '../tui/ui.js';
 import { buildDashboard } from './dashboard.js';
 import { desktopFlow } from './desktopUi.js';
-import { fosterFlow, labelFlow, restoreFlow, returnFlow, switchInstallation } from './flows.js';
+import {
+  fosterFlow,
+  labelFlow,
+  restoreFlow,
+  returnFlow,
+  sweepFlow,
+  switchInstallation,
+} from './flows.js';
 import { showAccounts, showIdentities, showRenewals, showStatus, showUsage } from './screens.js';
 import { BACK_OPTION, aborted } from './prompts.js';
 import { describeRef, labelsOf, nameEverything } from './names.js';
@@ -72,6 +79,7 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
 
   const actions: Record<string, Action> = {
     foster: (ctx) => fosterFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
+    sweep: (ctx) => sweepFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
     return: (ctx) => returnFlow(ctx.ui, ctx.store, ctx.ledger),
     restore: (ctx) => restoreFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
     status: (ctx) => {

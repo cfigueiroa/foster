@@ -3,7 +3,8 @@ import { bareSessionId } from '../domain/naming.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
-import type { DiscoveredSession } from '../domain/types.js';
+import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
+import type { NeverComes, SweepReport } from '../ops/sweep.js';
 import type { AccountOverview } from '../store/accounts.js';
 import type { AccountProfile } from '../store/profile.js';
 import type { UsageReport } from '../engine/anthropicApi.js';
@@ -495,4 +496,101 @@ function standingLine(standing: BranchStanding): string {
     ),
     pc.dim(`      foster consolidate --session ${shortId(standing.here)} --yes`),
   ].join('\n');
+}
+
+/**
+ * The lines a sweep ends on, shared by the command and the menu so both say the
+ * same thing about the same run.
+ *
+ * Ordered by what the reader has to act on: whether it is finished, where the
+ * copies landed, what will never come, and only then the things that are somebody
+ * else's decision.
+ */
+export function sweepSummary(report: SweepReport): string[] {
+  const lines: string[] = [];
+  const { fostered, restored } = report;
+
+  lines.push(
+    report.dryRun
+      ? pc.bold(
+          `Dry run: ${fostered.counts.fostered} would be fostered, ${restored.counts.fostered} restored.`,
+        )
+      : pc.bold(
+          `${fostered.counts.fostered} fostered, ${restored.counts.fostered} restored, ` +
+            `${fostered.counts.skipped + restored.counts.skipped} skipped, ` +
+            `${fostered.counts.failed + restored.counts.failed} failed.`,
+        ),
+  );
+
+  // Said whenever any copy carries the flag, because the archived view is where
+  // they land and Recents is where people look. A run that brought a hundred
+  // sessions and appears to have brought none is this sentence going unsaid.
+  if (report.archived > 0) {
+    const one = report.archived === 1;
+    lines.push(
+      `${report.archived} of them ${one ? 'was archived and stays' : 'were archived and stay'} archived — ` +
+        `${one ? 'it is' : 'they are'} in the app's archived view, not in Recents.`,
+    );
+  }
+
+  const confirmation = report.confirmation;
+  if (confirmation) {
+    lines.push(
+      confirmation.exhausted
+        ? pc.green('Nothing is left to sweep: a second run would foster 0 and restore 0.')
+        : pc.yellow(
+            `Not finished: ${confirmation.fosterable} still to foster, ` +
+              `${confirmation.restorable} still to restore. Run it again.`,
+          ),
+    );
+  }
+
+  const never = neverComesLine(report.neverComes);
+  if (never) lines.push(pc.dim(never));
+
+  if (report.forks > 0) {
+    const one = report.forks === 1;
+    lines.push(
+      pc.yellow(
+        `${report.forks} ${one ? 'session is' : 'sessions are'} the half of a fork that carried on; ` +
+          `this account is showing the half that stopped.\n` +
+          'Which half survives is a reading decision, so the sweep stops here: ' +
+          'foster consolidate lists them, and needs the app closed.',
+      ),
+    );
+  }
+
+  if (report.liveWriters.length > 0) {
+    const one = report.liveWriters.length === 1;
+    lines.push(
+      pc.dim(
+        `${report.liveWriters.length} of the conversations ${one ? 'was' : 'were'} reported as having a live writer. ` +
+          'That reading is a pid from a registry file, and pids get recycled — check it before acting on it.',
+      ),
+    );
+  }
+
+  return lines;
+}
+
+/**
+ * What no sweep can bring, in one line.
+ *
+ * Empty when there is nothing to say: a run with no gap should not print a
+ * sentence about a gap.
+ */
+export function neverComesLine(never: NeverComes): string {
+  if (never.total === 0) return '';
+  const names: Record<Unfosterable, string> = {
+    'scheduled-task': 'scheduled task',
+    'never-opened': 'never opened',
+    'too-large': "over the app's size limit",
+    archived: 'archived',
+    'already-a-copy': 'already a copy',
+  };
+  const detail = Object.entries(never.byReason)
+    .map(([reason, count]) => `${count} ${names[reason as Unfosterable]}`)
+    .join(', ');
+  const one = never.total === 1;
+  return `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
 }
