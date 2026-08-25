@@ -88,10 +88,13 @@ import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
 import {
   describeWriters,
+  endableWriter,
   isSelfHostedBy,
   liveSessions,
   pidAlive,
+  pruneRegistry,
   sessionRegistryRoots,
+  staleRegistryEntries,
   type LiveCliSession,
 } from '../store/liveSessions.js';
 import { viewTranscript } from '../store/transcripts.js';
@@ -2424,10 +2427,18 @@ program
   .description('conversations a claude process is holding open right now')
   .option('--json', 'machine-readable output')
   .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
-  .option('--yes', 'actually end them; without it nothing is stopped')
+  .option('--prune', 'remove registry entries whose process is gone or has been replaced')
+  .option('--yes', 'actually do it; without it nothing is stopped or removed')
   .action(async function (this: Command) {
-    const opts = this.opts<{ json?: boolean; stop?: string[]; yes?: boolean }>();
-    const sessions = liveSessions(sessionRegistryRoots(process.env));
+    const opts = this.opts<{ json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }>();
+    const roots = sessionRegistryRoots(process.env);
+
+    if (opts.prune) {
+      pruneStale(roots, Boolean(opts.yes), Boolean(opts.json));
+      return;
+    }
+
+    const sessions = liveSessions(roots);
 
     if (opts.stop?.length) {
       await stopWriters(sessions, opts.stop, Boolean(opts.yes), Boolean(opts.json));
@@ -2448,6 +2459,7 @@ program
 
     if (sessions.length === 0) {
       console.log('No live claude sessions.');
+      sayIfStale(roots);
       return;
     }
     for (const s of sessions) {
@@ -2455,7 +2467,105 @@ program
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
+    sayIfStale(roots);
   });
+
+/**
+ * Mention the files this list had to disregard.
+ *
+ * Said here because this is where someone is standing when the registry is what
+ * they are thinking about, and because the alternative — a list that quietly
+ * omits four entries somebody saw yesterday — is the shape of a bug report. The
+ * scan is free: the process table it needs was read a moment ago and is still in
+ * hand. Nothing is removed on the way past; `--prune` is a separate ask.
+ */
+function sayIfStale(roots: string[]): void {
+  const stale = staleRegistryEntries(roots);
+  if (stale.length === 0) return;
+  console.log(
+    pc.dim(
+      `\n${stale.length} registry ${stale.length === 1 ? 'file names' : 'files name'} a process ` +
+        'that is gone or has been replaced.\n`foster live --prune` clears them.',
+    ),
+  );
+}
+
+/**
+ * Drop registry entries that describe nothing.
+ *
+ * The registry is only tidied by the sessions that wrote it, so a crash — or a
+ * reboot, which is every session at once — leaves files behind for as long as
+ * nobody clears them. They are not inert: each one is a pid, and a pid Windows
+ * has since handed to something else reads as a live writer until it is checked.
+ * Removing them is offered rather than done, and only for entries whose process
+ * is provably gone or provably somebody else.
+ */
+function pruneStale(roots: string[], apply: boolean, json: boolean): void {
+  const stale = staleRegistryEntries(roots);
+  const described = stale.map((item) => ({
+    pid: item.pid,
+    cliSessionId: item.sessionId ?? null,
+    cwd: item.cwd ?? null,
+    registryFile: item.file,
+    why: item.why,
+  }));
+  // The records name conversations and are worth a line each; the peer keys
+  // beside them are the same fact repeated in bulk, and printing seventy of them
+  // would bury the few lines someone is actually reading.
+  const records = described.filter((row) => row.cliSessionId !== null);
+  const keyFiles = described.filter((row) => row.cliSessionId === null);
+  const plural = (n: number) => (n === 1 ? 'key' : 'keys');
+
+  if (!apply) {
+    if (json) {
+      print(described.map((row) => ({ ...row, removed: false })));
+      return;
+    }
+    if (stale.length === 0) {
+      console.log('Every registry entry still names its own process.');
+      return;
+    }
+    for (const row of records) {
+      console.log(`  ${String(row.pid).padStart(6)}  ${row.cliSessionId}  ${pc.dim(row.why)}`);
+    }
+    if (keyFiles.length > 0) {
+      const n = keyFiles.length;
+      console.log(
+        pc.dim(`  ${n} peer ${plural(n)} from ${n === 1 ? 'a process' : 'processes'} that ended`),
+      );
+    }
+    console.log(
+      pc.dim(
+        `\n${stale.length} stale ${stale.length === 1 ? 'file' : 'files'}. ` +
+          'Re-run with --yes to remove them.',
+      ),
+    );
+    return;
+  }
+
+  const { removed, failed } = pruneRegistry(stale);
+  const gone = new Set(removed);
+
+  if (json) {
+    print(described.map((row) => ({ ...row, removed: gone.has(row.registryFile) })));
+    return;
+  }
+
+  for (const row of records) {
+    const mark = gone.has(row.registryFile) ? pc.dim('removed') : pc.yellow('could not remove');
+    console.log(`  ${String(row.pid).padStart(6)}  ${row.cliSessionId}  ${mark}`);
+  }
+  const keysGone = keyFiles.filter((row) => gone.has(row.registryFile)).length;
+  if (keysGone > 0) console.log(pc.dim(`  ${keysGone} peer ${plural(keysGone)}`));
+  console.log(`\nRemoved ${removed.length} of ${stale.length}.`);
+  if (failed.length > 0) {
+    console.log(
+      pc.yellow(
+        `${failed.length} stayed: another client's directory, or a file that went on its own.`,
+      ),
+    );
+  }
+}
 
 /**
  * End the processes writing the named conversations.
@@ -2515,6 +2625,30 @@ async function stopWriters(
             `  ! ${session.pid}  ${session.sessionId}${where}\n` +
               '    This is the session foster is running in. Ending it would kill this command\n' +
               '    part-way through. Close it yourself, or run foster from another terminal.',
+          ),
+        );
+      }
+      continue;
+    }
+
+    // The identity gate, and the reason this command is not a taskkill with extra
+    // steps: a registry entry names a pid, and Windows reissues pids fast enough
+    // that a day-old entry routinely points at something else — a service worker,
+    // an editor, a process whose whole tree `/T` would take with it. Being listed
+    // as live is not enough to be ended; the process has to be the one the record
+    // described, and an entry foster cannot identify is refused rather than
+    // guessed at.
+    const endable = endableWriter(session.identity, rows);
+    if (!endable.ok) {
+      results.push({ ...row, outcome: 'refused-unidentified' });
+      if (!json) {
+        console.log(
+          pc.yellow(
+            `  ! ${session.pid}  ${session.sessionId}${where}\n` +
+              endable.reason
+                .split('\n')
+                .map((line) => `    ${line}`)
+                .join('\n'),
           ),
         );
       }

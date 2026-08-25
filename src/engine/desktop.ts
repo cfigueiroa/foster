@@ -9,6 +9,7 @@ import {
 } from '../domain/paths.js';
 import { closingWindowQuits } from '../store/config.js';
 import {
+  isCodeCliProcess,
   parseProcessCsv,
   readProcesses,
   type ProcessLister,
@@ -36,16 +37,11 @@ export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
 /**
  * Both the desktop app and the Code CLI it spawns are called claude.exe. Only
  * the path tells them apart, and only the CLI lives under a claude-code
- * directory.
+ * directory. The separation itself lives in util/processes: the session registry
+ * asks the same question of a pid, and must not import desktop control to do it.
  */
 function isDesktopProcess(row: ProcessRow): boolean {
   return row.name.toLowerCase() === 'claude.exe' && !isCodeCliProcess(row);
-}
-
-function isCodeCliProcess(row: ProcessRow): boolean {
-  return (
-    row.name.toLowerCase() === 'claude.exe' && row.path.toLowerCase().includes('\\claude-code\\')
-  );
 }
 
 export interface DesktopState {

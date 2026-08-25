@@ -651,7 +651,8 @@ foster pin       # pin sessions in the sidebar, or see what is pinned
 foster app       # status | quit | start | restart — drive Claude Desktop itself
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
-foster live      # conversations a claude process is holding open right now (--stop ends one)
+foster live      # conversations a claude process is holding open right now (--stop ends one,
+                 #   --prune clears registry entries whose process is gone)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
@@ -834,6 +835,22 @@ the start, `--chars` for how much; the id comes from `list --json` or `status --
 `foster resume <cliSessionId> "<prompt>"` runs `claude -p --resume` behind the same gate the agent
 has: it refuses while a live `claude` process holds that conversation, because two writers on one
 transcript is how transcripts get corrupted. `foster live` shows exactly what is being held.
+
+That gate rests on the CLI's own registry — a file per running session under `<configDir>/sessions/`,
+naming the pid holding the conversation — and a pid on its own is not an identity. Windows reissues
+pids quickly, and after a reboot a day-old registry file points at whatever took the number next: a
+service worker, a git process, the desktop app. So the pid is checked against the creation time the
+record kept for its writer (`procStart`, Windows' own clock): two processes can share a pid, but not
+a pid and a creation instant. Records too old to carry one fall back to what the pid is now and
+whether it is even older than the record describing it. An entry that fails is not a live writer,
+and `foster live --stop` will not end a process it cannot identify — the kill is `taskkill /F /T`,
+and the tree it takes with it would be a stranger's.
+
+`foster live --prune` clears the files whose process is provably gone or provably somebody else;
+without `--yes` it only lists them. That includes the peer key a session leaves beside its record —
+it carries the same creation time, so it is answerable by the same rule, and it is what a machine
+that has been up for a week is actually full of: the CLI clears records it finds stale but never
+the keys.
 
 `scan`, `list`, `status`, `stores`, `clients`, `doctor`, `app status`, `transcript`, `live`,
 `purge` and `whoami` take `--json`.
