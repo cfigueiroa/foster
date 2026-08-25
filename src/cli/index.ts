@@ -14,6 +14,8 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount } from '../engine/account.js';
+import { canIdentify, identifyAccount, signedInAccount } from '../engine/identify.js';
+import { uniquePrefix } from '../domain/prefix.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
   DesktopControlError,
@@ -1910,8 +1912,104 @@ program
           `${unseen} of them ${unseen === 1 ? 'has' : 'have'} never been seen signed in here; signing into one fills its row in.`,
         ),
       );
+      // Only worth suggesting when foster actually holds a credential that
+      // could answer — otherwise the command has nothing to try.
+      if (canIdentify(store)) {
+        console.log(
+          pc.dim('foster identify --all asks the API to name the ones it holds a key for.'),
+        );
+      }
     }
   });
+
+program
+  .command('identify')
+  .description('name accounts by asking the API, using a credential foster already holds')
+  .argument('[accountUuid]', 'the account to identify; omit for --all')
+  .option('--all', 'identify every account that has no identity yet')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command, accountArg: string | undefined) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ all?: boolean; json?: boolean }>();
+    const rows = overviewAccounts(store, ledger);
+
+    // Which accounts to ask about: one named (resolving a prefix the way --to
+    // does), or every unidentified one under --all.
+    let targets: string[];
+    if (accountArg) {
+      // Accept an abbreviated prefix the way --to does: exactly one match, or
+      // said plainly rather than guessed at.
+      const match = uniquePrefix(
+        rows.map((row) => row.accountUuid),
+        accountArg,
+        (uuid) => uuid,
+      );
+      if (match.kind === 'none') {
+        console.log(`No account here starts with ${accountArg}.`);
+        return;
+      }
+      if (match.kind === 'ambiguous') {
+        console.log(`${accountArg} matches more than one account; use more of the id.`);
+        return;
+      }
+      targets = [match.id];
+    } else if (opts.all) {
+      const signedIn = signedInAccount(store);
+      targets = rows
+        .filter((row) => !row.identity && row.accountUuid !== signedIn)
+        .map((row) => row.accountUuid);
+    } else {
+      console.log('Name an account, or pass --all. `foster accounts` lists them.');
+      return;
+    }
+
+    if (targets.length === 0) {
+      if (opts.json) return print([]);
+      console.log('Nothing to identify — every account here already has an identity.');
+      return;
+    }
+
+    if (!canIdentify(store)) {
+      if (opts.json) return print({ error: 'no-credential' });
+      console.log('foster holds no usable credential to ask with.');
+      console.log(
+        pc.dim(
+          'This presents a credential the account itself left — in a CLI client or\n' +
+            "foster's vault — so it can only name an account whose key is on this machine.\n" +
+            'Signing into an account once, or `foster guard` while it is signed in, leaves one.',
+        ),
+      );
+      return;
+    }
+
+    const results = [];
+    for (const accountUuid of targets) {
+      const outcome = await identifyAccount(store, ledger, accountUuid);
+      const name = outcome.profile?.name ?? outcome.profile?.email;
+      results.push({ accountUuid, name: name ?? null, reason: outcome.reason ?? null });
+      if (opts.json) continue;
+      if (name) {
+        console.log(`${shortId(accountUuid)}  ${pc.bold(name)}`);
+      } else {
+        console.log(pc.dim(`${shortId(accountUuid)}  ${identifyReason(outcome.reason)}`));
+      }
+    }
+    if (opts.json) print(results);
+  });
+
+/** The one-line reason an identify attempt found no name, for the dim output. */
+function identifyReason(
+  reason: 'no-credential' | 'expired-only' | 'no-answer' | undefined,
+): string {
+  switch (reason) {
+    case 'expired-only':
+      return 'the only credential for it has expired; its CLI renews on next run';
+    case 'no-answer':
+      return 'foster holds no credential for this account — sign into it once, or run foster guard while it is';
+    default:
+      return 'could not identify';
+  }
+}
 
 /** Writes down the current account's profile when it says something the ledger does not. */
 function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {

@@ -1144,13 +1144,19 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   `client new` and `vault` are not among its tools and it is told not to reach for them through the
   shell. Changing who you are signed in as is not a step on the way to something else, and a
   credential is not a file for a model to move. The read-only half — `clients`, `accounts`, `usage`,
-  `renewals` — answers "which account has quota" without any of it.
+  `renewals`, `identify` — answers "which account has quota" without any of it.
 
   **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
   read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
   it. The token is never written to disk, never logged, never put on a command line, and never sent
   to any host but `api.anthropic.com`. What it buys is the only data no cached file holds: your live
   5-hour and weekly limits, and a profile that is current rather than whatever the app last persisted.
+  `identify` asks the same `/api/oauth/profile` for a different reason — to put a name on an account
+  foster has never seen signed in. It works by presenting a credential that account itself left
+  behind, in a CLI client or in foster's own vault, and keeping the answer only when the profile's
+  own `accountUuid` matches the account asked about; a token belonging to someone else is discarded,
+  never recorded against the wrong account. Like the rest of this half it goes to the network only
+  when you run it, never on its own.
 
   **What still stops it cold:** the token is not stored in the open. Claude Desktop keeps it the way
   Chromium keeps a cookie — an AES-256-GCM blob under a key sealed with Windows DPAPI in `Local

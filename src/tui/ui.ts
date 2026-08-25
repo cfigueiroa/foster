@@ -27,6 +27,8 @@ export interface DashboardAccount {
   isCurrent: boolean;
   /** Name (or email) from the identity foster has seen — a fallback, not a label. */
   identityName?: string;
+  /** True when foster has no identity for this account and could ask the API for one. */
+  canIdentify?: boolean;
   plan?: string;
   subscription?: string;
   /** Set when the subscription is remembered, not read fresh: the date it was seen. */
