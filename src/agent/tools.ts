@@ -463,8 +463,10 @@ export function sweepEverything(ctx: AgentToolContext, args: SweepEverythingArgs
       ? {
           liveWriters: report.liveWriters,
           liveWritersNote:
-            'Reported, not verified: a live writer is a pid read from a registry file, and pids ' +
-            'get recycled. Pass this on as something to check, not as a fact.',
+            'A live `claude` process is writing these right now — the pid was checked against the ' +
+            'creation time the record kept for it, not taken on its own. Opening the copy branches ' +
+            'the conversation instead of continuing it, so tell the user to finish there first; ' +
+            '`foster live` names the process and the directory it runs in.',
         }
       : {}),
     restart: {

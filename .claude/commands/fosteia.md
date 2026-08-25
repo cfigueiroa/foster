@@ -56,7 +56,6 @@ on rather than re-deriving it:
 - **`foster consolidate --yes`.** `sweep` reports forks and stops there on purpose: choosing
   which half of a fork survives hides records, and that is the user's decision. Pass the
   suggestion along and stop.
-- **`foster live --stop`.** It is `taskkill /F /T` on a pid read from a registry file, and those
-  files go stale: after a reboot the pid can belong to something else entirely. `sweep` already
-  reports a live-writer reading as something to check rather than as a fact — repeat it the same
-  way.
+- **`foster live --stop`.** It is `taskkill /F /T`, so whatever that session had not written is
+  lost. If `sweep` reports a live writer, pass it on — finishing there is the user's call, not a
+  step for you to take.

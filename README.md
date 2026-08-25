@@ -1058,7 +1058,10 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   stops at the moment you opened it while your work carries on where you left it. `foster` warns when
   a copy it is making has a live writer, before and after writing, in the command and in the menu —
   and names it, with the pid and the directory it was started in, because "finish there first" is not
-  advice anyone can act on without knowing where _there_ is. When finishing is not possible,
+  advice anyone can act on without knowing where _there_ is. A pid on its own would not carry that
+  claim: Windows hands them back out, so a registry file left behind by a crash can name an unrelated
+  process. The record keeps the creation time of the process that wrote it, and that is what foster
+  checks, so the warning is about a writer that is actually there. When finishing is not possible,
   `foster live --stop <id>` ends the writer. That is a kill and says so: the CLI has no window to
   close politely, so whatever the session had not yet written is lost, while everything already in
   the transcript stays. It refuses the session foster is itself running in, for the same reason it

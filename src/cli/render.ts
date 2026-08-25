@@ -563,9 +563,10 @@ export function sweepSummary(report: SweepReport): string[] {
   if (report.liveWriters.length > 0) {
     const one = report.liveWriters.length === 1;
     lines.push(
-      pc.dim(
-        `${report.liveWriters.length} of the conversations ${one ? 'was' : 'were'} reported as having a live writer. ` +
-          'That reading is a pid from a registry file, and pids get recycled — check it before acting on it.',
+      pc.yellow(
+        `${report.liveWriters.length} of the conversations ${one ? 'has' : 'have'} a live writer. ` +
+          `Opening the ${one ? 'copy' : 'copies'} branches the conversation instead of continuing it, ` +
+          'so finish there first — foster live names the process and its directory.',
       ),
     );
   }
