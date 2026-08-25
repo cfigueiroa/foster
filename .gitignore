@@ -12,3 +12,9 @@ coverage/
 Thumbs.db
 .idea/
 .vscode/
+
+# Claude Code runtime state. The repository tracks .claude/commands/ and nothing
+# else under here: worktrees, checkpoints, mailboxes and agent registries are
+# per-machine, and this repository is public.
+.claude/*
+!.claude/commands/
