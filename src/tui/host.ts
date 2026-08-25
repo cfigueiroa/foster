@@ -1,7 +1,7 @@
 import type { Key } from './input.js';
 import { renderHeader, renderHome, renderPanel } from './home.js';
 import { loadPrefs, savePrefs } from './prefs.js';
-import { COMMANDS, filterChoices, filterCommands, type Command } from './slash.js';
+import { COMMANDS, accountActions, filterChoices, filterCommands, type Command } from './slash.js';
 import type { Terminal } from './terminal.js';
 import {
   THEMES,
@@ -15,9 +15,11 @@ import {
 } from './theme.js';
 import { CANCEL, type Choice, type Dashboard, type HomeRequest, type Ui } from './ui.js';
 import {
+  bold,
   fillLine,
   fitLine,
   paintFg,
+  paintSegment,
   rule,
   stripAnsi,
   truncateVisible,
@@ -62,7 +64,12 @@ export class TuiHost implements Ui {
   private overlay: Overlay | undefined;
   private promptText = '';
   private slashIndex = 0;
+  /** Cursor into the dashboard's account list; -1 is "nothing selected". */
+  private accountIndex = -1;
+  /** Where the cursor was when home() last returned, for the trip back. */
+  private lastAccountIndex = -1;
   private keyPending: Promise<Key | null> | undefined;
+  private wipe = false;
 
   constructor(private readonly term: Terminal) {
     this.level = detectColorLevel();
@@ -71,7 +78,12 @@ export class TuiHost implements Ui {
 
   start(): void {
     this.term.enter();
-    this.term.onResize(() => this.paint());
+    // A resize reflows whatever was on screen; repainting the same cells
+    // leaves the reflowed remainder standing at the edges. Wipe first.
+    this.term.onResize(() => {
+      this.wipe = true;
+      this.paint();
+    });
     this.tintCursor();
     this.paint();
   }
@@ -81,9 +93,13 @@ export class TuiHost implements Ui {
   }
 
   setTheme(name: ThemeName): void {
+    // The theme picker previews via this method on every cursor move; a
+    // same-theme call must be free or the preview wipes the screen per key.
+    if (this.palette.name === name) return;
     this.palette = THEMES[name];
     savePrefs({ theme: name });
     this.tintCursor();
+    this.wipe = true;
     this.paint();
   }
 
@@ -135,27 +151,62 @@ export class TuiHost implements Ui {
     this.dashboard = request.dashboard;
     this.promptText = '';
     this.slashIndex = 0;
+    // Restore the cursor where the last visit left it, clamped to the fresh
+    // list — coming back from an account's own screen should not cost the
+    // walk down to it again.
+    this.accountIndex = Math.min(this.lastAccountIndex, request.dashboard.accounts.length - 1);
 
     for (;;) {
       this.paint();
       const key = await this.takeKey();
-      if (!key) return CANCEL;
+      if (!key) return this.leaveHome(CANCEL);
 
       if (this.wantsPalette(key)) {
         const picked = await this.select({
           message: 'Command palette',
           options: request.options,
         });
-        if (picked !== CANCEL) return picked;
+        if (picked !== CANCEL) return this.leaveHome(picked);
         continue;
       }
+
+      const opened = await this.accountMenu(key);
+      if (opened !== undefined) return this.leaveHome(opened);
 
       const result = this.handleHome(key, request.options);
       if (result !== undefined) {
         this.promptText = '';
-        return result;
+        return this.leaveHome(result);
       }
     }
+  }
+
+  /**
+   * The highlight belongs to the home screen: remember it for the return
+   * trip, and stop painting it while a dispatched flow owns the keyboard.
+   */
+  private leaveHome<T>(value: T): T {
+    this.lastAccountIndex = this.accountIndex;
+    this.accountIndex = -1;
+    return value;
+  }
+
+  /**
+   * Enter on a selected account: a small menu of things to do to *it*. The
+   * verb goes back to the runner with the account attached, so the flow can
+   * skip the "which account?" question the cursor already answered.
+   */
+  private async accountMenu(key: Key): Promise<string | undefined> {
+    if (key.type !== 'enter' || this.promptText.length > 0) return undefined;
+    const account = this.dashboard?.accounts[this.accountIndex];
+    if (!account) return undefined;
+    const picked = await this.select({
+      message: account.label ?? account.shortId,
+      options: accountActions(account),
+    });
+    if (picked === CANCEL) return undefined;
+    // Usage is always the signed-in account's — the API token is theirs.
+    return picked === 'usage' ? picked : `${picked}:${account.accountUuid}`;
   }
 
   async select(opts: {
@@ -257,12 +308,18 @@ export class TuiHost implements Ui {
       return 'quit';
     }
     if (key.type === 'esc') {
+      // Undo in the order things sit on screen: typed text, then the panel
+      // covering the dashboard, then the account cursor.
       if (this.promptText) {
         this.promptText = '';
         this.slashIndex = 0;
         return undefined;
       }
-      if (this.panel) this.panel = undefined;
+      if (this.panel) {
+        this.panel = undefined;
+        return undefined;
+      }
+      this.accountIndex = -1;
       return undefined;
     }
 
@@ -275,10 +332,15 @@ export class TuiHost implements Ui {
     if (key.type === 'char') {
       this.promptText += key.value;
       this.slashIndex = 0;
+      // Enter now belongs to the slash line; a cursor it no longer answers to
+      // would be a second highlight lying about what Enter does.
+      this.accountIndex = -1;
       return undefined;
     }
     if (key.type === 'space') {
       this.promptText += ' ';
+      // Same reason as the char branch: Enter answers to the prompt now.
+      this.accountIndex = -1;
       return undefined;
     }
     if (key.type === 'backspace') {
@@ -287,10 +349,22 @@ export class TuiHost implements Ui {
       return undefined;
     }
     if (key.type === 'up' || key.type === 'down') {
-      // The old menu was a list; arrows moved it. An empty prompt that
-      // swallows arrows feels broken. Opening `/` puts the same list on
-      // screen; the first stroke only opens, the next ones move.
       if (this.promptText.length === 0) {
+        const accounts = this.dashboard?.accounts ?? [];
+        if (accounts.length > 0 && !this.panel) {
+          // Arrows walk the list the eye is already on. ↓ enters at the top,
+          // ↑ enters at the bottom; ↑ past the top clears the cursor.
+          this.accountIndex =
+            key.type === 'down'
+              ? Math.min(accounts.length - 1, this.accountIndex + 1)
+              : this.accountIndex === -1
+                ? accounts.length - 1
+                : Math.max(-1, this.accountIndex - 1);
+          return undefined;
+        }
+        // A panel on top (which has no scroll and must not be destroyed by a
+        // "show me more" keystroke), or nothing to walk: open the command
+        // list over it instead, so arrows always do something visible.
         this.promptText = '/';
         const items = this.slashItems();
         this.slashIndex = key.type === 'down' ? 0 : Math.max(0, items.length - 1);
@@ -351,7 +425,7 @@ export class TuiHost implements Ui {
     const bodyRows = Math.max(1, rows - header.length - footerH);
     const body = this.panel
       ? renderPanel(this.panel.title, this.panel.body, theme, level, cols, bodyRows)
-      : renderHome(dash, this.feed, theme, level, cols, bodyRows);
+      : renderHome(dash, this.feed, theme, level, cols, bodyRows, this.accountIndex);
 
     const lines = [
       ...header,
@@ -366,18 +440,27 @@ export class TuiHost implements Ui {
       ? `\x1b[${rows - 1};${this.promptCursorCol() + 1}H\x1b[?25h`
       : '\x1b[?25l';
 
-    this.term.write('\x1b[H' + framed.map((line) => fitLine(line, cols)).join('\r\n') + cursor);
+    const prefix = this.wipe ? '\x1b[2J' : '';
+    this.wipe = false;
+    this.term.write(
+      prefix + '\x1b[H' + framed.map((line) => fitLine(line, cols)).join('\r\n') + cursor,
+    );
   }
 
   private promptLine(cols: number): string {
     const prefix = paintFg(this.level, this.palette.accent, ' ❯ ');
     if (this.status) {
-      return prefix + paintFg(this.level, this.palette.warning, this.status);
+      return prefix + paintFg(this.level, this.palette.accent, `… ${this.status}`);
     }
+    const hasAccounts = (this.dashboard?.accounts.length ?? 0) > 0;
     const shown =
       this.promptText.length > 0
         ? this.promptText
-        : paintFg(this.level, this.palette.fgDim, '/ for commands');
+        : paintFg(
+            this.level,
+            this.palette.fgDim,
+            hasAccounts ? '/ for commands · ↑/↓ for accounts' : '/ for commands',
+          );
     return truncateVisible(prefix + shown, cols);
   }
 
@@ -390,17 +473,84 @@ export class TuiHost implements Ui {
   }
 
   private shortcuts(): string {
-    const hint =
+    const pairs: Array<[string, string]> =
       this.overlay?.kind === 'multi'
-        ? ' ↑/↓ move · Space tick · Enter accept · Esc back'
+        ? [
+            ['↑/↓', 'move'],
+            ['Space', 'tick'],
+            ['Enter', 'accept'],
+            ['Esc', 'back'],
+          ]
         : this.overlay?.kind === 'text'
-          ? ' Enter submit · Esc back'
+          ? [
+              ['Enter', 'submit'],
+              ['Esc', 'back'],
+            ]
           : this.overlay?.kind === 'select'
-            ? ' ↑/↓ move · Enter select · type to filter · Esc back'
+            ? [
+                ['↑/↓', 'move'],
+                ['Enter', 'select'],
+                ['type', 'to filter'],
+                ['Esc', 'back'],
+              ]
             : this.promptText.startsWith('/')
-              ? ' ↑/↓ move · Enter run · Esc close · Ctrl+P palette · Ctrl+Q quit'
-              : ' / commands · f foster · r return · u usage · Ctrl+P palette · Esc panel · Ctrl+Q quit';
-    return paintFg(this.level, this.palette.fgDim, hint);
+              ? [
+                  ['↑/↓', 'move'],
+                  ['Enter', 'run'],
+                  ['Esc', 'close'],
+                  ['Ctrl+P', 'palette'],
+                  ['Ctrl+Q', 'quit'],
+                ]
+              : this.accountIndex >= 0
+                ? [
+                    ['↑/↓', 'accounts'],
+                    ['Enter', 'actions'],
+                    ['Esc', 'clear'],
+                    ['/', 'commands'],
+                    ['Ctrl+Q', 'quit'],
+                  ]
+                : [
+                    ['/', 'commands'],
+                    ...((this.dashboard?.accounts.length ?? 0) > 0
+                      ? [['↑/↓', 'accounts'] as [string, string]]
+                      : []),
+                    ['f', 'foster'],
+                    ['r', 'return'],
+                    ['u', 'usage'],
+                    ['Ctrl+P', 'palette'],
+                    ...(this.panel ? [['Esc', 'panel'] as [string, string]] : []),
+                    ['Ctrl+Q', 'quit'],
+                  ];
+    // The strip must fit whole: past the width budget, fitLine falls back to
+    // truncateVisible, which strips every colour code with the cut. Dropping
+    // whole pairs — most-dispensable first — keeps the styling and the quit
+    // key on any width.
+    const cols = Math.max(40, this.term.cols);
+    const width = (list: Array<[string, string]>) =>
+      1 +
+      list.reduce((sum, [key, what]) => sum + key.length + 1 + what.length, 0) +
+      3 * (list.length - 1);
+    const droppable = ['Ctrl+P', 'u', 'r', 'f', '↑/↓'];
+    const shown = [...pairs];
+    for (const key of droppable) {
+      if (width(shown) <= cols) break;
+      const at = shown.findIndex(([k]) => k === key);
+      if (at >= 0) shown.splice(at, 1);
+    }
+    // The key in the theme's foreground, its meaning dimmed: the eye finds
+    // what to press without reading the whole strip.
+    const sep = paintFg(this.level, this.palette.fgDim, ' · ');
+    return (
+      ' ' +
+      shown
+        .map(
+          ([key, what]) =>
+            paintFg(this.level, this.palette.fg, key) +
+            ' ' +
+            paintFg(this.level, this.palette.fgDim, what),
+        )
+        .join(sep)
+    );
   }
 
   private composite(lines: string[], cols: number, rows: number): string[] {
@@ -455,7 +605,7 @@ export class TuiHost implements Ui {
     const titleBit = title ? ` ${truncateVisible(title, inner - 2)} ` : '';
     const top =
       paintFg(level, theme.accent, '╭') +
-      paintFg(level, theme.accent, titleBit) +
+      paintFg(level, theme.accent, bold(titleBit)) +
       paintFg(level, theme.border, '─'.repeat(Math.max(0, inner - visibleWidth(titleBit)))) +
       paintFg(level, theme.accent, '╮');
     const bottom =
@@ -468,7 +618,9 @@ export class TuiHost implements Ui {
       const marker = row.active ? paintFg(level, theme.accent, '▸ ') : '  ';
       const padded = truncateVisible(marker + row.label + hint, inner);
       const pad = ' '.repeat(Math.max(0, inner - visibleWidth(padded)));
-      const body = row.active ? paintFg(level, theme.fuzzy, padded) + pad : padded + pad;
+      // The active row gets a background slab as well as the marker — colour
+      // alone is easy to lose in a long list.
+      const body = row.active ? paintSegment(level, theme.bgHighlight, padded + pad) : padded + pad;
       return paintFg(level, theme.border, '│') + body + paintFg(level, theme.border, '│');
     });
     if (mid.length === 0) {
@@ -610,8 +762,14 @@ function overlayLine(
   theme: Theme,
   level: ColorLevel,
 ): string {
+  // The box is a card: panel background exactly as wide as the box, the
+  // screen's own background on either side. Painting the whole line panel
+  // made every overlay look like a stripe rather than something floating.
   const pad = ' '.repeat(Math.max(0, left));
-  const combined = pad + over;
-  const rest = Math.max(0, cols - visibleWidth(combined));
-  return fillLine(level, theme, combined + ' '.repeat(rest), cols, theme.bgPanel);
+  const rest = Math.max(0, cols - visibleWidth(pad + over));
+  return (
+    paintSegment(level, theme.bg, pad) +
+    paintSegment(level, theme.bgPanel, over) +
+    paintSegment(level, theme.bg, ' '.repeat(rest))
+  );
 }

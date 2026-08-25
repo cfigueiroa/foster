@@ -29,7 +29,6 @@ export interface Theme {
   barWarn: string;
   barCrit: string;
   barEmpty: string;
-  fuzzy: string;
 }
 
 /** Neutral dark, cyan accent — the colour the old clack badge already wore. */
@@ -51,7 +50,6 @@ export const FOSTER_NIGHT: Theme = {
   barWarn: '#e3b341',
   barCrit: '#f85149',
   barEmpty: '#30363d',
-  fuzzy: '#3dd6c6',
 };
 
 export const FOSTER_DAY: Theme = {
@@ -72,7 +70,6 @@ export const FOSTER_DAY: Theme = {
   barWarn: '#9a6700',
   barCrit: '#cf222e',
   barEmpty: '#d0d7de',
-  fuzzy: '#117a72',
 };
 
 export const THEMES: Record<ThemeName, Theme> = {
@@ -128,6 +125,13 @@ export function bgCode(hex: string, level: ColorLevel): string {
 
 export const RESET = '\x1b[0m';
 export const BOLD = '\x1b[1m';
+/**
+ * Reverse video. The badge uses this instead of an explicit background pair:
+ * the terminal swaps the cell's own colours, which survives environments where
+ * an explicit `48;2` background is dropped (observed under ConPTY with the
+ * acrylic renderer) and degrades to plain text when colour is off entirely.
+ */
+export const REVERSE = '\x1b[7m';
 
 export function to256(r: number, g: number, b: number): number {
   const grayish = Math.abs(r - g) < 10 && Math.abs(g - b) < 10 && Math.abs(r - b) < 10;

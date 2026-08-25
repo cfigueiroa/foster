@@ -3,7 +3,7 @@ import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { inspectApp } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
-import { overviewAccounts } from '../store/accounts.js';
+import { overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { VERSION } from '../version.js';
 import type { Dashboard, DashboardAccount } from '../tui/ui.js';
 import { formatDate, shortId } from './render.js';
@@ -13,9 +13,15 @@ import { formatDate, shortId } from './render.js';
  * usage API belong to /status and /usage — they are too expensive (and too
  * honest-about-staleness) to run every time the menu comes back.
  */
-export function buildDashboard(store: StoreLayout, ledger: Ledger, target: AccountRef): Dashboard {
+export function buildDashboard(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  // The caller can hand over rows it already computed — the scan behind them
+  // reads every session file, so running it twice per screen is real money.
+  rows: AccountOverview[] = overviewAccounts(store, ledger),
+): Dashboard {
   const labels = project(ledger.read()).labels;
-  const rows = overviewAccounts(store, ledger);
   const active = listActive(project(ledger.read()));
   const app = inspectApp(store);
   const signedLabel = labels.get(target.accountUuid) ?? shortId(target.accountUuid);
@@ -27,7 +33,12 @@ export function buildDashboard(store: StoreLayout, ledger: Ledger, target: Accou
     isCurrent: row.isCurrent,
     ...(row.identity?.plan ? { plan: row.identity.plan } : {}),
     ...(row.identity?.profile?.subscriptionStatus
-      ? { subscription: row.identity.profile.subscriptionStatus }
+      ? {
+          subscription: row.identity.profile.subscriptionStatus,
+          // A remembered status is only as fresh as the visit that saw it —
+          // dated here so the dashboard cannot assert it as current truth.
+          ...(row.remembered && row.seenAt ? { subscriptionAsOf: formatDate(row.seenAt) } : {}),
+        }
       : {}),
     sessions: row.sessions,
     copies: row.copies,

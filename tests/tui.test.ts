@@ -2,13 +2,14 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { renderHeader, renderHome } from '../src/tui/home.js';
 import { keyFromReadline, parseKey } from '../src/tui/input.js';
 import { filterChoices, filterCommands, fuzzyScore } from '../src/tui/slash.js';
 import { MemoryTerminal } from '../src/tui/terminal.js';
 import { TuiHost } from '../src/tui/host.js';
-import { detectColorLevel, to256 } from '../src/tui/theme.js';
+import { bgCode, detectColorLevel, to256 } from '../src/tui/theme.js';
 import { loadPrefs, prefsPath, savePrefs } from '../src/tui/prefs.js';
-import { meter } from '../src/tui/widgets.js';
+import { fillLine, meter, paintFg, stripAnsi, truncateMiddle } from '../src/tui/widgets.js';
 import { FOSTER_NIGHT } from '../src/tui/theme.js';
 import type { Dashboard } from '../src/tui/ui.js';
 
@@ -96,6 +97,121 @@ describe('meter', () => {
   });
 });
 
+describe('paint hygiene', () => {
+  it('keeps the line background alive across a foreground reset', () => {
+    // A coloured word ends in a full RESET; the padding after it must get the
+    // background back or the line shows the terminal's own colour from there.
+    const coloured = paintFg('truecolor', FOSTER_NIGHT.accent, 'hi');
+    const line = fillLine('truecolor', FOSTER_NIGHT, coloured, 10);
+    expect(line).toContain(`\x1b[0m${bgCode(FOSTER_NIGHT.bg, 'truecolor')}`);
+    expect(stripAnsi(line)).toBe('hi        ');
+  });
+
+  it('truncates the middle of a path, keeping both ends', () => {
+    const store = 'C:\\Stores\\claude\\Roaming\\Claude';
+    expect(truncateMiddle(store, 16)).toBe('C:\\Stor…g\\Claude');
+    expect(truncateMiddle(store, store.length)).toBe(store);
+    expect(truncateMiddle('abc', 1)).toBe('…');
+  });
+
+  it('badges the brand with reverse video, plain bold when colour is off', () => {
+    const dashboard: Dashboard = {
+      version: '0.30.0',
+      store: 'C:\\Claude',
+      signedIn: 'work',
+      appRunning: false,
+      accounts: [],
+      fostered: [],
+    };
+    const coloured = renderHeader(dashboard, FOSTER_NIGHT, 'truecolor', 60)[0]!;
+    expect(coloured).toContain('\x1b[7m');
+    const plain = renderHeader(dashboard, FOSTER_NIGHT, 'none', 60)[0]!;
+    expect(plain).not.toContain('\x1b[7m');
+    expect(stripAnsi(plain)).toContain(' foster ');
+  });
+
+  it('wipes the screen on resize so reflowed leftovers cannot survive', () => {
+    const term = new MemoryTerminal({ cols: 80, rows: 24 });
+    const host = new TuiHost(term);
+    host.start();
+    term.resize(60, 20);
+    expect(term.lastFrame().startsWith('\x1b[2J')).toBe(true);
+    host.paint();
+    expect(term.lastFrame().startsWith('\x1b[2J')).toBe(false);
+  });
+});
+
+describe('renderHome', () => {
+  it('counts accounts in the heading, aligns and pluralizes the tallies', () => {
+    const dashboard: Dashboard = {
+      version: '0.30.0',
+      store: 'C:\\Claude',
+      signedIn: 'work',
+      appRunning: true,
+      accounts: [
+        {
+          accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          shortId: 'aaaaaaaa',
+          label: 'work',
+          isCurrent: true,
+          plan: 'Max 20x',
+          subscription: 'active',
+          sessions: 12,
+          copies: 430,
+        },
+        {
+          accountUuid: '00000000-0000-4000-8000-00000000000b',
+          shortId: '00000000',
+          isCurrent: false,
+          sessions: 1,
+          copies: 1,
+        },
+      ],
+      fostered: [],
+    };
+    const plain = stripAnsi(renderHome(dashboard, [], FOSTER_NIGHT, 'none', 80, 24).join('\n'));
+    expect(plain).toContain('ACCOUNTS · 2');
+    expect(plain).toContain('12 sessions');
+    expect(plain).toContain(' 1 session ');
+    expect(plain).toContain('430 copies');
+    expect(plain).toContain('  1 copy');
+    expect(plain).not.toContain('unnamed');
+    expect(plain).not.toContain('session(s)');
+  });
+
+  it('paints the selected account as a highlighted slab with a cursor', () => {
+    const dashboard: Dashboard = {
+      version: '0.30.0',
+      store: 'C:\\Claude',
+      signedIn: 'work',
+      appRunning: true,
+      accounts: [
+        {
+          accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          shortId: 'aaaaaaaa',
+          isCurrent: true,
+          sessions: 1,
+          copies: 0,
+        },
+        {
+          accountUuid: '00000000-0000-4000-8000-00000000000b',
+          shortId: '00000000',
+          isCurrent: false,
+          sessions: 2,
+          copies: 0,
+        },
+      ],
+      fostered: [],
+    };
+    const lines = renderHome(dashboard, [], FOSTER_NIGHT, 'truecolor', 60, 24, 1);
+    const selected = lines.find((line) => stripAnsi(line).includes('00000000'))!;
+    expect(selected).toContain(bgCode(FOSTER_NIGHT.bgHighlight, 'truecolor'));
+    expect(stripAnsi(selected).startsWith('▸')).toBe(true);
+    const unselected = lines.find((line) => stripAnsi(line).includes('aaaaaaaa'))!;
+    expect(unselected).not.toContain(bgCode(FOSTER_NIGHT.bgHighlight, 'truecolor'));
+  });
+});
+
 describe('TuiHost', () => {
   it('paints a dashboard and quits from the slash menu', async () => {
     const term = new MemoryTerminal({ cols: 80, rows: 24 });
@@ -160,6 +276,71 @@ describe('TuiHost', () => {
       },
     });
     term.push([{ type: 'down' }, { type: 'enter' }]);
+    await expect(done).resolves.toBe('foster');
+  });
+
+  const twoAccounts: Dashboard = {
+    version: '0.30.0',
+    store: 'C:\\Claude',
+    signedIn: 'work',
+    appRunning: true,
+    accounts: [
+      {
+        accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        shortId: 'aaaaaaaa',
+        label: 'work',
+        isCurrent: true,
+        sessions: 3,
+        copies: 0,
+      },
+      {
+        accountUuid: '00000000-0000-4000-8000-00000000000b',
+        shortId: '00000000',
+        isCurrent: false,
+        sessions: 5,
+        copies: 2,
+      },
+    ],
+    fostered: [],
+  };
+
+  it('walks the account list with arrows and returns the verb with the account', async () => {
+    const term = new MemoryTerminal();
+    const host = new TuiHost(term);
+    const done = host.home({
+      message: 'What would you like to do?',
+      options: [{ value: 'foster', label: 'Bring sessions here' }],
+      dashboard: twoAccounts,
+    });
+    // Down twice lands on the second (non-current) account; Enter opens its
+    // action menu, whose first entry is "bring its sessions here".
+    term.push([{ type: 'down' }, { type: 'down' }, { type: 'enter' }, { type: 'enter' }]);
+    await expect(done).resolves.toBe('foster-from:00000000-0000-4000-8000-00000000000b');
+  });
+
+  it('clears the account cursor on Esc instead of acting on it', async () => {
+    const term = new MemoryTerminal();
+    const host = new TuiHost(term);
+    const done = host.home({
+      message: 'What would you like to do?',
+      options: [{ value: 'foster', label: 'Bring sessions here' }],
+      dashboard: twoAccounts,
+    });
+    // Select, clear, then Enter must do nothing (no selection, no slash) —
+    // the quit hotkey ends the request.
+    term.push([{ type: 'down' }, { type: 'esc' }, { type: 'enter' }, { type: 'ctrl', value: 'q' }]);
+    await expect(done).resolves.toBe('quit');
+  });
+
+  it('still fires letter hotkeys while an account is selected', async () => {
+    const term = new MemoryTerminal();
+    const host = new TuiHost(term);
+    const done = host.home({
+      message: 'What would you like to do?',
+      options: [{ value: 'foster', label: 'Bring sessions here' }],
+      dashboard: twoAccounts,
+    });
+    term.push([{ type: 'down' }, { type: 'char', value: 'f' }]);
     await expect(done).resolves.toBe('foster');
   });
 

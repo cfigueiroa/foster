@@ -106,6 +106,52 @@ export const COMMANDS: Command[] = [
   { value: 'quit', slash: 'quit', label: 'Quit', hint: 'leave foster' },
 ];
 
+/**
+ * What Enter offers for the account under the cursor. The signed-in account is
+ * the destination, so "bring its sessions here" would be a no-op there; it gets
+ * the read screens instead.
+ */
+export function accountActions(account: {
+  isCurrent: boolean;
+  label?: string;
+  shortId: string;
+  sessions: number;
+}): Choice[] {
+  const name = account.label ?? account.shortId;
+  const label: Choice = {
+    value: 'label',
+    label: account.label ? `Rename "${name}"` : 'Name it',
+    hint: 'so you stop reading UUIDs',
+  };
+  const details: Choice = {
+    value: 'details',
+    label: 'Who is this?',
+    hint: 'plan, subscription and sessions — everything foster knows',
+  };
+  if (account.isCurrent) {
+    return [
+      details,
+      { value: 'usage', label: 'Usage right now', hint: 'live limits, read from the API' },
+      label,
+    ];
+  }
+  return [
+    // Only offered when there is something to bring: a Cowork-only or empty
+    // account would turn this entry into a promise that can only fail.
+    ...(account.sessions > 0
+      ? [
+          {
+            value: 'foster-from',
+            label: 'Bring its sessions here',
+            hint: `copy ${name}'s sessions into this account`,
+          },
+        ]
+      : []),
+    details,
+    label,
+  ];
+}
+
 export const COMMAND_ALIASES: Record<string, string> = {
   exit: 'quit',
   q: 'quit',

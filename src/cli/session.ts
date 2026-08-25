@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { currentAccount } from '../engine/account.js';
 import { inspectApp } from '../engine/safety.js';
+import { overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project } from '../ledger/project.js';
 import { listAccountDirs } from '../domain/paths.js';
@@ -15,17 +16,26 @@ import { buildDashboard } from './dashboard.js';
 import { desktopFlow } from './desktopUi.js';
 import {
   fosterFlow,
+  fosterFromAccount,
+  labelAccount,
   labelFlow,
   restoreFlow,
   returnFlow,
   sweepFlow,
   switchInstallation,
 } from './flows.js';
-import { showAccounts, showIdentities, showRenewals, showStatus, showUsage } from './screens.js';
+import {
+  showAccountDetails,
+  showAccounts,
+  showIdentities,
+  showRenewals,
+  showStatus,
+  showUsage,
+} from './screens.js';
 import { BACK_OPTION, aborted } from './prompts.js';
 import { describeRef, labelsOf, nameEverything } from './names.js';
 
-type Action = (ctx: Session) => Promise<void>;
+type Action = (ctx: Session, accountUuid?: string) => Promise<void>;
 
 interface Session {
   ui: Ui;
@@ -68,6 +78,7 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
     return;
   }
   let target = signedIn;
+  let rows: AccountOverview[] = [];
 
   showEnvironment(ui, store, ledger, target);
 
@@ -96,7 +107,22 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
     },
     usage: (ctx) => showUsage(ctx.ui, ctx.store),
     renewals: (ctx) => showRenewals(ctx.ui, ctx.store, ctx.ledger),
-    label: (ctx) => labelFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
+    label: (ctx, accountUuid) =>
+      accountUuid
+        ? labelAccount(ctx.ui, ctx.store, ctx.ledger, ctx.target, accountUuid)
+        : labelFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
+    // The two verbs the account cursor adds: both arrive with the account the
+    // cursor already answered for, so neither asks "which one?" again.
+    'foster-from': (ctx, accountUuid) =>
+      accountUuid
+        ? fosterFromAccount(ctx.ui, ctx.store, ctx.ledger, ctx.target, accountUuid)
+        : fosterFlow(ctx.ui, ctx.store, ctx.ledger, ctx.target),
+    details: (ctx, accountUuid) => {
+      // Reuses the rows the dashboard was just painted from: the overview is
+      // a full store scan, far too heavy to repeat for a single row.
+      if (accountUuid) showAccountDetails(ctx.ui, ctx.ledger, rows, accountUuid);
+      return Promise.resolve();
+    },
     installation: async (ctx) => {
       const next = await switchInstallation(ctx.ui, ctx.store, ctx.ledger);
       if (aborted(next)) return;
@@ -114,7 +140,8 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
   };
 
   for (;;) {
-    const dashboard = buildDashboard(store, ledger, target);
+    rows = overviewAccounts(store, ledger);
+    const dashboard = buildDashboard(store, ledger, target, rows);
     if (status?.outdated) dashboard.update = `${status.latest} is available`;
 
     const choice = await ui.home({
@@ -128,9 +155,14 @@ async function runSession(initialStore: StoreLayout, ledger: Ledger, ui: Ui): Pr
       return;
     }
 
-    const action = actions[choice];
+    // `verb:accountUuid` is the account cursor speaking; a bare verb is the
+    // command menu. Same dispatch either way.
+    const colon = choice.indexOf(':');
+    const verb = colon === -1 ? choice : choice.slice(0, colon);
+    const accountUuid = colon === -1 ? undefined : choice.slice(colon + 1);
+    const action = actions[verb];
     if (!action) continue;
-    await action({ ui, store, ledger, target });
+    await action({ ui, store, ledger, target }, accountUuid);
   }
 }
 
