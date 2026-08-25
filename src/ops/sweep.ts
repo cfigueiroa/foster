@@ -108,9 +108,13 @@ export interface SweepReport {
    */
   forks: number;
   /**
-   * Conversations a live `claude` process was reported to be writing. A registry
-   * entry is a pid plus "does that pid answer", and pids are recycled, so this is
-   * a lead to check rather than a fact to state.
+   * Conversations a live `claude` process is writing right now.
+   *
+   * A registry entry is only counted once the pid has been shown to still be the
+   * process that wrote it — see `inspectWriter` in store/liveSessions.ts — so a
+   * pid Windows handed on to something else is not one of these. What is left
+   * over-reports only where nothing can be known: a machine with no process table
+   * to read, where every entry stays listed rather than being guessed away.
    */
   liveWriters: string[];
   neverComes: NeverComes;

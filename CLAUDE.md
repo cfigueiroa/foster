@@ -66,20 +66,26 @@ while ($p) { "$($p.ProcessId) $($p.Name) $($p.ExecutablePath)"; $p = Get-CimInst
 An ancestor under `WindowsApps\Claude_*` means the answer is: hand the user the command for
 a terminal outside the app. Do not try to work around it.
 
-## A reported "live writer" is not proof of one
+## A reported "live writer", and why the pid alone was not one
 
 Foster decides a conversation has a live writer from a registry file under
-`<configDir>/sessions/<pid>.json` plus "does that pid still exist". On Windows pids recycle,
-so after a reboot a stale file can point at an unrelated process. Verify before believing
-the warning, and **always** before `live --stop`, which is `taskkill /F /T` on that pid:
+`<configDir>/sessions/<pid>.json`. "Does that pid still exist" is not enough on its own —
+Windows reissues pids quickly, and after a reboot much of a day-old registry names whatever
+took the number next. So the record's own account of its writer is checked against what the
+pid names now:
 
-```powershell
-Get-CimInstance Win32_Process -Filter "ProcessId=<pid>" | Select-Object Name,CreationDate
-```
+- the CLI writes the writer's creation time into the file (`procStart`). Two processes can
+  share a pid but not a pid _and_ a creation instant, so a match is proof and a difference
+  is proof of the opposite;
+- with no creation time to check — an older CLI — a process that is not a Code CLI at all,
+  or one that started after the record describing it was written, is a stranger.
 
-A registry file is written by its own process, so `CreationDate` **later** than the file's
-`LastWriteTime` means the pid was recycled and the entry is dead. A second signal: the
-conversation's own `.jsonl` under `<configDir>/projects/` has not been appended to.
+Where there is no process table to read (anything that is not Windows), every entry stays
+listed and `live --stop` refuses rather than guessing. Trust the warning; what it will not
+do is name a writer that is not there.
+
+`live --stop` is still `taskkill /F /T`, so whatever that session had not written is lost —
+and it refuses a pid it could not identify, and the session foster is itself running in.
 
 ## What `foster agent` does and does not cover
 

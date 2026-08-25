@@ -803,11 +803,10 @@ program
       configDirs: opts.configDir ?? [],
     });
 
-    // Asked for even on a dry run: a run that writes nothing has nothing to
-    // restart for, and sweepRestart says so without touching the app.
-    const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
-
     if (opts.json) {
+      // The one output that has to wait: it is a single object, so the restart
+      // has to have happened before any of it can be written.
+      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
       print({ ...sweepJson(report), restart });
       return;
     }
@@ -828,7 +827,12 @@ program
       return;
     }
 
-    reportSweepRestart(restart);
+    // Last, and only now. Restarting waits up to half a minute for the app to
+    // close and a minute more for it to take the store again, and doing that
+    // before the report meant a sweep that had already written a few hundred
+    // files sat silent for the whole of it — with nothing on screen naming them
+    // if the wait was mistaken for a hang and interrupted.
+    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
   });
 
 function printPhase(heading: string, outcomes: Outcome[]): void {
