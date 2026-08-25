@@ -25,6 +25,8 @@ export interface DashboardAccount {
   shortId: string;
   label?: string;
   isCurrent: boolean;
+  /** Name (or email) from the identity foster has seen — a fallback, not a label. */
+  identityName?: string;
   plan?: string;
   subscription?: string;
   /** Set when the subscription is remembered, not read fresh: the date it was seen. */

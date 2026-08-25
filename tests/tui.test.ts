@@ -179,6 +179,40 @@ describe('renderHome', () => {
     expect(plain).not.toContain('session(s)');
   });
 
+  it('falls back to the remembered identity name when no label exists', () => {
+    const dashboard: Dashboard = {
+      version: '0.31.1',
+      store: 'C:\\Claude',
+      signedIn: 'work',
+      appRunning: true,
+      accounts: [
+        {
+          accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          shortId: 'aaaaaaaa',
+          identityName: 'Caio',
+          isCurrent: true,
+          sessions: 1,
+          copies: 0,
+        },
+        {
+          accountUuid: '00000000-0000-4000-8000-00000000000b',
+          shortId: '00000000',
+          label: 'work',
+          identityName: 'shadowed by the label',
+          isCurrent: false,
+          sessions: 2,
+          copies: 0,
+        },
+      ],
+      fostered: [],
+    };
+    const plain = stripAnsi(renderHome(dashboard, [], FOSTER_NIGHT, 'none', 80, 24).join('\n'));
+    expect(plain).toContain('Caio');
+    expect(plain).not.toContain('aaaaaaaa');
+    expect(plain).toContain('work');
+    expect(plain).not.toContain('shadowed');
+  });
+
   it('paints the selected account as a highlighted slab with a cursor', () => {
     const dashboard: Dashboard = {
       version: '0.30.0',

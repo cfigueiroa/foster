@@ -114,10 +114,11 @@ export const COMMANDS: Command[] = [
 export function accountActions(account: {
   isCurrent: boolean;
   label?: string;
+  identityName?: string;
   shortId: string;
   sessions: number;
 }): Choice[] {
-  const name = account.label ?? account.shortId;
+  const name = account.label ?? account.identityName ?? account.shortId;
   const label: Choice = {
     value: 'label',
     label: account.label ? `Rename "${name}"` : 'Name it',
