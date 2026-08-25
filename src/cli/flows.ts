@@ -68,11 +68,10 @@ export async function labelFlow(
   const labels = labelsOf(ledger);
   const accounts = [...new Set(listAccountDirs(store).map((ref) => ref.accountUuid))];
 
-  // Said once, here, because this screen is the only place the gap shows: the
-  // app knows the account's email and foster does not, since the only copy on
-  // disk is inside the OAuth token cache — which foster does not read, on
-  // purpose. Pairing the two is the whole job of this screen, and the answer is
-  // on screen in the other window.
+  // Said before the picker, because the picker is the question it answers:
+  // the rows below are bare short-ids, and the app's own window is where the
+  // email that identifies each one can be read. foster cannot read it — it
+  // lives in the OAuth token cache, which foster does not touch on purpose.
   ui.log.info(
     pc.dim(
       'Claude Desktop shows the account email under your avatar. foster cannot read it —\n' +
@@ -93,6 +92,23 @@ export async function labelFlow(
     target.accountUuid,
   );
   if (aborted(picked)) return;
+
+  await labelAccount(ui, store, ledger, target, picked);
+}
+
+/**
+ * Name one already-chosen account. The dashboard's account cursor lands here
+ * directly; the `/label` menu route arrives via the picker above.
+ */
+export async function labelAccount(
+  ui: Ui,
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  picked: string,
+): Promise<void> {
+  const labels = labelsOf(ledger);
+  const accounts = [...new Set(listAccountDirs(store).map((ref) => ref.accountUuid))];
 
   // For the signed-in account, the app's cache usually knows the name and email
   // already — offer it as the starting text so the common case is a keystroke.
@@ -623,7 +639,35 @@ export async function fosterFlow(
 ): Promise<void> {
   const source = await chooseSource(ui, store, ledger, current);
   if (aborted(source)) return;
+  await fosterFromSource(ui, store, ledger, current, source);
+}
 
+/**
+ * The dashboard cursor's "bring its sessions here": the source account was
+ * already pointed at, so the flow starts at the session list.
+ */
+export async function fosterFromAccount(
+  ui: Ui,
+  store: StoreLayout,
+  ledger: Ledger,
+  current: AccountRef,
+  accountUuid: string,
+): Promise<void> {
+  const refs = accountsIn(store, current).filter((ref) => ref.accountUuid === accountUuid);
+  if (refs.length === 0) {
+    ui.log.info('That account has no session directories to bring from.');
+    return;
+  }
+  await fosterFromSource(ui, store, ledger, current, { store, refs });
+}
+
+async function fosterFromSource(
+  ui: Ui,
+  store: StoreLayout,
+  ledger: Ledger,
+  current: AccountRef,
+  source: SourcePick,
+): Promise<void> {
   const all = scanFosterable(source.store, source.refs, ledger);
   const available = byRecency(applyFilter(all, {}));
   reportHidden(ui, all, available);

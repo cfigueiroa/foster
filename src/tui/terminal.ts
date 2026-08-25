@@ -73,8 +73,10 @@ export class NodeTerminal implements Terminal {
 
   private sigint = (): void => {
     this.leave();
-    const waiter = this.waiters.shift();
-    if (waiter) waiter(null);
+    // Every waiter, not just the head: a nested select swallows one null as
+    // its own cancel, and whoever it returns to would otherwise wait forever
+    // on a terminal that no longer has a keypress listener.
+    for (const waiter of this.waiters.splice(0)) waiter(null);
   };
 
   private onKeypress = (str: string | undefined, key: readline.Key): void => {
@@ -93,6 +95,9 @@ export class NodeTerminal implements Terminal {
   }
 
   readKey(): Promise<Key | null> {
+    // A torn-down terminal answers null immediately: no listener remains to
+    // resolve a new waiter, so parking one would hang the caller for good.
+    if (this.restored) return Promise.resolve(null);
     const next = this.keys.shift();
     if (next) return Promise.resolve(next);
     return new Promise((resolve) => this.waiters.push(resolve));
@@ -111,6 +116,7 @@ export class MemoryTerminal implements Terminal {
   current = '';
   private keys: Key[] = [];
   private waiters: Array<(key: Key | null) => void> = [];
+  private resizeHandler: (() => void) | undefined;
   entered = false;
   left = false;
 
@@ -157,8 +163,17 @@ export class MemoryTerminal implements Terminal {
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
-  onResize(): () => void {
-    return () => {};
+  onResize(handler: () => void): () => void {
+    this.resizeHandler = handler;
+    return () => {
+      if (this.resizeHandler === handler) this.resizeHandler = undefined;
+    };
+  }
+
+  resize(cols: number, rows: number): void {
+    this.cols = cols;
+    this.rows = rows;
+    this.resizeHandler?.();
   }
 
   enter(): void {

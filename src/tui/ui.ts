@@ -27,6 +27,8 @@ export interface DashboardAccount {
   isCurrent: boolean;
   plan?: string;
   subscription?: string;
+  /** Set when the subscription is remembered, not read fresh: the date it was seen. */
+  subscriptionAsOf?: string;
   sessions: number;
   copies: number;
   paymentNeedsAuth?: boolean;

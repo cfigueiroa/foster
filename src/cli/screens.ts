@@ -6,7 +6,7 @@ import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { findDuplicates } from '../engine/duplicates.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, listActive, project } from '../ledger/project.js';
-import { freshIdentityOf, overviewAccounts } from '../store/accounts.js';
+import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { readAccessToken } from '../store/credential.js';
 import { planName, worthRecording } from '../store/identity.js';
 import { scanAccount, summariseAccount } from '../store/scanner.js';
@@ -95,8 +95,11 @@ export function showAccounts(ui: Ui, store: StoreLayout, ledger: Ledger, target:
  * The visit itself is what fills the list in, so this records what it read on
  * the way past — the same gate `whoami` uses, for the same reason.
  */
-export function showIdentities(ui: Ui, store: StoreLayout, ledger: Ledger): void {
-  const rows = overviewAccounts(store, ledger);
+/**
+ * Persist what a fresh read saw, gated the way `whoami` gates it: a sighting
+ * left unrecorded is exactly the one the ledger cannot offer after a switch.
+ */
+function recordFreshIdentity(rows: AccountOverview[], ledger: Ledger): void {
   const fresh = freshIdentityOf(rows);
   const identity = fresh?.identity;
   if (
@@ -113,6 +116,11 @@ export function showIdentities(ui: Ui, store: StoreLayout, ledger: Ledger): void
       ...(identity.profile ? { profile: identity.profile } : {}),
     });
   }
+}
+
+export function showIdentities(ui: Ui, store: StoreLayout, ledger: Ledger): void {
+  const rows = overviewAccounts(store, ledger);
+  recordFreshIdentity(rows, ledger);
 
   if (rows.length === 0) {
     ui.log.info('No accounts in this installation yet.');
@@ -131,6 +139,38 @@ export function showIdentities(ui: Ui, store: StoreLayout, ledger: Ledger): void
         'session it is in. The rest is what foster saw on the visit that saw it.',
     ),
   );
+}
+
+/**
+ * One account, in full — the dashboard cursor's "who is this?".
+ *
+ * The same rendering `accounts` uses for the whole list, for one row, so the
+ * two screens can never drift apart on what a field means. The rows arrive
+ * from the caller — the dashboard just computed them, and the scan behind
+ * them reads every session file, so this screen must not run it again. Like
+ * its siblings, it records the fresh identity it is about to display.
+ */
+export function showAccountDetails(
+  ui: Ui,
+  ledger: Ledger,
+  rows: AccountOverview[],
+  accountUuid: string,
+): void {
+  recordFreshIdentity(rows, ledger);
+  const row = rows.find((r) => r.accountUuid === accountUuid);
+  if (!row) {
+    ui.log.info('That account is no longer in this installation.');
+    return;
+  }
+  ui.note(renderAccount(row).join('\n'), row.label ?? shortId(accountUuid));
+  if (!row.identity) {
+    ui.log.info(
+      pc.dim(
+        'Plan and subscription are unknown because this account was never seen signed in\n' +
+          'here. Signing into it once fills the row in permanently.',
+      ),
+    );
+  }
 }
 
 /**
