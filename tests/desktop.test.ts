@@ -206,8 +206,11 @@ describe('inspectApp', () => {
    */
   it('does not let another installation make a closed profile look busy', () => {
     // A temp store: no lockfile, and nothing in this environment resolves to it.
-    // Whatever is running on the machine, this store is not it.
-    expect(inspectApp(makeStore(), {})).toEqual({ running: false, evidence: [] });
+    // The installed app is up in the table, which is the point — a process name
+    // is not evidence about *this* store, and this one is closed. Said with a
+    // table of its own rather than the machine's: the proposition is about what
+    // running elsewhere means, not about what happens to be open right now.
+    expect(inspectApp(makeStore(), {}, () => rows({}))).toEqual({ running: false, evidence: [] });
   });
 
   it('does not treat a Code CLI process as Desktop running', () => {

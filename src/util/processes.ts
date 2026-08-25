@@ -37,6 +37,7 @@ const POWERSHELL_QUERY =
  * supported Windows, so this needs nothing installed.
  */
 export function readProcesses(): ProcessRow[] {
+  if (installedTable) return installedTable;
   if (process.platform !== 'win32') return [];
   let csv: string;
   try {
@@ -98,4 +99,74 @@ function splitCsvLine(line: string): string[] {
   }
   fields.push(current);
   return fields;
+}
+
+/**
+ * Both the desktop app and the Code CLI are called claude.exe. Only the path
+ * tells them apart, and only the CLI lives under a claude-code directory.
+ *
+ * Kept here rather than in engine/desktop so the session registry can ask what a
+ * pid is now without importing desktop control — the same reason this module
+ * exists at all.
+ */
+export function isCodeCliProcess(row: ProcessRow): boolean {
+  return (
+    row.name.toLowerCase() === 'claude.exe' && row.path.toLowerCase().includes('\\claude-code\\')
+  );
+}
+
+/** Long enough that one command reads the table once; short enough to stay a snapshot. */
+const PROCESS_CACHE_MS = 5_000;
+
+let cached: { rows: ProcessRow[]; at: number } | undefined;
+
+/**
+ * The process table, read at most once every few seconds.
+ *
+ * Reading it spawns PowerShell, which costs the better part of a second. Asking
+ * whether a pid is still the process a registry file named happens once per
+ * entry, and a machine carrying ninety stale entries would otherwise pay that
+ * ninety times over. Nothing is lost by reusing the answer briefly: a process
+ * table is already the past by the time it is parsed, so every caller here
+ * treats it as evidence about a moment, not as the present.
+ */
+export function cachedProcesses(): ProcessRow[] {
+  const now = Date.now();
+  if (cached && now - cached.at < PROCESS_CACHE_MS) return cached.rows;
+  const rows = readProcesses();
+  cached = { rows, at: now };
+  return rows;
+}
+
+/**
+ * Whether this machine can report a process table at all.
+ *
+ * `readProcesses` answers an unreadable table and an unsupported platform the
+ * same way, with nothing, because every caller has to cope with nothing either
+ * way. The difference is only in what a refusal should say about it: "the read
+ * failed" is worth retrying, and "not on this platform" is not.
+ */
+export function processTableReadable(): boolean {
+  return installedTable !== undefined || process.platform === 'win32';
+}
+
+/** Drops the memoised table, so the next ask reaches the machine again. */
+function clearProcessCache(): void {
+  cached = undefined;
+}
+
+/**
+ * Test seam: a fixed table so unit tests never spawn PowerShell against the real
+ * machine. Production never calls this. It stands in front of the read itself
+ * rather than the memoised one, so no route reaches the machine. An empty list
+ * is the honest answer for a test that is not asking about processes — it reads
+ * as "the table could not be read", which every caller here already has to cope
+ * with. A test that *is* asking about them passes its own rows, here or through
+ * the lister its subject takes.
+ */
+let installedTable: ProcessRow[] | undefined;
+
+export function useProcessTable(rows: ProcessRow[] | undefined): void {
+  installedTable = rows;
+  clearProcessCache();
 }

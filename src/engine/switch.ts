@@ -8,7 +8,12 @@ import {
   type CliCredential,
 } from '../store/cliCredential.js';
 import { readClientIdentity } from '../store/clients.js';
-import { liveSessions, pidAlive, type LiveCliSession } from '../store/liveSessions.js';
+import {
+  liveSessions,
+  writerAlive,
+  type LiveCliSession,
+  type WriterCheck,
+} from '../store/liveSessions.js';
 import type { OAuthToken } from '../store/credential.js';
 import { fetchLiveProfile } from './anthropicApi.js';
 import { currentCredential, rememberCredential } from './vault.js';
@@ -181,7 +186,7 @@ export async function planSwitch(opts: {
   home?: string;
   offline?: boolean;
   now?: number;
-  alive?: (pid: number) => boolean;
+  alive?: WriterCheck;
 }): Promise<SwitchPlan> {
   const from = await identify(opts.configDir, {
     home: opts.home,
@@ -235,7 +240,7 @@ export async function planSwitch(opts: {
     ...(chosen ? { takenAt: chosen.entry.savedAt } : {}),
     versions: chosen?.entry.versions ?? 0,
     incomingExpired: chosen?.credential.expired(opts.now) ?? false,
-    clobberers: clobberersIn(opts.configDir, opts.alive ?? pidAlive),
+    clobberers: clobberersIn(opts.configDir, opts.alive ?? writerAlive),
     blockers,
   };
 }
@@ -382,7 +387,7 @@ export function rememberCurrent(
 }
 
 /** Live `claude` processes registered in a config directory. */
-export function clobberersIn(configDir: string, alive: (pid: number) => boolean): Clobberer[] {
+export function clobberersIn(configDir: string, alive: WriterCheck): Clobberer[] {
   const seen = new Map<number, Clobberer>();
   for (const session of liveSessions([path.join(configDir, 'sessions')], alive)) {
     if (!seen.has(session.pid)) seen.set(session.pid, toClobberer(session));

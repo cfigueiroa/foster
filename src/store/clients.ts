@@ -5,7 +5,7 @@ import { comparablePath, samePath } from '../domain/paths.js';
 import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
 import { configDirCandidates, inUseConfigDir } from './configDirs.js';
 import { planName, type CachedIdentity } from './identity.js';
-import { liveSessions, pidAlive } from './liveSessions.js';
+import { liveSessions, writerAlive, type WriterCheck } from './liveSessions.js';
 import { indexTranscripts } from './transcripts.js';
 
 /**
@@ -55,7 +55,7 @@ export interface ClaudeClient {
 export function listClients(
   env: NodeJS.ProcessEnv = process.env,
   extra: string[] = [],
-  alive: (pid: number) => boolean = pidAlive,
+  alive: WriterCheck = writerAlive,
   home: string = homedir(),
 ): ClaudeClient[] {
   const defaultDir = path.join(home, '.claude');
@@ -98,7 +98,7 @@ function looksLikeClient(dir: string): boolean {
 
 function readClient(
   dir: string,
-  ctx: { defaultDir: string; inUseDir: string; home: string; alive: (pid: number) => boolean },
+  ctx: { defaultDir: string; inUseDir: string; home: string; alive: WriterCheck },
 ): ClaudeClient {
   const isDefault = samePath(dir, ctx.defaultDir);
   const transcripts = indexTranscripts(path.join(dir, 'projects'));
