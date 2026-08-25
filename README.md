@@ -706,17 +706,18 @@ foster return --to 00000000          # dry run, scoped to that account
 foster return --to 00000000 --yes    # with Claude Desktop closed
 ```
 
-### Naming accounts, and why foster cannot do it for you
+### Naming accounts, and when foster can do it for you
 
 Accounts are UUIDs here because that is all the directory names carry. The app knows better — it
-shows the account's email under your avatar — and foster deliberately does not go and look. The only
-copy of that email on this disk is inside `oauth:tokenCache` in the app's config, and reading token
-caches is precisely what the safety model promises not to do. (It is not in the config as plain
-text, not in the logs, and not in any file keyed by account; the one other copy is buried in an
-opaque IndexedDB blob that describes only the account currently signed in.)
-
-So the pairing has to come from you — but only once per account, and only the name, because foster
-already knows which account the sidebar is reading:
+shows the account's email under your avatar — and the plainest copy of that email on this disk is
+inside `oauth:tokenCache` in the app's config, which the safety model does not read as a shortcut to
+a name. (It is not in the config as plain text, not in the logs, and not in any file keyed by
+account; the one other copy is buried in an opaque IndexedDB blob that describes only the account
+currently signed in.) So a name comes from one of three places, in the order foster prefers them: a
+label you set, an identity foster read from the app's own profile cache, or — new — an answer the API
+gave when foster presented a credential the account itself left behind (see `identify`, below). Only
+when none of those is available does the pairing fall to you — and even then only the name, because
+foster already knows which account the sidebar is reading:
 
 ```bash
 foster label "John · johndoe@…"           # names the account you are signed into
@@ -729,10 +730,10 @@ the one whose email you can actually go and read right now.
 
 `foster whoami` reads your name, email and plan for you, from the app's own cache rather than off the
 screen — `John · johndoe@… · Max`, the same pieces the app shows under your avatar. The
-authoritative copy is behind the API, and the token that reaches it is a credential foster will not
-touch — but the app, having fetched its own profile once, keeps a copy at rest in the web-origin
-storage under `Local Storage/` and `IndexedDB/`, which is page data rather than a credential, so
-foster may read it. `foster label --from-cache` names the signed-in account with what it finds, and
+authoritative copy is behind the API; `whoami` chooses not to spend the token on it (that is
+`identify`'s and `usage`'s job, on request) and reads the app's own download instead — having fetched
+its profile once, the app keeps a copy at rest in the web-origin storage under `Local Storage/` and
+`IndexedDB/`, which is page data rather than a credential, so foster may read it offline. `foster label --from-cache` names the signed-in account with what it finds, and
 the menu's "Name an account" pre-fills the same suggestion.
 
 It is read the crudest way that cannot fail: the files are loaded as bytes, capped by size, and
@@ -753,6 +754,42 @@ difference is worth keeping visible.
 Remembering is also what makes the **other** accounts nameable. Web storage only ever describes the
 session in front of you, so the cache alone can name one account; the ledger accumulates them, one
 per visit, and `label` offers what it knows for whichever account you pick.
+
+`foster identify` closes part of that gap without a visit. An account foster has never seen signed in
+is a bare UUID because the app never fetched its profile here — but a credential _for_ that account
+may already be on the machine, in a CLI client (`foster clients` lists them) or in foster's own
+vault. The profile endpoint answers for whatever token it is given, so foster presents those
+credentials and keeps the answer only when the profile's own `account.uuid` matches the account
+asked about. That match is the safety: a token belonging to someone else is discarded, never written
+against the account that was asked. The sighting lands in the ledger the same way a sign-in's would,
+so the dashboard, `accounts` and the menu pick it up. `foster identify <account>` names one,
+`foster identify --all` sweeps every account that has no identity yet, and the menu offers "Identify
+it" on an unnamed account when a key to ask with is on hand. Like `usage`, it goes to the network
+only when you run it — never on its own — and when foster holds no live credential for an account it
+says so rather than guessing.
+
+**Two servers, and why only one of them answers.** This is worth understanding, because it is the
+line between what `identify` and `accounts` can tell you and what they cannot. Anthropic runs the
+account behind two different hosts, and they are not interchangeable:
+
+- **`api.anthropic.com`** is the programmatic host. The OAuth token the app holds was _issued to
+  talk to it_, so a request there is authenticated, expected, and ordinary — no trick involved. It
+  answers with **identity, plan, subscription status and live usage**. This is the front door, and
+  it is the only one foster ever knocks on: `usage`, `renewals` and `identify` all go here.
+- **`claude.ai`** is the website you open in a browser. The **billing** details — next charge date,
+  card on file, cancellation — live only here, and this host sits behind a **bot-check**: the
+  "confirm you're human" challenge (Cloudflare's) that a browser passes silently and a script does
+  not. For a program to read billing off `claude.ai` it would have to _defeat that challenge_ —
+  impersonate a human-driven browser. **foster does not do that, by policy.** So billing is
+  reachable only when the app itself already fetched it and left a copy on disk (which is why you may
+  see a card and a renewal date for the account signed in now, and never for one that was only
+  identified over the API).
+
+Put plainly: identity, plan and usage come through the front door and `identify` can fetch them for
+any account whose key is on this machine; billing is behind the bot-check, so it is only ever read
+from a cache the app already filled, never fetched by foster. The card and renewal you saw on the
+signed-in account are the app's own download at rest — not something foster went to `claude.ai` to
+get.
 
 Two honesties beyond that. It is **best-effort**: a version that keeps the profile differently makes
 `whoami` find nothing new rather than something wrong, and the manual `label` is always there. And
