@@ -3,8 +3,36 @@ import { VERSION } from '../version.js';
 import { SESSION_ID_PREFIX } from './naming.js';
 import type { AccountRef, CodeSessionData, Unfosterable } from './types.js';
 
-/** Marks a session in the sidebar as living under an account that is not its origin. */
-export const DEFAULT_PREFIX = '↪ ';
+/**
+ * Prefix put in front of a copy's title. Empty by default: no marker at all.
+ *
+ * It was `↪ ` until the reasoning behind it stopped holding. A copy saying so in
+ * the sidebar is worth something while fostering is the exception; it is worth
+ * nothing once fostering is how the sidebar gets filled. Measured on a swept
+ * store: of 764 rows in the account in use, 704 were copies. The marker sat on
+ * 92% of the list, so it separated nothing, and the 60 native rows — the ones a
+ * reader would actually want picked out — were the unmarked ones.
+ *
+ * It was not honest either, because the title is the app's to rewrite. A copy the
+ * app renames comes back without the prefix, and a session the app forks from a
+ * copy inherits it while being no copy at all. On that same store the titles
+ * disagreed with the ledger in five places, in both directions, with nobody
+ * having edited anything by hand.
+ *
+ * Nothing decides anything by this. `return` selects from the ledger, and the one
+ * title filter reads `originalTitle`, which never carried a prefix — so the
+ * prefix is a display choice, and the display that cannot be wrong is foster's
+ * own list, which draws its arrow from the ledger. `--prefix` brings a marker
+ * back for anyone who wants one.
+ */
+export const DEFAULT_PREFIX = '';
+
+/**
+ * Shown to someone who opens "Change the title prefix" and now finds the field
+ * empty. It is the marker copies used to carry, offered as an example of what
+ * goes in the box — never applied unless it is typed.
+ */
+export const EXAMPLE_PREFIX = '↪ ';
 
 /** What a copy is called when the session it came from never got a title. */
 export const UNTITLED = '(untitled)';

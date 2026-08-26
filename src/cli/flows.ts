@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { isCancel, type Ui } from '../tui/ui.js';
-import { DEFAULT_PREFIX } from '../domain/fostering.js';
+import { DEFAULT_PREFIX, EXAMPLE_PREFIX } from '../domain/fostering.js';
 import { listAccountDirs, samePath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -760,7 +760,7 @@ async function confirmAndWrite(
     if (decision === 'prefix') {
       const answer = await askText(ui, 'Title prefix for the copies', {
         initialValue: prefix,
-        placeholder: DEFAULT_PREFIX,
+        placeholder: EXAMPLE_PREFIX,
       });
       if (!aborted(answer)) prefix = answer;
       continue;
