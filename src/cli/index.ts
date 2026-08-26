@@ -615,7 +615,7 @@ sourceOptions(
       .option('--session <id...>', 'only these sessions, by id or unique prefix')
       .option('--to <accountUuid>', 'write the copies into this account instead')
       .option('--to-org <organizationUuid>', 'write the copies into this organization')
-      .option('--prefix <text>', 'title prefix marking fostered sessions', DEFAULT_PREFIX)
+      .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
       .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
       .option('--yes', 'actually write; without it nothing is written')
       .addOption(
@@ -776,7 +776,7 @@ program
   .option('--to <accountUuid>', 'write the copies into this account instead')
   .option('--to-org <organizationUuid>', 'write the copies into this organization')
   .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
-  .option('--prefix <text>', 'title prefix marking the copies', DEFAULT_PREFIX)
+  .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -969,7 +969,11 @@ program
   .option('--to <accountUuid>', 'write them into this account instead')
   .option('--to-org <organizationUuid>', 'write them into this organization')
   .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
-  .option('--prefix <text>', 'title prefix marking restored sessions', DEFAULT_PREFIX)
+  .option(
+    '--prefix <text>',
+    'title prefix for the restored sessions (default: none)',
+    DEFAULT_PREFIX,
+  )
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))

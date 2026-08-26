@@ -151,7 +151,9 @@ describe('restoring end to end', () => {
     expect(outcomes[0]!.status).toBe('fostered');
     const [written] = scanAccount(store, NEW_ACCOUNT);
     expect(written!.data.cliSessionId).toBe(DELETED_CLI);
-    expect(written!.data.title).toBe('↪ Refactor the parser');
+    // What this line is for is the title coming back from the transcript's own
+    // ai-title record rather than being invented; copies carry no marker now.
+    expect(written!.data.title).toBe('Refactor the parser');
     // A fresh identity, like every other copy foster writes.
     expect(written!.data.sessionId).not.toBe(`local_${DELETED_CLI}`);
   });

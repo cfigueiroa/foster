@@ -41,7 +41,8 @@ folder, with:
 - the **same `cliSessionId`**, so it opens the real transcript;
 - `error` / `errorAt` **stripped**, so a stale failure from the old account does not show up as a
   warning badge on the restored session;
-- a configurable **title prefix** (default `↪ `) marking it as fostered;
+- an optional **title prefix** (`--prefix`), off by default — see below for why a copy is no
+  longer marked in its own title;
 - a `_foster` key recording where it came from.
 
 That last one is a hint, not a record. The app rebuilds a session from a fixed list of fields when
@@ -54,6 +55,24 @@ and recording it.
 
 The original file is never touched. `foster return` deletes the copy and the session is simply gone
 from the current account again.
+
+### Why a copy is not marked in its own title
+
+Copies used to be titled `↪ <original>`. The prefix still exists as `--prefix`, but it is off by
+default, for two reasons that only showed up at scale.
+
+It stopped separating anything. On a swept store, 704 of the 764 rows in the account in use were
+copies — the marker was on 92% of the sidebar, and the 60 native rows, the ones worth picking out,
+were the unmarked ones. A mark that nearly everything carries is not a mark.
+
+And it was never reliable, for the same reason `_foster` is not: the title belongs to the app. A
+copy the app renames loses the prefix, and a session the app forks from a copy inherits one while
+being no copy at all. On that same store the titles disagreed with the ledger in five places, in
+both directions, with nobody having edited anything by hand.
+
+Nothing ever decided anything by it — `return` selects from the ledger, and `--title` filters on
+`originalTitle`, which never carried a prefix. So the marker was a display choice competing with a
+display that cannot be wrong: foster's own list, which draws its arrow from the ledger.
 
 ## The whole sweep
 
@@ -297,9 +316,8 @@ perfect answer. Running it once on a real conversation is what settles it:
 - **It takes over your window.** The app navigates to the imported session and focuses the composer,
   so whatever you were reading is replaced.
 
-`foster restore` reads the same transcript and writes a pointer at it instead: the real title with
-your prefix, the real dates, a fresh identity, and the transcript's modification time left exactly
-where it was.
+`foster restore` reads the same transcript and writes a pointer at it instead: the real title, the
+real dates, a fresh identity, and the transcript's modification time left exactly where it was.
 
 The deep link is still worth knowing about — it is the only thing that puts a session on screen
 without a restart. It is not a way to move three hundred, and it is not free.

@@ -9,15 +9,32 @@ import {
 } from '../src/domain/fostering.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT, session } from './helpers/store.js';
 
+/**
+ * The prefix the tool shipped with, kept here as a test fixture. The default is
+ * empty now, so a suite that reached for DEFAULT_PREFIX would be asserting that
+ * nothing happens and would pass with applyPrefix gutted.
+ */
+const MARKER = '↪ ';
+
 describe('title prefix', () => {
   it('adds the prefix', () => {
-    expect(applyPrefix('Refactor parser', DEFAULT_PREFIX)).toBe('↪ Refactor parser');
+    expect(applyPrefix('Refactor parser', MARKER)).toBe('↪ Refactor parser');
   });
 
   it('is idempotent — re-applying never stacks prefixes', () => {
-    const once = applyPrefix('Refactor parser', DEFAULT_PREFIX);
-    const twice = applyPrefix(once, DEFAULT_PREFIX);
+    const once = applyPrefix('Refactor parser', MARKER);
+    const twice = applyPrefix(once, MARKER);
     expect(twice).toBe(once);
+  });
+
+  /**
+   * The decision, not an incidental fact: a copy is not marked in the title.
+   * Without this, restoring the old default would go unnoticed by every test,
+   * since each one that cares now names its own prefix.
+   */
+  it('is empty by default, so a copy carries no marker', () => {
+    expect(DEFAULT_PREFIX).toBe('');
+    expect(applyPrefix('Refactor parser', DEFAULT_PREFIX)).toBe('Refactor parser');
   });
 
   it('leaves a title that genuinely begins with the prefix untouched', () => {
@@ -25,11 +42,11 @@ describe('title prefix', () => {
     // "old-", the title "old-notes" came out as "old-notes" with no marker and
     // "notes" recorded as the original.
     expect(applyPrefix('old-notes', 'old-')).toBe('old-notes');
-    expect(applyPrefix('↪ ↪ double', DEFAULT_PREFIX)).toBe('↪ ↪ double');
+    expect(applyPrefix('↪ ↪ double', MARKER)).toBe('↪ ↪ double');
   });
 
   it('tolerates a missing title', () => {
-    expect(applyPrefix(undefined, DEFAULT_PREFIX)).toBe(DEFAULT_PREFIX);
+    expect(applyPrefix(undefined, MARKER)).toBe(MARKER);
   });
 });
 
@@ -122,17 +139,33 @@ describe('a copy of a session that never got a title', () => {
     const untitled = session();
     delete untitled.title;
 
-    const copy = buildFosterCopy(untitled, { origin: OLD_ACCOUNT });
+    const copy = buildFosterCopy(untitled, { origin: OLD_ACCOUNT, prefix: MARKER });
     expect(copy.title).toBe('↪ (untitled)');
   });
 
   it('treats a blank title the same as none', () => {
-    const copy = buildFosterCopy(session({ title: '   ' }), { origin: OLD_ACCOUNT });
+    const copy = buildFosterCopy(session({ title: '   ' }), {
+      origin: OLD_ACCOUNT,
+      prefix: MARKER,
+    });
     expect(copy.title).toBe('↪ (untitled)');
+  });
+
+  /**
+   * With no marker the fallback is the whole of what the row says, so it has to
+   * survive on its own: a copy titled '' would be labelled "General coding
+   * session" by the app, which is every other untitled row too.
+   */
+  it('still says (untitled) when there is no prefix to carry it', () => {
+    const untitled = session();
+    delete untitled.title;
+
+    const copy = buildFosterCopy(untitled, { origin: OLD_ACCOUNT });
+    expect(copy.title).toBe('(untitled)');
   });
 
   it('leaves a real title alone', () => {
     const copy = buildFosterCopy(session({ title: 'Refactor parser' }), { origin: OLD_ACCOUNT });
-    expect(copy.title).toBe('↪ Refactor parser');
+    expect(copy.title).toBe('Refactor parser');
   });
 });
