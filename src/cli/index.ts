@@ -2852,7 +2852,16 @@ program
 
     if (stranded.length === 0) {
       console.log(`Nothing looks stranded from the last ${opts.since}.`);
-      console.log(pc.dim('A longer window is --since 7d; sessions you archived need --archived.'));
+      const windowIsShorterThanWeek = Date.now() - since < 7 * 24 * 3_600_000;
+      if (windowIsShorterThanWeek && !opts.archived) {
+        console.log(
+          pc.dim('A longer window is --since 7d; sessions you archived need --archived.'),
+        );
+      } else if (windowIsShorterThanWeek) {
+        console.log(pc.dim('A longer window is --since 7d.'));
+      } else if (!opts.archived) {
+        console.log(pc.dim('Sessions you archived need --archived.'));
+      }
       return;
     }
 
