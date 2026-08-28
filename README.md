@@ -192,6 +192,36 @@ would produce a shorter list that looks complete. Siblings of `~/.claude` are pi
 actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
 `foster clients` is the map of those directories, and of who is signed into each.
 
+## After a crash: cards that cannot reach the computer
+
+A session card with a remote-control mirror is a live link — the app shows the conversation
+through the process hosting it. When that process dies without closing (a crash, a reboot),
+the server keeps the mirror and the card can only say it cannot reach your computer. Nothing
+client-side reattaches the old mirror: the device key, bridge URL and authentication all
+survive a crash unchanged, and the card stays unreachable anyway, because the link is
+per-session, not per-device.
+
+What works is resuming the conversation — the transcript on disk is complete, and the first
+turn of a resume mints a fresh mirror. `foster rescue` finds the conversations in that state:
+cards that had a mirror, were active inside the window, and have no live writer now. Each row
+names the directory the resume must run in, read from the transcript's own tail rather than
+from the card — a session that moved between worktrees is filed under the directory it moved
+to, and the card still names the one it started in. A directory that has since been removed
+(worktrees usually are, once their session is archived) is said out loud instead of failing
+inside a closing terminal tab.
+
+```bash
+foster rescue                 # the list, with a resume command per conversation
+foster rescue --since 7d      # a longer window; sessions you archived need --archived
+foster rescue --open          # one Windows Terminal tab per conversation, resume running
+```
+
+Each tab stops at the CLI's own resume prompt, so nothing is consumed until a human picks
+summary or full there; `/desktop` inside a resumed session hands it back to the app. The old
+unreachable card never reconnects — archive it. The empty mirror cards named after the device
+("no messages yet") are the same husk seen from the other side: they hold nothing and are
+archived, not rescued.
+
 ## When one conversation becomes two
 
 A conversation that already has a writer cannot be continued from a second card. Asked to open one,
@@ -706,6 +736,8 @@ foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
 foster live      # conversations a claude process is holding open right now (--stop ends one,
                  #   --prune clears registry entries whose process is gone)
+foster rescue    # conversations stranded by a crash, and the resumes that bring them back
+                 #   (--open puts each one in its own Windows Terminal tab)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 

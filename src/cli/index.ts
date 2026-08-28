@@ -86,7 +86,13 @@ import {
   worthRecording,
 } from '../store/identity.js';
 import { findRestorable } from '../store/restore.js';
-import { scanStore, summarise } from '../store/scanner.js';
+import { scanAccount, scanStore, summarise } from '../store/scanner.js';
+import {
+  defaultRescueDeps,
+  findStranded,
+  openResumeTabs,
+  resumeCommandFor,
+} from '../engine/rescue.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
@@ -2786,6 +2792,145 @@ program
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
     sayIfStale(roots);
   });
+
+program
+  .command('rescue')
+  .summary('conversations stranded by a crash, and the resumes that bring them back')
+  .description(
+    'Find conversations whose sidebar card can only say "cannot reach your computer":\n' +
+      'they had a remote-control mirror, the process hosting them died without closing —\n' +
+      'a crash, a reboot — and no live claude process holds them now. The old mirror is\n' +
+      'server-side state and cannot be reattached from here; what works is resuming the\n' +
+      'conversation, which mints a fresh mirror on its first turn. Each row names the\n' +
+      "directory to resume in, read from the transcript itself — the card's own cwd goes\n" +
+      'stale when a session moves between worktrees.\n\n' +
+      '--open opens a Windows Terminal tab per conversation with `claude --resume`\n' +
+      "already running. Each tab stops at the CLI's own prompt, so nothing is consumed\n" +
+      'until you pick summary or full there; `/desktop` inside a resumed session hands\n' +
+      'it back to the app. Empty mirror cards named after the device ("no messages yet")\n' +
+      'hold nothing and cannot be rescued — archive them.',
+  )
+  .option('--since <age>', 'how far back a stranded conversation may have been active', '48h')
+  .option(
+    '--archived',
+    'include sessions you archived — closed on purpose, so reviving one is opt-in',
+  )
+  .option('--open', 'open a Windows Terminal tab per conversation with the resume already running')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ since: string; archived?: boolean; open?: boolean; json?: boolean }>();
+    const since = parseSince(opts.since);
+    if (since === undefined) {
+      throw new Error(`Could not read --since "${opts.since}". Try 48h, 3d or 2w.`);
+    }
+
+    const account = requireCurrentAccount(store, listAccountDirs(store));
+    const sessions = scanAccount(store, account, copySessionIds(ledger.read()));
+    const stranded = findStranded(
+      sessions,
+      { since, includeArchived: opts.archived ?? false },
+      defaultRescueDeps(),
+    );
+
+    if (opts.json) {
+      print(
+        stranded.map((row) => ({
+          cliSessionId: row.cliSessionId,
+          title: row.title ?? null,
+          cwd: row.cwd ?? null,
+          cwdExists: row.cwdExists ?? null,
+          transcriptPath: row.transcriptPath ?? null,
+          sizeBytes: row.sizeBytes ?? null,
+          lastActivityAt: row.lastActivityAt ?? null,
+          isArchived: row.isArchived,
+          resumeCommand: row.transcriptPath ? resumeCommandFor(row) : null,
+        })),
+      );
+      return;
+    }
+
+    if (stranded.length === 0) {
+      console.log(`Nothing looks stranded from the last ${opts.since}.`);
+      console.log(pc.dim('A longer window is --since 7d; sessions you archived need --archived.'));
+      return;
+    }
+
+    for (const row of stranded) {
+      const marks = [row.isArchived ? 'archived' : '', formatSize(row.sizeBytes)]
+        .filter(Boolean)
+        .join(', ');
+      console.log(
+        `  ${formatAge(row.lastActivityAt).padStart(8)}  ` +
+          `${row.title ?? pc.dim('(untitled)')}${marks ? pc.dim(`  (${marks})`) : ''}`,
+      );
+      if (!row.transcriptPath) {
+        console.log(pc.yellow('           transcript missing — there is nothing left to resume'));
+      } else if (!row.cwd) {
+        console.log(
+          `           ${resumeCommandFor(row)}  ` +
+            pc.yellow('(directory unknown — run it where the work lived)'),
+        );
+      } else if (row.cwdExists === false) {
+        console.log(pc.dim(`           ${row.cwd}`));
+        console.log(
+          pc.yellow(
+            '           directory gone — a removed worktree. Recreate it (git worktree add),\n' +
+              `           then: ${resumeCommandFor(row)}`,
+          ),
+        );
+      } else {
+        console.log(pc.dim(`           ${row.cwd}`));
+        console.log(`           ${resumeCommandFor(row)}`);
+      }
+    }
+    console.log(pc.bold(`\n${stranded.length} stranded conversation(s).`));
+
+    if (!opts.open) {
+      console.log(
+        pc.dim(
+          "Each resume stops at the CLI's own prompt, so nothing is consumed until you\n" +
+            'choose summary or full there. --open opens a terminal tab per conversation.',
+        ),
+      );
+      return;
+    }
+
+    if (process.platform !== 'win32') {
+      console.log(
+        pc.yellow('\n--open drives Windows Terminal; on this machine run the commands above.'),
+      );
+      return;
+    }
+
+    const outcomes = openResumeTabs(stranded);
+    console.log('');
+    for (const { row, outcome } of outcomes) {
+      if (outcome === 'no-transcript') {
+        console.log(pc.yellow(`  skipped ${shortId(row.cliSessionId)}: transcript missing`));
+      } else if (outcome === 'no-cwd') {
+        console.log(pc.yellow(`  skipped ${shortId(row.cliSessionId)}: no directory to resume in`));
+      } else if (outcome === 'cwd-gone') {
+        console.log(pc.yellow(`  skipped ${shortId(row.cliSessionId)}: its directory was removed`));
+      } else if (outcome === 'failed') {
+        console.log(pc.yellow(`  could not open a tab for ${shortId(row.cliSessionId)}`));
+      }
+    }
+    const opened = outcomes.filter((entry) => entry.outcome === 'opened').length;
+    console.log(`Opened ${opened} of ${stranded.length} in the "rescue" terminal window.`);
+    console.log(
+      pc.dim(
+        'In each tab: choose how to resume — summary for work that ended in a handoff,\n' +
+          'full for work cut mid-thought — then `/desktop` inside the session hands it\n' +
+          'back to the app. The old unreachable card never reconnects; archive it.',
+      ),
+    );
+  });
+
+/** A size the rescue listing can afford: exact bytes read as noise there. */
+function formatSize(bytes: number | undefined): string {
+  return bytes === undefined ? '' : formatBytes(bytes);
+}
 
 /**
  * Mention the files this list had to disregard.
