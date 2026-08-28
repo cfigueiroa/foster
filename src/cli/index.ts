@@ -3299,7 +3299,19 @@ async function closeDesktop(
     process.exitCode = 1;
     return false;
   }
-  console.log(pc.yellow('Claude Desktop is still running. Quit it from the tray icon.'));
+  // Reached after the app was actually asked to go. "Quit it from the tray icon"
+  // is the right ending, but on its own it reads as advice the user has already
+  // taken — they typed --terminate precisely because the tray note told them to.
+  // What was missing is why it did not work, which only the kill can say.
+  console.log(
+    pc.yellow(
+      terminate
+        ? `Claude Desktop (pid ${result.mainPid}) is still running: ending it did not take effect.`
+        : 'Claude Desktop is still running.',
+    ),
+  );
+  if (result.refused) console.log(pc.dim(`  ${result.refused}`));
+  console.log(pc.dim('Quit it from the tray icon, then re-run.'));
   process.exitCode = 1;
   return false;
 }
