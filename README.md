@@ -222,6 +222,26 @@ unreachable card never reconnects — archive it. The empty mirror cards named a
 ("no messages yet") are the same husk seen from the other side: they hold nothing and are
 archived, not rescued.
 
+Two things that look like shortcuts, measured against a live store:
+
+- **Headless resume does not reconnect the card.** `foster resume` (and `claude -p --resume`
+  generally) appends a real turn to the transcript, but print mode never attaches to the app,
+  so the card stays unreachable and the tokens are spent anyway. Use it to _talk_ to a
+  conversation, not to rescue one.
+- **The app can rescue its own cards, one paid turn each.** A Claude session running inside
+  Claude Desktop has session tools this CLI does not: asking it to deliver a message to a
+  stranded card makes the app itself host the conversation, which re-links the card with no
+  terminal tab and no human at a resume prompt. `foster rescue --json` gives such a session
+  the work list. Two conditions, both measured: the app refuses a card whose directory no
+  longer exists (recreate the worktree first — `git worktree add --detach <path>`), and
+  delivery runs a full turn in the target conversation, so say in the message that nothing
+  should be resumed or acted on.
+
+A rescued conversation leaves a second card behind: the app's fresh hosting card, which has
+no mirror history. `rescue` reads that card as the app's own proof of reachability and keeps
+the conversation off the list — the husk alone would put it right back on every run once its
+host went idle and exited.
+
 ## When one conversation becomes two
 
 A conversation that already has a writer cannot be continued from a second card. Asked to open one,

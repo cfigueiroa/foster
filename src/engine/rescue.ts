@@ -92,13 +92,26 @@ export function findStranded(
   // cards someone is looking at. The map is what keeps the same conversation
   // from being offered twice when both cards are present.
   const byConversation = new Map<string, DiscoveredSession>();
+  // A rescue leaves a second card behind: hosting the conversation again — a
+  // resume, or the app delivering a message to it — makes the app write a fresh
+  // card with no mirror history, while the husk keeps its dead mirror forever.
+  // Once the fresh card's host goes idle and exits, nothing is live and the
+  // husk alone would put the conversation right back on this list — already
+  // rescued, stranded again every morning. The fresh card is the tell: newer
+  // than the husk and pointing at a directory that exists, it is the app's own
+  // proof that it can reach the conversation without our help.
+  const rehostActivity = new Map<string, number>();
   for (const session of sessions) {
     const { data } = session;
     const conversation = data.cliSessionId?.toLowerCase();
     if (!conversation) continue;
-    // Only a card that had a mirror can be showing "unreachable" — a card
-    // without one just sits there resumable, and needs no rescuing.
-    if (!hadMirror(data)) continue;
+    if (!hadMirror(data)) {
+      if (data.isArchived !== true && data.cwd && deps.directoryExists(data.cwd)) {
+        const seen = rehostActivity.get(conversation) ?? -Infinity;
+        rehostActivity.set(conversation, Math.max(seen, data.lastActivityAt ?? 0));
+      }
+      continue;
+    }
     if (!selection.includeArchived && data.isArchived === true) continue;
     if (selection.since !== undefined && (data.lastActivityAt ?? 0) < selection.since) continue;
     // A live writer is the opposite of stranded: the mirror it minted works.
@@ -114,6 +127,8 @@ export function findStranded(
   for (const session of byConversation.values()) {
     const { data } = session;
     const cliSessionId = data.cliSessionId!;
+    const rehostedAt = rehostActivity.get(cliSessionId.toLowerCase());
+    if (rehostedAt !== undefined && rehostedAt >= (data.lastActivityAt ?? 0)) continue;
     const transcript = deps.transcriptFor(cliSessionId);
     const cwd = transcript ? deps.lastCwd(transcript) : undefined;
     const sizeBytes = transcript ? deps.sizeOf(transcript) : undefined;
