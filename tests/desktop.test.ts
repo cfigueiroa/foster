@@ -13,7 +13,7 @@ import {
   deliverUrl,
   type ProcessRow,
 } from '../src/engine/desktop.js';
-import { heldInMemory, inspectApp } from '../src/engine/safety.js';
+import { appHolds, heldInMemory, inspectApp } from '../src/engine/safety.js';
 import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -228,6 +228,37 @@ describe('heldInMemory', () => {
   it('assumes the worst when the start time is unknown', () => {
     const desktop = { running: true, codeSessions: 0, selfHosted: false };
     expect(heldInMemory([fostering(100)], desktop)).toHaveLength(1);
+  });
+});
+
+describe('appHolds', () => {
+  const up = { running: true, startedAt: 500, codeSessions: 0, selfHosted: false };
+
+  it('holds a card the app wrote, whenever it was written', () => {
+    // The app made it, so it has had it since it started — there is no "after"
+    // for a native card.
+    expect(appHolds({ path: 'C:\\card.json', native: true }, up)).toBe(true);
+  });
+
+  it('lets go of a copy written after the app started', () => {
+    // The app is past its one read of the directory, so this file is not in
+    // memory at all — which is why it takes a restart to appear.
+    expect(appHolds({ path: 'C:\\copy.json', native: false, fosteredAt: 900 }, up)).toBe(false);
+  });
+
+  it('holds a copy that already existed when the app started', () => {
+    expect(appHolds({ path: 'C:\\copy.json', native: false, fosteredAt: 100 }, up)).toBe(true);
+  });
+
+  it('assumes the worst when the start time is unknown', () => {
+    const blind = { running: true, codeSessions: 0, selfHosted: false };
+    expect(appHolds({ path: 'C:\\copy.json', native: false, fosteredAt: 900 }, blind)).toBe(true);
+  });
+
+  it('assumes the worst for a card the ledger knows nothing about', () => {
+    // No fostering entry means no evidence of when it was written, and a card
+    // foster cannot date is one it must not gamble on.
+    expect(appHolds({ path: 'C:\\card.json', native: false }, up)).toBe(true);
   });
 });
 

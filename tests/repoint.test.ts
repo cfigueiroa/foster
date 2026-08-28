@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
 import { fosterSessions } from '../src/engine/executor.js';
 import { inspectCopy } from '../src/engine/reconcile.js';
 import { repointCards, undoRequests } from '../src/engine/repoint.js';
+import type { WritableCard } from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, listRepointed, project } from '../src/ledger/project.js';
-import type { CodeSessionData } from '../src/domain/types.js';
+import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import { scanAccount } from '../src/store/scanner.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -21,7 +22,9 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './he
 const TRUNK = '00000000-0000-4000-8000-0000000000b1';
 const TIP = '00000000-0000-4000-8000-0000000000b2';
 
-const noGuard = (): void => {};
+// Everything writable: these tests drive a synthetic store, and whether a real
+// app on this machine is running must not decide whether they pass.
+const noGuard = (_store: StoreLayout, cards: WritableCard[]) => ({ writable: cards, held: [] });
 const refuse = (): never => {
   throw new Error('Claude Desktop is running');
 };
@@ -84,6 +87,47 @@ describe('repointCards', () => {
     // than no move at all.
     expect(read(file).cliSessionId).toBe(TRUNK);
     expect(ledger.read()).toHaveLength(0);
+  });
+
+  it('moves what it can and reports the cards the app is holding', () => {
+    // The whole point of splitting the batch. One row that has to wait used to
+    // refuse every row beside it, which is a tidy-up abandoned for its own
+    // smallest part.
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const held = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000b8', cliSessionId: TRUNK }),
+    );
+    const free = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000b9', cliSessionId: TRUNK }),
+    );
+
+    const outcomes = repointCards(
+      [
+        { path: held, target: NEW_ACCOUNT, to: TIP, native: true },
+        { path: free, target: NEW_ACCOUNT, to: TIP, native: false },
+      ],
+      {
+        store,
+        ledger,
+        guard: (_store, cards) => ({
+          writable: cards.filter((card) => !card.native),
+          held: cards.filter((card) => card.native),
+        }),
+      },
+    );
+
+    expect(outcomes.find((o) => o.path === free)).toMatchObject({ status: 'repointed', to: TIP });
+    expect(outcomes.find((o) => o.path === held)).toMatchObject({ status: 'skipped' });
+    expect(read(free).cliSessionId).toBe(TIP);
+    // Untouched, and unclaimed: a move the app would write back over must not be
+    // recorded as one that happened, or --undo has a reversal to make up.
+    expect(read(held).cliSessionId).toBe(TRUNK);
+    expect(listRepointed(project(ledger.read()))).toHaveLength(1);
   });
 
   it('writes nothing on a dry run', () => {
