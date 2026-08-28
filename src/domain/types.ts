@@ -35,6 +35,13 @@ export interface CodeSessionData {
   lastActivityAt?: number;
   /** Absent on sessions the user never opened; those do not show up under "Recents". */
   lastFocusedAt?: number;
+  /**
+   * The remote-control mirrors this card has had, one appended per attach; the
+   * newest is the one the sidebar shows. When the process behind it dies
+   * without closing, the card can only say "cannot reach your computer" —
+   * which is what `foster rescue` reads this field to find.
+   */
+  bridgeSessionIds?: string[];
   /** Present on sessions created by a scheduled task; those are listed elsewhere in the app. */
   scheduledTaskId?: string;
   isArchived?: boolean;

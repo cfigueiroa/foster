@@ -173,6 +173,51 @@ export function readTranscriptFacts(file: string, cliSessionId: string): Transcr
   return facts;
 }
 
+/** How much of a transcript's tail to read when recovering where it last ran. */
+const TAIL_CWD_BYTES = 256 * 1024;
+
+/**
+ * The working directory a conversation last ran in.
+ *
+ * The head records a cwd too, and it is wrong for exactly the conversations
+ * that need this read: a session that moves between worktrees writes its first
+ * records in one directory and its last in another, and `claude --resume`
+ * belongs in the last one — the directory whose project folder the transcript
+ * is actually filed under. Measured on a live store: three of eleven
+ * crash-stranded conversations had moved, and the head named a directory the
+ * work had already left.
+ */
+export function lastRecordedCwd(file: string): string | undefined {
+  let text: string;
+  let truncated: boolean;
+  try {
+    const size = statSync(file).size;
+    const length = Math.min(size, TAIL_CWD_BYTES);
+    truncated = length < size;
+    const fd = openSync(file, 'r');
+    try {
+      const buffer = Buffer.alloc(length);
+      const read = readSync(fd, buffer, 0, length, size - length);
+      text = buffer.subarray(0, read).toString('utf8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+
+  const lines = text.split('\n');
+  // The first line of a truncated read starts mid-record.
+  if (truncated) lines.shift();
+
+  let cwd: string | undefined;
+  for (const line of lines) {
+    const record = parseRecord(line);
+    if (record && typeof record.cwd === 'string' && record.cwd !== '') cwd = record.cwd;
+  }
+  return cwd;
+}
+
 /** What a whole transcript says about itself, in the terms a fork is judged by. */
 export interface ConversationScan {
   /**
