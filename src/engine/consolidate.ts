@@ -46,6 +46,16 @@ export interface ConsolidationEntry {
    */
   status: 'consolidate' | 'diverged' | 'app-made' | 'settled';
   /**
+   * Which test left a `diverged` fork alone, so the way out named is the one that
+   * would actually lift it.
+   *
+   * Printing "--max-lost N to do it anyway" under a fork the share test caught
+   * would send the reader to a flag that changes nothing for it — the same shape
+   * of wrong advice as telling someone to quit from a tray icon they have
+   * already used.
+   */
+  divergedBy?: 'count' | 'share';
+  /**
    * Records this account would stop showing — held alone by the branches it has a
    * row on, minus the one being kept. Not `fork.lost`, which is the same sum over
    * every branch anywhere and overstates the trade for an account that never held
@@ -77,6 +87,21 @@ export interface ConsolidateOptions {
    * this has to land in is wide.
    */
   maxLost?: number;
+  /**
+   * The same question asked as a proportion: how much of the surviving branch the
+   * losing halves may be worth, before the fork is left alone.
+   *
+   * The count alone measures the wrong thing. What makes a merge safe is not that
+   * the losing half is *small* but that it is insignificant beside the half that
+   * stays — and those come apart badly at the ends. Hiding 200 records of a 210
+   * record conversation passes a `maxLost` of 200, and it is 95% of the work;
+   * hiding 250 of 30,000 is a rounding error and fails it. Measured across a real
+   * store the honest tidy-ups sat at 0.3%, 8% and 15% while the one genuine
+   * two-way fork was 39%, so this lands in a wide gap too.
+   *
+   * Both tests have to pass. Each catches what the other waves through.
+   */
+  maxLostShare?: number;
   /** Account uuid prefix; without it, every account in the store. */
   to?: string;
   /** Conversation or card id prefixes: only forks that involve one of them. */
@@ -88,9 +113,20 @@ export interface ConsolidateOptions {
 
 export const DEFAULT_MAX_LOST = 200;
 
+/**
+ * A third of what the surviving branch holds.
+ *
+ * Chosen to sit above every tidy-up a real store offered — the largest was 15% —
+ * and below the one fork that was genuinely two pieces of work at 39%. Past a
+ * third, "the branch that carried on" is not a description of what happened: both
+ * sides did.
+ */
+export const DEFAULT_MAX_LOST_SHARE = 1 / 3;
+
 export function planConsolidation(options: ConsolidateOptions): ConsolidationEntry[] {
   const { store, ledger } = options;
   const maxLost = options.maxLost ?? DEFAULT_MAX_LOST;
+  const maxLostShare = options.maxLostShare ?? DEFAULT_MAX_LOST_SHARE;
   const events = ledger.read();
   const kin: Lineage = options.projectsDirs
     ? lineageAt(options.projectsDirs)
@@ -122,7 +158,7 @@ export function planConsolidation(options: ConsolidateOptions): ConsolidationEnt
 
   const entries: ConsolidationEntry[] = [];
   for (const [, group] of groupByAccountAndWork(cards, forks, to)) {
-    const entry = planOne(group, fosterings, maxLost);
+    const entry = planOne(group, fosterings, maxLost, maxLostShare);
     if (entry && wanted(entry, options.sessionIds)) entries.push(entry);
   }
 
@@ -161,6 +197,7 @@ function planOne(
   group: WorkGroup,
   fosterings: Map<string, ActiveFostering>,
   maxLost: number,
+  maxLostShare: number,
 ): ConsolidationEntry | undefined {
   const { account, fork, rows } = group;
   const tip = fork.branches[0]!;
@@ -206,8 +243,17 @@ function planOne(
     return { ...base, status: 'settled', remove: [], keptApart: [] };
   }
 
+  // Both tests, and the one that stopped it is recorded. A fork over the count is
+  // reported as over the count even when it is also over the share, because that
+  // is the flag the reader is being offered.
   if (fork.lost > maxLost) {
-    return { ...base, status: 'diverged', remove: [], keptApart: [] };
+    return { ...base, status: 'diverged', divergedBy: 'count', remove: [], keptApart: [] };
+  }
+  // Guarded on a tip that holds something: a branch with no records is not a
+  // survivor the rest can be weighed against, and dividing by it would call every
+  // such fork diverged on the strength of an infinity.
+  if (tip.total > 0 && fork.lost / tip.total > maxLostShare) {
+    return { ...base, status: 'diverged', divergedBy: 'share', remove: [], keptApart: [] };
   }
 
   // Every surplus row here is the app's own. Foster removes what foster wrote, so
