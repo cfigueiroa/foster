@@ -87,6 +87,20 @@ do is name a writer that is not there.
 `live --stop` is still `taskkill /F /T`, so whatever that session had not written is lost —
 and it refuses a pid it could not identify, and the session foster is itself running in.
 
+## Rescuing "cannot reach your computer" cards
+
+`foster rescue` lists them; `--open` opens a terminal tab per conversation, stopped at the
+resume prompt. Two facts that save wasted turns (both measured on a live store):
+
+- `foster resume` / `claude -p --resume` **does not reconnect the card** — print mode never
+  attaches to the app. It spends the tokens and the card stays unreachable.
+- An agent running **inside Claude Desktop** can rescue without terminal tabs: deliver a
+  message to the stranded card with the app's own session tools (`foster rescue --json` is
+  the work list) and the app hosts the conversation itself, which re-links the card. The app
+  refuses a card whose directory is gone — recreate the worktree first
+  (`git worktree add --detach <path>`) — and delivery runs a full turn, so the message must
+  say "do not resume any pending work".
+
 ## What `foster agent` does and does not cover
 
 `foster agent "<task>" --yes` exposes ten tools: `scan_accounts`, `list_sessions`,

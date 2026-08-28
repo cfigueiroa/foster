@@ -117,6 +117,60 @@ describe('findStranded', () => {
     expect(rows[0]!.lastActivityAt).toBe(2_000);
   });
 
+  it('drops a conversation the app already re-hosted through a fresh mirrorless card', () => {
+    // Rescuing leaves this exact shape behind: the husk keeps its dead mirror,
+    // and the app's fresh hosting card has none. Once the host exits there is
+    // no live writer either — without reading the fresh card, the conversation
+    // would come back to this list every day, already rescued.
+    const husk = card({ sessionId: 'local_00000011', lastActivityAt: 1_000 });
+    const rehost = card({
+      sessionId: 'local_00000012',
+      bridgeSessionIds: undefined,
+      cwd: '/work/alpha',
+      lastActivityAt: 2_000,
+    });
+    expect(findStranded([husk, rehost], { includeArchived: false }, deps())).toEqual([]);
+  });
+
+  it('still lists it when the re-host card points at a directory that is gone', () => {
+    // The app refuses to start a session whose folder no longer exists
+    // (measured), so a re-host card with a dead cwd proves nothing.
+    const husk = card({ sessionId: 'local_00000013', lastActivityAt: 1_000 });
+    const rehost = card({
+      sessionId: 'local_00000014',
+      bridgeSessionIds: undefined,
+      cwd: '/work/gone',
+      lastActivityAt: 2_000,
+    });
+    const seesOnlyAlpha = deps({ directoryExists: (dir) => dir === '/work/alpha' });
+    expect(findStranded([husk, rehost], { includeArchived: false }, seesOnlyAlpha)).toHaveLength(1);
+  });
+
+  it('still lists it when the mirror card is newer than the re-host card', () => {
+    // A mirror attached after the re-host means the conversation moved on and
+    // crashed again; the old hosting card is history, not reachability.
+    const husk = card({ sessionId: 'local_00000015', lastActivityAt: 3_000 });
+    const rehost = card({
+      sessionId: 'local_00000016',
+      bridgeSessionIds: undefined,
+      cwd: '/work/alpha',
+      lastActivityAt: 2_000,
+    });
+    expect(findStranded([husk, rehost], { includeArchived: false }, deps())).toHaveLength(1);
+  });
+
+  it('ignores an archived re-host card — closed on purpose is not reachable', () => {
+    const husk = card({ sessionId: 'local_00000017', lastActivityAt: 1_000 });
+    const rehost = card({
+      sessionId: 'local_00000018',
+      bridgeSessionIds: undefined,
+      cwd: '/work/alpha',
+      isArchived: true,
+      lastActivityAt: 2_000,
+    });
+    expect(findStranded([husk, rehost], { includeArchived: false }, deps())).toHaveLength(1);
+  });
+
   it('keeps a conversation whose transcript is gone, saying so rather than hiding it', () => {
     // A list that quietly omits the unrescuable case is the shape of a bug
     // report; the row stays, with nothing to resume attached to it.
