@@ -1036,9 +1036,18 @@ program
       target,
       prefix: opts.prefix,
       dryRun,
+      // The same rule "foster --session" follows, and for the same reason. A bulk
+      // restore rightly skips a conversation this account already shows a branch
+      // of — a second row for one piece of work is not a favour. Naming it is a
+      // decision about that conversation, and until this was passed there was no
+      // way to make it: the branch the deletion took with it held records no card
+      // here had, and every route to them was refused. That refusal also made the
+      // "foster consolidate" this printed unreachable, since consolidate only
+      // sees forks between cards that exist.
+      explicit: Boolean(opts.session?.length),
     });
 
-    for (const outcome of outcomes) console.log(outcomeLine(outcome));
+    for (const outcome of outcomes) console.log(outcomeLine(outcome, { restoring: true }));
     const counts = summariseOutcomes(outcomes);
 
     if (dryRun) {

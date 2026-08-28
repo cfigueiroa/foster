@@ -466,7 +466,7 @@ export function purgeLine(outcome: PurgeOutcome, dryRun: boolean): string {
   return `  ${marks[outcome.status]} ${outcome.title}${size}${detail}`;
 }
 
-export function outcomeLine(outcome: Outcome): string {
+export function outcomeLine(outcome: Outcome, options: { restoring?: boolean } = {}): string {
   const marks: Record<OutcomeStatus, string> = {
     fostered: pc.green('+'),
     returned: pc.green('-'),
@@ -475,7 +475,9 @@ export function outcomeLine(outcome: Outcome): string {
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
   const line = `  ${marks[outcome.status]} ${outcome.title}${detail}`;
-  const standing = outcome.standing ? standingLine(outcome.standing) : '';
+  const standing = outcome.standing
+    ? standingLine(outcome.standing, options.restoring === true, outcome.originSessionId)
+    : '';
   return standing ? `${line}\n${standing}` : line;
 }
 
@@ -486,15 +488,28 @@ export function outcomeLine(outcome: Outcome): string {
  * that stopped is right to skip it and has nothing to add, and a line under every
  * refusal would bury the handful that matter — one store had eight forks among
  * five hundred conversations.
+ *
+ * The way out is not the same on both routes, and printing one of them everywhere
+ * was worse than printing nothing. `consolidate` merges two *cards*; it builds
+ * its forks from what is on disk. On a sweep both halves are cards in different
+ * accounts, so it is exactly the right command. On a restore the other half is a
+ * conversation the app deleted — no card, nothing for consolidate to find — and
+ * the suggestion answered "Nothing is forked here", with the records it named
+ * still out of reach. There the first move is to give that half a card of its
+ * own, which naming it in a restore now does.
  */
-function standingLine(standing: BranchStanding): string {
+function standingLine(standing: BranchStanding, restoring: boolean, originId: string): string {
   if (!standing.ahead) return '';
   return [
     pc.yellow(
       `      the row here holds ${standing.hereOnly} record(s) this one does not; ` +
         `this one holds ${standing.theirOnly} it does not`,
     ),
-    pc.dim(`      foster consolidate --session ${shortId(standing.here)} --yes`),
+    pc.dim(
+      restoring
+        ? `      foster restore --session ${shortId(originId)} --yes, then foster consolidate`
+        : `      foster consolidate --session ${shortId(standing.here)} --yes`,
+    ),
   ].join('\n');
 }
 
