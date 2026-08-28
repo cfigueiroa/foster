@@ -245,10 +245,12 @@ function filterFrom(opts: {
   since?: string;
   all?: boolean;
   archived?: boolean;
+  includeScheduled?: boolean;
 }): SessionFilter {
   const filter: SessionFilter = {
     includeUnfosterable: opts.all ?? false,
     includeArchived: opts.archived ?? false,
+    includeScheduled: opts.includeScheduled ?? false,
   };
   if (opts.title) filter.title = opts.title;
   if (opts.cwd) filter.cwd = opts.cwd;
@@ -266,7 +268,11 @@ function filterOptions(command: Command): Command {
     .option('--title <text>', 'only sessions whose title contains this text')
     .option('--cwd <text>', 'only sessions whose working directory contains this text')
     .option('--since <age>', 'only sessions active within this window, e.g. 30d')
-    .option('--archived', 'include sessions you archived; the copy stays archived');
+    .option('--archived', 'include sessions you archived; the copy stays archived')
+    .option(
+      '--include-scheduled',
+      "include scheduled tasks' conversations; the copy is an ordinary session, not a task",
+    );
 }
 
 function sourceOptions(command: Command): Command {
@@ -637,6 +643,7 @@ sourceOptions(
     cwd?: string;
     since?: string;
     archived?: boolean;
+    includeScheduled?: boolean;
     session?: string[];
     from?: string;
     fromOrg?: string;
@@ -698,6 +705,7 @@ sourceOptions(
     prefix: opts.prefix,
     dryRun,
     includeArchived: Boolean(opts.archived),
+    includeScheduled: Boolean(opts.includeScheduled),
     // A conversation with a live writer branches when its copy is opened, which
     // is the one failure that reads as foster losing work. Reported, never
     // refused: copying the session you are working in is the ordinary case.

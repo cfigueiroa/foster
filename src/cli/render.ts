@@ -593,5 +593,13 @@ export function neverComesLine(never: NeverComes): string {
     .map(([reason, count]) => `${count} ${names[reason as Unfosterable]}`)
     .join(', ');
   const one = never.total === 1;
-  return `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
+  const line = `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
+  // Scheduled tasks are the one entry here that has an answer. What the app
+  // refuses to list is the card, not the conversation, so a copy without the task
+  // id is an ordinary row — and leaving the count under a flat "never" sent
+  // people looking for a gap that a flag closes.
+  const scheduled = never.byReason['scheduled-task'] ?? 0;
+  return scheduled > 0
+    ? `${line}\nThe scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`
+    : line;
 }
