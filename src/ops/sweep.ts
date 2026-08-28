@@ -266,10 +266,16 @@ function countNeverComes(sessions: DiscoveredSession[]): NeverComes {
     // Judged the way the sweep judges it: archived is accepted, so a session
     // whose only mark is `archived` is not a gap.
     const blocking = blockingReasons(session, { includeArchived: true });
-    const hopeless = blocking.filter((reason) => NEVER_COMES.includes(reason));
+    const hopeless = NEVER_COMES.filter((reason) => blocking.includes(reason));
     if (hopeless.length === 0) continue;
     total += 1;
-    for (const reason of hopeless) byReason[reason] = (byReason[reason] ?? 0) + 1;
+    // One session, one reason — the first that applies, in the order NEVER_COMES
+    // lists them. Counting every reason it carried made the parts contradict the
+    // whole: eight sessions, six of them scheduled tasks that had also never been
+    // opened, printed as "8 sessions (8 scheduled task, 6 never opened)". A
+    // breakdown that does not add up to its own total reads as a miscount, and
+    // the second reason changes nothing about what to do with the session.
+    byReason[hopeless[0]!] = (byReason[hopeless[0]!] ?? 0) + 1;
   }
 
   return { total, byReason };

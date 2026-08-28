@@ -39,9 +39,20 @@ export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
  * the path tells them apart, and only the CLI lives under a claude-code
  * directory. The separation itself lives in util/processes: the session registry
  * asks the same question of a pid, and must not import desktop control to do it.
+ *
+ * A row whose path could not be read is *not* the app. That is the whole point:
+ * the path is the only evidence, so without it "not a CLI" is an absence rather
+ * than a finding — and a claude.exe launched by another tool, or by a user whose
+ * processes this one cannot read, arrives here looking exactly like the app.
+ * Treating it as the app put a stranger's pid in front of `taskkill /F /T`, which
+ * killed it and left the real app running to report "still running". Requiring
+ * proof costs at most a manual restart when the app's own path is unreadable;
+ * the other way round ends someone else's process.
  */
 function isDesktopProcess(row: ProcessRow): boolean {
-  return row.name.toLowerCase() === 'claude.exe' && !isCodeCliProcess(row);
+  if (row.name.toLowerCase() !== 'claude.exe') return false;
+  if (row.path === '') return false;
+  return !isCodeCliProcess(row);
 }
 
 export interface DesktopState {
@@ -167,7 +178,25 @@ export function inspectDesktop(
   const desktopPids = new Set(desktop.map((row) => row.pid));
   // The main process is the one nothing else in the app spawned; its helpers all
   // descend from it.
-  const main = desktop.find((row) => !desktopPids.has(row.parentPid)) ?? desktop[0]!;
+  //
+  // More than one row can answer that description — a second installation the
+  // store filter did not narrow away, or a leftover from a crashed instance — and
+  // then "the first one listed" is whatever order the process table came back in.
+  // That order is not stable, so the same machine could pick a different pid on
+  // two consecutive runs and `--terminate` would kill whichever it happened to
+  // find. Rank instead, on the evidence that actually distinguishes a main
+  // process: the app's own helpers point at it, a stray has none. Oldest, then
+  // lowest pid, settle the rest so the answer is at least the same every time.
+  const orphans = desktop.filter((row) => !desktopPids.has(row.parentPid));
+  const helpersOf = (pid: number): number =>
+    desktop.reduce((total, row) => total + (row.parentPid === pid ? 1 : 0), 0);
+  const main =
+    [...orphans].sort(
+      (a, b) =>
+        helpersOf(b.pid) - helpersOf(a.pid) ||
+        (a.startedAt ?? Number.POSITIVE_INFINITY) - (b.startedAt ?? Number.POSITIVE_INFINITY) ||
+        a.pid - b.pid,
+    )[0] ?? desktop[0]!;
 
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const codeSessions = rows.filter(
@@ -278,8 +307,15 @@ export type QuitResult =
    * is the only way, and that needs saying out loud rather than doing quietly.
    */
   | { outcome: 'needs-terminate'; mainPid: number }
-  /** It was asked to close and is still up. */
-  | { outcome: 'still-running'; mainPid: number };
+  /**
+   * It was asked to close and is still up.
+   *
+   * `refused` carries what the kill itself said, when it said anything. Without
+   * it every failure looked the same from outside — a thirty-second wait ending
+   * in "quit it from the tray icon" — whether the process had ignored the
+   * request or `taskkill` had never been allowed to touch it.
+   */
+  | { outcome: 'still-running'; mainPid: number; refused?: string };
 
 /**
  * Close Claude Desktop.
@@ -322,12 +358,17 @@ export async function quitDesktop(
   const asking = closingWindowQuits(store);
   if (!asking && !terminate) return { outcome: 'needs-terminate', mainPid: pid };
 
+  let refused: string | undefined;
   if (terminate) {
     // The app saves on a trailing debounce of up to three seconds. Waiting that
     // out first turns "probably lost the last edit" into "probably did not",
     // which is cheap at this point — the user has already decided to close it.
     await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    taskkill(['/F', '/T', '/PID', String(pid)]);
+    // Kept, unlike the asking form's: `/F` does not fail for want of a window, so
+    // a non-zero exit here means the process was not ended — access denied, or a
+    // pid that had already gone. Discarding it spent the full timeout and then
+    // blamed the app for still running.
+    refused = taskkill(['/F', '/T', '/PID', String(pid)]);
   } else {
     taskkill(['/PID', String(pid)]);
   }
@@ -335,7 +376,8 @@ export async function quitDesktop(
   // The lockfile is held for as long as the app runs and is released on exit, so
   // it corroborates the pid check — a recycled pid cannot fake it.
   const gone = await waitFor(() => !processAlive(pid) && !lockfileHeld(store), timeoutMs);
-  return gone ? { outcome: 'quit' } : { outcome: 'still-running', mainPid: pid };
+  if (gone) return { outcome: 'quit' };
+  return { outcome: 'still-running', mainPid: pid, ...(refused ? { refused } : {}) };
 }
 
 /** Long enough to outlast the app's save debounce (1s idle, 3s while running). */
@@ -371,13 +413,26 @@ export function endProcess(pid: number): void {
   taskkill(['/F', '/T', '/PID', String(pid)]);
 }
 
-function taskkill(args: string[]): void {
+/**
+ * Run taskkill, and report what it said when it refused.
+ *
+ * The exit code never decides the outcome — the wait that follows does, because
+ * a kill can succeed and the process still take a moment to go. It is kept for
+ * the one thing the wait cannot supply: the reason. "ERROR: The process ... could
+ * not be terminated. Access is denied." is the whole diagnosis, and throwing it
+ * away left a thirty-second silence in its place.
+ *
+ * Returns undefined when taskkill was happy, which is also what the asking form
+ * gets when the process simply had no window to close.
+ */
+function taskkill(args: string[]): string | undefined {
   try {
     execFileSync('taskkill', args, { encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+    return undefined;
   } catch (error) {
-    // taskkill exits non-zero when a process has no window to close, which is
-    // expected here: the wait below decides the outcome, not the exit code.
-    void error;
+    const said = error as { stderr?: string | Buffer; stdout?: string | Buffer };
+    const text = `${String(said.stderr ?? '')}${String(said.stdout ?? '')}`.trim();
+    return text === '' ? undefined : text.split(/\r?\n/)[0];
   }
 }
 

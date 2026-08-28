@@ -466,7 +466,7 @@ export function purgeLine(outcome: PurgeOutcome, dryRun: boolean): string {
   return `  ${marks[outcome.status]} ${outcome.title}${size}${detail}`;
 }
 
-export function outcomeLine(outcome: Outcome): string {
+export function outcomeLine(outcome: Outcome, options: { restoring?: boolean } = {}): string {
   const marks: Record<OutcomeStatus, string> = {
     fostered: pc.green('+'),
     returned: pc.green('-'),
@@ -475,7 +475,9 @@ export function outcomeLine(outcome: Outcome): string {
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
   const line = `  ${marks[outcome.status]} ${outcome.title}${detail}`;
-  const standing = outcome.standing ? standingLine(outcome.standing) : '';
+  const standing = outcome.standing
+    ? standingLine(outcome.standing, options.restoring === true, outcome.originSessionId)
+    : '';
   return standing ? `${line}\n${standing}` : line;
 }
 
@@ -486,15 +488,28 @@ export function outcomeLine(outcome: Outcome): string {
  * that stopped is right to skip it and has nothing to add, and a line under every
  * refusal would bury the handful that matter — one store had eight forks among
  * five hundred conversations.
+ *
+ * The way out is not the same on both routes, and printing one of them everywhere
+ * was worse than printing nothing. `consolidate` merges two *cards*; it builds
+ * its forks from what is on disk. On a sweep both halves are cards in different
+ * accounts, so it is exactly the right command. On a restore the other half is a
+ * conversation the app deleted — no card, nothing for consolidate to find — and
+ * the suggestion answered "Nothing is forked here", with the records it named
+ * still out of reach. There the first move is to give that half a card of its
+ * own, which naming it in a restore now does.
  */
-function standingLine(standing: BranchStanding): string {
+function standingLine(standing: BranchStanding, restoring: boolean, originId: string): string {
   if (!standing.ahead) return '';
   return [
     pc.yellow(
       `      the row here holds ${standing.hereOnly} record(s) this one does not; ` +
         `this one holds ${standing.theirOnly} it does not`,
     ),
-    pc.dim(`      foster consolidate --session ${shortId(standing.here)} --yes`),
+    pc.dim(
+      restoring
+        ? `      foster restore --session ${shortId(originId)} --yes, then foster consolidate`
+        : `      foster consolidate --session ${shortId(standing.here)} --yes`,
+    ),
   ].join('\n');
 }
 
@@ -593,5 +608,20 @@ export function neverComesLine(never: NeverComes): string {
     .map(([reason, count]) => `${count} ${names[reason as Unfosterable]}`)
     .join(', ');
   const one = never.total === 1;
-  return `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
+  const scheduledOnly = never.byReason['scheduled-task'] ?? 0;
+  // "Can never come" stopped being true of scheduled tasks the moment there was a
+  // flag for them, and a sentence that overstates the gap is as misleading as one
+  // that hides it. Said plainly instead when any of the count has a way out.
+  const line =
+    scheduledOnly > 0
+      ? `${never.total} session${one ? '' : 's'} this sweep does not bring (${detail}).`
+      : `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
+  // Scheduled tasks are the one entry here that has an answer. What the app
+  // refuses to list is the card, not the conversation, so a copy without the task
+  // id is an ordinary row — and leaving the count under a flat "never" sent
+  // people looking for a gap that a flag closes.
+  const scheduled = never.byReason['scheduled-task'] ?? 0;
+  return scheduled > 0
+    ? `${line}\nThe scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`
+    : line;
 }

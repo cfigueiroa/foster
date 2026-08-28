@@ -166,6 +166,25 @@ describe('runSweep', () => {
 
     expect(sweep().neverComes.total).toBe(0);
   });
+
+  it('counts a session once even when more than one reason applies to it', () => {
+    // A scheduled task that was never opened is the ordinary shape of one, and
+    // counting both marks made the breakdown contradict its own total.
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-0000000000d4',
+      scheduledTaskId: 'task-2',
+    });
+    delete scheduled.lastFocusedAt;
+    writeSession(store, OLD_ACCOUNT, scheduled);
+
+    const { neverComes } = sweep();
+    const parts = Object.values(neverComes.byReason).reduce((sum, n) => sum + n, 0);
+
+    expect(neverComes.total).toBe(1);
+    expect(parts).toBe(neverComes.total);
+    expect(neverComes.byReason).toMatchObject({ 'scheduled-task': 1 });
+    expect(neverComes.byReason['never-opened']).toBeUndefined();
+  });
 });
 
 /**

@@ -107,6 +107,40 @@ describe('inspectDesktop', () => {
     expect(inspectDesktop(() => table, {})).toMatchObject({ running: false });
   });
 
+  it('does not take a claude.exe whose path it cannot read for the app', () => {
+    // A claude.exe started by another tool, or by a user whose processes this one
+    // cannot read, arrives with an empty path. "Not a CLI" is then an absence of
+    // evidence, and treating it as the app hands a stranger's pid to taskkill /F.
+    const table = rows({ pid: 700, parentPid: 9, path: '', commandLine: '' });
+    expect(inspectDesktop(() => table, {})).toMatchObject({ running: false });
+  });
+
+  it('picks the app over an unreadable stranger, whichever order they arrive in', () => {
+    const stranger = { pid: 42_828, parentPid: 43_396, path: '', commandLine: '' };
+    const app = [
+      { pid: 500, parentPid: 9 },
+      { pid: 501, parentPid: 500 },
+      { pid: 502, parentPid: 500 },
+    ];
+
+    expect(inspectDesktop(() => rows(stranger, ...app), {}).mainPid).toBe(500);
+    expect(inspectDesktop(() => rows(...app, stranger), {}).mainPid).toBe(500);
+  });
+
+  it('prefers the process its helpers point at when two could be the main one', () => {
+    // Two orphans, so "the first one listed" is whatever order the process table
+    // came back in — and that order is not stable between runs.
+    const table = rows(
+      { pid: 900, parentPid: 9, startedAt: 9_000 },
+      { pid: 500, parentPid: 9, startedAt: 5_000 },
+      { pid: 501, parentPid: 500 },
+      { pid: 502, parentPid: 500 },
+    );
+
+    expect(inspectDesktop(() => table, {}).mainPid).toBe(500);
+    expect(inspectDesktop(() => [...table].reverse(), {}).mainPid).toBe(500);
+  });
+
   it('detects that foster is running inside the app it would close', () => {
     const table = rows(
       { pid: 500, parentPid: 9 },

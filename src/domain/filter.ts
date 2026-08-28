@@ -22,13 +22,40 @@ export interface SessionFilter {
    * unreachable from any other account.
    */
   includeArchived?: boolean;
+  /**
+   * Bring a scheduled task's conversation across as an ordinary one.
+   *
+   * The exclusion is real but narrower than it looks: what the app refuses to
+   * list under Recents is a *card* carrying `scheduledTaskId`, not the
+   * conversation behind it, and the transcript is an ordinary transcript. So the
+   * copy arrives with that field dropped — see buildFosterCopy — and shows up
+   * like any other row.
+   *
+   * Off by default, because the copy is not the task. The schedule, its trigger
+   * and its history stay in the account that owns them, and nothing here runs
+   * again; what crosses is the reading of what it did. That is a different thing
+   * from what the row said in its own account, so it is asked for rather than
+   * swept up.
+   */
+  includeScheduled?: boolean;
 }
 
 /** The reasons that still stand once the caller has said what it will accept. */
 export function blockingReasons(session: DiscoveredSession, filter: SessionFilter): Unfosterable[] {
-  return filter.includeArchived
-    ? session.reasons.filter((reason) => reason !== 'archived')
-    : session.reasons;
+  const excused = new Set<Unfosterable>();
+  if (filter.includeArchived) excused.add('archived');
+  if (filter.includeScheduled && session.reasons.includes('scheduled-task')) {
+    excused.add('scheduled-task');
+    // Only alongside the one above, never on its own. A scheduled task that was
+    // never opened is the ordinary case — running unattended is the point of one
+    // — and the copy is given a focus time of its own so it lands in Recents. A
+    // session that was merely never opened is a different matter and stays out:
+    // this flag is about scheduled tasks, not about that.
+    excused.add('never-opened');
+  }
+  return excused.size === 0
+    ? session.reasons
+    : session.reasons.filter((reason) => !excused.has(reason));
 }
 
 /**

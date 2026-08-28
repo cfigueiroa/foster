@@ -245,10 +245,12 @@ function filterFrom(opts: {
   since?: string;
   all?: boolean;
   archived?: boolean;
+  includeScheduled?: boolean;
 }): SessionFilter {
   const filter: SessionFilter = {
     includeUnfosterable: opts.all ?? false,
     includeArchived: opts.archived ?? false,
+    includeScheduled: opts.includeScheduled ?? false,
   };
   if (opts.title) filter.title = opts.title;
   if (opts.cwd) filter.cwd = opts.cwd;
@@ -266,7 +268,11 @@ function filterOptions(command: Command): Command {
     .option('--title <text>', 'only sessions whose title contains this text')
     .option('--cwd <text>', 'only sessions whose working directory contains this text')
     .option('--since <age>', 'only sessions active within this window, e.g. 30d')
-    .option('--archived', 'include sessions you archived; the copy stays archived');
+    .option('--archived', 'include sessions you archived; the copy stays archived')
+    .option(
+      '--include-scheduled',
+      "include scheduled tasks' conversations; the copy is an ordinary session, not a task",
+    );
 }
 
 function sourceOptions(command: Command): Command {
@@ -637,6 +643,7 @@ sourceOptions(
     cwd?: string;
     since?: string;
     archived?: boolean;
+    includeScheduled?: boolean;
     session?: string[];
     from?: string;
     fromOrg?: string;
@@ -698,6 +705,7 @@ sourceOptions(
     prefix: opts.prefix,
     dryRun,
     includeArchived: Boolean(opts.archived),
+    includeScheduled: Boolean(opts.includeScheduled),
     // A conversation with a live writer branches when its copy is opened, which
     // is the one failure that reads as foster losing work. Reported, never
     // refused: copying the session you are working in is the ordinary case.
@@ -1028,9 +1036,18 @@ program
       target,
       prefix: opts.prefix,
       dryRun,
+      // The same rule "foster --session" follows, and for the same reason. A bulk
+      // restore rightly skips a conversation this account already shows a branch
+      // of — a second row for one piece of work is not a favour. Naming it is a
+      // decision about that conversation, and until this was passed there was no
+      // way to make it: the branch the deletion took with it held records no card
+      // here had, and every route to them was refused. That refusal also made the
+      // "foster consolidate" this printed unreachable, since consolidate only
+      // sees forks between cards that exist.
+      explicit: Boolean(opts.session?.length),
     });
 
-    for (const outcome of outcomes) console.log(outcomeLine(outcome));
+    for (const outcome of outcomes) console.log(outcomeLine(outcome, { restoring: true }));
     const counts = summariseOutcomes(outcomes);
 
     if (dryRun) {
@@ -3299,7 +3316,19 @@ async function closeDesktop(
     process.exitCode = 1;
     return false;
   }
-  console.log(pc.yellow('Claude Desktop is still running. Quit it from the tray icon.'));
+  // Reached after the app was actually asked to go. "Quit it from the tray icon"
+  // is the right ending, but on its own it reads as advice the user has already
+  // taken — they typed --terminate precisely because the tray note told them to.
+  // What was missing is why it did not work, which only the kill can say.
+  console.log(
+    pc.yellow(
+      terminate
+        ? `Claude Desktop (pid ${result.mainPid}) is still running: ending it did not take effect.`
+        : 'Claude Desktop is still running.',
+    ),
+  );
+  if (result.refused) console.log(pc.dim(`  ${result.refused}`));
+  console.log(pc.dim('Quit it from the tray icon, then re-run.'));
   process.exitCode = 1;
   return false;
 }

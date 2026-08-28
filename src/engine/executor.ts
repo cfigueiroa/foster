@@ -40,6 +40,16 @@ export interface FosterOptions {
    */
   includeArchived?: boolean;
   /**
+   * Accept a scheduled task's conversation. The copy arrives without the task id
+   * — see buildFosterCopy — so it is an ordinary row rather than a file the app
+   * never lists.
+   *
+   * Has to be forwarded here as well as to the scan: this re-judges every session
+   * with the same function, and an option the caller passed to only one of the
+   * two turns "available" into "skipped" between one screen and the next.
+   */
+  includeScheduled?: boolean;
+  /**
    * Conversations a live `claude` process is writing right now, lower-cased.
    *
    * Not a gate — fostering one is perfectly sound, and it is the common case when
@@ -136,7 +146,10 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // Judged the same way the filter judges it, so a session the caller was
     // shown as available cannot be refused here for the reason it was shown
     // despite.
-    const blocking = blockingReasons(session, { includeArchived: options.includeArchived });
+    const blocking = blockingReasons(session, {
+      includeArchived: options.includeArchived,
+      includeScheduled: options.includeScheduled,
+    });
     if (blocking.length > 0) {
       outcomes.push({
         originSessionId: originId,
