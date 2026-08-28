@@ -101,6 +101,12 @@ resume prompt. Two facts that save wasted turns (both measured on a live store):
   (`git worktree add --detach <path>`) — and delivery runs a full turn, so the message must
   say "do not resume any pending work".
 
+  Finish the job while you are there: the fresh hosting card arrives **untitled** (it shows
+  as "General coding session") and the husk keeps the real name. Copy the title over with
+  `set_session_title` — drop a leading "↪ ", foster's old copy marker — and archive the husk
+  with `archive_session`; it never reconnects. None of this can run from the CLI: the app
+  creates the fresh card on its own, and the session tools only exist inside the app.
+
 ## What `foster agent` does and does not cover
 
 `foster agent "<task>" --yes` exposes ten tools: `scan_accounts`, `list_sessions`,
