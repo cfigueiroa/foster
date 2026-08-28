@@ -608,7 +608,14 @@ export function neverComesLine(never: NeverComes): string {
     .map(([reason, count]) => `${count} ${names[reason as Unfosterable]}`)
     .join(', ');
   const one = never.total === 1;
-  const line = `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
+  const scheduledOnly = never.byReason['scheduled-task'] ?? 0;
+  // "Can never come" stopped being true of scheduled tasks the moment there was a
+  // flag for them, and a sentence that overstates the gap is as misleading as one
+  // that hides it. Said plainly instead when any of the count has a way out.
+  const line =
+    scheduledOnly > 0
+      ? `${never.total} session${one ? '' : 's'} this sweep does not bring (${detail}).`
+      : `${never.total} session${one ? '' : 's'} can never come (${detail}) — the app would not list ${one ? 'it' : 'them'}.`;
   // Scheduled tasks are the one entry here that has an answer. What the app
   // refuses to list is the card, not the conversation, so a copy without the task
   // id is an ordinary row — and leaving the count under a flat "never" sent
