@@ -289,13 +289,25 @@ transcripts stay on disk and `foster transcript <cliSessionId>` still reads them
 dry run says both numbers, because "keeps 2802 records, hides 105" is the whole decision and printing
 only the first half would be an advertisement.
 
-When both halves are substantial that trade is not one to make quietly, so it is not made. A fork
-whose losing halves hold more than `--max-lost` records between them (200 by default) is reported
-with its numbers and left exactly as it is. The gap turns out to be wide: across a store of 591
-conversations, the seven forks worth collapsing left between 3 and 158 records behind, while the one
-that was genuinely two pieces of work — 2352 records on one side, 3609 on the other, 770 in common —
-left 2352. Merging the two would be the only way to keep everything, and rewriting the record of a
-conversation is not something this tool does.
+When both halves are substantial that trade is not one to make quietly, so it is not made. Two tests
+decide it, and a fork has to pass both:
+
+- `--max-lost` (200 records by default) — how much the losing halves may hold between them;
+- `--max-lost-share` (33% by default) — how much they may be worth _beside the half that stays_.
+
+The second is there because the first measures the wrong thing on its own. What makes a merge safe
+is not that the losing half is small but that it is insignificant next to the one that survives, and
+those two come apart at the ends: hiding 200 records of a 210-record conversation passes a
+`--max-lost` of 200 and is 95% of the work, while hiding 250 of 30,000 is a rounding error and fails
+it. Both gaps turn out to be wide. Across a store of 591 conversations the forks worth collapsing
+left between 3 and 158 records behind — 0.3%, 8% and 15% of what stayed — while the one that was
+genuinely two pieces of work, 2352 records on one side and 3609 on the other with 770 in common,
+left 2352: 54%.
+
+A fork that fails either test is reported with its numbers and left exactly as it is, naming the
+test that stopped it so the flag offered is the one that would lift it. Merging the two transcripts
+would be the only way to keep everything, and rewriting the record of a conversation is not
+something this tool does.
 
 ### The one write to a card foster did not make
 

@@ -67,6 +67,21 @@ function evenlySplit(): string[] {
   });
 }
 
+/**
+ * A fork past the record threshold that is still plainly one piece of work.
+ *
+ * The two tests are not the same question. 250 records left behind is over the
+ * default either way, but 250 beside 3000 is a stub and 250 beside 300 is the
+ * other half of the work — and only the first is a threshold worth raising.
+ */
+function bigButLopsided(): string[] {
+  const shared = [record(ROOT)];
+  return transcripts({
+    [TRUNK]: [META, ...shared, ...Array.from({ length: 250 }, () => record(uuid()))],
+    [TIP]: [META, ...shared, ...Array.from({ length: 3000 }, () => record(uuid()))],
+  });
+}
+
 function ledgerIn(): Ledger {
   return new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-cs-l-')), 'l.jsonl'));
 }
@@ -178,8 +193,78 @@ describe('planConsolidation', () => {
     const [entry] = planConsolidation({
       store,
       ledger: ledgerIn(),
-      projectsDirs: evenlySplit(),
+      projectsDirs: bigButLopsided(),
       maxLost: 250,
+      to: NEW_ACCOUNT.accountUuid,
+    });
+
+    expect(entry!.status).toBe('consolidate');
+    expect(entry!.repoint).toMatchObject({ to: TIP });
+  });
+
+  it('still refuses an even split when the record threshold is raised past it', () => {
+    // The hole the count alone leaves. 250 records beside 300 is 83% of the work
+    // hidden to keep one row, and a `maxLost` high enough to reach it says
+    // nothing about that — the same number beside 3000 is a stub. Raising the
+    // threshold is a decision about size, not about which half is the work.
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000ca', cliSessionId: TRUNK }),
+    );
+    cardTheTip(store);
+
+    const [entry] = planConsolidation({
+      store,
+      ledger: ledgerIn(),
+      projectsDirs: evenlySplit(),
+      maxLost: 5_000,
+      to: NEW_ACCOUNT.accountUuid,
+    });
+
+    expect(entry!.status).toBe('diverged');
+    expect(entry!.divergedBy).toBe('share');
+    expect(entry!.repoint).toBeUndefined();
+  });
+
+  it('names the record threshold, not the share, when that is what stopped it', () => {
+    // Both tests can fail at once. The one reported is the one the reader is
+    // being offered a flag for, and --max-lost is the flag that comes first.
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000cb', cliSessionId: TRUNK }),
+    );
+    cardTheTip(store);
+
+    const [entry] = planConsolidation({
+      store,
+      ledger: ledgerIn(),
+      projectsDirs: evenlySplit(),
+      to: NEW_ACCOUNT.accountUuid,
+    });
+
+    expect(entry!.status).toBe('diverged');
+    expect(entry!.divergedBy).toBe('count');
+  });
+
+  it('lets a caller who means it lift the share test too', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000cc', cliSessionId: TRUNK }),
+    );
+    cardTheTip(store);
+
+    const [entry] = planConsolidation({
+      store,
+      ledger: ledgerIn(),
+      projectsDirs: evenlySplit(),
+      maxLost: 5_000,
+      maxLostShare: 0.9,
       to: NEW_ACCOUNT.accountUuid,
     });
 

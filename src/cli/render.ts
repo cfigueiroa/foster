@@ -565,12 +565,21 @@ export function sweepSummary(report: SweepReport): string[] {
 
   if (report.forks > 0) {
     const one = report.forks === 1;
+    const { theirOnly, hereOnly } = report.forkGap;
     lines.push(
       pc.yellow(
         `${report.forks} ${one ? 'session is' : 'sessions are'} the half of a fork that carried on; ` +
           `this account is showing the half that stopped.\n` +
+          // The size of the decision, not just that there is one. A fork worth 7
+          // records against 2625 and one worth 2352 against 3609 read identically
+          // without it, and only the second is worth stopping for.
+          `Merging would gain ${theirOnly} record(s) and stop showing ${hereOnly}.\n` +
           'Which half survives is a reading decision, so the sweep stops here: ' +
-          'foster consolidate lists them, and needs the app closed.',
+          'foster consolidate lists them, and needs the app closed.\n' +
+          // Said here because it is what makes the decision small. Left unsaid,
+          // "hides records" reads as irreversible, and the tidy-up never happens.
+          'Nothing is destroyed either way — the transcripts stay, and ' +
+          'foster consolidate --undo puts the cards back.',
       ),
     );
   }

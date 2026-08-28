@@ -108,6 +108,16 @@ export interface SweepReport {
    */
   forks: number;
   /**
+   * What those forks would cost, summed: records the halves this account does not
+   * show hold alone, and records its own halves hold alone.
+   *
+   * The count on its own does not say whether the reader is looking at a rounding
+   * error or at half their work. One store had a fork worth 7 records against
+   * 2625 and another worth 2352 against 3609; "1 session is the half of a fork"
+   * described both, and only one of them was worth stopping for.
+   */
+  forkGap: { theirOnly: number; hereOnly: number };
+  /**
    * Conversations a live `claude` process is writing right now.
    *
    * A registry entry is only counted once the pid has been shown to still be the
@@ -184,6 +194,16 @@ export function runSweep(options: SweepOptions): SweepReport {
     restored: phase(restoreOutcomes),
     archived: countArchived(candidates, fosterOutcomes),
     forks: fosterOutcomes.filter((outcome) => outcome.standing?.ahead).length,
+    forkGap: fosterOutcomes.reduce(
+      (gap, outcome) =>
+        outcome.standing?.ahead
+          ? {
+              theirOnly: gap.theirOnly + outcome.standing.theirOnly,
+              hereOnly: gap.hereOnly + outcome.standing.hereOnly,
+            }
+          : gap,
+      { theirOnly: 0, hereOnly: 0 },
+    ),
     liveWriters: [...fosterOutcomes, ...restoreOutcomes]
       .map((outcome) => outcome.live)
       .filter((id): id is string => Boolean(id)),

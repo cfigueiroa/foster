@@ -44,6 +44,7 @@ import { assertPurgeConfirmed, purgeConversations, summarisePurge } from '../eng
 import { findDuplicates, type DuplicateReport } from '../engine/duplicates.js';
 import {
   DEFAULT_MAX_LOST,
+  DEFAULT_MAX_LOST_SHARE,
   planConsolidation,
   type ConsolidationEntry,
 } from '../engine/consolidate.js';
@@ -1285,6 +1286,11 @@ program
     'leave a fork alone when the halves not kept hold more records than this',
     String(DEFAULT_MAX_LOST),
   )
+  .option(
+    '--max-lost-share <percent>',
+    'leave a fork alone when the halves not kept are worth more than this much of the one that stays',
+    String(Math.round(DEFAULT_MAX_LOST_SHARE * 100)),
+  )
   .option('--undo', 'put repointed cards back where the app had them')
   .option('--restart', 'restart Claude Desktop afterwards')
   .option('--json', 'machine-readable output')
@@ -1296,6 +1302,7 @@ program
       to?: string;
       session?: string[];
       maxLost?: string;
+      maxLostShare?: string;
       undo?: boolean;
       restart?: boolean;
       json?: boolean;
@@ -1314,10 +1321,18 @@ program
       throw new Error(`--max-lost wants a whole number of records, not "${opts.maxLost}".`);
     }
 
+    const maxLostShare = Number(opts.maxLostShare);
+    if (!Number.isFinite(maxLostShare) || maxLostShare < 0 || maxLostShare > 100) {
+      throw new Error(
+        `--max-lost-share wants a percentage between 0 and 100, not "${opts.maxLostShare}".`,
+      );
+    }
+
     const entries = planConsolidation({
       store,
       ledger,
       maxLost,
+      maxLostShare: maxLostShare / 100,
       ...(opts.to === undefined ? {} : { to: opts.to }),
       ...(opts.session === undefined ? {} : { sessionIds: opts.session }),
     });
@@ -1351,7 +1366,19 @@ program
         ),
       );
       if (diverged.length > 0) {
-        console.log(pc.dim(`${diverged.length} left alone — raise --max-lost to include them.`));
+        // Two gates, so "raise --max-lost" is only the whole answer when that is
+        // what stopped every one of them. The per-fork lines above already name
+        // the right flag with the right number; this one stops contradicting them.
+        const byShare = diverged.some((entry) => entry.divergedBy === 'share');
+        const byCount = diverged.some((entry) => entry.divergedBy !== 'share');
+        const raise = byShare && byCount ? '' : byShare ? ' --max-lost-share' : ' --max-lost';
+        console.log(
+          pc.dim(
+            raise === ''
+              ? `${diverged.length} left alone — each says above what would include it.`
+              : `${diverged.length} left alone — raise${raise} to include them.`,
+          ),
+        );
       }
       if (appMade.length > 0) {
         console.log(pc.dim(`${appMade.length} left to the app — see above.`));
@@ -1519,12 +1546,19 @@ function divergedLines(entry: ConsolidationEntry): string[] {
   const held = entry.fork.branches
     .map((branch) => `${shortConversation(branch.cliSessionId)} holds ${branch.only}`)
     .join(', ');
+  const tip = entry.fork.branches[0]!;
+  // Named after the test that actually stopped it. Offering --max-lost under a
+  // fork the share test caught would send the reader to a flag that changes
+  // nothing for it, however high they set it.
+  const share = tip.total > 0 ? Math.round((entry.fork.lost / tip.total) * 100) : 100;
+  const wayOut =
+    entry.divergedBy === 'share'
+      ? `    one row would hide ${entry.fork.lost} of them — ${share}% of the ${tip.total} that would stay, so --max-lost-share ${share} to do it anyway`
+      : `    one row would hide ${entry.fork.lost} of them — --max-lost ${entry.fork.lost} to do it anyway`;
   return [
     `${pc.dim('·')} ${entry.title}  ${pc.dim(shortId(entry.account.accountUuid))}`,
     pc.dim(`    left alone: ${held} records no other half has`),
-    pc.dim(
-      `    one row would hide ${entry.fork.lost} of them — --max-lost ${entry.fork.lost} to do it anyway`,
-    ),
+    pc.dim(wayOut),
   ];
 }
 
