@@ -92,55 +92,120 @@ export function heldInMemory(
  */
 export type RemovalGuard = (store: StoreLayout, fosterings: ActiveFostering[]) => void;
 
-/** Gate for rewriting a card in place. Injectable for the same reason as above. */
-export type WriteGuard = (store: StoreLayout, paths: string[]) => void;
+/**
+ * A card a repoint wants to rewrite, with what decides whether the app holds it.
+ *
+ * `native` — the app wrote this card, so it has always had it. `fosteredAt` is
+ * present only for foster's own copies, from the ledger entry that recorded one.
+ */
+export interface WritableCard {
+  path: string;
+  native: boolean;
+  fosteredAt?: number;
+}
 
 /**
- * Refuse to rewrite cards while an app that holds them is running.
+ * Gate for rewriting cards in place. Injectable for the same reason as above.
  *
- * Stricter than removal, and deliberately so. Removal can reason about *which*
- * copies the app could be holding, because a copy written after it started was
- * never read. A card being repointed is the opposite case by definition: it is a
- * row the user can see, which means the app read it at startup and has it in
- * memory. Anything it writes back — a focus timestamp is enough — carries the
- * pointer the app remembers and quietly undoes the write.
+ * Returns the split rather than a yes or no: the answer stopped being the same
+ * for every card in the batch, and a guard that could only throw forced the
+ * caller to ask a second, uninjectable question to find out which ones. A guard
+ * that refuses outright still may — throwing is how "none of these" is said.
+ */
+export type WriteGuard = (
+  store: StoreLayout,
+  cards: WritableCard[],
+) => { writable: WritableCard[]; held: WritableCard[] };
+
+/**
+ * Whether a running app has this card in memory.
  *
- * So the question is only whether an app holds the installation, and the answer
- * needs no process start time to be trustworthy.
+ * The hazard is the one removal has: a card the app holds is one it may write
+ * back at any time — a focus timestamp is enough — carrying the pointer the app
+ * remembers and quietly undoing the write.
+ *
+ * This used to be asked of the installation rather than the card, on the
+ * reasoning that a row being repointed is "one the user can see, which means the
+ * app read it at startup". That is true of a card the app wrote, and false of a
+ * copy foster wrote after the app started: the app is past its one read of the
+ * directory, so that file is not in memory at all — which is why it takes a
+ * restart to appear, and why it cannot be opened, retitled or refocused in the
+ * meantime. It is the same fact `heldInMemory` uses to let `return` remove such
+ * a copy while the app runs, applied to a write instead of a delete.
+ *
+ * The conservative answers stay conservative: a native card is held for as long
+ * as the app runs, and so is any copy when the app's start time cannot be read.
+ */
+export function appHolds(card: WritableCard, desktop: DesktopState): boolean {
+  if (card.native || card.fosteredAt === undefined) return true;
+  if (desktop.startedAt === undefined) return true;
+  return card.fosteredAt < desktop.startedAt;
+}
+
+/**
+ * Split the batch into what can be written now and what the app is holding.
+ *
+ * Grouped by the installation each card lives in, not by the store foster
+ * resolved: cards can sit in another profile, and asking this app about a file
+ * another app is holding answers about the wrong process.
+ */
+export function partitionWritable(
+  cards: WritableCard[],
+  list: ProcessLister = readProcesses,
+): { writable: WritableCard[]; held: WritableCard[] } {
+  const writable: WritableCard[] = [];
+  const held: WritableCard[] = [];
+  const desktops = new Map<string, DesktopState | undefined>();
+
+  for (const card of cards) {
+    // A path with no file is nothing to protect; the write itself will report it.
+    if (!existsSync(card.path)) {
+      writable.push(card);
+      continue;
+    }
+    const root = comparablePath(storeRootOfCopy(card.path));
+    if (!desktops.has(root)) {
+      desktops.set(
+        root,
+        lockfileHeld(layoutFor(root)) ? inspectDesktopFor(storeIdentity(root), list) : undefined,
+      );
+    }
+    const desktop = desktops.get(root);
+    if (desktop?.running && appHolds(card, desktop)) held.push(card);
+    else writable.push(card);
+  }
+
+  return { writable, held };
+}
+
+/**
+ * The same split, refusing outright when none of it can be written.
+ *
+ * Throwing is how "none of these" is said — that is the case the message was
+ * written for, and it belongs at the top of the run rather than repeated under
+ * every row. With something to do, the caller reports the held ones beside the
+ * ones that moved: one native card in a batch of fifteen used to refuse the
+ * other fourteen, which is a whole tidy-up abandoned for the one part of it that
+ * has to wait.
  */
 export function assertCardsWritable(
   store: StoreLayout,
-  paths: string[],
+  cards: WritableCard[],
   list: ProcessLister = readProcesses,
-): void {
-  // Grouped by the installation each card lives in, not by the store foster
-  // resolved: cards can sit in another profile, and asking this app about a file
-  // another app is holding answers about the wrong process.
-  const counts = new Map<string, number>();
-  for (const file of paths) {
-    if (!existsSync(file)) continue;
-    const root = comparablePath(storeRootOfCopy(file));
-    counts.set(root, (counts.get(root) ?? 0) + 1);
-  }
+): { writable: WritableCard[]; held: WritableCard[] } {
+  const split = partitionWritable(cards, list);
+  if (split.writable.length > 0 || split.held.length === 0) return split;
 
-  let held = 0;
-  const busy = new Set<string>();
-  for (const [root, count] of counts) {
-    if (!lockfileHeld(layoutFor(root))) continue;
-    if (!inspectDesktopFor(storeIdentity(root), list).running) continue;
-    held += count;
-    busy.add(root);
-  }
-
-  if (held === 0) return;
-
+  const busy = new Set(split.held.map((card) => comparablePath(storeRootOfCopy(card.path))));
+  const count = split.held.length;
   const where =
     busy.size === 1 && busy.has(comparablePath(store.root))
       ? 'Claude Desktop is running'
       : `Claude Desktop is running on ${busy.size === 1 ? 'the installation holding them' : `${busy.size} installations holding them`}`;
 
   throw new AppRunningError(
-    `${where} and has ${held} of these ${held === 1 ? 'card' : 'cards'} loaded.\n` +
+    `${where} and has ${count} of these ${count === 1 ? 'card' : 'cards'} loaded.
+` +
       'A card it holds is one it will write back from memory, pointer and all, so the change ' +
       'would not survive. Close the app first — foster can do that for you.',
   );
