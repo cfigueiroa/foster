@@ -314,12 +314,22 @@ something this tool does.
 Everywhere else, foster removes only what foster wrote. A repoint is the exception, and it carries
 the guarantees that exception has to earn.
 
-It refuses while an app holding the card is running — stricter than `return`, which can reason about
-which copies the app could have loaded. A card being repointed is by definition a row you can see,
-which means the app read it at startup and will write it back from memory, pointer and all. The
-ledger records where the card was, the date it wore and where to find it, so `--undo` needs no scan
-and works for an account nobody is signed into. A card moved twice still goes back to where the app
-had it, not to where it stopped along the way.
+It refuses to rewrite a card a running app is holding, because that card will be written back from
+memory, pointer and all, and the move would not survive. That question is asked of each card rather
+than of the installation, the same way `return` asks it: a card the app wrote is held for as long as
+the app runs, and so is a copy that already existed when it started, but a copy foster wrote
+afterwards was never read — the app is past its one read of the directory, which is why it takes a
+restart to appear and why nothing can retitle or refocus it in the meantime.
+
+The practical shape of that: **consolidate before the restart, not after**. A sweep and the tidy-up
+that follows it can run back to back on one closed-then-reopened app, where doing it the other way
+round hands every fresh copy to the app first and then finds them all held. What cannot be helped is
+a card the app itself made; those wait, and are reported as waiting rather than taking the rest of
+the batch down with them.
+
+The ledger records where the card was, the date it wore and where to find it, so `--undo` needs no
+scan and works for an account nobody is signed into. A card moved twice still goes back to where the
+app had it, not to where it stopped along the way.
 
 What it will not touch is a second card the _app_ made for the same work. Those are reported and left
 alone, for the reason `return` leaves them alone: deleting somebody else's file on the strength of a
