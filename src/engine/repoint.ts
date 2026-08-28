@@ -1,10 +1,12 @@
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
+import { listActive, project } from '../ledger/project.js';
 import type { RepointedCard } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
 import { assertCardsWritable, type WriteGuard } from './safety.js';
+import { comparablePath } from '../domain/paths.js';
 
 /**
  * Move a card onto another conversation, and nothing else.
@@ -69,13 +71,48 @@ export function repointCards(
   const { store, ledger, dryRun = false, guard = assertCardsWritable } = options;
   const outcomes: RepointOutcome[] = [];
 
-  if (!dryRun && requests.length > 0)
-    guard(
-      store,
-      requests.map((request) => request.path),
-    );
+  // Cards the running app is holding, which this run has to leave alone. Empty on
+  // a dry run, which writes nothing and so has nothing to be held back from.
+  const holding = new Set<string>();
+
+  if (!dryRun && requests.length > 0) {
+    // What the ledger knows about each card, so the question can be asked of
+    // *this* card rather than of the installation. A copy foster wrote after the
+    // app started was never read by it.
+    const fosteredAt = new Map<string, number>();
+    for (const fostering of listActive(project(ledger.read()))) {
+      fosteredAt.set(comparablePath(fostering.copyPath), fostering.fosteredAt);
+    }
+    const cards = requests.map((request) => {
+      const at = fosteredAt.get(comparablePath(request.path));
+      return {
+        path: request.path,
+        native: request.native,
+        ...(at === undefined ? {} : { fosteredAt: at }),
+      };
+    });
+
+    // One question, through the injectable seam. The guard refuses outright when
+    // none of the batch can be written; what comes back otherwise is the split.
+    const { held } = guard(store, cards);
+    for (const card of held) holding.add(comparablePath(card.path));
+  }
 
   for (const request of requests) {
+    if (holding.has(comparablePath(request.path))) {
+      const data = readSessionFile(request.path);
+      outcomes.push({
+        path: request.path,
+        sessionId: data?.sessionId ?? '',
+        title: data?.title ?? request.path,
+        status: 'skipped',
+        detail: 'Claude Desktop has this card loaded — close it and run this again',
+        ...(data?.cliSessionId ? { from: data.cliSessionId } : {}),
+        to: request.to,
+      });
+      continue;
+    }
+
     const data = readSessionFile(request.path);
     if (!data) {
       outcomes.push({
