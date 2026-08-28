@@ -152,6 +152,22 @@ export function buildFosterCopy(
   delete copy.error;
   delete copy.errorAt;
 
+  // What made the original invisible outside its own account, dropped so the copy
+  // is an ordinary conversation.
+  //
+  // Unconditional, because a copy is never the task. The schedule lives in the
+  // account that owns it and keeps running there; carrying the id across would
+  // name a task this account does not have, and the app would file the row where
+  // it files scheduled tasks — which is to say, not under Recents. The
+  // conversation is the part worth having, and without the id it is just a
+  // conversation. `lastFocusedAt` is set for the same reason restore sets it: a
+  // card without one counts as never opened, which is the other way to be
+  // correct and invisible.
+  if (copy.scheduledTaskId !== undefined) {
+    delete copy.scheduledTaskId;
+    copy.lastFocusedAt = source.lastFocusedAt ?? options.now ?? Date.now();
+  }
+
   copy.sessionId = options.sessionId ?? mintSessionId();
   // A session with no title would otherwise become a copy titled with nothing but
   // the marker — "↪ " — which says it is a copy and nothing else. Saying it had

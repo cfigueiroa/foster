@@ -82,6 +82,44 @@ describe('fosterSessions', () => {
     expect(skipped!.detail).toContain('scheduled-task');
   });
 
+  it('brings a scheduled task across when asked, as an ordinary conversation', () => {
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-00000000005b',
+      scheduledTaskId: 'nightly',
+      // The ordinary case: a task that runs unattended was never opened, and that
+      // is the other reason the app would refuse to list it.
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, scheduled);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeScheduled: true,
+    });
+    const outcome = outcomes.find((o) => o.originSessionId === scheduled.sessionId);
+    expect(outcome!.status).toBe('fostered');
+
+    // The point of the flag: a copy that kept either mark would be written and
+    // then silently never listed.
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as Record<string, unknown>;
+    expect(copy.scheduledTaskId).toBeUndefined();
+    expect(copy.lastFocusedAt).toEqual(expect.any(Number));
+    expect(copy.cliSessionId).toBe(scheduled.cliSessionId);
+  });
+
+  it('leaves the scheduled task itself alone in the account that owns it', () => {
+    const scheduled = session({
+      sessionId: '00000000-0000-4000-8000-00000000005c',
+      scheduledTaskId: 'nightly',
+    });
+    const originPath = writeSession(store, OLD_ACCOUNT, scheduled);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), includeScheduled: true });
+
+    const origin = JSON.parse(readFileSync(originPath, 'utf8')) as Record<string, unknown>;
+    expect(origin.scheduledTaskId).toBe('nightly');
+  });
+
   it('writes nothing on a dry run', () => {
     const sessions = seed();
     const [outcome] = fosterSessions(sessions, { ...opts(), dryRun: true });

@@ -94,9 +94,11 @@ so anyone who did not know the flag finished with a tenth of the work done and n
 Archived copies **stay archived**. They arrive in the app's archived view rather than reappearing in
 Recents — bringing the conversation across is the point, not undoing the decision to tuck it away.
 
-It also counts what can never come: scheduled tasks, sessions never opened, and files over the
-10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
-unmentioned reads as having brought everything.
+It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
+the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
+unmentioned reads as having brought everything. One of the three has a way out — see
+[scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
+under a flat "never".
 
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
@@ -923,9 +925,10 @@ foster --store "$env:LOCALAPPDATA\Claude-Work" foster --from-store "<the default
 
 An account can hold several organizations and the sidebar only reads one of them, so any
 organization other than that one is a valid source — including another organization of the account
-you are already signed into. Sessions that could never appear in the sidebar are always excluded —
+you are already signed into. Sessions that could not appear in the sidebar are excluded by default —
 scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
-refuses to load. `list --all` shows them anyway.
+refuses to load. `list --all` shows them anyway, and `--include-scheduled` brings the first of the
+three across as ordinary conversations.
 
 Archived sessions are excluded too, but for a different reason and with a way out. Archiving is a
 decision you made, not a limitation of the file: the session has a place in the app, just not in
@@ -933,6 +936,19 @@ Recents. A sweep should not drag back what you tucked away, so `--archived` is o
 only card a conversation has left is archived in an account you are not signed into, it is the only
 way to reach it at all. The copy keeps the flag and lands in the destination's archived view, which
 brings the conversation across without undoing your decision about it.
+
+### A scheduled task's conversation
+
+A scheduled task is excluded for a reason that turns out to be narrower than it looks. What the app
+refuses to list under Recents is the **card**, because it carries a `scheduledTaskId`; the
+conversation behind it is an ordinary transcript. So a copy of one is only invisible if it keeps
+that field — and `--include-scheduled` drops it, along with giving the copy a focus time, since a
+card without one counts as never opened and is the other way to be correct and invisible.
+
+It is opt-in because the copy is not the task. The schedule, its trigger and its history stay in
+the account that owns them, and nothing runs again; what crosses is the reading of what it did.
+That is a different thing from what the row meant in its own account, so it is asked for rather
+than swept up. The original is left untouched, still a scheduled task where it belongs.
 
 ### A copy can be the last card its conversation has
 
