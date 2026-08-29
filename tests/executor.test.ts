@@ -107,6 +107,63 @@ describe('fosterSessions', () => {
     expect(copy.cliSessionId).toBe(scheduled.cliSessionId);
   });
 
+  it('refuses a spawned session by default, saying which reason held it', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005d',
+      spawnedFrom: { sessionId: 'local_parent', taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), opts());
+    const skipped = outcomes.find((o) => o.originSessionId === spawned.sessionId);
+
+    expect(skipped!.status).toBe('skipped');
+    expect(skipped!.detail).toContain('spawned-task');
+  });
+
+  it('brings a spawned session across when asked, as an ordinary conversation', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005e',
+      spawnedFrom: { sessionId: 'local_parent', taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeSpawned: true,
+    });
+    const outcome = outcomes.find((o) => o.originSessionId === spawned.sessionId);
+    expect(outcome!.status).toBe('fostered');
+
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as Record<string, unknown>;
+    expect(copy.spawnedFrom).toBeUndefined();
+    expect(copy.lastFocusedAt).toEqual(expect.any(Number));
+    // The conversation is the part worth having, and it is shared, not copied.
+    expect(copy.cliSessionId).toBe(spawned.cliSessionId);
+  });
+
+  /**
+   * The two flags are separate questions. Asking for schedules and getting
+   * background work as well would be the kind of quiet over-reach that makes a
+   * sweep untrustworthy.
+   */
+  it('--include-scheduled does not smuggle spawned sessions in with it', () => {
+    const spawned = session({
+      sessionId: '00000000-0000-4000-8000-00000000005f',
+      spawnedFrom: { taskId: 'task_1' },
+      lastFocusedAt: undefined,
+    });
+    writeSession(store, OLD_ACCOUNT, spawned);
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      includeScheduled: true,
+    });
+    expect(outcomes.find((o) => o.originSessionId === spawned.sessionId)!.status).toBe('skipped');
+  });
+
   it('leaves the scheduled task itself alone in the account that owns it', () => {
     const scheduled = session({
       sessionId: '00000000-0000-4000-8000-00000000005c',

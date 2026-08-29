@@ -433,3 +433,38 @@ function headRecords(file: string, bytes = HEAD_BYTES): Record<string, unknown>[
   }
   return records;
 }
+
+/**
+ * How much conversation sits behind each of the ids named.
+ *
+ * The question this answers is "is there anything there", asked of sessions the
+ * sidebar will never show. An id with no transcript maps to 0 rather than being
+ * left out, because "measured, and empty" is the answer that matters: it is what
+ * separates a record nobody ever opened from work that ran somewhere else.
+ *
+ * A conversation split across installations counts as the sum of its files, the
+ * same way an orphan does.
+ */
+export function transcriptBytes(
+  ids: Iterable<string>,
+  projectsDirs: string | string[],
+): Map<string, number> {
+  const wanted = new Set(ids);
+  const out = new Map<string, number>();
+  if (wanted.size === 0) return out;
+
+  const index = indexAllTranscripts(projectsDirs);
+  for (const id of wanted) {
+    let total = 0;
+    for (const file of index.get(id) ?? []) {
+      try {
+        total += statSync(file).size;
+      } catch {
+        // Unreadable counts as nothing rather than aborting the measurement:
+        // a file that cannot be sized is one foster could not bring across.
+      }
+    }
+    out.set(id, total);
+  }
+  return out;
+}

@@ -1,5 +1,6 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
+import { describeUnfosterable } from '../domain/fostering.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
@@ -606,18 +607,12 @@ export function sweepSummary(report: SweepReport): string[] {
  */
 export function neverComesLine(never: NeverComes): string {
   if (never.total === 0) return '';
-  const names: Record<Unfosterable, string> = {
-    'scheduled-task': 'scheduled task',
-    'never-opened': 'never opened',
-    'too-large': "over the app's size limit",
-    archived: 'archived',
-    'already-a-copy': 'already a copy',
-  };
   const detail = Object.entries(never.byReason)
-    .map(([reason, count]) => `${count} ${names[reason as Unfosterable]}`)
+    .map(([reason, count]) => `${count} ${describeUnfosterable(reason as Unfosterable)}`)
     .join(', ');
   const one = never.total === 1;
-  const scheduledOnly = never.byReason['scheduled-task'] ?? 0;
+  const scheduledOnly =
+    (never.byReason['scheduled-task'] ?? 0) + (never.byReason['spawned-task'] ?? 0);
   // "Can never come" stopped being true of scheduled tasks the moment there was a
   // flag for them, and a sentence that overstates the gap is as misleading as one
   // that hides it. Said plainly instead when any of the count has a way out.
@@ -630,7 +625,20 @@ export function neverComesLine(never: NeverComes): string {
   // id is an ordinary row — and leaving the count under a flat "never" sent
   // people looking for a gap that a flag closes.
   const scheduled = never.byReason['scheduled-task'] ?? 0;
-  return scheduled > 0
-    ? `${line}\nThe scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`
-    : line;
+  const spawned = never.byReason['spawned-task'] ?? 0;
+  const ways: string[] = [];
+  if (scheduled > 0) {
+    ways.push(
+      `The scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`,
+    );
+  }
+  // Said separately from the schedules, and worth saying: a spawned session is
+  // the one entry here that routinely holds a whole piece of work nothing else
+  // points at. Left under a flat "never" it reads as an empty record.
+  if (spawned > 0) {
+    ways.push(
+      `The background ${spawned === 1 ? 'one is' : 'ones are'} too: foster --include-spawned.`,
+    );
+  }
+  return ways.length > 0 ? [line, ...ways].join('\n') : line;
 }

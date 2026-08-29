@@ -44,6 +44,15 @@ export interface CodeSessionData {
   bridgeSessionIds?: string[];
   /** Present on sessions created by a scheduled task; those are listed elsewhere in the app. */
   scheduledTaskId?: string;
+  /**
+   * Present on sessions the app spawned from a background-task chip.
+   *
+   * The same shape of thing as `scheduledTaskId`: the conversation ran on its
+   * own, unattended, so it never got a focus time and never reached Recents.
+   * What it did is an ordinary transcript, and can be substantial — this was
+   * found on a session carrying 562 turns of work that had no card anywhere.
+   */
+  spawnedFrom?: { sessionId?: string; taskId?: string; title?: string };
   isArchived?: boolean;
   model?: string;
   /** A stale failure from the origin account; rendered as a warning badge. Stripped when fostering. */
@@ -60,7 +69,7 @@ export interface CodeSessionData {
  * over 10 MB while loading, so a copy of one would be written and never listed.
  */
 export type Unfosterable =
-  'scheduled-task' | 'never-opened' | 'archived' | 'already-a-copy' | 'too-large';
+  'scheduled-task' | 'spawned-task' | 'never-opened' | 'archived' | 'already-a-copy' | 'too-large';
 
 export interface DiscoveredSession {
   /** Absolute path of the session JSON. */
@@ -68,6 +77,16 @@ export interface DiscoveredSession {
   /** The account directory it was found in — the only thing binding it to an account. */
   account: AccountRef;
   data: CodeSessionData;
+  /**
+   * Bytes of transcript behind a session that has no card of its own to show it.
+   *
+   * Only ever filled in for sessions held back by `never-opened`, and only by
+   * the surfaces that report them, because answering it means indexing the
+   * transcript directories. `undefined` means "not measured", `0` means the
+   * conversation is not on disk at all — a distinction worth keeping, since the
+   * whole point is telling an abandoned record apart from real work.
+   */
+  transcriptBytes?: number;
   /**
    * A copy previously written by foster, rather than a session the app itself created.
    * Detected via the _foster marker, so a rescan never mistakes copies for new discoveries.
