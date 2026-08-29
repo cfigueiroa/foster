@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { selectByIds } from '../src/domain/filter.js';
-import type { DiscoveredSession } from '../src/domain/types.js';
+import { selectFosterSessions } from '../src/ops/foster.js';
+import type { DiscoveredSession, Unfosterable } from '../src/domain/types.js';
 import { OLD_ACCOUNT, session } from './helpers/store.js';
 
 const found = (sessionId: string): DiscoveredSession => ({
@@ -46,5 +47,59 @@ describe('selectByIds', () => {
     const { selected, unmatched } = selectByIds(sessions, ['00000000']);
     expect(selected).toHaveLength(2);
     expect(unmatched).toEqual([]);
+  });
+});
+
+/**
+ * An id that names a session foster is holding back.
+ *
+ * The old answer was "No session matches <id>", under advice to go and look at
+ * `foster list` — where the session is, with its reasons in the row. Two
+ * readings of that are both wrong: the id is a typo, or the session is gone.
+ * Measured on a real store, it cost three attempts at a correct id before the
+ * reason was found by other means.
+ */
+describe('naming a session that is held back', () => {
+  const held = (reasons: Unfosterable[]): DiscoveredSession => ({
+    ...found(A),
+    reasons,
+  });
+
+  it('says why, instead of claiming nothing matches', () => {
+    expect(() => selectFosterSessions([], [`local_${A}`], [held(['never-opened'])])).toThrow(
+      /never opened/,
+    );
+  });
+
+  it('does not send the reader off to check an id that was right', () => {
+    expect(() => selectFosterSessions([], [`local_${A}`], [held(['never-opened'])])).not.toThrow(
+      /No session matches/,
+    );
+  });
+
+  it('names the flag that would include it', () => {
+    expect(() => selectFosterSessions([], [`local_${A}`], [held(['archived'])])).toThrow(
+      /--archived/,
+    );
+    expect(() => selectFosterSessions([], [`local_${A}`], [held(['spawned-task'])])).toThrow(
+      /--include-spawned/,
+    );
+  });
+
+  /**
+   * `never-opened` on its own has no flag. Offering one would be worse than
+   * offering none: the reader would try it and get the same refusal back.
+   */
+  it('offers no flag when there is none that lifts the reason', () => {
+    expect(() => selectFosterSessions([], [`local_${A}`], [held(['never-opened'])])).not.toThrow(
+      /Add --/,
+    );
+  });
+
+  it('still says nothing matches for an id that names nothing', () => {
+    const missing = '00000000-0000-4000-8000-0000000000c3';
+    expect(() => selectFosterSessions([], [`local_${missing}`], [held(['archived'])])).toThrow(
+      /No session matches/,
+    );
   });
 });

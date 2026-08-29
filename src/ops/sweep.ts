@@ -139,7 +139,16 @@ export interface SweepReport {
  * of the sweep — and neither is `already-a-copy`, which describes something that
  * is already here.
  */
-export const NEVER_COMES: readonly Unfosterable[] = ['scheduled-task', 'never-opened', 'too-large'];
+export const NEVER_COMES: readonly Unfosterable[] = [
+  'scheduled-task',
+  // Before `never-opened`, and the order is what makes the report useful: one
+  // session is counted under the first reason that applies, and a spawned one is
+  // always also never opened. Counted under the latter it would be reported as a
+  // gap with no way out, when `--include-spawned` is exactly the way out.
+  'spawned-task',
+  'never-opened',
+  'too-large',
+];
 
 export function runSweep(options: SweepOptions): SweepReport {
   const { store, ledger, dryRun = false } = options;

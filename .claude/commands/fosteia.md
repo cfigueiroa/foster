@@ -45,17 +45,38 @@ on rather than re-deriving it:
   for rows that are not there;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run
   `foster sweep --yes` again and say why;
-- the "can never come" line, when there is one: scheduled tasks, sessions never opened, files
-  over the 10 MB the app refuses to load. Report the count rather than leaving a silent gap;
+- the "can never come" line, when there is one: scheduled tasks, background tasks, sessions
+  never opened, files over the 10 MB the app refuses to load. Report the count rather than
+  leaving a silent gap — and pass on the ways out the line itself offers, because most of that
+  count has one: `--include-scheduled` for the scheduled ones, `--include-spawned` for the
+  background ones;
+- **what is behind anything still counted as never opened.** That reason is a missing focus
+  time and nothing else, so an abandoned record and a conversation that ran its whole life
+  outside the app look identical in the count. Measure before calling it a loss:
+
+  ```
+  foster list --all --json
+  ```
+
+  Each row carries `transcriptBytes` for those sessions — `0` means there is genuinely nothing
+  there, and anything substantial is work with no card anywhere. Name the ones that are not
+  empty, with their size; do not report them as an unreachable gap without saying what is in
+  them. This is not hypothetical: one such session held 1.4 MB of finished work whose change
+  had already been merged;
+
 - whether the restart happened or is waiting on them.
 
 ## Never, in this command
 
 - **`foster purge`.** It destroys transcripts irreversibly and is not part of any sweep.
   Not through the CLI, not through a shell.
-- **`foster consolidate --yes`.** `sweep` reports forks and stops there on purpose: choosing
-  which half of a fork survives hides records, and that is the user's decision. Pass the
-  suggestion along and stop.
+- **`foster consolidate --yes`.** `sweep` reports forks and stops there on purpose: which half
+  of a fork the sidebar shows is the user's call, not yours. Pass it on as something they can
+  act on rather than as a dead end — `foster consolidate --dry-run` lists the forks with their
+  record counts, the defaults (`--max-lost 200`, `--max-lost-share 33`) already leave a fork
+  alone when the discarded half is worth more than a third of the one that stays, and
+  `foster consolidate --undo` puts the cards back. It wants the app closed, so it belongs in
+  the same terminal as the restart.
 - **`foster live --stop`.** It is `taskkill /F /T`, so whatever that session had not written is
   lost. If `sweep` reports a live writer, pass it on — finishing there is the user's call, not a
   step for you to take.

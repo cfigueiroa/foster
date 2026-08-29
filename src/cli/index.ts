@@ -116,6 +116,8 @@ import {
   matchOrganizationPrefix,
   listFosterable,
   liveConversationIds,
+  measureNeverOpened,
+  scanFosterable,
   selectFosterSessions,
 } from '../ops/foster.js';
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
@@ -247,11 +249,13 @@ function filterFrom(opts: {
   all?: boolean;
   archived?: boolean;
   includeScheduled?: boolean;
+  includeSpawned?: boolean;
 }): SessionFilter {
   const filter: SessionFilter = {
     includeUnfosterable: opts.all ?? false,
     includeArchived: opts.archived ?? false,
     includeScheduled: opts.includeScheduled ?? false,
+    includeSpawned: opts.includeSpawned ?? false,
   };
   if (opts.title) filter.title = opts.title;
   if (opts.cwd) filter.cwd = opts.cwd;
@@ -273,6 +277,10 @@ function filterOptions(command: Command): Command {
     .option(
       '--include-scheduled',
       "include scheduled tasks' conversations; the copy is an ordinary session, not a task",
+    )
+    .option(
+      '--include-spawned',
+      'include conversations the app spawned from a background task; the copy is an ordinary session',
     );
 }
 
@@ -596,8 +604,13 @@ sourceOptions(
     const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()));
 
     if (opts.json) {
+      // Measured here and nowhere else in this command: a caller reading JSON is
+      // the one deciding what a held-back session is worth, and "never opened"
+      // alone does not say whether there is a conversation behind it. Null when
+      // the question does not apply, so a reader can tell "not measured" from a
+      // measurement of nothing.
       print(
-        candidates.map((session) => ({
+        measureNeverOpened(candidates).map((session) => ({
           sessionId: session.data.sessionId,
           title: session.data.title ?? null,
           cwd: session.data.cwd ?? null,
@@ -606,6 +619,7 @@ sourceOptions(
           organizationUuid: session.account.organizationUuid,
           fosterable: session.reasons.length === 0,
           reasons: session.reasons,
+          transcriptBytes: session.transcriptBytes ?? null,
         })),
       );
       return;
@@ -645,6 +659,7 @@ sourceOptions(
     since?: string;
     archived?: boolean;
     includeScheduled?: boolean;
+    includeSpawned?: boolean;
     session?: string[];
     from?: string;
     fromOrg?: string;
@@ -684,10 +699,18 @@ sourceOptions(
 
   if (opts.session?.length) {
     try {
-      candidates = selectFosterSessions(candidates, opts.session);
+      // The unfiltered scan comes along so an id naming a session that exists but
+      // is held back can be answered with the reason and the flag that lifts it.
+      // Pointing at "foster list" was actively wrong there: the session is on it.
+      candidates = selectFosterSessions(
+        candidates,
+        opts.session,
+        scanFosterable(sourceStore, sources, ledger),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}\nRun "foster list" to see the ids.`);
+      const unknown = message.startsWith('No session matches');
+      throw new Error(unknown ? `${message}\nRun "foster list --all" to see the ids.` : message);
     }
   }
 
@@ -707,6 +730,7 @@ sourceOptions(
     dryRun,
     includeArchived: Boolean(opts.archived),
     includeScheduled: Boolean(opts.includeScheduled),
+    includeSpawned: Boolean(opts.includeSpawned),
     // A conversation with a live writer branches when its copy is opened, which
     // is the one failure that reads as foster losing work. Reported, never
     // refused: copying the session you are working in is the ordinary case.

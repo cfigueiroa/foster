@@ -50,6 +50,13 @@ export interface FosterOptions {
    */
   includeScheduled?: boolean;
   /**
+   * Accept a conversation the app spawned from a background-task chip. Forwarded
+   * here for the same reason the one above is: this re-judges every session, and
+   * an option that reached only the scan turns "available" into "skipped"
+   * between one screen and the next.
+   */
+  includeSpawned?: boolean;
+  /**
    * Conversations a live `claude` process is writing right now, lower-cased.
    *
    * Not a gate — fostering one is perfectly sound, and it is the common case when
@@ -149,6 +156,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     const blocking = blockingReasons(session, {
       includeArchived: options.includeArchived,
       includeScheduled: options.includeScheduled,
+      includeSpawned: options.includeSpawned,
     });
     if (blocking.length > 0) {
       outcomes.push({
