@@ -569,28 +569,33 @@ export function retitleLine(outcome: RetitleOutcome): string {
  */
 export function sweepSummary(report: SweepReport): string[] {
   const lines: string[] = [];
-  const { fostered, restored } = report;
+  const { fostered, restored, branches } = report;
 
+  // The rows the branch pass added are copies too, and a first line that said
+  // "0 fostered" over seven of them read as a run that did nothing.
+  const rows = branches.counts.fostered;
+  const forBranches = rows > 0 ? `, ${rows} row${rows === 1 ? '' : 's'} for branches` : '';
   lines.push(
     report.dryRun
       ? pc.bold(
-          `Dry run: ${fostered.counts.fostered} would be fostered, ${restored.counts.fostered} restored.`,
+          `Dry run: ${fostered.counts.fostered} would be fostered${forBranches}, ` +
+            `${restored.counts.fostered} restored.`,
         )
       : pc.bold(
-          `${fostered.counts.fostered} fostered, ${restored.counts.fostered} restored, ` +
-            `${fostered.counts.skipped + restored.counts.skipped} skipped, ` +
-            `${fostered.counts.failed + restored.counts.failed} failed.`,
+          `${fostered.counts.fostered} fostered${forBranches}, ${restored.counts.fostered} restored, ` +
+            `${fostered.counts.skipped + branches.counts.skipped + restored.counts.skipped} skipped, ` +
+            `${fostered.counts.failed + branches.counts.failed + restored.counts.failed} failed.`,
         ),
   );
 
-  // Said whenever any copy carries the flag, because the archived view is where
-  // they land and Recents is where people look. A run that brought a hundred
+  // Said whenever any row lands there, because the archived view is where they
+  // land and Recents is where people look. A run that brought a hundred
   // sessions and appears to have brought none is this sentence going unsaid.
   if (report.archived > 0) {
     const one = report.archived === 1;
     lines.push(
-      `${report.archived} of them ${one ? 'was archived and stays' : 'were archived and stay'} archived — ` +
-        `${one ? 'it is' : 'they are'} in the app's archived view, not in Recents.`,
+      `${report.archived} of the rows ${one ? 'is' : 'are'} in the app's archived view, not in Recents — ` +
+        'archived copies stay archived, and the branches that stopped are filed there.',
     );
   }
 
@@ -598,9 +603,12 @@ export function sweepSummary(report: SweepReport): string[] {
   if (confirmation) {
     lines.push(
       confirmation.exhausted
-        ? pc.green('Nothing is left to sweep: a second run would foster 0 and restore 0.')
+        ? pc.green(
+            'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, and restore 0.',
+          )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
+              `${confirmation.branches} row(s) still to add or mark for branches, ` +
               `${confirmation.restorable} still to restore. Run it again.`,
           ),
     );
@@ -609,7 +617,6 @@ export function sweepSummary(report: SweepReport): string[] {
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
 
-  const { branches } = report;
   if (branches.forks.length > 0) {
     const forks = branches.forks.length;
     const added = branches.counts.fostered;
