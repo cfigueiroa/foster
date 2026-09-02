@@ -1,8 +1,16 @@
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
+import { DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import type { AccountRef, DiscoveredSession, StoreLayout, Unfosterable } from '../domain/types.js';
 import { requireCurrentAccount } from '../engine/account.js';
+import {
+  applyBranchCards,
+  planBranchCards,
+  type BranchesResult,
+  type ForkOutcome,
+} from '../engine/branchCards.js';
+import { forksOf } from '../engine/branches.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import {
   fosterSessions,
@@ -10,9 +18,14 @@ import {
   type Outcome,
   type OutcomeStatus,
 } from '../engine/executor.js';
+import { lineage, lineageAt, type Lineage } from '../engine/lineage.js';
+import type { RetitleOutcome } from '../engine/retitle.js';
+import { sidebarFrom } from '../engine/sidebar.js';
 import type { Ledger } from '../ledger/log.js';
+import { copySessionIds, project } from '../ledger/project.js';
 import { findRestorable } from '../store/restore.js';
-import { listFosterable, liveConversationIds, scanFosterable } from './foster.js';
+import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import { fosterableFrom, liveConversationIds } from './foster.js';
 
 /**
  * The whole job, in one call: everything that can be in this account's sidebar,
@@ -25,21 +38,29 @@ import { listFosterable, liveConversationIds, scanFosterable } from './foster.js
  * sessions without it and 141 with it, so anyone who did not know the flag
  * finished with a tenth of the work done and no way to tell.
  *
- * Two operations, in this order, then a re-scan that proves they are exhausted:
+ * Three passes, in this order, then a re-plan that proves they are exhausted:
  *
  *  1. copy every fosterable session from the other accounts, archived included —
  *     the copy keeps the flag, so it lands in the destination's archived view
  *     rather than quietly reappearing in Recents;
- *  2. bring back conversations the app deleted that nothing still points at.
+ *  2. give every branch of a forked conversation a row of its own: the branch
+ *     that carried on keeps its title, the rest are marked stale and filed in
+ *     the archived view — see `branchCards.ts`;
+ *  3. bring back conversations the app deleted that nothing still points at.
  *
- * Order matters: a conversation a fresh copy now points at is not lost any more,
- * so restoring after fostering asks the second question against the answer to
- * the first rather than against the state before it.
+ * Order matters. A conversation a fresh copy now points at is not lost any more,
+ * so restoring after fostering asks the third question against the answer to
+ * the first rather than against the state before it; and a fork's members are
+ * kept out of the first pass so each row is written once, with its final title.
  *
  * What is deliberately *not* here: `purge`, which destroys transcripts and is
- * part of no sweep, and `consolidate`, which decides which half of a fork
- * survives — a reading decision that hides records, and the user's to make. A
- * fork is counted and reported, and the sweep stops there.
+ * part of no sweep. `consolidate` is not either, but for the opposite reason —
+ * with a row per branch nothing is hidden, so collapsing a fork to one row is a
+ * tidy-up for whoever wants one, not a decision the sweep has to leave open.
+ *
+ * One scan, one lineage, one transcript index for the whole run. The passes
+ * used to build their own, and a `--yes` run read every card in the store five
+ * times over and walked the transcript tree six.
  */
 
 export interface SweepOptions {
@@ -48,11 +69,18 @@ export interface SweepOptions {
   /** Where the copies go. Defaults to the account the app is signed into. */
   target?: AccountRef;
   prefix?: string;
+  /**
+   * What a row for a branch that stopped wears in front of its title; `{when}`
+   * is where the moment of its last answer goes. See `domain/stale.ts`.
+   */
+  staleTemplate?: string;
   /** When true, plan everything and write nothing. */
   dryRun?: boolean;
   /** Extra Claude config directories to search for deleted conversations. */
   configDirs?: string[];
   env?: NodeJS.ProcessEnv;
+  /** Transcript `projects/` directories, for tests. Wins over `env` and `configDirs`. */
+  projectsDirs?: string[];
   /**
    * Conversations a live `claude` is writing. Injected so the engine stays free
    * of process inspection; production reads the real registry.
@@ -63,6 +91,13 @@ export interface SweepOptions {
 export interface SweepPhase {
   outcomes: Outcome[];
   counts: Record<OutcomeStatus, number>;
+}
+
+/** The branch pass: what it brought, what it marked, per fork. */
+export interface BranchesPhase extends BranchesResult {
+  counts: Record<OutcomeStatus, number>;
+  /** The template the stale rows were marked with, for the summary to quote. */
+  staleTemplate: string;
 }
 
 /**
@@ -79,10 +114,10 @@ export interface NeverComes {
 }
 
 /**
- * The re-scan, so the result says the sweep is finished rather than leaving the
+ * The re-plan, so the result says the sweep is finished rather than leaving the
  * user to re-run it and find out.
  *
- * Both numbers are what a second run *would write*, not what a second scan would
+ * Every number is what a second run *would write*, not what a second scan would
  * list: an origin session stays on disk after being fostered and keeps showing up
  * in the scan, and a conversation the user deleted in the app is offered by
  * `restore` for ever while the engine rightly refuses to resurrect it. Counting
@@ -90,6 +125,8 @@ export interface NeverComes {
  */
 export interface SweepConfirmation {
   fosterable: number;
+  /** Rows a second branch pass would still add or mark. */
+  branches: number;
   restorable: number;
   exhausted: boolean;
 }
@@ -99,24 +136,13 @@ export interface SweepReport {
   target: AccountRef;
   dryRun: boolean;
   fostered: SweepPhase;
+  branches: BranchesPhase;
   restored: SweepPhase;
-  /** Copies that arrive in the destination's archived view rather than in Recents. */
+  /**
+   * Rows that end up in the destination's archived view rather than in Recents:
+   * copies of archived sessions, and the branches that stopped.
+   */
   archived: number;
-  /**
-   * Sessions the destination refused because it already shows the half of a fork
-   * that carried on. Reported with no command attached — see the module note.
-   */
-  forks: number;
-  /**
-   * What those forks would cost, summed: records the halves this account does not
-   * show hold alone, and records its own halves hold alone.
-   *
-   * The count on its own does not say whether the reader is looking at a rounding
-   * error or at half their work. One store had a fork worth 7 records against
-   * 2625 and another worth 2352 against 3609; "1 session is the half of a fork"
-   * described both, and only one of them was worth stopping for.
-   */
-  forkGap: { theirOnly: number; hereOnly: number };
   /**
    * Conversations a live `claude` process is writing right now.
    *
@@ -141,10 +167,33 @@ export interface SweepReport {
  */
 export const NEVER_COMES: readonly Unfosterable[] = ['scheduled-task', 'never-opened', 'too-large'];
 
+/** What every pass of one run shares, read once. */
+interface SweepRun {
+  store: StoreLayout;
+  ledger: Ledger;
+  target: AccountRef;
+  sources: AccountRef[];
+  prefix: string;
+  staleTemplate: string;
+  configDirs: string[];
+  env: NodeJS.ProcessEnv;
+  live: ReadonlySet<string>;
+  kin: Lineage;
+  /** The sources' cards, classified by the ledger. Never written to, so read once. */
+  fromSources: DiscoveredSession[];
+}
+
+interface Passes {
+  fostered: Outcome[];
+  branches: BranchesResult;
+  restored: Outcome[];
+}
+
 export function runSweep(options: SweepOptions): SweepReport {
   const { store, ledger, dryRun = false } = options;
   const env = options.env ?? process.env;
   const prefix = options.prefix ?? DEFAULT_PREFIX;
+  const staleTemplate = options.staleTemplate ?? DEFAULT_STALE_TEMPLATE;
   const configDirs = options.configDirs ?? [];
   const accounts = listAccountDirs(store);
   const target = options.target ?? requireCurrentAccount(store, accounts);
@@ -158,53 +207,41 @@ export function runSweep(options: SweepOptions): SweepReport {
       !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
   );
 
+  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
+  const scanned = scanStore(store, copySessionIds(ledger.read()));
+  const run: SweepRun = {
+    store,
+    ledger,
+    target,
+    sources,
+    prefix,
+    staleTemplate,
+    configDirs,
+    env,
+    live,
+    kin,
+    fromSources: fromAccounts(scanned, sources),
+  };
+
   // Counted before anything is written, from the unfiltered scan: the same set of
   // files, judged by the same rules that decide what the sweep may offer.
-  const neverComes = countNeverComes(scanFosterable(store, sources, ledger));
+  const neverComes = countNeverComes(run.fromSources);
 
-  const candidates = fosterable(store, ledger, sources);
-  const fosterOutcomes = fosterSessions(candidates, {
-    store,
-    ledger,
-    target,
-    prefix,
-    dryRun,
-    includeArchived: true,
-    live,
-    env,
-  });
-
-  // After the copies, deliberately. A conversation one of them now points at has
-  // stopped being orphaned, and offering to restore it would only add a second
-  // card for work that is already back.
-  const restoreOutcomes = fosterSessions(restorable(store, env, configDirs), {
-    store,
-    ledger,
-    target,
-    prefix,
-    dryRun,
-    env,
-  });
+  const passes = runPasses(run, fromAccounts(scanned, [target]), dryRun);
 
   const report: SweepReport = {
     store: store.root,
     target,
     dryRun,
-    fostered: phase(fosterOutcomes),
-    restored: phase(restoreOutcomes),
-    archived: countArchived(candidates, fosterOutcomes),
-    forks: fosterOutcomes.filter((outcome) => outcome.standing?.ahead).length,
-    forkGap: fosterOutcomes.reduce(
-      (gap, outcome) =>
-        outcome.standing?.ahead
-          ? {
-              theirOnly: gap.theirOnly + outcome.standing.theirOnly,
-              hereOnly: gap.hereOnly + outcome.standing.hereOnly,
-            }
-          : gap,
-      { theirOnly: 0, hereOnly: 0 },
-    ),
-    liveWriters: [...fosterOutcomes, ...restoreOutcomes]
+    fostered: phase(passes.fostered),
+    branches: {
+      ...passes.branches,
+      counts: summariseOutcomes(passes.branches.outcomes),
+      staleTemplate,
+    },
+    restored: phase(passes.restored),
+    archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
+    liveWriters: [...passes.fostered, ...passes.branches.outcomes, ...passes.restored]
       .map((outcome) => outcome.live)
       .filter((id): id is string => Boolean(id)),
     neverComes,
@@ -215,23 +252,67 @@ export function runSweep(options: SweepOptions): SweepReport {
   // claim about a run that never happened.
   if (dryRun) return report;
 
-  return { ...report, confirmation: confirm(options, target, sources, prefix, live) };
+  return { ...report, confirmation: confirm(run) };
 }
 
-function fosterable(
-  store: StoreLayout,
-  ledger: Ledger,
-  sources: AccountRef[],
-): DiscoveredSession[] {
-  return listFosterable(store, sources, ledger, { includeArchived: true });
-}
+/**
+ * The three passes over one reading of the destination.
+ *
+ * Fork members are split off before the first pass. Fostering one there would
+ * give whichever branch the scan listed first a row with a clean title — and
+ * the scan lists by card recency, which the app inflates on the row that was
+ * merely clicked — so the branch pass would then have to rewrite a file the
+ * first pass just wrote. Split first, every row is written once, with the title
+ * it keeps.
+ */
+function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolean): Passes {
+  const { store, ledger, target, sources, prefix, staleTemplate, configDirs, env, live, kin } = run;
+  const here = sidebarFrom(hereCards, kin);
 
-function restorable(
-  store: StoreLayout,
-  env: NodeJS.ProcessEnv,
-  configDirs: string[],
-): DiscoveredSession[] {
-  return findRestorable(store, env, configDirs).map((entry) => entry.session);
+  const candidates = fosterableFrom(run.fromSources, sources, { includeArchived: true });
+  const orphans = findRestorable(store, env, configDirs, [], {
+    cards: [...run.fromSources, ...hereCards],
+    transcripts: kin.transcripts(),
+  }).map((entry) => entry.session);
+
+  const forks = forksOf(
+    [...hereCards, ...candidates, ...orphans]
+      .map((session) => session.data.cliSessionId)
+      .filter((id): id is string => Boolean(id)),
+    kin,
+  );
+  const inFork = (session: DiscoveredSession): boolean =>
+    forks.of(session.data.cliSessionId) !== undefined;
+
+  const shared = { store, ledger, target, dryRun, live, env, kin, here, includeArchived: true };
+
+  const fostered = fosterSessions(
+    candidates.filter((session) => !inFork(session)),
+    { ...shared, prefix },
+  );
+
+  const plans = planBranchCards({
+    forks,
+    here,
+    hereCards,
+    candidates: candidates.filter(inFork),
+    orphans: orphans.filter(inFork),
+    prefix,
+    staleTemplate,
+    live,
+    state: project(ledger.read()),
+  });
+  const branches = applyBranchCards(plans, { ...shared, prefix });
+
+  // After the copies, deliberately. A conversation one of them now points at has
+  // stopped being orphaned, and offering to restore it would only add a second
+  // card for work that is already back.
+  const restored = fosterSessions(
+    orphans.filter((session) => !inFork(session)),
+    { ...shared, prefix },
+  );
+
+  return { fostered, branches, restored };
 }
 
 /**
@@ -240,37 +321,27 @@ function restorable(
  * Planned rather than listed, and planned as a dry run so the check itself
  * cannot record anything: the question is whether the sweep has anything left to
  * do, not whether the scan still finds the files it already copied.
+ *
+ * Only the destination is read again. The sources were never written to, and
+ * the transcripts are what they were; what changed is the one directory the
+ * sweep wrote into.
  */
-function confirm(
-  options: SweepOptions,
-  target: AccountRef,
-  sources: AccountRef[],
-  prefix: string,
-  live: ReadonlySet<string>,
-): SweepConfirmation {
-  const { store, ledger } = options;
-  const env = options.env ?? process.env;
-  const plan = (sessions: DiscoveredSession[], includeArchived: boolean): number =>
-    summariseOutcomes(
-      fosterSessions(sessions, {
-        store,
-        ledger,
-        target,
-        prefix,
-        dryRun: true,
-        includeArchived,
-        live,
-        env,
-      }),
-    ).fostered;
+function confirm(run: SweepRun): SweepConfirmation {
+  const { store, ledger, target } = run;
+  const hereCards = scanAccount(store, target, copySessionIds(ledger.read()));
+  const again = runPasses(run, hereCards, true);
 
-  const stillFosterable = plan(fosterable(store, ledger, sources), true);
-  const stillRestorable = plan(restorable(store, env, options.configDirs ?? []), false);
+  const fosterable = summariseOutcomes(again.fostered).fostered;
+  const branches =
+    summariseOutcomes(again.branches.outcomes).fostered +
+    again.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
+  const restorable = summariseOutcomes(again.restored).fostered;
 
   return {
-    fosterable: stillFosterable,
-    restorable: stillRestorable,
-    exhausted: stillFosterable === 0 && stillRestorable === 0,
+    fosterable,
+    branches,
+    restorable,
+    exhausted: fosterable === 0 && branches === 0 && restorable === 0,
   };
 }
 
@@ -307,14 +378,19 @@ function countNeverComes(sessions: DiscoveredSession[]): NeverComes {
  * Worth its own number: they are the bulk of what a sweep brings and they are
  * exactly the rows nobody finds, because Recents does not list them.
  */
-function countArchived(candidates: DiscoveredSession[], outcomes: Outcome[]): number {
-  const archived = new Set(
-    candidates.filter((s) => s.data.isArchived).map((s) => s.data.sessionId),
-  );
+function countArchived(sources: DiscoveredSession[], outcomes: Outcome[]): number {
+  const archived = new Set(sources.filter((s) => s.data.isArchived).map((s) => s.data.sessionId));
   return outcomes.filter(
     (outcome) => outcome.status === 'fostered' && archived.has(outcome.originSessionId),
   ).length;
 }
+
+/** Rows the branch pass marked stale, for callers that count rather than list. */
+export function countRetitled(outcomes: RetitleOutcome[]): number {
+  return outcomes.filter((outcome) => outcome.status === 'retitled').length;
+}
+
+export type { ForkOutcome };
 
 /**
  * Whether foster may restart the app from where it is standing, and the line to

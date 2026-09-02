@@ -169,3 +169,41 @@ describe('forksOf', () => {
     expect(forksOf([TRUNK, TIP], lineageAt(dirs)).all()).toHaveLength(0);
   });
 });
+
+describe('the last answer', () => {
+  it('is kept apart from the last record, which a click on a stale row moves', () => {
+    const answered = JSON.stringify({
+      uuid: uuid(),
+      type: 'assistant',
+      timestamp: '2026-09-01T21:10:00.000Z',
+    });
+    const clicked = JSON.stringify({
+      uuid: uuid(),
+      type: 'user',
+      timestamp: '2026-09-02T11:24:00.000Z',
+    });
+    const dirs = transcripts({
+      [TRUNK]: [META, record(ROOT), answered, clicked],
+      [TIP]: [META, record(ROOT), record(uuid()), record(uuid()), record(uuid())],
+    });
+
+    const trunk = weighBranches([TRUNK, TIP], lineageAt(dirs)).find(
+      (weight) => weight.cliSessionId === TRUNK,
+    );
+
+    expect(trunk!.lastAssistantAt).toBe(Date.parse('2026-09-01T21:10:00.000Z'));
+    expect(trunk!.lastMessageAt).toBe(Date.parse('2026-09-02T11:24:00.000Z'));
+  });
+
+  it('is absent from a branch nothing was ever answered on', () => {
+    const dirs = transcripts({
+      [TRUNK]: [META, record(ROOT), record(uuid())],
+      [TIP]: [META, record(ROOT), record(uuid()), record(uuid())],
+    });
+
+    const [tip] = weighBranches([TRUNK, TIP], lineageAt(dirs));
+
+    expect(tip!.lastAssistantAt).toBeUndefined();
+    expect(tip!.lastMessageAt).toBeDefined();
+  });
+});

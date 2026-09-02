@@ -5,7 +5,9 @@ import {
   formatAge,
   formatBytes,
   groupByAccount,
+  sweepSummary,
 } from '../src/cli/render.js';
+import type { SweepReport } from '../src/ops/sweep.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -168,5 +170,64 @@ describe('formatAge', () => {
 
   it('does not report the future as a very long time ago', () => {
     expect(formatAge(now + 86_400_000, now)).toBe('just now');
+  });
+});
+
+describe('sweepSummary', () => {
+  const counts = { fostered: 0, skipped: 0, failed: 0, returned: 0 };
+  const report = (overrides: Partial<SweepReport> = {}): SweepReport => ({
+    store: 'C:\\store',
+    target: { accountUuid: ACCOUNT_A, organizationUuid: ORG_1 },
+    dryRun: false,
+    fostered: { outcomes: [], counts },
+    branches: {
+      forks: [],
+      outcomes: [],
+      retitled: [],
+      archived: 0,
+      counts,
+      staleTemplate: '(stale, stopped {when}) ',
+    },
+    restored: { outcomes: [], counts },
+    archived: 0,
+    liveWriters: [],
+    neverComes: { total: 0, byReason: {} },
+    ...overrides,
+  });
+
+  it('says one row per branch, and never that the app has to be closed', () => {
+    const lines = sweepSummary(
+      report({
+        branches: {
+          forks: [{ root: 'r', tip: 't', rows: [], brought: [], retitled: [], skipped: [] }],
+          outcomes: [],
+          retitled: [
+            {
+              path: 'p',
+              sessionId: 's',
+              from: 'Work',
+              to: '(stale, stopped 01/09 18:10) Work',
+              status: 'retitled',
+              as: 'stale',
+            },
+          ],
+          archived: 2,
+          counts: { ...counts, fostered: 1 },
+          staleTemplate: '(stale, stopped {when}) ',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      '1 forked conversation, one row per branch: 1 row added, 1 retitled, 2 filed in the archived view as stale.',
+    );
+    expect(lines).toContain('"(stale, stopped {when})"');
+    expect(lines).not.toMatch(/needs the app closed/);
+  });
+
+  it('says nothing about forks when there are none', () => {
+    expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/fork/);
   });
 });

@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { accountDir } from '../src/domain/paths.js';
+import { formatStamp } from '../src/domain/stale.js';
 import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
-import { restartPlan, runSweep } from '../src/ops/sweep.js';
+import { listRetitled, project } from '../src/ledger/project.js';
+import { restartPlan, runSweep, type SweepOptions } from '../src/ops/sweep.js';
 import { scanAccount, SESSION_FILE_MAX_BYTES } from '../src/store/scanner.js';
 import { sweepEverything, WRITES_DISABLED } from '../src/agent/tools.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
@@ -43,14 +45,34 @@ beforeEach(() => {
   mkdirSync(accountDir(store, OLD_ACCOUNT), { recursive: true });
 });
 
-function sweep(dryRun = false) {
-  return runSweep({ store, ledger, target: NEW_ACCOUNT, dryRun, env, configDirs: [] });
+function sweep(dryRun = false, extra: Partial<SweepOptions> = {}) {
+  return runSweep({
+    store,
+    ledger,
+    target: NEW_ACCOUNT,
+    dryRun,
+    env,
+    configDirs: [],
+    // The transcript seam keeps unit tests out of the real ~/.claude, so the
+    // tree this test wrote is named outright.
+    projectsDirs: [path.join(configDir, 'projects')],
+    ...extra,
+  });
 }
 
 function copies(): CodeSessionData[] {
   return scanAccount(store, NEW_ACCOUNT)
     .filter((entry) => entry.isCopy)
     .map((entry) => entry.data);
+}
+
+/** A card in the destination, read back from disk. */
+function card(id: string): CodeSessionData {
+  const found = scanAccount(store, NEW_ACCOUNT).find(
+    (entry) => entry.data.sessionId === `local_${id}`,
+  );
+  if (!found) throw new Error(`no card local_${id}`);
+  return found.data;
 }
 
 /** The markers the app leaves behind on a deletion: one per id, holding the time. */
@@ -119,7 +141,12 @@ describe('runSweep', () => {
     // Not "the scan found nothing": the origin sessions are still on disk and a
     // second scan still lists them. What has to be zero is what a second run
     // would write.
-    expect(report.confirmation).toEqual({ fosterable: 0, restorable: 0, exhausted: true });
+    expect(report.confirmation).toEqual({
+      fosterable: 0,
+      branches: 0,
+      restorable: 0,
+      exhausted: true,
+    });
   });
 
   it('has nothing to confirm on a dry run, and says so by leaving it out', () => {
@@ -184,6 +211,412 @@ describe('runSweep', () => {
     expect(parts).toBe(neverComes.total);
     expect(neverComes.byReason).toMatchObject({ 'scheduled-task': 1 });
     expect(neverComes.byReason['never-opened']).toBeUndefined();
+  });
+});
+
+/**
+ * One conversation, forked: the row here is the branch that stopped, the branch
+ * that carried on sits in another account. The sweep used to refuse the second
+ * and report that nothing was left; now every branch gets a row, and the rows
+ * say which one to open.
+ */
+const ROOT = '00000000-0000-4000-8000-0000000000b0';
+const TRUNK = '00000000-0000-4000-8000-0000000000b1';
+const TIP = '00000000-0000-4000-8000-0000000000b2';
+const TRUNK_CARD = '00000000-0000-4000-8000-0000000000b3';
+const TIP_CARD = '00000000-0000-4000-8000-0000000000b4';
+const OTHER_CARD = '00000000-0000-4000-8000-0000000000b5';
+const SHARED = '00000000-0000-4000-8000-0000000000b6';
+const TRUNK_ANSWER = '00000000-0000-4000-8000-0000000000b7';
+const TRUNK_CLICK = '00000000-0000-4000-8000-0000000000b8';
+const TIP_ONLY = [
+  '00000000-0000-4000-8000-0000000000b9',
+  '00000000-0000-4000-8000-0000000000ba',
+  '00000000-0000-4000-8000-0000000000bb',
+];
+const COPY_ID = '00000000-0000-4000-8000-0000000000bc';
+const SECOND_CARD = '00000000-0000-4000-8000-0000000000bd';
+
+/** The last answer on the branch that stopped, and the click that resumed it a day later. */
+const LAST_ANSWER = '2026-09-01T21:10:00.000Z';
+const LATER_CLICK = '2026-09-02T11:24:00.000Z';
+const STAMP = formatStamp(Date.parse(LAST_ANSWER));
+
+function rec(uuid: string, type: 'user' | 'assistant', timestamp: string) {
+  return { uuid, type, timestamp };
+}
+
+/**
+ * The trunk holds the shared history, one answer of its own, and the user
+ * record a click on the stale row appended a day later. The tip holds the same
+ * history and three records of its own — the branch that carried on.
+ */
+function fork(): void {
+  const meta = { type: 'custom-title', customTitle: 'Macs' };
+  transcript(TRUNK, [
+    meta,
+    rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+    rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+    rec(TRUNK_ANSWER, 'assistant', LAST_ANSWER),
+    rec(TRUNK_CLICK, 'user', LATER_CLICK),
+  ]);
+  transcript(TIP, [
+    meta,
+    rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+    rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+    rec(TIP_ONLY[0]!, 'user', '2026-09-02T10:00:00.000Z'),
+    rec(TIP_ONLY[1]!, 'assistant', '2026-09-02T10:05:00.000Z'),
+    rec(TIP_ONLY[2]!, 'assistant', '2026-09-02T11:14:00.000Z'),
+  ]);
+}
+
+describe('one row per branch', () => {
+  it('gives the branch that carried on a clean row, and marks the row here stale', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    // A fork member is never the ordinary pass's to copy: it would arrive with
+    // a clean title and need rewriting.
+    expect(report.fostered.counts.fostered).toBe(0);
+    expect(report.branches.forks).toHaveLength(1);
+    expect(report.branches.counts.fostered).toBe(1);
+
+    const tip = copies().find((data) => data.cliSessionId === TIP);
+    expect(tip).toMatchObject({ title: 'Macs', isArchived: false });
+
+    // Stamped with the last answer, not with the click that resumed it: the
+    // click is the newer record, and stamping it would call the stale row the
+    // newest thing here.
+    expect(card(TRUNK_CARD)).toMatchObject({
+      title: `(stale, stopped ${STAMP}) Macs`,
+      isArchived: true,
+    });
+
+    const events = ledger.read();
+    expect(events.find((event) => event.kind === 'fostered')).toMatchObject({
+      prefix: '',
+      originalTitle: 'Macs',
+    });
+    expect(events.find((event) => event.kind === 'card_retitled')).toMatchObject({
+      from: 'Macs',
+      to: `(stale, stopped ${STAMP}) Macs`,
+      fromArchived: false,
+      toArchived: true,
+      native: true,
+      as: 'stale',
+    });
+  });
+
+  it('brings the branch that stopped as a marked, archived row, from its most recent card', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: TRUNK_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs',
+        lastActivityAt: 1_700_000_100_000,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: OTHER_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs again',
+        lastActivityAt: 1_700_000_900_000,
+      }),
+    );
+
+    const report = sweep();
+
+    // One row for the branch, not one per card that holds it.
+    expect(report.branches.counts.fostered).toBe(1);
+    expect(copies()).toHaveLength(1);
+    expect(copies()[0]).toMatchObject({
+      cliSessionId: TRUNK,
+      title: `(stale, stopped ${STAMP}) Macs again`,
+      isArchived: true,
+    });
+    expect(report.branches.archived).toBe(1);
+    expect(report.archived).toBe(1);
+
+    const fostered = ledger.read().find((event) => event.kind === 'fostered');
+    expect(fostered).toMatchObject({
+      originSessionId: `local_${OTHER_CARD}`,
+      originalTitle: 'Macs again',
+      prefix: `(stale, stopped ${STAMP}) `,
+      archived: true,
+    });
+    // The row here is the branch that carried on, and is left exactly as it is.
+    expect(card(TIP_CARD).title).toBe('Macs');
+    expect(ledger.read().filter((event) => event.kind === 'card_retitled')).toHaveLength(0);
+  });
+
+  it('takes the mark off a row whose branch carried on, and lifts a flag foster set', () => {
+    fork();
+    const marked = '(stale, stopped 01/09 18:10) Macs';
+    const file = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: marked, isArchived: true }),
+    );
+    ledger.append({
+      kind: 'card_retitled',
+      sessionId: `local_${TIP_CARD}`,
+      target: NEW_ACCOUNT,
+      path: file,
+      from: 'Macs',
+      to: marked,
+      fromArchived: false,
+      toArchived: true,
+      native: true,
+      as: 'stale',
+    });
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(card(TIP_CARD)).toMatchObject({ title: 'Macs', isArchived: false });
+    expect(ledger.read().at(-1)).toMatchObject({
+      kind: 'card_retitled',
+      as: 'tip',
+      to: 'Macs',
+      toArchived: false,
+    });
+    // Back to what the app had, so the fold no longer lists it.
+    expect(listRetitled(project(ledger.read()))).toHaveLength(0);
+  });
+
+  it('leaves a flag the user set alone, even on the branch that carried on', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs', isArchived: true }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(card(TIP_CARD)).toMatchObject({ title: 'Macs', isArchived: true });
+  });
+
+  it('does not bring back a copy of a branch the user deleted in the app', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    const copyPath = path.join(accountDir(store, NEW_ACCOUNT), `local_${COPY_ID}.json`);
+    ledger.append({
+      kind: 'fostered',
+      originSessionId: `local_${TIP_CARD}`,
+      origin: OLD_ACCOUNT,
+      target: NEW_ACCOUNT,
+      copySessionId: `local_${COPY_ID}`,
+      copyPath,
+      cliSessionId: TIP,
+      prefix: '',
+    });
+    writeFileSync(
+      path.join(accountDir(store, NEW_ACCOUNT), `deleted_${COPY_ID}`),
+      '1700000500000',
+      'utf8',
+    );
+
+    const report = sweep();
+
+    expect(report.branches.counts.fostered).toBe(0);
+    expect(report.branches.outcomes[0]).toMatchObject({ status: 'skipped' });
+    expect(report.branches.outcomes[0]!.detail).toMatch(/deleted in the app/);
+    expect(copies()).toHaveLength(0);
+  });
+
+  it('settles: a second run adds nothing, marks nothing, and says so', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const first = sweep();
+    expect(first.confirmation).toEqual({
+      fosterable: 0,
+      branches: 0,
+      restorable: 0,
+      exhausted: true,
+    });
+
+    const second = sweep();
+    expect(second.branches.counts.fostered).toBe(0);
+    expect(second.branches.retitled.filter((o) => o.status === 'retitled')).toHaveLength(0);
+    expect(ledger.read().filter((event) => event.kind === 'card_retitled')).toHaveLength(1);
+  });
+
+  it('plans the same rows on a dry run, and writes none of them', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep(true);
+
+    expect(report.branches.counts.fostered).toBe(1);
+    expect(report.branches.retitled).toHaveLength(1);
+    expect(report.branches.retitled[0]).toMatchObject({ status: 'retitled', as: 'stale' });
+    expect(copies()).toHaveLength(0);
+    expect(card(TRUNK_CARD)).toMatchObject({ title: 'Macs', isArchived: false });
+    expect(ledger.read()).toHaveLength(0);
+  });
+
+  it('gives a deleted branch that carried on its row back, through the branch pass', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    // The tip has no card anywhere: the app deleted it and left the transcript.
+    tombstone([TIP]);
+
+    const report = sweep();
+
+    expect(report.restored.counts.fostered).toBe(0);
+    expect(report.branches.counts.fostered).toBe(1);
+    expect(copies().find((data) => data.cliSessionId === TIP)).toMatchObject({
+      title: '(recovered conversation)',
+      isArchived: false,
+    });
+    expect(card(TRUNK_CARD).title).toBe(`(stale, stopped ${STAMP}) Macs`);
+  });
+
+  it('marks every row the app made for a stale branch, and removes none of them', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: SECOND_CARD, cliSessionId: TRUNK, title: 'Macs (again)' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    expect(report.branches.retitled.filter((o) => o.status === 'retitled')).toHaveLength(2);
+    expect(card(TRUNK_CARD).title).toBe(`(stale, stopped ${STAMP}) Macs`);
+    expect(card(SECOND_CARD).title).toBe(`(stale, stopped ${STAMP}) Macs (again)`);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(3);
+  });
+
+  it('brings the branch that carried on even while something is writing it, and says so', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep(false, { live: new Set([TIP.toLowerCase()]) });
+
+    expect(report.branches.counts.fostered).toBe(1);
+    expect(report.liveWriters).toEqual([TIP]);
+  });
+
+  it('leaves a stale row alone while something is still writing its branch', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep(false, { live: new Set([TRUNK.toLowerCase()]) });
+
+    expect(card(TRUNK_CARD).title).toBe('Macs');
+    expect(report.branches.forks[0]!.skipped).toHaveLength(1);
+    expect(report.branches.forks[0]!.skipped[0]!.detail).toMatch(/live claude/);
+  });
+
+  it('marks in whatever words the caller chose', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep(false, { staleTemplate: '(defasada, parou {when}) ' });
+
+    expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
   });
 });
 
@@ -274,5 +707,62 @@ describe('sweep_everything', () => {
     expect(result.counts.fostered).toBe(1);
     expect(result.restart.command).toBe('foster app restart');
     expect(copies()).toHaveLength(1);
+  });
+});
+
+/**
+ * A branch every record of which the branch that carried on also holds — the
+ * shape a copy has when it was opened once and never written to again.
+ */
+describe('a branch with nothing of its own', () => {
+  const CONTAINED = '00000000-0000-4000-8000-0000000000be';
+  const CONTAINED_CARD = '00000000-0000-4000-8000-0000000000bf';
+
+  function contained(): void {
+    fork();
+    transcript(CONTAINED, [
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+    ]);
+  }
+
+  it('gets no row of its own: it would open nothing the clean row does not', () => {
+    contained();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: CONTAINED_CARD, cliSessionId: CONTAINED, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    expect(report.branches.counts.fostered).toBe(0);
+    expect(copies()).toHaveLength(0);
+    const row = report.branches.forks[0]!.rows.find((entry) => entry.cliSessionId === CONTAINED);
+    expect(row).toMatchObject({ only: 0, held: 0, action: 'none' });
+  });
+
+  it('is still marked stale when a row for it is already here', () => {
+    contained();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: CONTAINED_CARD, cliSessionId: CONTAINED, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(card(CONTAINED_CARD).title).toMatch(/^\(stale, stopped .*\) Macs$/);
+    expect(card(CONTAINED_CARD).isArchived).toBe(true);
   });
 });

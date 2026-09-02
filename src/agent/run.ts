@@ -43,8 +43,9 @@ Domain facts you can rely on:
 - Never advise deleting fostered sessions in the app's UI; return_fosterings is the way back.
 - "Bring everything here" is sweep_everything, not foster_sessions: foster_sessions leaves
   archived sessions behind (on one real store, 15 offered against 141) and cannot reach
-  conversations deleted in the app. sweep_everything does both and then re-scans to say whether
-  anything is left. It stops at forks on purpose — report them, never consolidate.
+  conversations deleted in the app. sweep_everything does both, gives every branch of a forked
+  conversation a row of its own (the branch that carried on keeps its title, the rest are marked
+  stale and archived), and re-scans to say whether anything is left. Never run consolidate.
 - \`foster purge\` destroys conversations on disk and cannot be undone. It is deliberately not one
   of your tools, and you must never run it through the shell either — not with --yes, not with
   --confirm, not to "clean up". If a task seems to call for it, say so and let the user run it.

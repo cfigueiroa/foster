@@ -845,9 +845,12 @@ export async function sweepFlow(
 
   const wouldFoster = plan.fostered.counts.fostered;
   const wouldRestore = plan.restored.counts.fostered;
+  const wouldBranch =
+    plan.branches.counts.fostered +
+    plan.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
   const never = neverComesLine(plan.neverComes);
 
-  if (wouldFoster === 0 && wouldRestore === 0) {
+  if (wouldFoster === 0 && wouldRestore === 0 && wouldBranch === 0) {
     ui.log.info('Nothing to sweep: everything that can be in this account already is.');
     // Still said. "Nothing to do" and "nothing to do, and 13 sessions will never
     // come" are different states, and only one of them explains a gap the user
@@ -859,11 +862,14 @@ export async function sweepFlow(
   ui.note(
     [
       `${wouldFoster} session(s) to copy from the other accounts, archived included.`,
+      `${wouldBranch} row(s) to add or mark for branches of forked conversations.`,
       `${wouldRestore} deleted conversation(s) to bring back.`,
       '',
       'Archived ones stay archived: they arrive in the app’s archived view, not in',
-      'Recents. Nothing is destroyed and nothing is merged — "Send them back" undoes',
-      'all of it.',
+      'Recents. A forked conversation gets one row per branch: the branch that',
+      'carried on keeps its title, the others are marked stale and filed away.',
+      'Nothing is destroyed and nothing is merged — "Send them back" removes the',
+      'copies.',
       ...(never ? ['', never] : []),
     ].join('\n'),
     'What the sweep would do',
@@ -884,14 +890,23 @@ export async function sweepFlow(
 
   try {
     const report = runSweep({ store, ledger, target: current, dryRun: false });
-    const written = [...report.fostered.outcomes, ...report.restored.outcomes];
+    const written = [
+      ...report.fostered.outcomes,
+      ...report.branches.outcomes,
+      ...report.restored.outcomes,
+    ];
     for (const outcome of written.slice(0, PREVIEW_LIMIT)) ui.log.message(outcomeLine(outcome));
     if (written.length > PREVIEW_LIMIT) {
       ui.log.message(pc.dim(`… and ${written.length - PREVIEW_LIMIT} more`));
     }
 
     ui.note(sweepSummary(report).join('\n\n'), 'Swept');
-    if (report.fostered.counts.fostered + report.restored.counts.fostered === 0) return;
+    const changed =
+      report.fostered.counts.fostered +
+      report.branches.counts.fostered +
+      report.branches.retitled.filter((outcome) => outcome.status === 'retitled').length +
+      report.restored.counts.fostered;
+    if (changed === 0) return;
 
     // Asked before offering, not after trying: restarting from a session the app
     // started would kill this one part-way through, and an offer that can only

@@ -1,6 +1,6 @@
 import { fosteringKey } from '../domain/fostering.js';
 import type { KnownIdentity } from '../domain/identity.js';
-import type { ActiveFostering, LedgerEvent, RepointedCard } from './types.js';
+import type { ActiveFostering, LedgerEvent, RepointedCard, RetitledCard } from './types.js';
 
 export type { KnownIdentity };
 
@@ -12,6 +12,8 @@ export interface LedgerState {
   identities: Map<string, KnownIdentity>;
   /** Cards sitting on a conversation the app did not put them on, keyed by session id. */
   repointed: Map<string, RepointedCard>;
+  /** Cards wearing a title, or an archived flag, the app did not give them, keyed by session id. */
+  retitled: Map<string, RetitledCard>;
 }
 
 /**
@@ -23,6 +25,7 @@ export function project(events: LedgerEvent[]): LedgerState {
   const labels = new Map<string, string>();
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
+  const retitled = new Map<string, RetitledCard>();
   // Which fostering a copy belongs to, so a repoint can find it. The fold is
   // keyed on the origin session, and a repoint knows only the card it rewrote.
   const fosteringOfCopy = new Map<string, string>();
@@ -73,6 +76,7 @@ export function project(events: LedgerEvent[]): LedgerState {
           cliSessionId: event.cliSessionId,
           originStore: event.originStore,
           fosteredAt: event.ts,
+          ...(event.archived ? { archivedByFoster: true } : {}),
         });
         fosteringOfCopy.set(event.copySessionId, key);
         break;
@@ -137,6 +141,33 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      case 'card_retitled': {
+        // The original title and flag are what the first write saw; later ones
+        // carry them forward, so the answer to "what did the app have here?" is
+        // the same however many sweeps have marked the card since. A card written
+        // back to exactly that stops being one of these.
+        const known = retitled.get(event.sessionId);
+        const from = known?.from ?? event.from;
+        const fromArchived = known ? known.fromArchived : event.fromArchived;
+        const archivedNow = event.toArchived ?? known?.toArchived;
+        const back = event.to === from && (archivedNow ?? false) === (fromArchived ?? false);
+        if (back) retitled.delete(event.sessionId);
+        else {
+          retitled.set(event.sessionId, {
+            sessionId: event.sessionId,
+            path: event.path,
+            target: event.target,
+            from,
+            to: event.to,
+            ...(fromArchived === undefined ? {} : { fromArchived }),
+            ...(archivedNow === undefined ? {} : { toArchived: archivedNow }),
+            native: event.native,
+            retitledAt: event.ts,
+          });
+        }
+        break;
+      }
+
       case 'account_switched':
       case 'conversation_purged':
       case 'failed':
@@ -146,12 +177,17 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels, identities, repointed };
+  return { active, labels, identities, repointed, retitled };
 }
 
 /** Cards currently pointed somewhere the app did not point them, oldest move first. */
 export function listRepointed(state: LedgerState): RepointedCard[] {
   return [...state.repointed.values()].sort((a, b) => a.repointedAt - b.repointedAt);
+}
+
+/** Cards wearing a title or flag the app did not give them, oldest write first. */
+export function listRetitled(state: LedgerState): RetitledCard[] {
+  return [...state.retitled.values()].sort((a, b) => a.retitledAt - b.retitledAt);
 }
 
 /**

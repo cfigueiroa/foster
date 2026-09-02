@@ -433,30 +433,44 @@ export function sweepEverything(ctx: AgentToolContext, args: SweepEverythingArgs
     ...(args.configDirs ? { configDirs: args.configDirs } : {}),
   });
 
-  const outcomes = [...report.fostered.outcomes, ...report.restored.outcomes];
+  const outcomes = [
+    ...report.fostered.outcomes,
+    ...report.branches.outcomes,
+    ...report.restored.outcomes,
+  ];
   const restart = restartPlan(store, env, ctx.processes);
+  const { branches } = report;
+  const retitled = branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
 
   return {
     dryRun,
     ...(gated ? { note: WRITES_DISABLED } : dryRun ? {} : { note: RESTART_NOTE }),
     target,
     counts: {
-      fostered: report.fostered.counts.fostered,
+      fostered: report.fostered.counts.fostered + branches.counts.fostered,
       restored: report.restored.counts.fostered,
-      skipped: report.fostered.counts.skipped + report.restored.counts.skipped,
-      failed: report.fostered.counts.failed + report.restored.counts.failed,
+      skipped:
+        report.fostered.counts.skipped + branches.counts.skipped + report.restored.counts.skipped,
+      failed:
+        report.fostered.counts.failed + branches.counts.failed + report.restored.counts.failed,
     },
     archived: report.archived,
     archivedNote:
       'Copies of archived sessions stay archived: they are in the app’s archived view, not in Recents.',
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
     neverComes: report.neverComes,
-    forks: report.forks,
-    ...(report.forks > 0
+    branches: {
+      forks: branches.forks.length,
+      added: branches.counts.fostered,
+      retitled,
+      archived: branches.archived,
+    },
+    ...(branches.forks.length > 0
       ? {
-          forksNote:
-            'A fork is one piece of work with two rows, and choosing which half survives hides ' +
-            'records. That is the user’s decision: report it and stop, never run consolidate.',
+          branchesNote:
+            'A forked conversation gets one row per branch: the branch that carried on keeps its ' +
+            `title, the others wear "${branches.staleTemplate.trim()}" and sit in the archived view. ` +
+            'Nothing is hidden and no decision is needed; consolidate is an optional tidy-up.',
         }
       : {}),
     ...(report.liveWriters.length > 0

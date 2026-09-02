@@ -2,7 +2,7 @@ import { applyFilter, byRecency, selectByIds, type SessionFilter } from '../doma
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds } from '../ledger/project.js';
-import { scanSources } from '../store/scanner.js';
+import { fromAccounts, scanSources, scanStore } from '../store/scanner.js';
 import { liveSessions, sessionRegistryRoots } from '../store/liveSessions.js';
 import { ambiguousIds, requireUniquePrefix } from '../domain/prefix.js';
 
@@ -19,7 +19,23 @@ export function listFosterable(
   ledger: Ledger,
   filter: SessionFilter = {},
 ): DiscoveredSession[] {
-  return byRecency(applyFilter(scanSources(store, sources, copySessionIds(ledger.read())), filter));
+  return fosterableFrom(scanStore(store, copySessionIds(ledger.read())), sources, filter);
+}
+
+/**
+ * The same answer from a scan the caller already holds.
+ *
+ * `scanned` has to be the whole store, classified by the ledger — what
+ * `scanStore(store, copySessionIds(...))` returns — because whether a copy is the
+ * last card of its conversation is decided against every account, the
+ * destination included. See `scanSources`.
+ */
+export function fosterableFrom(
+  scanned: DiscoveredSession[],
+  sources: AccountRef[],
+  filter: SessionFilter = {},
+): DiscoveredSession[] {
+  return byRecency(applyFilter(fromAccounts(scanned, sources), filter));
 }
 
 /**

@@ -290,3 +290,67 @@ describe('selectByTarget', () => {
     expect(picked.map((f) => f.originSessionId)).toEqual(['b1']);
   });
 });
+
+/**
+ * A title or flag foster rewrote on a card. The fold keeps what the app had,
+ * however many sweeps have marked the card since, and forgets the card once it
+ * is back to that.
+ */
+describe('card_retitled', () => {
+  const marked = {
+    kind: 'card_retitled' as const,
+    sessionId: 'local_card-1',
+    target: NEW_ACCOUNT,
+    path: '/store/new/local_card-1.json',
+    native: true,
+    as: 'stale' as const,
+  };
+  const STALE = '(stale, stopped 01/09 18:10) Work';
+  const LATER = '(stale, stopped 02/09 05:56) Work';
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+
+    expect(ledger.read()[0]).toMatchObject({ kind: 'card_retitled', to: STALE });
+  });
+
+  it('folds to the card, carrying the original title and flag across repeated marks', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({ ...marked, from: STALE, to: LATER });
+
+    expect(project(ledger.read()).retitled.get('local_card-1')).toMatchObject({
+      from: 'Work',
+      to: LATER,
+      fromArchived: false,
+      toArchived: true,
+    });
+  });
+
+  it('drops the card once it is back to what the app had', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({
+      ...marked,
+      from: STALE,
+      to: 'Work',
+      fromArchived: true,
+      toArchived: false,
+      as: 'tip',
+    });
+
+    expect(project(ledger.read()).retitled.size).toBe(0);
+  });
+
+  it('keeps the card while the title is back but the flag is not', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({ ...marked, from: STALE, to: 'Work', as: 'tip' });
+
+    expect(project(ledger.read()).retitled.get('local_card-1')).toMatchObject({
+      to: 'Work',
+      toArchived: true,
+    });
+  });
+});

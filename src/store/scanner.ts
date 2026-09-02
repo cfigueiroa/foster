@@ -96,8 +96,23 @@ export function scanSources(
   accounts: AccountRef[],
   copies: KnownCopies = NOTHING_KNOWN,
 ): DiscoveredSession[] {
+  return fromAccounts(scanStore(store, copies), accounts);
+}
+
+/**
+ * The sessions of a whole-store scan that sit in the accounts named.
+ *
+ * The scan is the expensive half — every card in every account, read and
+ * parsed — and a sweep asks this question of the same scan several times over,
+ * once per destination and once per set of sources. Splitting the filter out
+ * is what lets it be asked without reading the store again.
+ */
+export function fromAccounts(
+  sessions: DiscoveredSession[],
+  accounts: AccountRef[],
+): DiscoveredSession[] {
   const wanted = new Set(accounts.map(directoryOf));
-  return scanStore(store, copies).filter((session) => wanted.has(directoryOf(session.account)));
+  return sessions.filter((session) => wanted.has(directoryOf(session.account)));
 }
 
 function directoryOf(account: AccountRef): string {

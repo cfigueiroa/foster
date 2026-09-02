@@ -2,7 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { isSessionFileName } from '../domain/naming.js';
 import { comparablePath, listAgentAccountDirs } from '../domain/paths.js';
-import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
 import { scanStore } from './scanner.js';
 import { scanAllTombstones, type Tombstone } from './tombstones.js';
@@ -48,11 +48,19 @@ export interface OrphanSearch {
   includeAgent?: boolean;
   env?: NodeJS.ProcessEnv;
   configDirs?: string[];
+  /**
+   * `store`'s cards, when the caller has already read them. The store is still
+   * walked for its tombstones and Cowork cards; what this saves is reading every
+   * session file a second time in a run that just did so.
+   */
+  cards?: DiscoveredSession[];
+  /** The transcript index, when the caller already holds one — see `Lineage.transcripts`. */
+  transcripts?: ReadonlyMap<string, string[]>;
 }
 
 export function findOrphanedConversations(search: OrphanSearch): OrphanedConversation[] {
   const { store, env = process.env, configDirs = [], includeAgent = true } = search;
-  const transcripts = indexAllTranscripts(transcriptRoots(env, configDirs));
+  const transcripts = search.transcripts ?? indexAllTranscripts(transcriptRoots(env, configDirs));
   if (transcripts.size === 0) return [];
 
   const referenced = new Set<string>();
@@ -61,7 +69,8 @@ export function findOrphanedConversations(search: OrphanSearch): OrphanedConvers
     const key = comparablePath(scope.root);
     if (scanned.has(key)) continue;
     scanned.add(key);
-    for (const session of scanStore(scope)) {
+    const sessions = scope === store && search.cards ? search.cards : scanStore(scope);
+    for (const session of sessions) {
       if (session.data.cliSessionId) referenced.add(session.data.cliSessionId);
     }
     if (includeAgent) {

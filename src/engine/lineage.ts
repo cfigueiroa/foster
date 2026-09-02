@@ -1,6 +1,6 @@
 import {
   conversationRoot,
-  indexTranscripts,
+  indexAllTranscripts,
   scanConversation,
   transcriptRoots,
   type ConversationScan,
@@ -46,6 +46,15 @@ export interface Lineage {
    * six times over. Undefined when there is no transcript to read.
    */
   scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
+  /**
+   * Every transcript on disk, every path it occupies, keyed by conversation.
+   *
+   * The same directory walk the other answers are built on, exposed so a caller
+   * that also needs the whole index — the orphan search, which asks which
+   * transcripts nothing points at — walks the tree once with this rather than
+   * once more on its own. A sweep used to do that walk six times over.
+   */
+  transcripts(): ReadonlyMap<string, string[]>;
 }
 
 /**
@@ -60,14 +69,20 @@ export function useTranscriptRoots(dirs: string[] | undefined): void {
 }
 
 export function lineageAt(projectsDirs: string[]): Lineage {
-  let transcripts: Map<string, string> | undefined;
+  let index: Map<string, string[]> | undefined;
   const roots = new Map<string, string | undefined>();
   const scans = new Map<string, ConversationScan | undefined>();
 
+  const transcripts = (): Map<string, string[]> => {
+    index ??= indexAllTranscripts(projectsDirs);
+    return index;
+  };
+
+  // First path wins: the same conversation can be mirrored under a second
+  // project directory, and either copy opens the same session.
   const fileOf = (cliSessionId: string | undefined): string | undefined => {
     if (cliSessionId === undefined || cliSessionId === '') return undefined;
-    transcripts ??= indexTranscripts(projectsDirs);
-    return transcripts.get(cliSessionId);
+    return transcripts().get(cliSessionId)?.[0];
   };
 
   const rootOf = (cliSessionId: string | undefined): string | undefined => {
@@ -101,9 +116,18 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       scans.set(cliSessionId, scan);
       return scan;
     },
+
+    transcripts,
   };
 }
 
-export function lineage(env: NodeJS.ProcessEnv = process.env): Lineage {
-  return lineageAt(installedRoots ?? transcriptRoots(env));
+/**
+ * The lineage of everything this machine's Claude directories hold.
+ *
+ * `extra` is the caller's further config directories — the same list the
+ * orphan search takes — so a sweep asked to look in one more place reads its
+ * transcripts through the one index too.
+ */
+export function lineage(env: NodeJS.ProcessEnv = process.env, extra: string[] = []): Lineage {
+  return lineageAt(installedRoots ?? transcriptRoots(env, extra));
 }
