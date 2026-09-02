@@ -15,6 +15,7 @@ export type LedgerEvent =
   | ReturnedEvent
   | FosteringFollowedEvent
   | CardRepointedEvent
+  | CardRetitledEvent
   | ConversationPurgedEvent
   | OperationFailedEvent;
 
@@ -152,6 +153,13 @@ export interface FosteredEvent extends BaseEvent {
    */
   originStore?: string;
   prefix: string;
+  /**
+   * True when the copy was written archived by foster's own decision rather
+   * than because the source was. The branch pass files the branch that stopped
+   * in the archived view; should that branch later carry on and become the tip,
+   * this is what says the flag was foster's to lift, not the user's.
+   */
+  archived?: true;
 }
 
 export interface ReturnedEvent extends BaseEvent {
@@ -255,6 +263,38 @@ export interface CardRepointedEvent extends BaseEvent {
 }
 
 /**
+ * A card's title, and possibly its archived flag, rewritten by the sweep.
+ *
+ * The second write foster makes to a file it did not create, and a lighter one
+ * than a repoint: nothing about which conversation the row opens changes. A
+ * fork gives every branch a row, and this is how the rows that did not carry
+ * on come to say so — the title gains the stale mark, and the row moves to the
+ * archived view. Both fields are recorded before and after, so the log can say
+ * what the card wore when foster found it, and a later pass can tell a flag
+ * foster set from one the user set.
+ */
+export interface CardRetitledEvent extends BaseEvent {
+  kind: 'card_retitled';
+  /** The card's own session id, which the write does not change. */
+  sessionId: string;
+  /** The account directory it sits in. */
+  target: AccountRef;
+  path: string;
+  /** The title it wore before. */
+  from: string;
+  /** The title it wears now. */
+  to: string;
+  /** The archived flag before, when the write changed it. */
+  fromArchived?: boolean;
+  /** The archived flag after, when the write changed it. */
+  toArchived?: boolean;
+  /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
+  native: boolean;
+  /** Why: marked as the branch that stopped, or restored to the branch that carried on. */
+  as: 'stale' | 'tip';
+}
+
+/**
  * A conversation destroyed on disk, recorded deliberately thin.
  *
  * The ledger exists so every operation can be replayed in reverse, and this is
@@ -309,8 +349,32 @@ export type LedgerEventInput =
   | Draft<ReturnedEvent>
   | Draft<FosteringFollowedEvent>
   | Draft<CardRepointedEvent>
+  | Draft<CardRetitledEvent>
   | Draft<ConversationPurgedEvent>
   | Draft<OperationFailedEvent>;
+
+/**
+ * A card whose title, or archived flag, is not what the app last had.
+ *
+ * `from` and `fromArchived` are the *original* values, carried across repeated
+ * writes the way `RepointedCard.from` is, so "what did the user's card say?"
+ * has one answer however many sweeps have marked it since.
+ */
+export interface RetitledCard {
+  sessionId: string;
+  path: string;
+  target: AccountRef;
+  /** The title the app had, before foster first touched it. */
+  from: string;
+  /** The title it wears now. */
+  to: string;
+  /** The archived flag the app had, when foster changed it at all. */
+  fromArchived?: boolean;
+  /** The archived flag now, when foster set it. */
+  toArchived?: boolean;
+  native: boolean;
+  retitledAt: number;
+}
 
 /**
  * A card that is currently pointed somewhere other than where the app had it.
@@ -348,6 +412,8 @@ export interface ActiveFostering {
   /** The installation the original lives in, when it is not the one holding the copy. */
   originStore?: string;
   fosteredAt: number;
+  /** True when foster wrote the copy archived by its own decision — see `FosteredEvent.archived`. */
+  archivedByFoster?: true;
   /**
    * True once the app has branched this copy and foster followed it there.
    *

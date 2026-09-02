@@ -1,6 +1,6 @@
 import { buildRestoredSession, unfosterableReasons } from '../domain/fostering.js';
 import type { DiscoveredSession, StoreLayout } from '../domain/types.js';
-import { findOrphanedConversations } from './orphans.js';
+import { findOrphanedConversations, type OrphanSearch } from './orphans.js';
 import type { Tombstone } from './tombstones.js';
 import type { TranscriptFacts } from './transcripts.js';
 
@@ -23,8 +23,16 @@ export function findRestorable(
   env: NodeJS.ProcessEnv = process.env,
   configDirs: string[] = [],
   referenceStores: StoreLayout[] = [],
+  /** Reads the caller already made, so the search does not make them again. */
+  shared: Pick<OrphanSearch, 'cards' | 'transcripts'> = {},
 ): Restorable[] {
-  return findOrphanedConversations({ store, env, configDirs, referenceStores }).map((orphan) => {
+  return findOrphanedConversations({
+    store,
+    env,
+    configDirs,
+    referenceStores,
+    ...shared,
+  }).map((orphan) => {
     const data = buildRestoredSession(orphan.facts);
     return {
       tombstone: orphan.tombstone,

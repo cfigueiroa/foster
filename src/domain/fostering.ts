@@ -132,6 +132,13 @@ export interface BuildCopyOptions {
   prefix?: string;
   now?: number;
   sessionId?: string;
+  /**
+   * What the copy's archived flag should be, whatever the source's is. Left out,
+   * the copy keeps the source's — the ordinary case, and the one the sweep's
+   * "archived stays archived" rests on. The branch pass sets it: a row for the
+   * branch that stopped goes to the archived view however its source is filed.
+   */
+  archived?: boolean;
 }
 
 /**
@@ -167,6 +174,8 @@ export function buildFosterCopy(
     delete copy.scheduledTaskId;
     copy.lastFocusedAt = source.lastFocusedAt ?? options.now ?? Date.now();
   }
+
+  if (options.archived !== undefined) copy.isArchived = options.archived;
 
   copy.sessionId = options.sessionId ?? mintSessionId();
   // A session with no title would otherwise become a copy titled with nothing but

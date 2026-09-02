@@ -10,7 +10,7 @@ import { errorMessage } from '../util/fs.js';
 
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
 import { lineage, lineageAt, type Lineage } from './lineage.js';
-import { BRANCH_HERE, sidebarOf, type BranchStanding } from './sidebar.js';
+import { BRANCH_HERE, sidebarOf, type BranchStanding, type Sidebar } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
 
@@ -66,6 +66,30 @@ export interface FosterOptions {
   env?: NodeJS.ProcessEnv;
   /** Transcript `projects/` directories. Wins over `env` when both are given. */
   projectsDirs?: string[];
+  /**
+   * A lineage the caller already built. Wins over both of the above: the sweep
+   * runs several passes over one store, and each pass building its own meant
+   * the same transcripts were read once per pass.
+   */
+  kin?: Lineage;
+  /**
+   * The destination already read, for the same reason. The run marks what it
+   * plans into it, so a caller's next pass sees this one's copies.
+   */
+  here?: Sidebar;
+  /**
+   * Accept a session whose conversation the destination already shows a
+   * *branch* of — never an exact copy of. This is the sweep's branch pass, which
+   * gives every branch of a fork a row of its own. Narrower than `explicit`:
+   * that one also brings back a copy the user deleted in the app, and a bulk
+   * pass must not.
+   */
+  acceptBranches?: boolean;
+  /**
+   * Write the copies archived whatever their source says, and record that it
+   * was foster's decision. The branch that stopped goes to the archived view.
+   */
+  archive?: boolean;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -97,6 +121,11 @@ export interface Outcome {
    * the same thing.
    */
   standing?: BranchStanding;
+  /**
+   * The title the copy was written with, when one was. `title` is the origin's;
+   * the two differ by the prefix, and a branch pass names the stale rows by it.
+   */
+  copyTitle?: string;
 }
 
 /**
@@ -130,8 +159,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // Keyed by branch as well, because the id is exactly what a branch changes: the
   // pair this check exists to prevent is most often made *by* the branch, one
   // account holding the conversation and the other holding what it forked into.
-  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env);
-  const here = sidebarOf(store, target, copySessionIds(ledger.read()), kin);
+  const kin =
+    options.kin ?? (options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env));
+  const here = options.here ?? sidebarOf(store, target, copySessionIds(ledger.read()), kin);
 
   // No gate here on purpose. Every copy gets a session id the app has never seen,
   // so a running app neither reads nor writes the file: it is invisible to the
@@ -188,7 +218,13 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // already showing here would gain a second row for the same work.
     const cliSessionId = session.data.cliSessionId;
     const shownHere = here.reason(cliSessionId);
-    if (shownHere !== undefined && !explicit) {
+    // A branch pass lifts only the branch answer. An exact copy stays refused:
+    // two cards opening one transcript is the duplicate this check exists for.
+    const branchAccepted =
+      options.acceptBranches === true &&
+      shownHere !== undefined &&
+      shownHere.startsWith(BRANCH_HERE);
+    if (shownHere !== undefined && !explicit && !branchAccepted) {
       // Only a branch is worth weighing. Two cards for the *same* conversation
       // open the same transcript, so there is no half to be on the wrong side of.
       const standing = shownHere.startsWith(BRANCH_HERE) ? here.standing(cliSessionId) : undefined;
@@ -208,6 +244,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         ? { originStore: options.sourceStore }
         : {}),
       prefix,
+      ...(options.archive ? { archived: true } : {}),
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
     // Carried on the outcome rather than acted on: the copy is sound either way,
@@ -237,6 +274,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         title,
         status: 'fostered',
         copyPath,
+        copyTitle: copy.title,
         ...liveFlag,
       });
       // A dry run has to make the same marks a real one does, or it stops
@@ -278,6 +316,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
           ? { originStore: options.sourceStore }
           : {}),
         prefix,
+        ...(options.archive ? { archived: true } : {}),
       });
       recordPlanned();
       outcomes.push({
@@ -285,6 +324,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         title,
         status: 'fostered',
         copyPath,
+        copyTitle: copy.title,
         ...liveFlag,
       });
     } catch (error) {

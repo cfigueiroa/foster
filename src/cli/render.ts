@@ -1,6 +1,8 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
+import type { ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
+import type { RetitleOutcome } from '../engine/retitle.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
@@ -514,6 +516,50 @@ function standingLine(standing: BranchStanding, restoring: boolean, originId: st
 }
 
 /**
+ * One fork of the branch pass, as the sweep lists it: which branch carried on,
+ * then every row it added or marked, in the title each row now wears.
+ */
+export function forkLines(fork: ForkOutcome): string[] {
+  const tip = fork.rows.find((row) => row.tip);
+  const held = tip ? ` — the branch that carried on holds ${tip.total} records` : '';
+  const lines = [pc.dim(`  fork ${shortId(fork.root)}: ${fork.rows.length} branches${held}`)];
+  for (const outcome of fork.brought) lines.push(broughtLine(outcome));
+  for (const outcome of fork.retitled) lines.push(retitleLine(outcome));
+  for (const row of fork.skipped) {
+    lines.push(`  ${pc.dim('·')} ${row.title}${pc.dim(` (${row.detail})`)}`);
+  }
+  return lines;
+}
+
+/** A row the branch pass added, named by the title the copy wears. */
+function broughtLine(outcome: Outcome): string {
+  const marks: Record<OutcomeStatus, string> = {
+    fostered: pc.green('+'),
+    returned: pc.green('-'),
+    skipped: pc.dim('·'),
+    failed: pc.red('x'),
+  };
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${marks[outcome.status]} ${outcome.copyTitle ?? outcome.title}${detail}`;
+}
+
+/** A row the branch pass renamed: what it said, what it says now. */
+export function retitleLine(outcome: RetitleOutcome): string {
+  const mark =
+    outcome.status === 'retitled'
+      ? pc.green('~')
+      : outcome.status === 'failed'
+        ? pc.red('x')
+        : pc.dim('·');
+  const filed =
+    outcome.archived === undefined
+      ? ''
+      : pc.dim(outcome.archived.to ? ' → archived view' : ' → out of the archived view');
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${outcome.from || '(untitled)'} ${pc.dim('→')} ${outcome.to}${filed}${detail}`;
+}
+
+/**
  * The lines a sweep ends on, shared by the command and the menu so both say the
  * same thing about the same run.
  *
@@ -563,24 +609,21 @@ export function sweepSummary(report: SweepReport): string[] {
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
 
-  if (report.forks > 0) {
-    const one = report.forks === 1;
-    const { theirOnly, hereOnly } = report.forkGap;
+  const { branches } = report;
+  if (branches.forks.length > 0) {
+    const forks = branches.forks.length;
+    const added = branches.counts.fostered;
+    const marked = branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
+    const filed =
+      branches.archived > 0 ? `, ${branches.archived} filed in the archived view as stale` : '';
     lines.push(
-      pc.yellow(
-        `${report.forks} ${one ? 'session is' : 'sessions are'} the half of a fork that carried on; ` +
-          `this account is showing the half that stopped.\n` +
-          // The size of the decision, not just that there is one. A fork worth 7
-          // records against 2625 and one worth 2352 against 3609 read identically
-          // without it, and only the second is worth stopping for.
-          `Merging would gain ${theirOnly} record(s) and stop showing ${hereOnly}.\n` +
-          'Which half survives is a reading decision, so the sweep stops here: ' +
-          'foster consolidate lists them, and needs the app closed.\n' +
-          // Said here because it is what makes the decision small. Left unsaid,
-          // "hides records" reads as irreversible, and the tidy-up never happens.
-          'Nothing is destroyed either way — the transcripts stay, and ' +
-          'foster consolidate --undo puts the cards back.',
-      ),
+      `${forks} forked conversation${forks === 1 ? '' : 's'}, one row per branch: ` +
+        `${added} row${added === 1 ? '' : 's'} added, ${marked} retitled${filed}.\n` +
+        // What the reader has to know to pick a row: the clean title is the one
+        // to continue in, and a marked one says when it was left.
+        `The branch that carried on keeps its title; the others wear "${branches.staleTemplate.trim()}" ` +
+        'with the moment of their last answer.\n' +
+        'Nothing is hidden — foster consolidate collapses a fork to one row if you want that.',
     );
   }
 

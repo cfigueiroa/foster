@@ -571,3 +571,79 @@ describe('findDuplicates', () => {
     expect(report.copies).toHaveLength(0);
   });
 });
+
+/**
+ * The sweep's branch pass: a row for a branch the account already shows another
+ * branch of. Narrower than naming the session — that also brings back a copy
+ * the user deleted in the app, and a bulk pass must not.
+ */
+describe('accepting a branch', () => {
+  it('fosters a branch of work the account shows, when asked for branches', () => {
+    const { store, ledger } = branchWaiting();
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+    });
+
+    expect(outcomes[0]!.status).toBe('fostered');
+    expect(outcomes[0]!.copyTitle).toBe('Sample session');
+  });
+
+  it('still refuses a second card for exactly the conversation the account shows', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e7', cliSessionId: ORIGINAL }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e8', cliSessionId: ORIGINAL }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+    });
+
+    expect(outcomes[0]!.status).toBe('skipped');
+    expect(outcomes[0]!.detail).toBe('this account already has that conversation');
+  });
+
+  it('writes the copy archived when told to, and records that as its own decision', () => {
+    const { store, ledger } = branchWaiting();
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+      prefix: '(stale) ',
+      archive: true,
+    });
+
+    expect(outcomes[0]!.copyTitle).toBe('(stale) Sample session');
+    const copy = scanAccount(store, NEW_ACCOUNT).find((entry) => entry.isCopy);
+    expect(copy!.data.isArchived).toBe(true);
+    expect(listActive(project(ledger.read()))[0]!.archivedByFoster).toBe(true);
+  });
+});
+
+describe('the transcript index', () => {
+  it('lists every path a conversation occupies, from the walk the answers share', () => {
+    const kin = lineageAt(projects(forked()));
+
+    expect(kin.transcripts().get(ORIGINAL)).toHaveLength(1);
+    expect(kin.transcripts().has(SECOND)).toBe(true);
+    expect(kin.rootOf(ORIGINAL)).toBe(ROOT);
+  });
+});

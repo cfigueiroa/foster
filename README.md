@@ -85,14 +85,28 @@ foster sweep          # what it would do, writing nothing
 foster sweep --yes    # do it
 ```
 
-It copies every fosterable session from the other accounts, **archived ones included**, brings back
-conversations the app deleted that nothing still points at, and then re-scans to say whether either
-pass has anything left. That last part is the reason it exists as a command rather than as advice:
-measured on one real store, the same sweep offered 15 sessions without `--archived` and 141 with it,
-so anyone who did not know the flag finished with a tenth of the work done and no way to tell.
+It copies every fosterable session from the other accounts, **archived ones included**, gives every
+branch of a forked conversation a row of its own, brings back conversations the app deleted that
+nothing still points at, and then re-scans to say whether any pass has anything left. That last part
+is the reason it exists as a command rather than as advice: measured on one real store, the same
+sweep offered 15 sessions without `--archived` and 141 with it, so anyone who did not know the flag
+finished with a tenth of the work done and no way to tell.
 
 Archived copies **stay archived**. They arrive in the app's archived view rather than reappearing in
 Recents — bringing the conversation across is the point, not undoing the decision to tuck it away.
+
+A forked conversation — one piece of work continued in more than one account, each continuation on
+a transcript of its own — gets **one row per branch**, and the rows say which one to open. The
+branch that carried on keeps its title untouched. Every other branch is retitled
+`(stale, stopped DD/MM HH:MM) …`, stamped with the moment of its last answer, and filed in the
+archived view — the row already in the account included, whoever made it. Nothing is chosen and
+nothing is hidden: the stale rows still open, they just no longer look like the row to continue in.
+The one branch that gets no row of its own is one holding nothing of its own — every record of it
+already in the branch that carried on — because a row for it would open nothing the clean row does
+not.
+`--stale-prefix` changes the words; `{when}` is where the moment goes. Measured on the store that
+prompted this: the row the user had pinned held 328 records while the branches in two other accounts
+held 3157 and 2564, and every previous sweep had reported that nothing was left to do.
 
 It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
 the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
@@ -102,8 +116,12 @@ under a flat "never".
 
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
-choosing which half of a fork survives hides records, and that is a reading decision — forks are
-counted, reported, and left alone.
+with a row per branch nothing is hidden, so collapsing a fork to one row is a tidy-up for whoever
+wants one, not a decision the sweep has to leave open.
+
+One scan, one lineage, one walk of the transcript tree per run. The passes used to build their own,
+and a `--yes` run read every card in the store five times over and walked the transcript tree six —
+on a store of eleven accounts, half a minute of the run was spent reading what it had just read.
 
 `--restart` restarts Claude Desktop at the end, which is what makes the copies visible. A Claude
 Code session started from the app's sidebar is a child process of the app, so restarting from
@@ -252,7 +270,15 @@ points that card at the fork. From then on there are two conversations where the
 halves usually live in different accounts, and fostering between those accounts puts both in the same
 sidebar — one piece of work, several rows, nothing to tell them apart but a date.
 
-`foster consolidate` reduces that to one row per account, on the half that carried on:
+`foster sweep` answers this without choosing: one row per branch, the branch that carried on under
+its own title and every other branch retitled stale and filed in the archived view — see
+[the whole sweep](#the-whole-sweep). The retitle is the one write the sweep makes to a card it did
+not create, and it changes only the title and the archived flag; the ledger records both before
+and after, native or not, and a stale row that later carries on gets its title back and, if it was
+foster that filed it away, its place in Recents.
+
+`foster consolidate` is the tidy-up for anyone who wants one row per account instead, on the half
+that carried on:
 
 ```bash
 foster consolidate                  # what it would do, writing nothing
@@ -1166,12 +1192,14 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   turns the other never got, so read both before choosing; `--session` overrides, and for pairs
   already on disk `status` counts them and `foster return --branches` removes them.
 
-  Refusing it is right and refusing it silently was not, because the account keeps whichever half
-  reached it first. When the half being turned away is the one that carried on, the sweep now weighs
-  the two and says so — how many records each holds that the other does not — and names
-  `foster consolidate`, which is what moves the row you have onto the half that kept going. The other
-  direction gets no such line: skipping the half that stopped is simply correct, and a note under
-  every refusal would bury the handful that matter.
+  Refusing it is right for `foster foster`, and refusing it silently was not, because the account
+  keeps whichever half reached it first. When the half being turned away is the one that carried
+  on, the command weighs the two and says so — how many records each holds that the other does not
+  — and names `foster consolidate`. The other direction gets no such line: skipping the half that
+  stopped is simply correct, and a note under every refusal would bury the handful that matter.
+  `foster sweep` does not refuse at all: it brings every branch as its own row, the branch that
+  carried on under its title and the rest marked stale, so the account never keeps the wrong half
+  by accident.
 
   Removal keeps one row per piece of work, always: a card foster did not write if there is one,
   otherwise the half that carried on after the fork — measured by the records it holds that no

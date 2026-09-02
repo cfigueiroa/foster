@@ -8,8 +8,9 @@ import type { StoreLayout } from '../src/domain/types.js';
 import { fosterSessions } from '../src/engine/executor.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, project } from '../src/ledger/project.js';
+import { lineageAt } from '../src/engine/lineage.js';
 import { findRestorable } from '../src/store/restore.js';
-import { scanAccount } from '../src/store/scanner.js';
+import { scanAccount, scanStore } from '../src/store/scanner.js';
 import { scanTombstones } from '../src/store/tombstones.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -247,5 +248,42 @@ describe('conversations spread across several CLI config directories', () => {
 
     // No projects/ tree in it, so it contributes nothing and breaks nothing.
     expect(findRestorable(store, env, [bare])).toHaveLength(1);
+  });
+});
+
+/**
+ * The sweep reads every card and walks the transcript tree once, and hands both
+ * in here rather than having them read again.
+ */
+describe('findRestorable with reads the caller already made', () => {
+  it('gives the same answer from shared cards and transcripts', () => {
+    tombstone([DELETED_SESSION, DELETED_CLI]);
+    transcript(DELETED_CLI, [{ type: 'user', cwd: '/work/project' }]);
+
+    const alone = findRestorable(store, env);
+    const kin = lineageAt([path.join(configDir, 'projects')]);
+    const shared = findRestorable(store, env, [], [], {
+      cards: scanStore(store),
+      transcripts: kin.transcripts(),
+    });
+
+    expect(alone).toHaveLength(1);
+    expect(shared.map((entry) => entry.session.data.cliSessionId)).toEqual(
+      alone.map((entry) => entry.session.data.cliSessionId),
+    );
+  });
+
+  it('trusts the cards it is handed as the references, in place of its own scan', () => {
+    tombstone([DELETED_SESSION, DELETED_CLI]);
+    transcript(DELETED_CLI, [{ type: 'user', cwd: '/work/project' }]);
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: DELETED_SESSION, cliSessionId: DELETED_CLI }),
+    );
+
+    expect(findRestorable(store, env)).toHaveLength(0);
+    expect(findRestorable(store, env, [], [], { cards: scanStore(store) })).toHaveLength(0);
+    expect(findRestorable(store, env, [], [], { cards: [] })).toHaveLength(1);
   });
 });

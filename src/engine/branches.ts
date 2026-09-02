@@ -41,6 +41,12 @@ export interface BranchWeight {
   shared: number;
   /** The last record carrying a timestamp — the last thing said, not the last write. */
   lastMessageAt?: number;
+  /**
+   * The last answer written on this branch — where the work was left. Not a
+   * ranking input; it is what a stale row is stamped with, and
+   * `transcripts.ts` explains why the last record would stamp it wrong.
+   */
+  lastAssistantAt?: number;
 }
 
 export interface Fork {
@@ -92,6 +98,7 @@ export function weighBranches(cliSessionIds: string[], kin: Lineage): BranchWeig
       only,
       shared: scan.uuids.size - only,
       ...(scan.lastMessageAt === undefined ? {} : { lastMessageAt: scan.lastMessageAt }),
+      ...(scan.lastAssistantAt === undefined ? {} : { lastAssistantAt: scan.lastAssistantAt }),
     });
   }
 

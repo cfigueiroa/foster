@@ -1,4 +1,4 @@
-import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { weighBranches } from './branches.js';
 import type { Lineage } from './lineage.js';
@@ -23,6 +23,12 @@ export interface Sidebar {
   reason(cliSessionId: string | undefined): string | undefined;
   /** A card this run has committed to bringing, so the next one sees it. */
   markPlanned(cliSessionId: string): void;
+  /**
+   * Whether a card for exactly this conversation is here — on disk, or planned
+   * by this run. The branch question is `reason`'s; this one is only about the
+   * id, which is what a branch pass needs to know before adding a row for it.
+   */
+  shows(cliSessionId: string | undefined): boolean;
   /**
    * Extra foster rows, never the survivor. Keyed by the copy's session id.
    * Exact when something else in the group holds the same conversation; a
@@ -66,9 +72,17 @@ export function sidebarOf(
   copies: KnownCopies,
   kin: Lineage,
 ): Sidebar {
+  return sidebarFrom(scanAccount(store, account, copies), kin);
+}
+
+/**
+ * The same index over cards the caller has already read — one account's worth,
+ * classified by the ledger the way `scanAccount` classifies them.
+ */
+export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sidebar {
   const cards: SidebarCard[] = [];
 
-  for (const session of scanAccount(store, account, copies)) {
+  for (const session of sessions) {
     const id = session.data.cliSessionId;
     if (!id) continue;
     cards.push({
@@ -110,6 +124,12 @@ export function sidebarOf(
         cliSessionId,
         archived: false,
       });
+    },
+
+    shows(cliSessionId) {
+      if (cliSessionId === undefined) return false;
+      const wanted = cliSessionId.toLowerCase();
+      return cards.some((card) => card.cliSessionId.toLowerCase() === wanted);
     },
 
     standing(cliSessionId) {

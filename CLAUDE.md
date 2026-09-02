@@ -32,10 +32,17 @@ foster sweep            # what it would do, writing nothing
 foster sweep --yes      # do it
 ```
 
-It copies every fosterable session from the other accounts — **archived included** — brings back
-conversations the app deleted that nothing points at, then re-scans to say whether anything is
-left. Archived copies stay archived, so they arrive in the app's _archived_ view rather than in
-Recents; say so, or the user will look for rows that are not there.
+It copies every fosterable session from the other accounts — **archived included** — gives
+every branch of a forked conversation a row of its own, brings back conversations the app
+deleted that nothing points at, then re-scans to say whether anything is left. Archived copies
+stay archived, so they arrive in the app's _archived_ view rather than in Recents; say so, or
+the user will look for rows that are not there.
+
+A fork is one conversation continued in more than one account, each continuation on a
+transcript of its own. The sweep does not choose between them: the branch that carried on
+keeps its title, and every other branch is retitled `(stale, stopped DD/MM HH:MM) …` — or
+whatever `--stale-prefix` says — and filed in the archived view, native rows included. Nothing
+is hidden; `foster consolidate` is the optional tidy-up for anyone who wants one row.
 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
@@ -45,8 +52,8 @@ that line rather than leaving the user to wonder what the gap was.
 foster is running inside the app it will not do that (see below) and the output ends with the
 command to run elsewhere instead.
 
-`sweep` deliberately never purges and never consolidates. If it reports forks, pass that on and
-stop there.
+`sweep` deliberately never purges and never consolidates. Pass the "forked conversation" line
+on as it is: rows added, rows retitled, and that the clean title is the row to continue in.
 
 ## You cannot restart the app from a session the app started
 
