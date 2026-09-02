@@ -236,6 +236,18 @@ export interface ConversationScan {
    * that had been running all morning, because its card had just been clicked.
    */
   lastMessageAt?: number;
+  /**
+   * The last record the assistant wrote — the last time the work moved.
+   *
+   * Kept apart from `lastMessageAt` because the two disagree in exactly the
+   * case that matters. Opening a card whose conversation stopped a day ago
+   * resumes it, and the resume appends user records — task notifications, a
+   * result line — with today's timestamp and no answer after them. Measured on
+   * a real store: last answer 18:10 the day before, last record 08:24 that
+   * morning, from one click. A stale row stamped with the click would claim to
+   * be the newest thing there.
+   */
+  lastAssistantAt?: number;
 }
 
 /**
@@ -254,16 +266,24 @@ export interface ConversationScan {
 export function scanConversation(file: string): ConversationScan {
   const uuids = new Set<string>();
   let lastMessageAt: number | undefined;
+  let lastAssistantAt: number | undefined;
 
   for (const record of streamRecords(file)) {
     if (typeof record.uuid === 'string' && record.uuid !== '') uuids.add(record.uuid);
     if (typeof record.timestamp === 'string') {
       const at = Date.parse(record.timestamp);
-      if (Number.isFinite(at)) lastMessageAt = at;
+      if (Number.isFinite(at)) {
+        lastMessageAt = at;
+        if (record.type === 'assistant') lastAssistantAt = at;
+      }
     }
   }
 
-  return { uuids, ...(lastMessageAt === undefined ? {} : { lastMessageAt }) };
+  return {
+    uuids,
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
+  };
 }
 
 /** How much of a transcript to hold in memory at once while streaming it. */

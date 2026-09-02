@@ -119,7 +119,14 @@ import {
   selectFosterSessions,
 } from '../ops/foster.js';
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
-import { RESTART_COMMAND, restartPlan, runSweep, type SweepReport } from '../ops/sweep.js';
+import {
+  RESTART_COMMAND,
+  restartPlan,
+  runSweep,
+  type BranchesPhase,
+  type SweepReport,
+} from '../ops/sweep.js';
+import { DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -127,6 +134,7 @@ import { labelsOf } from './names.js';
 import { runInteractive } from './interactive.js';
 import {
   accountTree,
+  forkLines,
   formatAge,
   formatBytes,
   formatDate,
@@ -780,18 +788,24 @@ program
     // Wrapped short on purpose: commander re-wraps to the terminal width and
     // keeps these newlines as well, so a long line comes out ragged.
     'Copy every fosterable session from the other accounts into the account\n' +
-      'signed in now, archived included, then bring back conversations the app\n' +
-      'deleted that nothing points at — and confirm both are exhausted.\n\n' +
+      'signed in now, archived included; give every branch of a forked\n' +
+      'conversation a row of its own; bring back conversations the app deleted\n' +
+      'that nothing points at — and confirm all three are exhausted.\n\n' +
       'Archived copies stay archived: they arrive in the archived view rather\n' +
-      'than in Recents.\n\n' +
-      'purge and consolidate are deliberately not part of this. purge destroys\n' +
-      'transcripts, and choosing which half of a fork survives hides records —\n' +
-      'forks are counted, reported and left alone.',
+      'than in Recents. So do the branches that stopped: the branch that carried\n' +
+      'on keeps its title, the others are marked stale and filed away. Nothing\n' +
+      'is hidden and nothing is merged.\n\n' +
+      'purge is deliberately not part of this: it destroys transcripts.',
   )
   .option('--to <accountUuid>', 'write the copies into this account instead')
   .option('--to-org <organizationUuid>', 'write the copies into this organization')
   .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
   .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
+  .option(
+    '--stale-prefix <template>',
+    'what a row for a branch that stopped wears in front of its title; {when} is its last answer',
+    DEFAULT_STALE_TEMPLATE,
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -803,6 +817,7 @@ program
       toOrg?: string;
       configDir?: string[];
       prefix: string;
+      stalePrefix: string;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
@@ -816,6 +831,7 @@ program
       ledger,
       target,
       prefix: opts.prefix,
+      staleTemplate: opts.stalePrefix,
       dryRun,
       configDirs: opts.configDir ?? [],
     });
@@ -834,6 +850,7 @@ program
     );
 
     printPhase('Fostering, archived included', report.fostered.outcomes);
+    printBranches(report.branches);
     printPhase('Restoring what the app deleted', report.restored.outcomes);
 
     console.log('');
@@ -861,16 +878,27 @@ function printPhase(heading: string, outcomes: Outcome[]): void {
   for (const outcome of outcomes) console.log(outcomeLine(outcome));
 }
 
+function printBranches(phase: BranchesPhase): void {
+  console.log(pc.bold('\nForked conversations, one row per branch'));
+  if (phase.forks.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  for (const fork of phase.forks) for (const line of forkLines(fork)) console.log(line);
+}
+
 function sweepJson(report: SweepReport): Record<string, unknown> {
+  const outcomeJson = (outcome: Outcome) => ({
+    originSessionId: outcome.originSessionId,
+    title: outcome.title,
+    status: outcome.status,
+    ...(outcome.detail ? { detail: outcome.detail } : {}),
+    ...(outcome.copyPath ? { copyPath: outcome.copyPath } : {}),
+    ...(outcome.copyTitle ? { copyTitle: outcome.copyTitle } : {}),
+  });
   const phase = (entry: SweepReport['fostered']) => ({
     counts: entry.counts,
-    outcomes: entry.outcomes.map((outcome) => ({
-      originSessionId: outcome.originSessionId,
-      title: outcome.title,
-      status: outcome.status,
-      ...(outcome.detail ? { detail: outcome.detail } : {}),
-      ...(outcome.copyPath ? { copyPath: outcome.copyPath } : {}),
-    })),
+    outcomes: entry.outcomes.map(outcomeJson),
   });
 
   return {
@@ -878,9 +906,30 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     target: report.target,
     dryRun: report.dryRun,
     fostered: phase(report.fostered),
+    branches: {
+      counts: report.branches.counts,
+      archived: report.branches.archived,
+      staleTemplate: report.branches.staleTemplate,
+      forks: report.branches.forks.map((fork) => ({
+        root: fork.root,
+        tip: fork.tip,
+        rows: fork.rows,
+        brought: fork.brought.map(outcomeJson),
+        retitled: fork.retitled.map((outcome) => ({
+          sessionId: outcome.sessionId,
+          path: outcome.path,
+          from: outcome.from,
+          to: outcome.to,
+          ...(outcome.archived ? { archived: outcome.archived } : {}),
+          status: outcome.status,
+          ...(outcome.detail ? { detail: outcome.detail } : {}),
+          as: outcome.as,
+        })),
+        skipped: fork.skipped,
+      })),
+    },
     restored: phase(report.restored),
     archived: report.archived,
-    forks: report.forks,
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
