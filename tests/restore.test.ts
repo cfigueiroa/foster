@@ -68,6 +68,25 @@ describe('buildRestoredSession', () => {
       '(recovered conversation)',
     );
   });
+
+  /**
+   * The transcript names the worktree the conversation ran in. Restoring into it
+   * would put the card inside a directory another card holds — and with both
+   * fields naming the worktree, there would be no repository to fall back to.
+   */
+  it('comes back in the repository, not in the worktree the conversation ran in', () => {
+    const data = buildRestoredSession({
+      cliSessionId: DELETED_CLI,
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+    });
+    expect(data.cwd).toBe('/workspace/project');
+    expect(data.originCwd).toBe('/workspace/project');
+  });
+
+  it('leaves an ordinary working directory as the transcript recorded it', () => {
+    const data = buildRestoredSession({ cliSessionId: DELETED_CLI, cwd: '/workspace/project' });
+    expect(data.cwd).toBe('/workspace/project');
+  });
 });
 
 describe('findRestorable', () => {
