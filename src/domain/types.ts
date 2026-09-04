@@ -36,6 +36,8 @@ export interface CodeSessionData {
    */
   worktreePath?: string;
   worktreeName?: string;
+  /** A worktree the app has promised the session but not yet cut. Same reasoning. */
+  worktreeLazy?: unknown;
   title?: string;
   titleSource?: string;
   createdAt?: number;

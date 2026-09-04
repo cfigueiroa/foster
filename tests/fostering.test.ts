@@ -129,15 +129,48 @@ describe('buildFosterCopy', () => {
     expect(copy.cwd).toBe('/workspace/project/.claude/worktrees/topic-a1b2c3');
   });
 
-  it('leaves the working directory untouched when no worktree is named', () => {
-    const copy = buildFosterCopy(session({ cwd: '/workspace/elsewhere' }), {
-      origin: OLD_ACCOUNT,
+  /**
+   * Most cards sitting in a worktree never name one: on a real store, 2798 of
+   * the 3898 with a `cwd` under `.claude/worktrees/` carried no `worktreePath`.
+   * A copy of one used to open inside another card's directory, which is why
+   * the directory itself has to be read and not just the fields.
+   */
+  it('relocates a copy sitting in a worktree the card never named', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
     });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project');
+  });
+
+  /** A worktree promised but not yet cut is still a claim the copy cannot hold. */
+  it('drops a lazy worktree the same way', () => {
+    const promised = session({
+      worktreeLazy: { path: '/workspace/project/.claude/worktrees/topic-a1b2c3' },
+    });
+    const copy = buildFosterCopy(promised, { origin: OLD_ACCOUNT });
+    expect(copy.worktreeLazy).toBeUndefined();
+  });
+
+  it('leaves the working directory untouched when it is already the repository', () => {
+    const copy = buildFosterCopy(
+      session({ cwd: '/workspace/elsewhere', originCwd: '/workspace/elsewhere' }),
+      { origin: OLD_ACCOUNT },
+    );
     expect(copy.cwd).toBe('/workspace/elsewhere');
   });
 
   it('does not mutate the source', () => {
-    const original = session({ title: 'Refactor parser' });
+    // Carries a worktree, so the removal and the relocation are both exercised
+    // against the original rather than skipped over.
+    const original = session({
+      title: 'Refactor parser',
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
     const snapshot = structuredClone(original);
     buildFosterCopy(original, { origin: OLD_ACCOUNT });
     expect(original).toEqual(snapshot);

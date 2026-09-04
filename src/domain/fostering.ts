@@ -1,7 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { VERSION } from '../version.js';
 import { SESSION_ID_PREFIX } from './naming.js';
+import { samePath } from './paths.js';
 import type { AccountRef, CodeSessionData, Unfosterable } from './types.js';
+
+/**
+ * The app's own worktree layout, which is `<repo>/.claude/worktrees/<name>`.
+ * Matching the shape is not the same as guessing: a directory that does not end
+ * this way is left exactly as it came.
+ */
+const WORKTREE_TAIL = /[/\\]\.claude[/\\]worktrees[/\\][^/\\]+[/\\]?$/;
+
+/** The repository a worktree was cut from, or the directory itself when it is not one. */
+function repositoryOf(dir: string): string {
+  const trimmed = dir.replace(WORKTREE_TAIL, '');
+  return trimmed === '' ? dir : trimmed;
+}
 
 /**
  * Prefix put in front of a copy's title. Empty by default: no marker at all.
@@ -104,7 +118,16 @@ export function buildRestoredSession(facts: {
   return {
     sessionId: `${SESSION_ID_PREFIX}${facts.cliSessionId}`,
     cliSessionId: facts.cliSessionId,
-    ...(facts.cwd === undefined ? {} : { cwd: facts.cwd, originCwd: facts.cwd }),
+    // The transcript records where the conversation ran, which is a worktree
+    // whenever the app gave it one — and a restored card that opens there would
+    // land inside a directory another card holds, with no repository to fall
+    // back to, since both fields would name the worktree. So the repository is
+    // what goes in: the worktree the conversation used is gone or spoken for by
+    // the time a deletion is being undone, and the app cuts a fresh one when the
+    // conversation next needs to edit.
+    ...(facts.cwd === undefined
+      ? {}
+      : { cwd: repositoryOf(facts.cwd), originCwd: repositoryOf(facts.cwd) }),
     // An untitled restore is still worth having; it just says what it is. Left
     // unset, the app labels it "General coding session", which is indistinguishable
     // from every other untitled one — worse than blank for finding it again.
@@ -145,9 +168,11 @@ export interface BuildCopyOptions {
  * Produce the session object to write into the target account's directory.
  *
  * Unknown keys are carried over untouched — the app normalises the file itself on
- * first open. Only four things change: a fresh identity, the fostering marker, the
- * prefixed title, and the removal of any stale error inherited from the origin
- * account (which the sidebar would otherwise render as a warning badge).
+ * first open. Five things change: a fresh identity, the fostering marker, the
+ * prefixed title, the removal of any stale error inherited from the origin
+ * account (which the sidebar would otherwise render as a warning badge), and the
+ * worktree the source holds, which is dropped along with the `cwd` inside it for
+ * the reason spelled out below.
  */
 export function buildFosterCopy(
   source: CodeSessionData,
@@ -171,15 +196,30 @@ export function buildFosterCopy(
   // named a worktree; of the 853 whose card was still live, 88% named a
   // directory that no longer existed.
   //
-  // `cwd` follows the same removal: it points inside the worktree, while
-  // `originCwd` is the repository the worktree was cut from. Every card on that
-  // store that named a worktree carried an `originCwd`, and it always differed
-  // from `cwd`, so nothing here is guessed. Without a worktree the copy simply
-  // opens in the repository, and the app gives it one of its own when the
-  // conversation next needs to edit.
-  if (copy.worktreePath !== undefined || copy.worktreeName !== undefined) {
+  // Naming the fields is not enough to recognise the state, which is why the
+  // test is on the directory as well: a card whose `cwd` is not its `originCwd`
+  // is sitting in a worktree whether or not it says so. On that same store 3898
+  // cards had a `cwd` under `.claude/worktrees/`, and 2798 of them named no
+  // worktree at all — 2469 pointing at a directory that was already gone. Every
+  // card whose `cwd` differed from its `originCwd` was in a worktree, so the
+  // wider test brought in no other kind of directory. `worktreeLazy` is a
+  // worktree the app has promised but not yet cut, and it travels no better.
+  //
+  // `originCwd` is the repository the worktree came from, and the copy opens
+  // there instead. A source without one keeps the directory it had — there is
+  // nowhere else to send it.
+  const inWorktree =
+    copy.worktreePath !== undefined ||
+    copy.worktreeName !== undefined ||
+    copy.worktreeLazy !== undefined ||
+    (typeof copy.cwd === 'string' &&
+      typeof copy.originCwd === 'string' &&
+      copy.originCwd !== '' &&
+      !samePath(copy.cwd, copy.originCwd));
+  if (inWorktree) {
     delete copy.worktreePath;
     delete copy.worktreeName;
+    delete copy.worktreeLazy;
     if (typeof copy.originCwd === 'string' && copy.originCwd !== '') copy.cwd = copy.originCwd;
   }
 
