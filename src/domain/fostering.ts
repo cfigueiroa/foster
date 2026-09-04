@@ -159,6 +159,30 @@ export function buildFosterCopy(
   delete copy.error;
   delete copy.errorAt;
 
+  // A lease on a worktree does not travel with a copy.
+  //
+  // A card names the worktree it holds (`worktreePath`/`worktreeName`) while the
+  // lease itself lives in the app's own store of worktrees, keyed by the session
+  // id that took it out. A copy mints a fresh id, so what it would inherit is the
+  // claim without the lease: two cards naming one directory, and — since a branch
+  // can only be checked out in one worktree — a git refusal for whichever of them
+  // the app reaches second. That session lands in the main repository instead and
+  // loses whatever it had not committed. Measured on a real store, 1100 cards
+  // named a worktree; of the 853 whose card was still live, 88% named a
+  // directory that no longer existed.
+  //
+  // `cwd` follows the same removal: it points inside the worktree, while
+  // `originCwd` is the repository the worktree was cut from. Every card on that
+  // store that named a worktree carried an `originCwd`, and it always differed
+  // from `cwd`, so nothing here is guessed. Without a worktree the copy simply
+  // opens in the repository, and the app gives it one of its own when the
+  // conversation next needs to edit.
+  if (copy.worktreePath !== undefined || copy.worktreeName !== undefined) {
+    delete copy.worktreePath;
+    delete copy.worktreeName;
+    if (typeof copy.originCwd === 'string' && copy.originCwd !== '') copy.cwd = copy.originCwd;
+  }
+
   // What made the original invisible outside its own account, dropped so the copy
   // is an ordinary conversation.
   //

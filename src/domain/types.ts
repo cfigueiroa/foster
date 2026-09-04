@@ -29,6 +29,13 @@ export interface CodeSessionData {
   cliSessionId?: string;
   cwd?: string;
   originCwd?: string;
+  /**
+   * The worktree this card holds. The claim is here; the lease is in the app's
+   * own store, keyed by session id — which is why a copy must not carry either
+   * across. See `buildFosterCopy`.
+   */
+  worktreePath?: string;
+  worktreeName?: string;
   title?: string;
   titleSource?: string;
   createdAt?: number;

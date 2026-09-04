@@ -87,6 +87,55 @@ describe('buildFosterCopy', () => {
     expect(copy.someFutureField).toEqual({ nested: true });
   });
 
+  /**
+   * The claim is on the card; the lease is in the app's store, under the session
+   * id that took it out. A copy has a new id, so carrying the claim across is
+   * how two cards come to name one directory — and a branch only checks out in
+   * one worktree, so the app refuses whichever card it reaches second and drops
+   * that session into the main repository.
+   */
+  it('drops the worktree the original holds, whose lease the copy cannot have', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.worktreePath).toBeUndefined();
+    expect(copy.worktreeName).toBeUndefined();
+  });
+
+  it('opens the copy in the repository the worktree was cut from', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project');
+  });
+
+  /** Nothing to relocate to, so the directory is left as it was found. */
+  it('leaves cwd alone when the source names a worktree but no repository', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    delete held.originCwd;
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project/.claude/worktrees/topic-a1b2c3');
+  });
+
+  it('leaves the working directory untouched when no worktree is named', () => {
+    const copy = buildFosterCopy(session({ cwd: '/workspace/elsewhere' }), {
+      origin: OLD_ACCOUNT,
+    });
+    expect(copy.cwd).toBe('/workspace/elsewhere');
+  });
+
   it('does not mutate the source', () => {
     const original = session({ title: 'Refactor parser' });
     const snapshot = structuredClone(original);
