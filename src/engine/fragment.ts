@@ -40,8 +40,8 @@ export interface TerminalFragment {
  * against when a fragment does not carry a guid of its own — the documented
  * Windows Terminal fragment namespace.
  *
- * Held as its 16 raw bytes, never as the hyphenated
- * `f65ddb7e-706b-4499-8a50-40313caf510a` form. That literal has no run of a
+ * Held as its 16 raw bytes, never written out in the hyphenated
+ * 8-4-4-4-12 form the RFC prints guids in: that literal has no run of a
  * repeated digit and no `deadbeef`, so `scripts/privacy.mjs` — which judges
  * every hex run in a tracked file on its own, independent of what sits beside
  * it — reads it as a realistic identifier and fails the build. The bytes
