@@ -297,7 +297,7 @@ export interface CardRetitledEvent extends BaseEvent {
   /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
   native: boolean;
   /** Why: marked as the branch that stopped, or restored to the branch that carried on. */
-  as: 'stale' | 'tip';
+  as: 'stale' | 'tip' | 'diverged';
 }
 
 /**

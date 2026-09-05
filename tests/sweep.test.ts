@@ -280,6 +280,10 @@ const LAST_ANSWER = '2026-09-01T21:10:00.000Z';
 const LATER_CLICK = '2026-09-02T11:24:00.000Z';
 const STAMP = formatStamp(Date.parse(LAST_ANSWER));
 
+/** An answer on the trunk written after the tip's own last answer. */
+const WENT_ON = '2026-09-02T12:00:00.000Z';
+const WENT_ON_STAMP = formatStamp(Date.parse(WENT_ON));
+
 function rec(uuid: string, type: 'user' | 'assistant', timestamp: string) {
   return { uuid, type, timestamp };
 }
@@ -769,6 +773,158 @@ describe('sweep_everything', () => {
  * A branch every record of which the branch that carried on also holds — the
  * shape a copy has when it was opened once and never written to again.
  */
+/**
+ * A fork whose halves both hold work of their own, and the half that is not the
+ * tip is the one that answered last.
+ *
+ * Measured on a real store: of 209 forked conversations, 111 looked like this.
+ * Ranking by weight alone called the fresher half "stale, stopped ..." and
+ * filed it in the archived view, sending the reader to the half they had left
+ * hours earlier. The tip is still the half holding most work of its own — that
+ * measure is not the bug; calling the other half stopped was.
+ */
+function wentOn(): void {
+  const meta = { type: 'custom-title', customTitle: 'Macs' };
+  transcript(TRUNK, [
+    meta,
+    rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+    rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+    rec(TRUNK_ANSWER, 'assistant', WENT_ON),
+  ]);
+  transcript(TIP, [
+    meta,
+    rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+    rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+    rec(TIP_ONLY[0]!, 'user', '2026-09-02T10:00:00.000Z'),
+    rec(TIP_ONLY[1]!, 'assistant', '2026-09-02T10:05:00.000Z'),
+    rec(TIP_ONLY[2]!, 'assistant', '2026-09-02T11:14:00.000Z'),
+  ]);
+}
+
+describe('a branch that went on after the tip', () => {
+  it('is not called stale, and is not filed away', () => {
+    wentOn();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    expect(card(TRUNK_CARD)).toMatchObject({
+      title: `(other branch, went on ${WENT_ON_STAMP}) Macs`,
+      isArchived: false,
+    });
+    expect(report.branches.retitled[0]).toMatchObject({ status: 'retitled', as: 'diverged' });
+    const rows = report.branches.forks[0]!.rows;
+    expect(rows.find((row) => row.cliSessionId === TRUNK)!.kind).toBe('diverged');
+    expect(rows.find((row) => row.cliSessionId === TIP)!.kind).toBe('tip');
+  });
+
+  it('comes back out of the archived view when an earlier sweep filed it', () => {
+    wentOn();
+    const marked = '(stale, stopped 01/09 18:10) Macs';
+    const file = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: marked, isArchived: true }),
+    );
+    ledger.append({
+      kind: 'card_retitled',
+      sessionId: `local_${TRUNK_CARD}`,
+      target: NEW_ACCOUNT,
+      path: file,
+      from: 'Macs',
+      to: marked,
+      fromArchived: false,
+      toArchived: true,
+      native: true,
+      as: 'stale',
+    });
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep();
+
+    // The old mark goes with the old verdict: one mark at a time, never stacked.
+    expect(card(TRUNK_CARD)).toMatchObject({
+      title: `(other branch, went on ${WENT_ON_STAMP}) Macs`,
+      isArchived: false,
+    });
+  });
+
+  it('arrives unarchived when it is only in another account', () => {
+    wentOn();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(copies().find((data) => data.cliSessionId === TRUNK)).toMatchObject({
+      title: `(other branch, went on ${WENT_ON_STAMP}) Macs`,
+      isArchived: false,
+    });
+  });
+
+  it('marks in whatever words the caller chose', () => {
+    wentOn();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep(false, { divergedTemplate: '(outro ramo, seguiu {when}) ' });
+
+    expect(card(TRUNK_CARD).title).toBe(`(outro ramo, seguiu ${WENT_ON_STAMP}) Macs`);
+  });
+
+  it('is still stale when its own last answer is older, whatever the last click says', () => {
+    // The trunk holds work of its own, but the tip answered after it; the later
+    // user record on the trunk is a click on the row, not the work going on.
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(card(TRUNK_CARD)).toMatchObject({
+      title: `(stale, stopped ${STAMP}) Macs`,
+      isArchived: true,
+    });
+  });
+});
+
 describe('a branch with nothing of its own', () => {
   const CONTAINED = '00000000-0000-4000-8000-0000000000be';
   const CONTAINED_CARD = '00000000-0000-4000-8000-0000000000bf';

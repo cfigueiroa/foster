@@ -151,7 +151,7 @@ import {
   type BranchesPhase,
   type SweepReport,
 } from '../ops/sweep.js';
-import { DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
+import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -1002,6 +1002,11 @@ program
     'what a row for a branch that stopped wears in front of its title; {when} is its last answer',
     DEFAULT_STALE_TEMPLATE,
   )
+  .option(
+    '--branch-prefix <template>',
+    'what a row for a branch that went on after the tip wears; it is not filed away',
+    DEFAULT_DIVERGED_TEMPLATE,
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -1014,6 +1019,7 @@ program
       configDir?: string[];
       prefix: string;
       stalePrefix: string;
+      branchPrefix: string;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
@@ -1028,6 +1034,7 @@ program
       target,
       prefix: opts.prefix,
       staleTemplate: opts.stalePrefix,
+      divergedTemplate: opts.branchPrefix,
       dryRun,
       configDirs: opts.configDir ?? [],
     });
@@ -1106,6 +1113,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
       counts: report.branches.counts,
       archived: report.branches.archived,
       staleTemplate: report.branches.staleTemplate,
+      divergedTemplate: report.branches.divergedTemplate,
       forks: report.branches.forks.map((fork) => ({
         root: fork.root,
         tip: fork.tip,

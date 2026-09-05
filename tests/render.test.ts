@@ -188,6 +188,7 @@ describe('sweepSummary', () => {
       archived: 0,
       counts,
       staleTemplate: '(stale, stopped {when}) ',
+      divergedTemplate: '(other branch, went on {when}) ',
     },
     restored: { outcomes: [], counts },
     archived: 0,
@@ -215,6 +216,7 @@ describe('sweepSummary', () => {
           archived: 2,
           counts: { ...counts, fostered: 1 },
           staleTemplate: '(stale, stopped {when}) ',
+          divergedTemplate: '(other branch, went on {when}) ',
         },
       }),
     )

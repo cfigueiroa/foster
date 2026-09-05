@@ -17,6 +17,23 @@
 
 export const DEFAULT_STALE_TEMPLATE = '(stale, stopped {when}) ';
 
+/**
+ * What a branch wears when it is not the tip but is not stale either.
+ *
+ * Measured on a real store: of 209 forked conversations, 111 had a branch that
+ * was not the tip and had still said the last word — holding records of its own
+ * that the tip never got. Calling those "stale, stopped ..." and filing them in
+ * the archived view sent the reader to the fatter half and hid the half they
+ * had been working in an hour earlier. Ranking by sheer recency instead would
+ * be worse: one trivial turn on an abandoned half would promote it over a
+ * branch holding a thousand records nobody else has.
+ *
+ * So neither half is called stale. The tip is still the branch holding most
+ * work of its own, and a branch that went on after it keeps its place in the
+ * sidebar, wearing the moment it went on to.
+ */
+export const DEFAULT_DIVERGED_TEMPLATE = '(other branch, went on {when}) ';
+
 /** The slot in a template that the moment fills. */
 export const WHEN = '{when}';
 
@@ -69,6 +86,25 @@ export function stripStale(title: string, template: string): string {
   let out = title;
   for (;;) {
     const next = out.replace(matcher, '');
+    if (next === out) return out;
+    out = next;
+  }
+}
+
+/**
+ * The title underneath any of these marks.
+ *
+ * A branch can have worn a different mark on an earlier sweep — a row marked
+ * stale that turns out to have gone on after the tip, or the reverse — so the
+ * clean title is what is left once every mark this run knows about is gone.
+ * Order does not matter: each is anchored at the start and applied until it
+ * stops matching.
+ */
+export function stripMarks(title: string, templates: readonly string[]): string {
+  let out = title;
+  for (;;) {
+    let next = out;
+    for (const template of templates) next = stripStale(next, template);
     if (next === out) return out;
     out = next;
   }

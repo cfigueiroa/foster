@@ -121,6 +121,33 @@ function byAdvancement(a: BranchWeight, b: BranchWeight): number {
   return a.cliSessionId.localeCompare(b.cliSessionId);
 }
 
+/**
+ * Did this branch go on after the tip did?
+ *
+ * The question `byAdvancement` cannot answer, and the one a reader is actually
+ * asking of a second row. The tip is the branch holding most work of its own,
+ * which is not the same as the branch that spoke last: when both halves carry
+ * records nobody else has, the fatter one wins the ranking while the other may
+ * be where the work was left an hour ago.
+ *
+ * A branch counts as diverged only when it holds records of its own *and* its
+ * last **answer** is later than the tip's. Both halves are load-bearing:
+ *
+ *  - a branch holding nothing the tip does not hold has nothing to go back
+ *    for, however recently the app touched it;
+ *  - the last *message* would be the wrong clock. Opening a stale row appends
+ *    a user record to its transcript, so a branch nobody has worked in since
+ *    can carry the newer message purely because somebody clicked it — the same
+ *    trap `stoppedAtOf` avoids, and the reason `mtime` was rejected above. An
+ *    answer is written only when the work actually went on.
+ */
+export function divergedFrom(branch: BranchWeight, tip: BranchWeight): boolean {
+  if (branch.cliSessionId === tip.cliSessionId) return false;
+  if (branch.only === 0) return false;
+  const went = branch.lastAssistantAt ?? 0;
+  return went > (tip.lastAssistantAt ?? tip.lastMessageAt ?? 0);
+}
+
 export interface Forks {
   /** The fork this conversation belongs to, or nothing when it is not in one. */
   of(cliSessionId: string | undefined): Fork | undefined;

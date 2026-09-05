@@ -95,10 +95,22 @@ stay archived, so they arrive in the app's _archived_ view rather than in Recent
 the user will look for rows that are not there.
 
 A fork is one conversation continued in more than one account, each continuation on a
-transcript of its own. The sweep does not choose between them: the branch that carried on
-keeps its title, and every other branch is retitled `(stale, stopped DD/MM HH:MM) …` — or
-whatever `--stale-prefix` says — and filed in the archived view, native rows included. Nothing
-is hidden; `foster consolidate` is the optional tidy-up for anyone who wants one row.
+transcript of its own. The sweep does not choose between them, and it no longer calls every
+other branch stopped. Three outcomes, decided per branch:
+
+- the **tip** — the branch holding most records no sibling holds — keeps its title;
+- a branch whose own last **answer** is later than the tip's, and that holds records of its
+  own, **went on after the tip**: it is retitled `(other branch, went on DD/MM HH:MM) …` — or
+  whatever `--branch-prefix` says — and **stays in the sidebar**, unarchived. Measured on a
+  real store, 111 of 209 forks looked like this, and the old rule filed exactly the half the
+  user had been working in;
+- only a branch that really did stop earlier is retitled `(stale, stopped DD/MM HH:MM) …` —
+  `--stale-prefix` — and filed in the archived view, native rows included.
+
+"Went on" is judged on the last answer, never the last record: opening a stale row appends a
+user record to its transcript, so the last _message_ can be a click rather than work
+(`divergedFrom`, `src/engine/branches.ts`). Nothing is hidden; `foster consolidate` is the
+optional tidy-up for anyone who wants one row.
 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
