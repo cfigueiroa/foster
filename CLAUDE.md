@@ -218,14 +218,15 @@ than judging a handler it cannot trust.
 `foster --store <profile> app login --yes` creates only the levels of `HKCU\Software\Classes\
 claude\shell\open\command` that do not already exist — outside the container that is usually all
 of `shell`, `shell\open` and `shell\open\command` — points the command at `<profile>` for one
-sign-in, and undoes exactly what it changed once the sign-in is detected or the wait times out: a
-real previous command is written back verbatim, and a level this run created is deleted rather
-than guessed back into some rebuilt shape. It needs `--yes` — without it, it only prints what it
-would do. It refuses outright from inside Claude Desktop's own container (see above) — a change
-there is invisible to the browser regardless of what follows. **An agent must never run this**: it
-writes a machine-wide registry subtree and drives a sign-in only the human at the keyboard can
-finish in the browser. `foster app login --restore --yes` is the way out of a login left routed by
-a crash or a stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
+sign-in, and undoes exactly what it changed once the sign-in is detected, the wait is cut short, or
+it is cancelled: a real previous command is written back verbatim, and a level this run created is
+deleted rather than guessed back into some rebuilt shape. It waits until the sign-in lands or
+Ctrl+C; `--timeout <seconds>` caps it. It needs `--yes` — without it, it only prints what it would
+do. It refuses outright from inside Claude Desktop's own container (see above) — a change there is
+invisible to the browser regardless of what follows. **An agent must never run this**: it writes a
+machine-wide registry subtree and drives a sign-in only the human at the keyboard can finish in the
+browser. `foster app login --restore --yes` is the way out of a login left routed by a crash or a
+stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
 
 ## Before pushing
 

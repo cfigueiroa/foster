@@ -3821,13 +3821,16 @@ app
       'and foster never sees the code.',
   )
   .option('--yes', 'arm the handler and wait for the sign-in; without it, a dry run')
-  .option('--timeout <seconds>', 'how long to wait for the sign-in, in seconds', '300')
+  .option(
+    '--timeout <seconds>',
+    'cap the wait for the sign-in, in seconds; without it, waits until the sign-in lands or Ctrl+C',
+  )
   .option('--print', 'show what would happen without arming anything')
   .option('--restore', 'put a routed handler back — for a login interrupted mid-run')
   .action(async function (this: Command) {
     const opts = this.opts<{
       yes?: boolean;
-      timeout: string;
+      timeout?: string;
       print?: boolean;
       restore?: boolean;
     }>();
@@ -3873,9 +3876,12 @@ app
       return;
     }
 
-    const timeoutSeconds = Number(opts.timeout);
-    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
-      throw new Error(`--timeout must be a positive integer, not "${opts.timeout}".`);
+    let timeoutSeconds: number | undefined;
+    if (opts.timeout !== undefined) {
+      timeoutSeconds = Number(opts.timeout);
+      if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+        throw new Error(`--timeout must be a positive integer, not "${opts.timeout}".`);
+      }
     }
 
     const plan = planLogin(store, { io: registryHandlerIo, events });
@@ -3915,7 +3921,11 @@ app
 
     // Printed before arming, so the instructions are on screen while the wait
     // that follows keeps the terminal otherwise silent.
-    console.log(`claude:// links now go to ${label} for the next ${timeoutSeconds}s.`);
+    console.log(
+      timeoutSeconds !== undefined
+        ? `claude:// links now go to ${label} for the next ${timeoutSeconds}s.`
+        : `claude:// links now go to ${label} until the sign-in lands or you press Ctrl+C.`,
+    );
     console.log(
       'In that window, click "Continue with Google" or "Continue with browser" and finish in the browser as usual.',
     );
@@ -3938,7 +3948,15 @@ app
             accountUuid: config.lastKnownAccountUuid,
           };
         },
-        timeoutMs: timeoutSeconds * 1000,
+        ...(timeoutSeconds !== undefined ? { timeoutMs: timeoutSeconds * 1000 } : {}),
+        onHeartbeat: (elapsedMs) => {
+          const minutes = Math.round(elapsedMs / 60_000);
+          console.log(
+            pc.dim(
+              `still waiting: the handler has been armed for ${minutes} min; Ctrl+C puts it back`,
+            ),
+          );
+        },
         signal: controller.signal,
       });
     } finally {

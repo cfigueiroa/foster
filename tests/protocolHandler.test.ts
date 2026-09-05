@@ -652,6 +652,88 @@ describe('runLogin', () => {
     expect(io.read().value).toBe(PLAIN_HANDLER);
   });
 
+  it('keeps polling past what would have been the old default timeout when timeoutMs is absent, then succeeds', async () => {
+    const plan = basePlan();
+    const io = fakeIo(PLAIN_HANDLER);
+    let t = 0;
+    const now = () => t;
+    let calls = 0;
+    const readState = () => {
+      calls += 1;
+      t += 100_000;
+      // Only succeeds once elapsed time is well past the old 300_000ms
+      // default — proof that no implicit deadline is doing the stopping.
+      return calls < 5 ? { hasTokenCache: false } : { hasTokenCache: true, accountUuid: account };
+    };
+
+    const result = await runLogin(plan, {
+      io,
+      append: () => {},
+      readState,
+      now,
+      sleep: async () => {},
+    });
+
+    expect(t).toBeGreaterThan(300_000);
+    expect(result.outcome).toBe('signed-in');
+    expect(result.restored).toBe(true);
+  });
+
+  it('keeps polling with no timeoutMs until aborted', async () => {
+    const plan = basePlan();
+    const io = fakeIo(PLAIN_HANDLER);
+    let t = 0;
+    const now = () => t;
+    const controller = new AbortController();
+    let ticks = 0;
+    const sleep = async () => {
+      ticks += 1;
+      t += 100_000;
+      if (ticks >= 4) controller.abort();
+    };
+
+    const result = await runLogin(plan, {
+      io,
+      append: () => {},
+      readState: () => ({ hasTokenCache: false }),
+      signal: controller.signal,
+      now,
+      sleep,
+    });
+
+    expect(t).toBeGreaterThan(300_000);
+    expect(result.outcome).toBe('aborted');
+    expect(result.restored).toBe(true);
+  });
+
+  it('fires onHeartbeat once per heartbeatMs while waiting', async () => {
+    const plan = basePlan();
+    const io = fakeIo(PLAIN_HANDLER);
+    let t = 0;
+    const now = () => t;
+    const heartbeats: number[] = [];
+    let ticks = 0;
+    const sleep = async () => {
+      ticks += 1;
+      t += 20_000;
+    };
+    const readState = () =>
+      ticks >= 10 ? { hasTokenCache: true, accountUuid: account } : { hasTokenCache: false };
+
+    const result = await runLogin(plan, {
+      io,
+      append: () => {},
+      readState,
+      now,
+      sleep,
+      heartbeatMs: 60_000,
+      onHeartbeat: (elapsed) => heartbeats.push(elapsed),
+    });
+
+    expect(result.outcome).toBe('signed-in');
+    expect(heartbeats).toEqual([60_000, 120_000, 180_000]);
+  });
+
   it('restores when aborted', async () => {
     const plan = basePlan();
     const io = fakeIo(PLAIN_HANDLER);

@@ -507,8 +507,13 @@ export interface RunLoginOptions {
   append: (event: LedgerEventInput) => void;
   /** Re-reads the store's config. Injectable. */
   readState: () => { hasTokenCache: boolean; accountUuid?: string };
+  /** Undefined means no time limit: the wait ends only on success, abort, or a rewritten handler. */
   timeoutMs?: number;
   pollMs?: number;
+  /** How often `onHeartbeat` fires while waiting. Default 60_000; meaningless without `onHeartbeat`. */
+  heartbeatMs?: number;
+  /** Called once per `heartbeatMs` of waiting, with the elapsed time since the handler was armed. */
+  onHeartbeat?: (elapsedMs: number) => void;
   signal?: AbortSignal;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -570,8 +575,10 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
     io,
     append,
     readState,
-    timeoutMs = 300_000,
+    timeoutMs,
     pollMs = 1_000,
+    heartbeatMs = 60_000,
+    onHeartbeat,
     signal,
     now = Date.now,
     sleep = defaultSleep,
@@ -599,7 +606,9 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
     throw new Error(`could not arm the handler: read back "${readBack.value ?? ''}"${detail}`);
   }
 
-  const deadline = now() + timeoutMs;
+  const startedAt = now();
+  const deadline = timeoutMs !== undefined ? startedAt + timeoutMs : undefined;
+  let nextHeartbeat = onHeartbeat !== undefined ? startedAt + heartbeatMs : undefined;
   let outcome: LoginOutcome = 'timeout';
   let accountAfter: string | undefined;
 
@@ -624,9 +633,14 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
       break;
     }
 
-    if (now() >= deadline) {
+    if (deadline !== undefined && now() >= deadline) {
       outcome = 'timeout';
       break;
+    }
+
+    if (nextHeartbeat !== undefined && now() >= nextHeartbeat) {
+      onHeartbeat!(now() - startedAt);
+      nextHeartbeat += heartbeatMs;
     }
 
     await sleep(pollMs);

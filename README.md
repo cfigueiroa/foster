@@ -521,8 +521,8 @@ reported to take precedence over package activation for a `claude:` URL
 (anthropics/claude-code#31476) — that is the hypothesis `app login` exists to test, not yet
 confirmed sign-in-to-sign-in. It creates only the levels of that key which do not already exist —
 usually all of `shell`, `shell\open` and `shell\open\command`, since outside the container none of
-them normally are — points the command at the named profile for the length of one sign-in — 300
-seconds by default, `--timeout` to change it — and records what it is about to create or overwrite
+them normally are — points the command at the named profile for the length of one sign-in — it waits until the sign-in
+lands or Ctrl+C; `--timeout <seconds>` caps it — and records what it is about to create or overwrite
 in the ledger _before_ touching anything, so the key can always be put back (or the levels it
 created removed) even if this process dies mid-wait. Success is detected without reading the
 callback at all: the profile's own token cache appears, or its account changes, either of which ends
