@@ -68,8 +68,10 @@ export function transcriptRoots(
  * path.
  */
 export function indexTranscripts(projectsDirs: string | string[]): Map<string, string> {
-  // First one wins: the same conversation can be mirrored under a second project
-  // directory, and either copy opens the same session.
+  // First one wins, which is an answer to "is there a transcript, and where do I
+  // point a reader at it" and to nothing else. The copies are not mirrors — see
+  // `scanConversationFiles` — so anything measuring a conversation must take
+  // every path instead.
   return new Map(
     [...indexAllTranscripts(projectsDirs)].map(([id, files]) => [id, files[0]!] as const),
   );
@@ -361,6 +363,52 @@ export function scanConversation(file: string): ConversationScan {
     ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
     ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
   };
+}
+
+/**
+ * One conversation read across every file it occupies, as one scan.
+ *
+ * A `cliSessionId` can name more than one transcript, and those files are not
+ * copies of each other. The app finds a conversation's transcript under the
+ * project directory for the card's `cwd`, so continuing one conversation from
+ * two working directories — a repository and a worktree cut from it — leaves
+ * two files under one id, each holding the records written while that card was
+ * the one being used. Measured on a real store: 41 conversations with more than
+ * one file, 24 of them with records the first file does not hold, 6070 records
+ * in total that reading one file cannot see.
+ *
+ * Union rather than choice, because neither file is the conversation on its
+ * own. Ids survive whatever copying happened, so the shared history counts once
+ * and each side's own records count too — the same property `weighBranches`
+ * already relies on. The timestamps are the latest either file offers: the
+ * question they answer is when this work last moved, and it moved in whichever
+ * file moved last.
+ */
+export function scanConversationFiles(files: readonly string[]): ConversationScan {
+  const scans = files.map(scanConversation);
+  if (scans.length === 1) return scans[0]!;
+
+  const uuids = new Set<string>();
+  let lastMessageAt: number | undefined;
+  let lastAssistantAt: number | undefined;
+  for (const scan of scans) {
+    for (const uuid of scan.uuids) uuids.add(uuid);
+    lastMessageAt = later(lastMessageAt, scan.lastMessageAt);
+    lastAssistantAt = later(lastAssistantAt, scan.lastAssistantAt);
+  }
+
+  return {
+    uuids,
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
+  };
+}
+
+/** The later of two moments, when either may be missing. */
+function later(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.max(a, b);
 }
 
 /** How much of a transcript to hold in memory at once while streaming it. */

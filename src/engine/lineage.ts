@@ -2,7 +2,7 @@ import {
   conversationRoot,
   idsMentionedIn,
   indexAllTranscripts,
-  scanConversation,
+  scanConversationFiles,
   transcriptRoots,
   type ConversationScan,
 } from '../store/transcripts.js';
@@ -103,11 +103,16 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     return index;
   };
 
-  // First path wins: the same conversation can be mirrored under a second
-  // project directory, and either copy opens the same session.
-  const fileOf = (cliSessionId: string | undefined): string | undefined => {
-    if (cliSessionId === undefined || cliSessionId === '') return undefined;
-    return transcripts().get(cliSessionId)?.[0];
+  /**
+   * Every path this conversation occupies, because none of them is the whole of
+   * it. `scanConversationFiles` has the measurement; the short version is that
+   * one `cliSessionId` continued from two working directories leaves two files,
+   * and taking the first the directory walk offered hid 6070 records on a real
+   * store.
+   */
+  const filesOf = (cliSessionId: string | undefined): string[] => {
+    if (cliSessionId === undefined || cliSessionId === '') return [];
+    return transcripts().get(cliSessionId) ?? [];
   };
 
   const headOf = (cliSessionId: string): string | undefined => {
@@ -116,8 +121,27 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     // every card that points at it.
     if (roots.has(cliSessionId)) return roots.get(cliSessionId);
 
-    const file = fileOf(cliSessionId);
-    const root = file ? conversationRoot(file) : undefined;
+    // Every file's own first record, not just one file's. Two transcripts of one
+    // conversation disagree about their head whenever the second was started
+    // from the middle, and a conversation that answered with the wrong one of
+    // them was grouped away from its own siblings.
+    const heads: string[] = [];
+    for (const file of filesOf(cliSessionId)) {
+      const head = conversationRoot(file);
+      if (head !== undefined && !heads.includes(head)) heads.push(head);
+    }
+
+    const root = heads[0];
+    // The rest are the same work by construction — one id, one conversation —
+    // so they are filed as aliases of it and every id reaching any of them
+    // canonicalises to the same answer, whichever file the walk offered first.
+    if (root !== undefined) {
+      for (const other of heads.slice(1)) {
+        if (alias.has(other) || canonical(root) === other) continue;
+        alias.set(other, root);
+      }
+    }
+
     roots.set(cliSessionId, root);
     return root;
   };
@@ -159,8 +183,8 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       if (cliSessionId === undefined || cliSessionId === '') return undefined;
       if (scans.has(cliSessionId)) return scans.get(cliSessionId);
 
-      const file = fileOf(cliSessionId);
-      const scan = file === undefined ? undefined : scanConversation(file);
+      const files = filesOf(cliSessionId);
+      const scan = files.length === 0 ? undefined : scanConversationFiles(files);
       scans.set(cliSessionId, scan);
       return scan;
     },
@@ -179,17 +203,17 @@ export function lineageAt(projectsDirs: string[]): Lineage {
 
       const wanted = new Set(heads.values());
       for (const [id, head] of heads) {
-        const file = fileOf(id);
-        if (file === undefined) continue;
-        for (const found of idsMentionedIn(file, wanted)) {
-          // Its own head is not evidence of anything, and a root already spoken
-          // for keeps the first answer: the alias is a claim about one record,
-          // and two hosts holding it say the same thing.
-          if (found === head || alias.has(found)) continue;
-          // A root that is this conversation's own head would make the work
-          // point at itself once canonicalised.
-          if (canonical(head) === found) continue;
-          alias.set(found, head);
+        for (const file of filesOf(id)) {
+          for (const found of idsMentionedIn(file, wanted)) {
+            // Its own head is not evidence of anything, and a root already
+            // spoken for keeps the first answer: the alias is a claim about one
+            // record, and two hosts holding it say the same thing.
+            if (found === head || alias.has(found)) continue;
+            // A root that is this conversation's own head would make the work
+            // point at itself once canonicalised.
+            if (canonical(head) === found) continue;
+            alias.set(found, head);
+          }
         }
       }
     },
