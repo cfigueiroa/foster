@@ -647,3 +647,85 @@ describe('the transcript index', () => {
     expect(kin.rootOf(ORIGINAL)).toBe(ROOT);
   });
 });
+
+/**
+ * The mirror of "a copy the app branched": the card that was copied *from* is
+ * the one the app moved.
+ *
+ * Measured on a real store: 38 of 8312 active fosterings had an origin card
+ * holding a conversation other than the one recorded against it. Keyed on the
+ * card alone, the ledger answered "already fostered" for work it had never
+ * copied — and no sweep, not even one naming the session outright, would bring
+ * it. The conversation is what was fostered; the card is only where it was
+ * found.
+ */
+describe('an origin card the app branched', () => {
+  function fosteredFrom(): {
+    store: StoreLayout;
+    ledger: Ledger;
+    projectsDirs: string[];
+    originPath: string;
+  } {
+    const store = makeStore();
+    const originPath = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f1', cliSessionId: ORIGINAL }),
+    );
+    const ledger = ledgerIn();
+    const projectsDirs = projects(forked());
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+    return { store, ledger, projectsDirs, originPath };
+  }
+
+  it('brings the conversation the card now holds, instead of calling it already fostered', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again).toHaveLength(1);
+    expect(again[0]!.status).toBe('fostered');
+  });
+
+  it('keeps the fostering of the conversation it copied before', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // Two rows, two fosterings: the second must not evict the first, or the copy
+    // already in the sidebar would stop being anything `foster return` knows.
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(active.map((entry) => entry.cliSessionId).sort()).toEqual([ORIGINAL, UNRELATED].sort());
+  });
+
+  it('is still skipped when the card holds the conversation it was fostered for', () => {
+    const { store, ledger, projectsDirs } = fosteredFrom();
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again[0]).toMatchObject({ status: 'skipped', detail: 'already fostered' });
+  });
+});

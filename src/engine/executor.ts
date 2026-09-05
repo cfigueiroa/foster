@@ -190,7 +190,10 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    const key = fosteringKey(originId, target);
+    // Keyed on the conversation the origin card holds *now*. An origin card the
+    // app has branched since is a card for different work, and the fostering
+    // recorded against it says nothing about the conversation it holds today.
+    const key = fosteringKey(originId, target, session.data.cliSessionId);
     if (mintedInBatch.has(key)) {
       outcomes.push({
         originSessionId: originId,
@@ -201,7 +204,11 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    const active = state.active.get(key);
+    // The legacy key is consulted second, so a fostering written before the
+    // conversation was recorded still answers for the card it was made from.
+    const active =
+      state.active.get(key) ??
+      (session.data.cliSessionId ? state.active.get(fosteringKey(originId, target)) : undefined);
     if (active) {
       const skip = resolveExisting(active, { explicit, dryRun, ledger, kin });
       if (skip) {
@@ -211,6 +218,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // Reconciled: the ledger no longer counts it as active, so fall through and
       // make the copy the caller asked for.
       state.active.delete(key);
+      state.active.delete(fosteringKey(originId, target));
     }
 
     // Asked after the ledger, which knows about foster's own copies, and about
