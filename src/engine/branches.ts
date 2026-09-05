@@ -170,8 +170,14 @@ export interface Forks {
  * conversations are in no fork at all.
  */
 export function forksOf(cliSessionIds: Iterable<string>, kin: Lineage): Forks {
+  const ids = [...cliSessionIds];
+  // Before grouping, not after: a branch forked from the middle of a
+  // conversation answers with a root of its own until this has run, and would
+  // be grouped as work nobody else shares.
+  kin.deepen(ids);
+
   const byRoot = new Map<string, Set<string>>();
-  for (const cliSessionId of cliSessionIds) {
+  for (const cliSessionId of ids) {
     const root = kin.rootOf(cliSessionId);
     if (root === undefined) continue;
     const members = byRoot.get(root);
