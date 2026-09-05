@@ -11,6 +11,7 @@ import { closingWindowQuits } from '../store/config.js';
 import {
   isCodeCliProcess,
   parseProcessCsv,
+  partialTable,
   readProcesses,
   regExePath,
   type ProcessLister,
@@ -123,6 +124,17 @@ export interface DesktopState {
    * asking for it, part-way through whatever it was doing.
    */
   selfHosted: boolean;
+  /**
+   * Set when the process table could not tell the app from a Claude Code
+   * session; `running` is then false for want of proof, not because the app is
+   * absent. Only a partial table (tasklist: no paths, parents or command lines)
+   * can produce this — a full table always has enough evidence to say either
+   * way — and only when there is something to be uncertain about at all: a
+   * `claude.exe` row it cannot attribute. A partial table with no `claude.exe`
+   * anywhere is a certain "not running", because a name is proof enough of
+   * absence even when it proves nothing about identity.
+   */
+  uncertain?: string;
 }
 
 /**
@@ -138,6 +150,12 @@ export function runningStores(list: ProcessLister = readProcesses): string[] {
   const dirs = new Set<string>();
   for (const row of list()) {
     if (row.name.toLowerCase() !== 'claude.exe') continue;
+    // A partial row (tasklist) has no command line at all, so `--user-data-dir`
+    // can never be read out of it — skipped explicitly rather than relying on
+    // the empty string to fail the match below, so a reader added later that
+    // happens to leave `commandLine` non-empty on a partial row cannot silently
+    // start attributing profiles it has no evidence for.
+    if (row.partial) continue;
     const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
     if (match?.[1]) dirs.add(match[1]);
   }
@@ -172,16 +190,26 @@ export function inspectDesktopFor(
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
   const wanted = identity.roots.map(comparableUserDataDir);
+  const allRows = list();
 
-  const rows = list().filter((row) => {
-    // Everything that is not the app stays: the ancestry walk needs those rows to
-    // work out whether foster is running inside the instance.
-    if (row.name.toLowerCase() !== 'claude.exe') return true;
-    const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
-    // A switchless process belongs to the default installation, and only to it.
-    if (!match?.[1]) return identity.isDefault;
-    return wanted.includes(comparableUserDataDir(match[1]));
-  });
+  // A partial table (tasklist) carries no command line, so every claude.exe on
+  // it would fail the --user-data-dir match below and land on the switchless
+  // rule — attributing it to the default installation and turning a profile
+  // store's "cannot tell" into a confident, wrong "not running". Keeping every
+  // row instead of filtering lets inspectDesktop's own partial-table handling
+  // see every claude.exe there is, so the uncertain note it produces reaches
+  // this store too instead of the filter silently deciding the question first.
+  const rows = partialTable(allRows)
+    ? allRows
+    : allRows.filter((row) => {
+        // Everything that is not the app stays: the ancestry walk needs those rows to
+        // work out whether foster is running inside the instance.
+        if (row.name.toLowerCase() !== 'claude.exe') return true;
+        const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
+        // A switchless process belongs to the default installation, and only to it.
+        if (!match?.[1]) return identity.isDefault;
+        return wanted.includes(comparableUserDataDir(match[1]));
+      });
 
   // Ancestry is already scoped — the rows above are this instance's — so only the
   // environment marker still needs narrowing to this store.
@@ -204,6 +232,12 @@ export function inspectDesktopFor(
  * the file settles it. When no store holds it — deleted mid-session, say — this
  * says nothing and the refusal stands: over-refusing costs a manual restart,
  * while under-refusing kills the caller.
+ *
+ * A partial table (tasklist) makes `runningStores` below name nothing at all —
+ * it has no command lines to read a profile out of — so on a partial table this
+ * can only ever find the environment marker's own store, never "some other
+ * store the marker might belong to". The refusal stands in that case too, for
+ * the same reason: it is the safe side, and unchanged by what caused it.
  */
 function hostedElsewhere(
   identity: StoreIdentity,
@@ -227,6 +261,28 @@ export function inspectDesktop(
   const desktop = rows.filter((row) => isDesktopProcess(row, rows, env));
 
   if (desktop.length === 0) {
+    // isDesktopProcess demands a readable path, so a partial table (tasklist)
+    // never passes it — every claude.exe on one looks exactly like a stranger.
+    // A claude.exe that could not be attributed is not evidence the app is
+    // absent; it is evidence foster cannot currently tell. The asymmetry below
+    // matters: a partial table with NO claude.exe at all still says "not
+    // running" with no note, because a name is proof enough of absence — it is
+    // only the identity question, "which claude.exe is this", that a partial
+    // table cannot answer.
+    const claudeCount = partialTable(rows)
+      ? rows.filter((row) => row.name.toLowerCase() === 'claude.exe').length
+      : 0;
+    if (claudeCount > 0) {
+      return {
+        running: false,
+        codeSessions: 0,
+        selfHosted: hostedByDesktop(env),
+        uncertain:
+          `${claudeCount} claude.exe process(es) are running, but the process table was read ` +
+          'through tasklist, which reports no paths, parent links or command lines — foster ' +
+          'cannot tell the app from a Claude Code session',
+      };
+    }
     return { running: false, codeSessions: 0, selfHosted: hostedByDesktop(env) };
   }
 
@@ -401,6 +457,17 @@ export async function quitDesktop(
   // question would happily quit whichever main process came first.
   const state = inspectDesktopFor(storeIdentity(store.root, env), list, env);
 
+  if (!state.running && state.uncertain) {
+    // Returning 'not-running' here would let a restart flow start a second
+    // instance on top of one that may well be running — the exact failure mode
+    // `selfHosted` guards against below, reached by a different route (a
+    // process table too thin to see the app at all, rather than one that sees
+    // it and finds foster inside it).
+    throw new DesktopControlError(
+      `foster cannot tell whether Claude Desktop is running: ${state.uncertain}.\n` +
+        'Quit it yourself, or see "foster doctor" for why the process table could not be read in full.',
+    );
+  }
   if (!state.running || state.mainPid === undefined) return { outcome: 'not-running' };
   if (state.selfHosted) {
     throw new DesktopControlError(

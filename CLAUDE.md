@@ -129,6 +129,10 @@ while ($p) { "$($p.ProcessId) $($p.Name) $($p.ExecutablePath)"; $p = Get-CimInst
 An ancestor under `WindowsApps\Claude_*` means the answer is: hand the user the command for
 a terminal outside the app. Do not try to work around it.
 
+That probe is PowerShell, and PowerShell is not always the tool that answers (see the next
+section). When it is stuck, ask wmic the same question about one pid instead:
+`wmic process where "ProcessId=<pid>" get ParentProcessId,Name,ExecutablePath /format:list`.
+
 ## A reported "live writer", and why the pid alone was not one
 
 Foster decides a conversation has a live writer from a registry file under
@@ -164,6 +168,34 @@ a machine carrying several of them turned each into an orphaned "desktop" row th
 a path under a known store root, under the app's own `\Packages\Claude...` directory, or a child
 process carrying Electron's `--type=` — absence of the CLI's markers no longer counts as
 presence of the app's.
+
+## Reading processes no longer needs a live PowerShell
+
+Symptom measured 05/09/2026 on this machine: PowerShell hangs at start-up (`InitializeDefaultDrives`
+of the FileSystem provider, blocked on a WinFsp/Cryptomator drive that had stopped answering), every
+`powershell.exe` invocation waits the full 20 s and then errors, and `foster app status`, `foster
+live`, `foster stores` and `foster doctor` each pay that 20 s and then report an empty machine — a
+lie, and a dangerous one for `live --stop`, which decides what to kill from that table.
+
+`readProcesses()` now falls back: PowerShell first, then `wmic process get ... /format:list` (same
+six fields — pid, parent pid, name, path, command line, start time), then `tasklist /fo csv /nh`
+(pid and name only). A PowerShell that fails once is not retried for the rest of that run — the hang
+is paid at most once. Run `foster doctor` and read the `process table` line: `via PowerShell` is the
+healthy case, `via wmic — <reason>` means PowerShell was passed over but the table is still full,
+`via tasklist (partial: ...)` means only pid and name are known, and `unreadable` means nothing
+answered at all.
+
+A table read through tasklist refuses rather than guesses: `app status` says it cannot tell the app
+from a Claude Code session, `live --stop` will not touch a partial row, and `sweep --restart` hands
+over the command instead of trying. Do not treat a partial table's empty path or command line as
+evidence of anything — it means the reader could not report one, not that there was none.
+
+When PowerShell is stuck and you need the answer directly, these run without it:
+
+```
+tasklist /fo csv /nh
+wmic process get ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate /format:list
+```
 
 ## Rescuing "cannot reach your computer" cards
 

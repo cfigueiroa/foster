@@ -167,6 +167,33 @@ function inspectWriter(identity: WriterIdentity, rows: ProcessRow[]): WriterInsp
     return { verdict: 'unknown', note: `pid ${identity.pid} is not in the process table` };
   }
 
+  // tasklist rows never carry a creation time, so without this check every
+  // partial row would fall straight through to the 'plausible' return at the
+  // bottom — the two checks in between (creation time, then recordedAt) both
+  // require fields a partial row never has. That is exactly backwards: a
+  // partial row is the case with the LEAST evidence, and 'plausible' is what
+  // lets `endableWriter` hand a pid to `taskkill /F /T`. With parent links gone
+  // too, `isSelfHostedBy` cannot see that the pid is foster's own ancestor
+  // either, so a partial row must never come out as anything but 'mismatch' (a
+  // name alone still proves a stranger) or 'unknown' — never 'confirmed', never
+  // 'plausible'.
+  if (row.partial) {
+    if (!couldBeWriter(row)) {
+      return {
+        verdict: 'mismatch',
+        row,
+        note: `pid ${identity.pid} is ${row.name || 'a process'}, which is not a claude session`,
+      };
+    }
+    return {
+      verdict: 'unknown',
+      row,
+      note:
+        `pid ${identity.pid} is ${row.name || 'a process'}, but the process table was read ` +
+        'through tasklist, which reports no creation time or path to check the record against',
+    };
+  }
+
   if (identity.procStartedAt !== undefined && row.startedAt !== undefined) {
     if (Math.abs(row.startedAt - identity.procStartedAt) <= START_MATCH_MS) {
       return { verdict: 'confirmed', row };

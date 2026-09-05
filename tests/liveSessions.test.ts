@@ -437,6 +437,68 @@ describe('ending a writer', () => {
   });
 });
 
+/**
+ * A partial row — everything tasklist reports once wmic and PowerShell have
+ * both failed — carries a pid and a name and nothing else: no path, no parent,
+ * no creation time. That is the weakest evidence this module ever reasons
+ * from, and it must never come out looking stronger than it is: a name alone
+ * still proves a stranger, but it can never confirm or even suggest a match,
+ * because there is no creation time left to contradict a wrong guess and no
+ * parent link left for isSelfHostedBy to see foster's own ancestry with.
+ */
+describe('a partial row (tasklist)', () => {
+  const partialClaude: ProcessRow = {
+    pid: 4242,
+    parentPid: 0,
+    name: 'claude.exe',
+    path: '',
+    commandLine: '',
+    partial: true,
+  };
+  const partialGit: ProcessRow = {
+    pid: 4242,
+    parentPid: 0,
+    name: 'git.exe',
+    path: '',
+    commandLine: '',
+    partial: true,
+  };
+
+  it('refuses to end a claude.exe row even when the record carries a creation time', () => {
+    const identity = { pid: 4242, procStartedAt: WRITER_STARTED, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialClaude]);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.reason).toContain('tasklist');
+    expect(verdict.reason).toContain('creation time');
+
+    // The registry still says a writer exists, and nothing here contradicts
+    // it — fork protection must not fall away just because the table is thin.
+    expect(against([partialClaude])(4242, identity)).toBe(true);
+  });
+
+  it('refuses a claude.exe row even for a record with no creation time to compare at all', () => {
+    // The weaker check other records fall back to ('plausible') must never be
+    // reached here: with no path and no parent link, foster cannot tell this
+    // pid apart from itself, let alone from a stranger.
+    const identity = { pid: 4242, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialClaude]);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('still recognises an unrelated process name as a stranger', () => {
+    const identity = { pid: 4242, procStartedAt: WRITER_STARTED, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialGit]);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.reason).toContain('4242');
+    expect(verdict.reason).toContain('git.exe');
+    expect(verdict.reason).toContain('Windows reuses pids');
+
+    expect(against([partialGit])(4242, identity)).toBe(false);
+  });
+});
+
 describe('pruning the registry', () => {
   /** The companion file a session leaves beside its record. */
   function peerKey(root: string, pid: number, body: Record<string, unknown> | string): string {

@@ -92,6 +92,7 @@ import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../stor
 import { listClients, type ClaudeClient } from '../store/clients.js';
 import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
+import { processTableProvenance, type ProcessTableProvenance } from '../util/processes.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -342,6 +343,33 @@ function sameStore(a: StoreLayout, b: StoreLayout): boolean {
   return samePath(a.root, b.root);
 }
 
+/**
+ * The `process table` line `doctor` prints: which reader answered, and — for
+ * anything short of a clean PowerShell read — why the ones before it were
+ * passed over. Coloured by how much the answer can be trusted: wmic still has
+ * every field PowerShell does, tasklist is missing the ones foster reasons
+ * from (paths, parent links, command lines, start times), and no reader
+ * answering at all is the state that used to look exactly like an idle
+ * machine.
+ */
+function describeProcessTable(provenance: ProcessTableProvenance): string {
+  const passedOver = provenance.passedOver.join('; ');
+  switch (provenance.source) {
+    case 'powershell':
+      return 'via PowerShell';
+    case 'wmic':
+      return `via wmic — ${passedOver}`;
+    case 'tasklist':
+      return pc.yellow(
+        `via tasklist (partial: no paths, parent links, command lines or start times) — ${passedOver}`,
+      );
+    case 'installed':
+      return 'via a test fixture';
+    case 'none':
+      return pc.red(`unreadable — ${passedOver}`);
+  }
+}
+
 program
   .command('doctor')
   .description('check the environment before doing anything else')
@@ -370,6 +398,8 @@ program
         updaterLastSeenVersion: config.updaterLastSeenVersion ?? null,
         appRunning: app.running,
         appId: packagedAppId(store) ?? null,
+        // Populated by the inspectApp call above, so this costs no extra read.
+        processTable: processTableProvenance(),
       });
       return;
     }
@@ -419,6 +449,9 @@ program
     console.log(`  updater sees  ${config.updaterLastSeenVersion ?? 'unknown'}`);
     console.log(`  account       ${config.lastKnownAccountUuid ?? 'unknown'}`);
     console.log(`  launches as   ${packagedAppId(store) ?? 'unknown'}`);
+    // Populated by the inspectApp call above, so this line costs no extra read
+    // of the process table — it only reports how the one already taken went.
+    console.log(`  process table ${describeProcessTable(processTableProvenance())}`);
 
     // A profile started with the --user-data-dir switch is invisible to a process
     // that did not launch it, so the running instances are the only place to learn
@@ -3760,7 +3793,13 @@ function reportDesktop(command: Command): void {
   }
 
   if (!state.running) {
-    console.log('Claude Desktop is not running.');
+    // uncertain rides along on the object spread in the --json branch above, so
+    // this text branch is the only place that has to say it out loud.
+    if (state.uncertain) {
+      console.log(pc.yellow(`Cannot tell whether Claude Desktop is running: ${state.uncertain}`));
+    } else {
+      console.log('Claude Desktop is not running.');
+    }
     return;
   }
   console.log(`Claude Desktop is running (pid ${state.mainPid}).`);
