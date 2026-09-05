@@ -10,6 +10,7 @@ import {
 } from '../util/processes.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { configDirCandidates } from './configDirs.js';
+import { storeHoldsSession } from '../domain/paths.js';
 
 /**
  * The CLI's registry of running sessions.
@@ -65,6 +66,14 @@ export interface LiveCliSession {
   /** The conversation the process is holding open. */
   sessionId: string;
   cwd?: string;
+  /**
+   * Who started this CLI process, when the record says. `'claude-desktop'` is
+   * the app spawning a Code session inside itself; anything else, terminal.
+   * Records too old to carry one are treated as terminal — the safe default,
+   * since a terminal session is never mistaken for one the app can be asked
+   * about.
+   */
+  entrypoint?: string;
   /** What the file says about its writer, for anything that has to verify it. */
   identity: WriterIdentity;
 }
@@ -530,6 +539,46 @@ export function liveSessionFor(
   return liveSessions(roots, alive).find((session) => session.sessionId.toLowerCase() === wanted);
 }
 
+/**
+ * The subset of a known installation this needs — deliberately narrower than
+ * `KnownStore` (`src/engine/stores.ts`), so this module never has to import the
+ * engine layer just to describe the shape it reads.
+ */
+export interface HostCandidate {
+  root: string;
+  /** The name it was registered under, when it has one. */
+  name?: string;
+  /** The account this installation last recorded — `readConfig(store).lastKnownAccountUuid`. */
+  accountUuid?: string;
+  /** Whether the directory is still there; a gone store cannot hold a live card. */
+  exists: boolean;
+}
+
+/**
+ * Which known installation is hosting a registry entry, if any.
+ *
+ * The registry file names a pid and a conversation; it says nothing about which
+ * Desktop installation is holding it, because the app's environment carries no
+ * store identity into the child — only `entrypoint`. The one place the link
+ * exists on disk is the card itself, `<store>/claude-code-sessions/<account>/
+ * <org>/<sessionId>.json`, so every known, still-existing store is checked for
+ * one with `storeHoldsSession` — the same existence check `isSelfHostedBy`'s
+ * sibling in `paths.ts` makes for "am I running inside this installation".
+ *
+ * A terminal session (any entrypoint but `'claude-desktop'`) is never looked
+ * up: it did not come from an installation at all, so a card that happens to
+ * share its id would be a coincidence, not an answer. A hosted entry whose
+ * card cannot be found — deleted since, or in a store foster does not know
+ * about — comes back `undefined` rather than a guess at the likeliest one.
+ */
+export function hostedStoreFor(
+  session: { sessionId: string; entrypoint?: string },
+  stores: HostCandidate[],
+): HostCandidate | undefined {
+  if (session.entrypoint !== 'claude-desktop') return undefined;
+  return stores.find((store) => store.exists && storeHoldsSession(store.root, session.sessionId));
+}
+
 function readRegistryFile(file: string): Omit<LiveCliSession, 'registryFile'> | undefined {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -550,6 +599,7 @@ function readRegistryFile(file: string): Omit<LiveCliSession, 'registryFile'> | 
       pid,
       sessionId,
       ...(typeof parsed.cwd === 'string' ? { cwd: parsed.cwd } : {}),
+      ...(typeof parsed.entrypoint === 'string' ? { entrypoint: parsed.entrypoint } : {}),
       identity: {
         pid,
         ...(procStartedAt !== undefined ? { procStartedAt } : {}),

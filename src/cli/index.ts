@@ -102,10 +102,12 @@ import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
 import {
   describeWriters,
+  hostedStoreFor,
   liveSessions,
   pruneRegistry,
   sessionRegistryRoots,
   staleRegistryEntries,
+  type HostCandidate,
   type LiveCliSession,
 } from '../store/liveSessions.js';
 import { selectWriters, stopWriters } from '../ops/writers.js';
@@ -3109,7 +3111,9 @@ program
   .option('--prune', 'remove registry entries whose process is gone or has been replaced')
   .option('--yes', 'actually do it; without it nothing is stopped or removed')
   .action(async function (this: Command) {
-    const opts = this.opts<{ json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }>();
+    const opts = this.optsWithGlobals<
+      GlobalOptions & { json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }
+    >();
     const roots = sessionRegistryRoots(process.env);
 
     if (opts.prune) {
@@ -3124,14 +3128,38 @@ program
       return;
     }
 
+    // Which installation, if any, is actually hosting each entry. The registry
+    // names no store — the card is the only place that link exists on disk —
+    // so every installation foster knows about is checked for one.
+    const events = (opts.ledger ? new Ledger(opts.ledger) : new Ledger()).read();
+    const labels = project(events).labels;
+    const storeCandidates: HostCandidate[] = knownStores(events, process.env).map((known) => ({
+      root: known.root,
+      name: known.name,
+      accountUuid: known.accountUuid,
+      exists: known.exists,
+    }));
+
     if (opts.json) {
       print(
-        sessions.map((s) => ({
-          pid: s.pid,
-          cliSessionId: s.sessionId,
-          cwd: s.cwd ?? null,
-          registryFile: s.registryFile,
-        })),
+        sessions.map((s) => {
+          const hosted = hostedStoreFor(s, storeCandidates);
+          return {
+            pid: s.pid,
+            cliSessionId: s.sessionId,
+            cwd: s.cwd ?? null,
+            registryFile: s.registryFile,
+            hostedBy: hosted
+              ? {
+                  root: hosted.root,
+                  name: hosted.name ?? null,
+                  lastSeenAs: hosted.accountUuid
+                    ? (labels.get(hosted.accountUuid) ?? shortId(hosted.accountUuid))
+                    : null,
+                }
+              : null,
+          };
+        }),
       );
       return;
     }
@@ -3142,7 +3170,9 @@ program
       return;
     }
     for (const s of sessions) {
-      console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(s.cwd ?? '')}`);
+      const hosted = hostedStoreFor(s, storeCandidates);
+      const detail = hosted ? hostedByLine(hosted, labels) : terminalSessionLine(s);
+      console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(detail)}`);
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
@@ -3295,6 +3325,34 @@ program
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {
   return bytes === undefined ? '' : formatBytes(bytes);
+}
+
+/**
+ * `hosted by <name|root>`, with `· last seen as <label>` appended when the
+ * store carries the config's account hint. Without a hint nothing is guessed
+ * at — the store is still named, the account just is not.
+ */
+function hostedByLine(hosted: HostCandidate, labels: Map<string, string>): string {
+  const label = hosted.accountUuid
+    ? (labels.get(hosted.accountUuid) ?? shortId(hosted.accountUuid))
+    : undefined;
+  return `hosted by ${hosted.name ?? hosted.root}` + (label ? ` · last seen as ${label}` : '');
+}
+
+/**
+ * What to print for a session no installation claims — a plain terminal.
+ *
+ * "Client" means the config directory everywhere else this CLI says it
+ * (`clients`, `src/store/clients.ts`), not the process's launch directory, so
+ * that is what gets named here: two `dirname`s above the registry file, since
+ * a session registers itself at `<configDir>/sessions/<pid>.json`. The launch
+ * directory is still worth a line when it differs from the client root.
+ */
+function terminalSessionLine(session: LiveCliSession): string {
+  const clientDir = path.dirname(path.dirname(session.registryFile));
+  return session.cwd && session.cwd !== clientDir
+    ? `${clientDir}  (cwd ${session.cwd})`
+    : clientDir;
 }
 
 /**
@@ -3559,13 +3617,32 @@ app
   });
 
 function reportDesktop(command: Command): void {
-  const { store } = context(command);
+  const { store, ledger } = context(command);
   // The instance running this store, so `--store <profile> app status` describes
   // that profile rather than whichever app was found first.
   const state = inspectDesktopFor(storeIdentity(store.root));
 
+  // The registry entries the card cross-reference says belong to this store —
+  // see `hostedStoreFor` — checked against this one installation rather than
+  // every known one, since that is the question `app status` is asked.
+  const accountUuid = readConfig(store).lastKnownAccountUuid;
+  const candidate: HostCandidate = { root: store.root, accountUuid, exists: true };
+  const hosted = liveSessions(sessionRegistryRoots(process.env)).filter(
+    (session) => hostedStoreFor(session, [candidate]) !== undefined,
+  );
+
+  // Computed unconditionally so `--json` carries the same label `live --json`
+  // does for the same concept (`hostedBy.lastSeenAs`) — a JSON consumer should
+  // not see less than the text branch prints below.
+  const labels = project(ledger.read()).labels;
+  const lastSeenAs = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : null;
+
   if (command.opts<{ json?: boolean }>().json) {
-    print({ ...state, appId: packagedAppId(store) ?? null });
+    print({
+      ...state,
+      appId: packagedAppId(store) ?? null,
+      hostedSessions: hosted.map((s) => ({ pid: s.pid, cliSessionId: s.sessionId, lastSeenAs })),
+    });
     return;
   }
 
@@ -3577,6 +3654,10 @@ function reportDesktop(command: Command): void {
   if (state.startedAt) console.log(pc.dim(`  started ${formatAge(state.startedAt)}`));
   if (state.codeSessions > 0)
     console.log(pc.dim(`  hosting ${state.codeSessions} Claude Code session(s)`));
+  if (hosted.length > 0) {
+    console.log(pc.dim(`  hosted sessions${lastSeenAs ? ` · last seen as ${lastSeenAs}` : ''}:`));
+    for (const s of hosted) console.log(pc.dim(`    ${s.sessionId}  (pid ${s.pid})`));
+  }
   if (state.selfHosted)
     console.log(pc.yellow('  foster is running inside it, so it cannot close it'));
 }

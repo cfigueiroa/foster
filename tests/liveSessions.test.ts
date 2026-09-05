@@ -7,11 +7,13 @@ import type { ProcessRow } from '../src/engine/desktop.js';
 import {
   describeWriters,
   endableWriter,
+  hostedStoreFor,
   isSelfHostedBy,
   liveSessions,
   pruneRegistry,
   staleRegistryEntries,
   writerAliveWith,
+  type HostCandidate,
 } from '../src/store/liveSessions.js';
 
 const CONVERSATION = '00000000-0000-4000-8000-0000000000e1';
@@ -109,6 +111,89 @@ describe('describeWriters', () => {
     ];
 
     expect(describeWriters([CONVERSATION], [root], () => recycled, against(recycled))).toEqual([]);
+  });
+});
+
+describe('liveSessions reading entrypoint', () => {
+  it('carries the entrypoint the record wrote', () => {
+    const root = registryWith([
+      { pid: 900, sessionId: CONVERSATION, cwd: '/work/thing', entrypoint: 'claude-desktop' },
+    ]);
+
+    const live = liveSessions([root], () => true);
+    expect(live[0]?.entrypoint).toBe('claude-desktop');
+  });
+
+  it('leaves it undefined for a record too old to carry one', () => {
+    const root = registryWith([{ pid: 900, sessionId: CONVERSATION, cwd: '/work/thing' }]);
+
+    const live = liveSessions([root], () => true);
+    expect(live[0]?.entrypoint).toBeUndefined();
+  });
+});
+
+describe('hostedStoreFor', () => {
+  const ACCOUNT = '00000000-0000-4000-8000-00000000000a';
+  const ORG = '00000000-0000-4000-8000-00000000000b';
+
+  /** A store root holding a session card at the real path `storeHoldsSession` reads. */
+  function storeWithCard(sessionId: string): string {
+    const root = mkdtempSync(path.join(tmpdir(), 'foster-store-'));
+    const dir = path.join(root, 'claude-code-sessions', ACCOUNT, ORG);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, `${sessionId}.json`), '{}', 'utf8');
+    return root;
+  }
+
+  it('names the store and account holding the card', () => {
+    const root = storeWithCard(CONVERSATION);
+    const store: HostCandidate = { root, name: 'work', accountUuid: ACCOUNT, exists: true };
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
+    ).toEqual(store);
+  });
+
+  it('never looks up a terminal session, even one that shares an id with a card', () => {
+    const root = storeWithCard(CONVERSATION);
+    const store: HostCandidate = { root, exists: true };
+
+    expect(hostedStoreFor({ sessionId: CONVERSATION }, [store])).toBeUndefined();
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'terminal' }, [store]),
+    ).toBeUndefined();
+  });
+
+  it('leaves a hosted entry unlabeled when no known store holds its card, instead of guessing', () => {
+    const root = storeWithCard('some-other-session');
+    const store: HostCandidate = { root, exists: true };
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
+    ).toBeUndefined();
+  });
+
+  it('does not check inside a store that no longer exists', () => {
+    const root = storeWithCard(CONVERSATION);
+    const store: HostCandidate = { root, exists: false };
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
+    ).toBeUndefined();
+  });
+
+  it('assigns each session to its own store when two are standing', () => {
+    const rootA = storeWithCard('session-a');
+    const rootB = storeWithCard('session-b');
+    const storeA: HostCandidate = { root: rootA, name: 'a', exists: true };
+    const storeB: HostCandidate = { root: rootB, name: 'b', exists: true };
+
+    expect(
+      hostedStoreFor({ sessionId: 'session-a', entrypoint: 'claude-desktop' }, [storeA, storeB]),
+    ).toEqual(storeA);
+    expect(
+      hostedStoreFor({ sessionId: 'session-b', entrypoint: 'claude-desktop' }, [storeA, storeB]),
+    ).toEqual(storeB);
   });
 });
 
