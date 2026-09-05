@@ -5,9 +5,10 @@ import {
   formatAge,
   formatBytes,
   groupByAccount,
+  neverComesLine,
   sweepSummary,
 } from '../src/cli/render.js';
-import type { SweepReport } from '../src/ops/sweep.js';
+import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -191,7 +192,7 @@ describe('sweepSummary', () => {
     restored: { outcomes: [], counts },
     archived: 0,
     liveWriters: [],
-    neverComes: { total: 0, byReason: {} },
+    neverComes: { total: 0, byReason: {}, sessions: [] },
     ...overrides,
   });
 
@@ -229,5 +230,89 @@ describe('sweepSummary', () => {
 
   it('says nothing about forks when there are none', () => {
     expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/fork/);
+  });
+});
+
+describe('neverComesLine', () => {
+  const never = (sessions: NeverComeSession[]): NeverComes => {
+    const byReason: Partial<Record<NeverComeSession['reason'], number>> = {};
+    for (const one of sessions) byReason[one.reason] = (byReason[one.reason] ?? 0) + 1;
+    return { total: sessions.length, byReason, sessions };
+  };
+
+  it('names the ones with no way in, so the count is not the only trace of them', () => {
+    // The whole reason this exists: a sweep reported "2 never opened" and the two
+    // titles appeared nowhere, which reads exactly like having brought everything.
+    const line = plain(
+      neverComesLine(
+        never([
+          { title: 'Guard for every versioned plist', reason: 'never-opened' },
+          { title: 'Half-written draft', reason: 'too-large' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('Guard for every versioned plist');
+    expect(line).toContain('Half-written draft');
+    expect(line).toContain('2 with no way in');
+  });
+
+  it('leaves scheduled tasks unnamed, because the flag above already answers them', () => {
+    const line = plain(
+      neverComesLine(
+        never([
+          { title: 'Nightly watchdog', reason: 'scheduled-task' },
+          { title: 'Second watchdog', reason: 'scheduled-task' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('foster --include-scheduled');
+    expect(line).not.toContain('Nightly watchdog');
+    expect(line).not.toContain('with no way in');
+  });
+
+  it('names the stranded ones even when scheduled tasks are the bulk of the gap', () => {
+    const line = plain(
+      neverComesLine(
+        never([
+          ...Array.from({ length: 8 }, (_, i) => ({
+            title: `Watchdog ${i}`,
+            reason: 'scheduled-task' as const,
+          })),
+          { title: 'The one nobody would find', reason: 'never-opened' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('The one nobody would find');
+    expect(line).toContain('The one with no way in');
+  });
+
+  it('caps the list rather than printing a wall of titles', () => {
+    const line = plain(
+      neverComesLine(
+        never(
+          Array.from({ length: 13 }, (_, i) => ({
+            title: `Stranded ${i}`,
+            reason: 'never-opened' as const,
+          })),
+        ),
+      ),
+    );
+
+    expect(line).toContain('Stranded 9');
+    expect(line).not.toContain('Stranded 10');
+    expect(line).toContain('...and 3 more');
+  });
+
+  it('gives an untitled session a name to be listed under', () => {
+    const line = plain(neverComesLine(never([{ title: undefined, reason: 'never-opened' }])));
+
+    expect(line).toContain('(untitled)');
+  });
+
+  it('stays empty when there is no gap at all', () => {
+    expect(neverComesLine(never([]))).toBe('');
   });
 });
