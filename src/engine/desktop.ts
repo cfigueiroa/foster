@@ -3,6 +3,7 @@ import type { StoreLayout } from '../domain/types.js';
 import {
   candidateStoreRoots,
   comparableUserDataDir,
+  layoutFor,
   storeHoldsSession,
   storeIdentity,
   type StoreIdentity,
@@ -363,6 +364,40 @@ export function packagedAppId(store: StoreLayout): string | undefined {
   const application = family.split('_')[0];
   if (!application) return undefined;
   return `${family}!${application}`;
+}
+
+/**
+ * The AppUserModelID of the installed Claude Desktop package — independent
+ * of which store a caller happens to be operating on.
+ *
+ * `packagedAppId` derives the family from a store's own root
+ * (`\Packages\<family>`), which works for the installed app's own store but
+ * not for a profile: a second account's userData can sit anywhere at all
+ * (`D:\Claude-Work`, say), with no `\Packages\` segment in it, so
+ * `packagedAppId(profileStore)` is undefined even on a machine where the
+ * package is very much installed. `app login` for a profile still needs to
+ * know that package's identity — the packaged ProgID it hands off to in
+ * `protocolHandler.ts` is the *installed app's*, never the profile's own —
+ * so this looks it up independently: the first `candidateStoreRoots(env)`
+ * entry that is itself a package install (i.e. does resolve through
+ * `packagedAppId`), or, when that scan finds nothing at all (measured only
+ * on a very fresh install with no `claude-code-sessions` folder yet), a
+ * running `Claude.exe` whose own path names the package directly.
+ */
+export function installedAppId(
+  env: NodeJS.ProcessEnv = process.env,
+  list: ProcessLister = readProcesses,
+): string | undefined {
+  for (const root of candidateStoreRoots(env)) {
+    const id = packagedAppId(layoutFor(root));
+    if (id !== undefined) return id;
+  }
+  for (const row of list()) {
+    if (row.name.toLowerCase() !== 'claude.exe') continue;
+    const id = appIdFromWindowsAppsPath(row.path);
+    if (id !== undefined) return id;
+  }
+  return undefined;
 }
 
 export class DesktopControlError extends Error {

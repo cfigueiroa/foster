@@ -484,8 +484,28 @@ program
     // `app login` that has not yet been put back — whether it is still running
     // in another terminal or was interrupted, doctor cannot tell, so it points
     // at the one command that resolves either case.
-    const handler = inspectHandler(store, project(ledger.read()), registryHandlerIo);
-    console.log(pc.dim(`  packaged ProgID ${handler.key ?? 'not found'}`));
+    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    if (handler.key !== undefined) {
+      console.log(pc.dim(`  packaged ProgID ${handler.key} (via ${handler.progIdSource})`));
+      if (handler.current !== undefined) {
+        console.log(pc.dim(`  Parameters      ${handler.current.raw}`));
+      }
+    } else if (handler.lookup?.kind === 'ambiguous') {
+      console.log(
+        pc.yellow(
+          `  packaged ProgID not found: more than one candidate carries AppUserModelID ` +
+            `${handler.lookup.aumid} (${handler.lookup.progIds.join(', ')}) — pass --progid to ` +
+            'app login to choose',
+        ),
+      );
+    } else {
+      const aumid = handler.lookup?.aumid;
+      console.log(
+        pc.dim(
+          `  packaged ProgID not found${aumid !== undefined ? ` (looked for AppUserModelID ${aumid})` : ''}`,
+        ),
+      );
+    }
     if (handler.virtualizedView) {
       console.log(
         pc.dim(
@@ -3884,6 +3904,11 @@ app
     '--restart-profile',
     'when the profile is running without package identity, close it and start it again with it',
   )
+  .option(
+    '--progid <name>',
+    'choose the packaged ProgID explicitly (an AppX... name) when more than one carries this ' +
+      "install's AppUserModelID",
+  )
   .action(async function (this: Command) {
     const opts = this.opts<{
       yes?: boolean;
@@ -3891,6 +3916,7 @@ app
       print?: boolean;
       restore?: boolean;
       restartProfile?: boolean;
+      progid?: string;
     }>();
     const { store, ledger } = context(this);
     const events = ledger.read();
@@ -3929,7 +3955,7 @@ app
       }
     }
 
-    let plan = planLogin(store, { io: registryHandlerIo, events });
+    let plan = planLogin(store, { io: registryHandlerIo, events, progid: opts.progid });
 
     // The one blocker `app login` can fix for itself: a profile running
     // without package identity can never receive the callback, however the
@@ -3955,7 +3981,7 @@ app
           ),
         );
       }
-      plan = planLogin(store, { io: registryHandlerIo, events });
+      plan = planLogin(store, { io: registryHandlerIo, events, progid: opts.progid });
     }
 
     const label = plan.name ?? plan.root;

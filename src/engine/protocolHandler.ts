@@ -4,7 +4,7 @@ import type { StoreLayout } from '../domain/types.js';
 import {
   desktopExecutable,
   inspectDesktopFor,
-  packagedAppId,
+  installedAppId,
   runningStores,
   type ProcessLister,
 } from './desktop.js';
@@ -12,6 +12,7 @@ import {
   processPackageIdentity,
   readProcesses,
   regExePath,
+  systemExePath,
   type PackageIdentity,
 } from '../util/processes.js';
 import { readConfig } from '../store/config.js';
@@ -56,6 +57,24 @@ import type { LedgerEvent, LedgerEventInput } from '../ledger/types.js';
  * The one registry subtree this ever touches sits behind `HandlerIo` so tests
  * never touch it — they hand in an in-memory fake and assert against that
  * instead. See CLAUDE.md, "The registry has two views".
+ *
+ * Finding *which* `AppX<hash>` ProgID is the right one is its own problem,
+ * measured separately on 05/09/2026: a machine can carry more than one
+ * packaged ProgID with the *identical* `AppUserModelID` — one install here
+ * registered both a `claude:` protocol handler and a file-type association,
+ * each its own ProgID, both stamped with the same package identity. Scanning
+ * the registry for "any ProgID whose `AppUserModelID` matches" cannot tell
+ * them apart, and arming the wrong one's `Parameters` would silently do
+ * nothing. The one place that reliably distinguishes them is the shell
+ * itself: `AssocQueryString` with `ASSOCF_IS_PROTOCOL`, the exact call
+ * `ShellExecute` makes to resolve `claude:`, answers with the ProgID Windows
+ * actually uses — reached here through a disposable PowerShell P/Invoke
+ * (`HandlerIo.protocolProgId`). When PowerShell cannot answer, the fallback
+ * is a `reg query ... /f <AppUserModelID> /d /s` data search
+ * (`HandlerIo.searchData`), kept only for the `Shell\open` keys whose own
+ * `AppUserModelID` equals the install's; more than one surviving that filter
+ * is refused rather than guessed at, with `--progid` as the way to choose by
+ * hand.
  */
 const CLASSES_ROOT = 'HKCU\\Software\\Classes';
 
@@ -87,9 +106,133 @@ export interface HandlerIo {
   keyExists(key: string): boolean;
   /** The direct subkey names (not full paths) sitting right under `key`. */
   listSubkeys(key: string): string[];
+  /**
+   * The packaged ProgID Windows itself resolves `claude:` to — straight from
+   * `AssocQueryString`, the same call `ShellExecute` makes, so it is the one
+   * source that can tell two ProgIDs with an identical `AppUserModelID`
+   * apart (see the module docblock). `undefined` when PowerShell could not
+   * answer; never a guess.
+   */
+  protocolProgId(): string | undefined;
+  /**
+   * Raw `reg query <root> /f <needle> /d /s` output, one line per array
+   * entry — a recursive data search for every key holding `needle` somewhere
+   * in one of its values. Empty when nothing matched or the search itself
+   * could not run: the fallback path this backs has nothing softer to fall
+   * back to, so a failure here is reported the same way as a clean miss.
+   */
+  searchData(root: string, needle: string): string[];
 }
 
-/** The real implementation, entirely through `reg.exe`. */
+/** Every reg.exe read this module does is capped generously: a full data
+ * search of `HKCU\Software\Classes` (measured: ~49 KB for 96 `AppX*`
+ * subkeys) is nowhere near Node's 1 MB default `maxBuffer`, but there is no
+ * reason to leave that default in place and rediscover the hard way that a
+ * bigger machine's registry can outgrow it. */
+const REG_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
+ * The short hive names this module and its callers write (`HKCU`) versus the
+ * long ones `reg.exe` always echoes back in its own output
+ * (`HKEY_CURRENT_USER`) — accepted interchangeably as input, but never
+ * produced interchangeably as output. Comparing a `reg query` line against
+ * the short spelling this module is written with therefore never matches at
+ * all; this table is how `canonicalRegistryPath` translates one to the other
+ * before comparing.
+ */
+const HIVE_ALIASES: Record<string, string> = {
+  hkcr: 'hkey_classes_root',
+  hkcu: 'hkey_current_user',
+  hklm: 'hkey_local_machine',
+  hku: 'hkey_users',
+  hkcc: 'hkey_current_config',
+};
+
+/** `key`, with its hive spelled out the way `reg.exe` itself prints it. */
+function canonicalRegistryPath(key: string): string {
+  const sep = key.indexOf('\\');
+  const hive = (sep === -1 ? key : key.slice(0, sep)).toLowerCase();
+  const rest = sep === -1 ? '' : key.slice(sep);
+  return (HIVE_ALIASES[hive] ?? hive) + rest;
+}
+
+/**
+ * Parses `reg query <key>` (no `/s`) output into the direct subkey names
+ * sitting right under it.
+ *
+ * Measured on a real machine: the output is a blank line, then one FULL key
+ * path per line (`HKEY_CURRENT_USER\Software\Classes\AppX<hash>`), CRLF
+ * terminated — never the abbreviated hive `key` itself may have been passed
+ * in as (`HKCU\...`). A prefix check against the un-translated `key` matches
+ * nothing at all against real `reg.exe` output, which is exactly the defect
+ * this was measured against: `findProtocolProgId` reported "packaged ProgID
+ * not found" on a machine that plainly had one, because this returned an
+ * empty list every time. Exported and pure so a test can feed it that real
+ * shape directly, without spawning `reg.exe`.
+ */
+export function parseSubkeyNames(output: string, key: string): string[] {
+  const prefix = `${canonicalRegistryPath(key)}\\`.toLowerCase();
+  const names = new Set<string>();
+  for (const rawLine of output.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.toLowerCase().startsWith(prefix)) continue;
+    const rest = line.slice(prefix.length);
+    if (rest === '' || rest.includes('\\')) continue;
+    names.add(rest);
+  }
+  return [...names];
+}
+
+/** `HKCU\Software\Classes\<progId>\Shell\open` — the key `Parameters` lives under. */
+function openKeyFor(progId: string): string {
+  return `${CLASSES_ROOT}\\${progId}\\Shell\\open`;
+}
+
+/**
+ * A resolved key is only trustworthy once it is confirmed to exist and to
+ * actually carry `Parameters`.
+ *
+ * A read *error* is not evidence of that — it is a different failure
+ * entirely (`reg.exe` not on PATH, access denied), completely unrelated to
+ * whether this is the right ProgID, and `planLogin`'s own read of `key`
+ * right after this surfaces it as its own blocker
+ * (`couldNotReadBlocker`). Treating it as "this key has no Parameters, try
+ * something else" would silently swap that specific, actionable blocker for
+ * a generic "packaged ProgID not found" — so only a *clean* read that comes
+ * back with nothing at all disqualifies a candidate key.
+ */
+function verifiedProgIdKey(io: HandlerIo, key: string): boolean {
+  if (!io.keyExists(key)) return false;
+  const read = io.readValue(key, 'Parameters');
+  return read.error !== undefined || read.value !== undefined;
+}
+
+const ASSOCF_IS_PROTOCOL = 0x1000;
+const ASSOCSTR_PROGID = 20;
+
+/**
+ * P/Invokes `shlwapi!AssocQueryStringW` for the ProgID of the `claude:`
+ * protocol — the exact call `ShellExecute` itself makes to resolve a
+ * `claude://...` link, and so the one answer that is never ambiguous between
+ * two ProgIDs sharing an `AppUserModelID` (see the module docblock). Prints
+ * nothing when the flags return non-zero or the buffer never gets a length,
+ * which comes back as `undefined` below rather than a guess.
+ */
+const ASSOC_QUERY_SCRIPT =
+  "$ErrorActionPreference='Stop'; try { " +
+  "Add-Type -Namespace FosterNative -Name Assoc -MemberDefinition '" +
+  '[DllImport("shlwapi.dll", CharSet=CharSet.Unicode)] public static extern int AssocQueryStringW(' +
+  'uint f, uint s, string pszAssoc, string pszExtra, System.Text.StringBuilder pszOut, ref uint pcchOut);' +
+  "'; " +
+  `$flags = ${ASSOCF_IS_PROTOCOL}; $str = ${ASSOCSTR_PROGID}; $len = 0; ` +
+  '[FosterNative.Assoc]::AssocQueryStringW($flags, $str, "claude", $null, $null, [ref]$len) | Out-Null; ' +
+  'if ($len -gt 0) { ' +
+  '$sb = New-Object System.Text.StringBuilder([int]$len); ' +
+  '$rc = [FosterNative.Assoc]::AssocQueryStringW($flags, $str, "claude", $null, $sb, [ref]$len); ' +
+  'if ($rc -eq 0) { Write-Output $sb.ToString() } ' +
+  '} } catch { }';
+
+/** The real implementation, entirely through `reg.exe` and, for `protocolProgId`, PowerShell. */
 export const registryHandlerIo: HandlerIo = {
   readValue(key: string, name: string): HandlerReadResult {
     if (process.platform !== 'win32') return {};
@@ -98,6 +241,7 @@ export const registryHandlerIo: HandlerIo = {
         windowsHide: true,
         stdio: 'pipe',
         encoding: 'utf8',
+        maxBuffer: REG_MAX_BUFFER,
       });
       // The value's own name can be localised in other places in this codebase,
       // but never here: `/v <name>` asks for it by the fixed, English names the
@@ -120,6 +264,7 @@ export const registryHandlerIo: HandlerIo = {
       windowsHide: true,
       stdio: 'pipe',
       encoding: 'utf8',
+      maxBuffer: REG_MAX_BUFFER,
     });
   },
   keyExists(key: string): boolean {
@@ -129,6 +274,7 @@ export const registryHandlerIo: HandlerIo = {
         windowsHide: true,
         stdio: 'pipe',
         encoding: 'utf8',
+        maxBuffer: REG_MAX_BUFFER,
       });
       return true;
     } catch {
@@ -142,49 +288,172 @@ export const registryHandlerIo: HandlerIo = {
         windowsHide: true,
         stdio: 'pipe',
         encoding: 'utf8',
+        maxBuffer: REG_MAX_BUFFER,
       });
-      // Plain `reg query <key>` (no /s) prints the key's own values first, then
-      // one line per direct subkey, each the subkey's *full* path — so a name is
-      // one of those lines with the parent's path (and a trailing backslash)
-      // stripped off the front, and nothing else after it.
-      const prefix = `${key}\\`.toLowerCase();
-      const names = new Set<string>();
-      for (const rawLine of out.split(/\r?\n/)) {
-        const line = rawLine.trim();
-        if (!line.toLowerCase().startsWith(prefix)) continue;
-        const rest = line.slice(prefix.length);
-        if (rest === '' || rest.includes('\\')) continue;
-        names.add(rest);
-      }
-      return [...names];
+      return parseSubkeyNames(out, key);
     } catch {
       return [];
+    }
+  },
+  protocolProgId(): string | undefined {
+    if (process.platform !== 'win32') return undefined;
+    try {
+      const exe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe');
+      const out = execFileSync(
+        exe,
+        ['-NoProfile', '-NonInteractive', '-Command', ASSOC_QUERY_SCRIPT],
+        { windowsHide: true, stdio: 'pipe', encoding: 'utf8', timeout: 20_000 },
+      ).trim();
+      return out === '' ? undefined : out;
+    } catch {
+      return undefined;
+    }
+  },
+  searchData(root: string, needle: string): string[] {
+    if (process.platform !== 'win32') return [];
+    try {
+      const out = execFileSync(regExePath(), ['query', root, '/f', needle, '/d', '/s'], {
+        windowsHide: true,
+        stdio: 'pipe',
+        encoding: 'utf8',
+        maxBuffer: REG_MAX_BUFFER,
+      });
+      return out.split(/\r?\n/);
+    } catch (err) {
+      // `reg` exits non-zero — and still writes its "not found" notice to
+      // stdout — when a search simply comes up empty; that is a normal,
+      // empty result here, not a failure worth surfacing. A spawn failure
+      // (reg.exe missing, denied) has no stdout at all, and comes back the
+      // same empty way: this fallback has nothing softer to fall back to.
+      const failure = err as NodeJS.ErrnoException & { stdout?: string };
+      return typeof failure.stdout === 'string' ? failure.stdout.split(/\r?\n/) : [];
     }
   },
 };
 
 /**
+ * Every `Shell\open` key name found in a `searchData` result whose own
+ * `AppUserModelID` line equals `aumid` — the fallback lookup's disambiguation
+ * step. Pure, over the raw lines `HandlerIo.searchData` returns, so it can be
+ * tested against a realistic two-ProgID result without spawning `reg.exe`.
+ *
+ * `reg query ... /f <aumid> /d /s` prints one block per matching key: the key's
+ * own full path (canonical hive spelling, same trap as `parseSubkeyNames`),
+ * then its values indented underneath, blocks separated by a blank line (not
+ * guaranteed after the very last one). Only a block whose key path itself
+ * ends `\Shell\open` and whose `AppUserModelID` value equals `aumid` counts —
+ * the same search also turns up each ProgID's sibling `\Application` key,
+ * which is not what `Parameters` lives under and must not be counted as a
+ * candidate.
+ */
+function progIdsFromSearch(lines: string[], aumid: string): string[] {
+  const wanted = aumid.trim().toLowerCase();
+  const canonicalPrefix = `${canonicalRegistryPath(CLASSES_ROOT)}\\`.toLowerCase();
+  const found = new Set<string>();
+  let currentProgId: string | undefined;
+  let hasMatch = false;
+
+  const flush = () => {
+    if (currentProgId !== undefined && hasMatch) found.add(currentProgId);
+    currentProgId = undefined;
+    hasMatch = false;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line === '') {
+      flush();
+      continue;
+    }
+    if (/^HKEY_/i.test(line)) {
+      flush();
+      const lower = line.toLowerCase();
+      if (lower.startsWith(canonicalPrefix) && /\\shell\\open$/i.test(lower)) {
+        const rest = line.slice(canonicalPrefix.length);
+        const segments = rest.split('\\');
+        // <ProgID>\Shell\open — exactly three segments, or this is some
+        // deeper key the search also turned up and not one this cares about.
+        if (segments.length === 3) currentProgId = segments[0];
+      }
+      continue;
+    }
+    const value = /^AppUserModelID\s+REG_SZ\s+(.*)$/i.exec(line);
+    if (currentProgId !== undefined && value && value[1]!.trim().toLowerCase() === wanted) {
+      hasMatch = true;
+    }
+  }
+  flush();
+
+  return [...found];
+}
+
+/** What `findProtocolProgId` came back with — see its own docblock. */
+export type ProgIdOutcome =
+  | {
+      kind: 'found';
+      key: string;
+      progId: string;
+      how: 'shell association' | 'registry search' | 'explicit';
+    }
+  | { kind: 'ambiguous'; aumid: string; progIds: string[] }
+  | { kind: 'not-found'; aumid?: string; explicitProgId?: string };
+
+export interface FindProgIdOptions {
+  env?: NodeJS.ProcessEnv;
+  list?: ProcessLister;
+  /** An explicit choice — from `app login --progid` — bypassing detection entirely. */
+  progid?: string;
+}
+
+/**
  * Finds the packaged ProgID this install registered for `claude:`, and
  * returns its `Shell\open` key — the key `Parameters` lives under.
  *
- * There is no direct path from the protocol name to the ProgID: enumerating
- * every `AppX*` subkey of `HKCU\Software\Classes` and checking each one's own
- * `AppUserModelID` against this install's (`packagedAppId`) is what the
- * measurement above actually did, so that is what this does too. Read-only,
- * and entirely through the injectable `io` — a test hands in a fake tree with
- * one matching entry rather than a real registry.
+ * Three ways to answer, tried in order, because each is more expensive and
+ * less certain than the last:
+ *
+ *  1. `--progid`, when the caller passed one: no lookup at all, just a
+ *     verification that the named key exists and carries `Parameters`.
+ *  2. `io.protocolProgId()` — the shell's own answer, and the only one that
+ *     can never be ambiguous (see the module docblock). Preferred whenever
+ *     PowerShell can run it.
+ *  3. A `reg query ... /f <AppUserModelID> /d /s` data search, kept only for
+ *     the `Shell\open` keys whose own `AppUserModelID` matches this
+ *     install's (`installedAppId`, never `packagedAppId(store)` — a profile
+ *     store carries no package identity of its own). More than one surviving
+ *     that filter is reported `'ambiguous'` rather than picked at random;
+ *     `app login --progid` is the way out.
+ *
+ * Read-only, and entirely through the injectable `io` — a test hands in a
+ * fake tree rather than a real registry.
  */
-export function findProtocolProgId(io: HandlerIo, store: StoreLayout): string | undefined {
-  const appId = packagedAppId(store);
-  if (appId === undefined) return undefined;
+export function findProtocolProgId(io: HandlerIo, opts: FindProgIdOptions = {}): ProgIdOutcome {
+  const { env = process.env, list = readProcesses, progid } = opts;
 
-  for (const name of io.listSubkeys(CLASSES_ROOT)) {
-    if (!name.toLowerCase().startsWith('appx')) continue;
-    const openKey = `${CLASSES_ROOT}\\${name}\\Shell\\open`;
-    if (!io.keyExists(openKey)) continue;
-    if (io.readValue(openKey, 'AppUserModelID').value === appId) return openKey;
+  if (progid !== undefined) {
+    const key = openKeyFor(progid);
+    if (verifiedProgIdKey(io, key)) return { kind: 'found', key, progId: progid, how: 'explicit' };
+    return { kind: 'not-found', explicitProgId: progid };
   }
-  return undefined;
+
+  const viaShell = io.protocolProgId();
+  if (viaShell !== undefined) {
+    const key = openKeyFor(viaShell);
+    if (verifiedProgIdKey(io, key)) {
+      return { kind: 'found', key, progId: viaShell, how: 'shell association' };
+    }
+  }
+
+  const aumid = installedAppId(env, list);
+  if (aumid === undefined) return { kind: 'not-found' };
+
+  const progIds = progIdsFromSearch(io.searchData(CLASSES_ROOT, aumid), aumid);
+  if (progIds.length === 0) return { kind: 'not-found', aumid };
+  if (progIds.length > 1) return { kind: 'ambiguous', aumid, progIds };
+
+  const key = openKeyFor(progIds[0]!);
+  if (!verifiedProgIdKey(io, key)) return { kind: 'not-found', aumid };
+  return { kind: 'found', key, progId: progIds[0]!, how: 'registry search' };
 }
 
 /** What `Parameters` holds, parsed. Absent `userDataDir` means the bare, unrouted `"%1"`. */
@@ -227,6 +496,10 @@ export interface LoginPlan {
   spelling: string;
   /** The ProgID's `Shell\open` key `Parameters` lives under, once found. */
   key?: string;
+  /** The bare ProgID name (`AppX...`), for messages and `--progid`. */
+  progId?: string;
+  /** How `key` was found — see `findProtocolProgId`. */
+  progIdSource?: 'shell association' | 'registry search' | 'explicit';
   /** Whether the running profile's main process has package identity. */
   identity?: PackageIdentity;
   /** The current value of `Parameters`, to restore once the sign-in ends. */
@@ -243,6 +516,8 @@ export interface PlanLoginOptions {
   env?: NodeJS.ProcessEnv;
   list?: ProcessLister;
   platform?: string;
+  /** `app login --progid`: choose the packaged ProgID explicitly rather than detecting it. */
+  progid?: string;
   /** Injectable: reads the running profile's package identity. */
   identity?: (pid: number) => PackageIdentity;
   /**
@@ -307,9 +582,28 @@ export function containerBlocker(env: NodeJS.ProcessEnv): string | undefined {
 const OFF_WINDOWS_BLOCKER =
   'the claude:// handler is a Windows registry key; there is nothing to route elsewhere';
 
-const PROGID_NOT_FOUND_BLOCKER =
-  'this Claude Desktop does not register claude:// as a packaged app; only the MSIX install is ' +
-  'supported by app login';
+/** The refusal for every `ProgIdOutcome` short of `'found'` — see `findProtocolProgId`. */
+function progIdNotFoundBlocker(found: Extract<ProgIdOutcome, { kind: 'not-found' }>): string {
+  if (found.explicitProgId !== undefined) {
+    return (
+      `--progid ${found.explicitProgId} does not exist under ${CLASSES_ROOT}, or has no ` +
+      'Parameters value; nothing was armed'
+    );
+  }
+  const suffix = found.aumid !== undefined ? ` (looked for AppUserModelID ${found.aumid})` : '';
+  return (
+    `this Claude Desktop does not register claude:// as a packaged app${suffix}; only the MSIX ` +
+    'install is supported by app login'
+  );
+}
+
+function ambiguousProgIdBlocker(found: Extract<ProgIdOutcome, { kind: 'ambiguous' }>): string {
+  return (
+    `more than one packaged ProgID carries AppUserModelID ${found.aumid}: ` +
+    `${found.progIds.join(', ')}. foster will not guess which one Windows actually uses for ` +
+    `claude:// — re-run with --progid <name>, e.g. --progid ${found.progIds[0]}`
+  );
+}
 
 const NOTHING_TO_ARM_BLOCKER =
   'foster could not work out what to arm the handler with; nothing was changed';
@@ -379,6 +673,7 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     env = process.env,
     list = readProcesses,
     platform = process.platform,
+    progid,
     identity: identityReader,
     lockfileHeld: lockfileHeldReader = lockfileHeldDefault,
   } = opts;
@@ -419,11 +714,16 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     return plan;
   }
 
-  const key = findProtocolProgId(io, store);
-  if (key === undefined) {
-    blockers.push(PROGID_NOT_FOUND_BLOCKER);
+  const found = findProtocolProgId(io, { env, list, progid });
+  if (found.kind === 'ambiguous') {
+    blockers.push(ambiguousProgIdBlocker(found));
+  } else if (found.kind === 'not-found') {
+    blockers.push(progIdNotFoundBlocker(found));
   } else {
+    const key = found.key;
     plan.key = key;
+    plan.progId = found.progId;
+    plan.progIdSource = found.how;
     const read = io.readValue(key, 'Parameters');
 
     if (read.error !== undefined) {
@@ -676,6 +976,10 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
 export interface HandlerState {
   /** The ProgID's `Shell\open` key, once found. */
   key?: string;
+  /** The bare ProgID name (`AppX...`), once found. */
+  progId?: string;
+  /** How `key` was found — see `findProtocolProgId`. */
+  progIdSource?: 'shell association' | 'registry search' | 'explicit';
   current?: { userDataDir?: string; raw: string };
   armed?: LedgerState['handlerArmed'];
   /**
@@ -684,27 +988,35 @@ export interface HandlerState {
    * browser would see. `doctor` shows this instead of judging the handler.
    */
   virtualizedView: boolean;
+  /** Set when no key was found — why, so `doctor` can say the AUMID it looked for, or list ambiguous candidates. */
+  lookup?: Extract<ProgIdOutcome, { kind: 'not-found' | 'ambiguous' }>;
 }
 
 export function inspectHandler(
-  store: StoreLayout,
   state: LedgerState,
   io: HandlerIo,
   env: NodeJS.ProcessEnv = process.env,
+  list: ProcessLister = readProcesses,
 ): HandlerState {
   const virtualizedView = insideAppContainer(env);
   const armed = state.handlerArmed;
-  const key = findProtocolProgId(io, store);
+  const found = findProtocolProgId(io, { env, list });
 
-  if (key === undefined) {
-    return { ...(armed !== undefined ? { armed } : {}), virtualizedView };
+  if (found.kind !== 'found') {
+    return {
+      ...(armed !== undefined ? { armed } : {}),
+      virtualizedView,
+      lookup: found,
+    };
   }
 
-  const read = io.readValue(key, 'Parameters');
+  const read = io.readValue(found.key, 'Parameters');
   const parsed = parseParameters(read.value);
 
   return {
-    key,
+    key: found.key,
+    progId: found.progId,
+    progIdSource: found.how,
     ...(parsed !== undefined
       ? {
           current: {

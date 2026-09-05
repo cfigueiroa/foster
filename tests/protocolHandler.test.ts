@@ -9,6 +9,7 @@ import {
   findProtocolProgId,
   inspectHandler,
   parseParameters,
+  parseSubkeyNames,
   planLogin,
   restoreHandler,
   runLogin,
@@ -20,17 +21,59 @@ import { project } from '../src/ledger/project.js';
 import type { LedgerEvent, LedgerEventInput } from '../src/ledger/types.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
-import { makeStore } from './helpers/store.js';
 
 // Not a real machine identifier (this repo is public) — the same shape
 // measured on 05/09/2026: a Package Family Name followed by its application.
 const APP_ID = 'Claude_pzs8sxrjxfjjc!Claude';
 const PROG_ID = 'AppXaem4n1tckgw588q10avtdbzpbgt71c77';
+// A second ProgID that would carry the same AppUserModelID on a real
+// machine — measured 05/09/2026: one install registers both a `claude:`
+// protocol handler and a file-type association, each its own ProgID.
+const PROG_ID_2 = 'AppXc5eekcytc3qx4t9p10r6czzyc15gmhgf';
 const OPEN_KEY = `HKCU\\Software\\Classes\\${PROG_ID}\\Shell\\open`;
 const EXE =
   'C:\\home\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+// A real MSIX install path under \WindowsApps\ — the shape `installedAppId`
+// falls back to reading when no candidate store yields a packagedAppId.
+const WINDOWS_APPS_EXE =
+  'C:\\Program Files\\WindowsApps\\Claude_1.46388.2.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe';
 // The bare, unrouted value every fresh install carries.
 const PLAIN_PARAMETERS = '"%1"';
+
+/**
+ * A `ProcessRow` naming a running `claude.exe` under `\WindowsApps\`, so
+ * `installedAppId`'s fallback (a running process's own path, when nothing in
+ * `candidateStoreRoots` yields a package) resolves it to `APP_ID`.
+ */
+function windowsAppsRow(): ProcessRow {
+  return {
+    pid: 321,
+    parentPid: 1,
+    name: 'claude.exe',
+    path: WINDOWS_APPS_EXE,
+    commandLine: `"${WINDOWS_APPS_EXE}"`,
+  };
+}
+
+/**
+ * Synthetic `reg query <root> /f <needle> /d /s` output: one block per entry
+ * (a `Shell\open` key and its `AppUserModelID`), separated by a blank line —
+ * the shape `findProtocolProgId`'s registry-search fallback parses. `reg.exe`
+ * always echoes the canonical, long hive name (`HKEY_CURRENT_USER`), never
+ * the abbreviated one this codebase writes its own keys with (`HKCU`) — the
+ * same trap `parseSubkeyNames` exists to survive, reproduced here on purpose
+ * rather than in the short form that would hide it.
+ */
+function regSearchLines(entries: Array<{ progId: string; appUserModelId: string }>): string[] {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    lines.push(`HKEY_CURRENT_USER\\Software\\Classes\\${entry.progId}\\Shell\\open`);
+    lines.push(`    AppUserModelID    REG_SZ    ${entry.appUserModelId}`);
+    lines.push('    Parameters    REG_SZ    "%1"');
+    lines.push('');
+  }
+  return lines;
+}
 
 // Empty, not inherited: this suite runs inside a hosted Claude Code session
 // (this very repository is worked on from one), whose real process.env
@@ -42,9 +85,10 @@ const NO_ENV: NodeJS.ProcessEnv = {};
 
 /**
  * A store whose root sits under `\Packages\Claude_pzs8sxrjxfjjc\...`, so
- * `packagedAppId` resolves it to `APP_ID` — the precondition `findProtocolProgId`
- * needs to find anything at all. A real temp directory, unlike `makeStore()`'s
- * plain one, so a test can still write `config.json` into it.
+ * `packagedAppId` resolves it to `APP_ID` — the shape `planLogin`'s other
+ * checks (`storeIdentity`, `readConfig`) expect a real installation to have.
+ * A real temp directory, unlike `makeStore()`'s plain one, so a test can
+ * still write `config.json` into it.
  */
 function makePackagedStore(): StoreLayout {
   const base = mkdtempSync(path.join(tmpdir(), 'foster-test-'));
@@ -62,16 +106,58 @@ function makePackagedStore(): StoreLayout {
 }
 
 /**
+ * A profile store with no package identity of its own at all (a
+ * `D:\Claude-Work` shape — no `\Packages\` segment), alongside an env whose
+ * `LOCALAPPDATA` names a temp dir holding a *separate*, installed package —
+ * so `installedAppId` can find `APP_ID` by scanning `candidateStoreRoots`,
+ * never by looking at the profile's own path. This is the exact case the
+ * defect measured 05/09/2026 was found from: `packagedAppId(profileStore)`
+ * is undefined, so anything deriving the AUMID from the store itself finds
+ * nothing on a real profile, however real the installed app is.
+ */
+function makeProfileStoreWithInstalledApp(): { store: StoreLayout; env: NodeJS.ProcessEnv } {
+  const base = mkdtempSync(path.join(tmpdir(), 'foster-test-'));
+  const installedRoot = path.join(
+    base,
+    'Packages',
+    'Claude_pzs8sxrjxfjjc',
+    'LocalCache',
+    'Roaming',
+    'Claude',
+  );
+  mkdirSync(path.join(installedRoot, 'claude-code-sessions'), { recursive: true });
+
+  const store = layoutFor(path.join(base, 'Claude-Work'));
+  mkdirSync(store.codeSessionsDir, { recursive: true });
+
+  return { store, env: { LOCALAPPDATA: base } };
+}
+
+/**
  * An in-memory registry tree with one packaged ProgID, whose `Shell\open`
  * holds `AppUserModelID` and `Parameters`. `log`, when given, records
  * `write:<key>:<name>=<value>` in call order.
+ *
+ * `protocolProgId` defaults to answering `PROG_ID` straight away — the shell
+ * association is meant to be the easy, common case (a machine with a working
+ * PowerShell), so most of the tests below never need to touch `env`/`list`/
+ * `searchData` at all. Tests exercising the registry-search fallback set it
+ * to `undefined` explicitly (a PowerShell that could not answer) and supply
+ * `searchLines` instead.
  */
 function fakeIo(
-  options: { appUserModelId?: string; parameters?: string; log?: string[] } = {},
+  options: {
+    appUserModelId?: string;
+    parameters?: string;
+    log?: string[];
+    protocolProgId?: string | undefined;
+    searchLines?: string[];
+  } = {},
 ): HandlerIo {
   const appUserModelId = options.appUserModelId ?? APP_ID;
   let parameters = options.parameters;
   const log = options.log;
+  const protocolProgIdAnswer = 'protocolProgId' in options ? options.protocolProgId : PROG_ID;
 
   return {
     listSubkeys: (key) => (key === 'HKCU\\Software\\Classes' ? [PROG_ID] : []),
@@ -86,6 +172,8 @@ function fakeIo(
       log?.push(`write:${key}:${name}=${value}`);
       if (key === OPEN_KEY && name === 'Parameters') parameters = value;
     },
+    protocolProgId: () => protocolProgIdAnswer,
+    searchData: () => options.searchLines ?? [],
   };
 }
 
@@ -98,6 +186,8 @@ function fakeIoNoProgId(): HandlerIo {
     writeValue: () => {
       throw new Error('not reached: no ProgID was found to write to');
     },
+    protocolProgId: () => undefined,
+    searchData: () => [],
   };
 }
 
@@ -167,23 +257,188 @@ describe('containerBlocker', () => {
   });
 });
 
+describe('parseSubkeyNames', () => {
+  // Measured on a real machine: `reg query HKCU\Software\Classes` (no `/s`)
+  // prints a blank line, then one FULL key path per line — always the long,
+  // canonical hive name (`HKEY_CURRENT_USER`), never the short one this
+  // codebase writes its keys with (`HKCU`) — CRLF terminated, ~49 KB for 96
+  // `AppX*` subkeys on that machine. This is the actual defect: the previous
+  // implementation compared each line against a prefix built from the short
+  // spelling, which never matched a single line of real `reg.exe` output, so
+  // `findProtocolProgId` reported "packaged ProgID not found" on a machine
+  // that plainly had one.
+  const REAL_SHAPE_OUTPUT =
+    '\r\n' +
+    'HKEY_CURRENT_USER\\Software\\Classes\r\n' +
+    '\r\n' +
+    'HKEY_CURRENT_USER\\Software\\Classes\\.001\r\n' +
+    `HKEY_CURRENT_USER\\Software\\Classes\\${PROG_ID}\r\n` +
+    `HKEY_CURRENT_USER\\Software\\Classes\\${PROG_ID_2}\r\n` +
+    'HKEY_CURRENT_USER\\Software\\Classes\\zzzfakeprogid\r\n';
+
+  it('parses the real, canonical-hive output shape against a short (HKCU) key', () => {
+    expect(parseSubkeyNames(REAL_SHAPE_OUTPUT, 'HKCU\\Software\\Classes')).toEqual(
+      expect.arrayContaining(['.001', PROG_ID, PROG_ID_2, 'zzzfakeprogid']),
+    );
+  });
+
+  it('parses the same output against the already-canonical key', () => {
+    expect(parseSubkeyNames(REAL_SHAPE_OUTPUT, 'HKEY_CURRENT_USER\\Software\\Classes')).toEqual(
+      expect.arrayContaining([PROG_ID, PROG_ID_2]),
+    );
+  });
+
+  it('ignores the key line itself and anything nested deeper than one level', () => {
+    const withNesting =
+      REAL_SHAPE_OUTPUT + `HKEY_CURRENT_USER\\Software\\Classes\\${PROG_ID}\\Shell\\open\r\n`;
+    const names = parseSubkeyNames(withNesting, 'HKCU\\Software\\Classes');
+    expect(names).not.toContain('Shell');
+    expect(names).not.toContain('');
+  });
+
+  it('returns nothing for a key with no matching lines at all', () => {
+    expect(parseSubkeyNames(REAL_SHAPE_OUTPUT, 'HKCU\\Software\\SomethingElse')).toEqual([]);
+  });
+});
+
 describe('findProtocolProgId', () => {
-  it('finds the ProgID whose AppUserModelID matches this install', () => {
-    const store = makePackagedStore();
-    expect(findProtocolProgId(fakeIo(), store)).toBe(OPEN_KEY);
+  it('prefers the shell association when PowerShell can answer', () => {
+    const io = fakeIo({ protocolProgId: PROG_ID, parameters: PLAIN_PARAMETERS });
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [] })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'shell association',
+    });
   });
 
-  it('returns undefined when this store has no package identity of its own', () => {
-    // A plain makeStore() root has no \Packages\ segment, so packagedAppId
-    // cannot even ask the question.
-    expect(findProtocolProgId(fakeIo(), makeStore())).toBeUndefined();
+  it('never falls through to the registry search when the shell association already answers', () => {
+    const io: HandlerIo = {
+      ...fakeIo({ protocolProgId: PROG_ID, parameters: PLAIN_PARAMETERS }),
+      searchData: () => {
+        throw new Error('not reached: the shell association already found it');
+      },
+    };
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [] })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'shell association',
+    });
   });
 
-  it('returns undefined when nothing registered matches', () => {
-    const store = makePackagedStore();
-    expect(
-      findProtocolProgId(fakeIo({ appUserModelId: 'Someone_else!App' }), store),
-    ).toBeUndefined();
+  it('falls back to a registry search for a PROFILE store, using the installed root from candidateStoreRoots', () => {
+    const { env } = makeProfileStoreWithInstalledApp();
+    const io = fakeIo({
+      protocolProgId: undefined,
+      parameters: PLAIN_PARAMETERS,
+      searchLines: regSearchLines([{ progId: PROG_ID, appUserModelId: APP_ID }]),
+    });
+
+    expect(findProtocolProgId(io, { env, list: () => [] })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'registry search',
+    });
+  });
+
+  it('falls back to a running Claude.exe under \\WindowsApps\\ when no candidate store yields one', () => {
+    const io = fakeIo({
+      protocolProgId: undefined,
+      parameters: PLAIN_PARAMETERS,
+      searchLines: regSearchLines([{ progId: PROG_ID, appUserModelId: APP_ID }]),
+    });
+
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [windowsAppsRow()] })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'registry search',
+    });
+  });
+
+  it('refuses ambiguously when more than one ProgID carries the installed AppUserModelID', () => {
+    const io = fakeIo({
+      protocolProgId: undefined,
+      searchLines: regSearchLines([
+        { progId: PROG_ID, appUserModelId: APP_ID },
+        { progId: PROG_ID_2, appUserModelId: APP_ID },
+      ]),
+    });
+
+    const result = findProtocolProgId(io, { env: NO_ENV, list: () => [windowsAppsRow()] });
+    expect(result.kind).toBe('ambiguous');
+    expect(result).toMatchObject({ aumid: APP_ID });
+    if (result.kind === 'ambiguous') {
+      expect(result.progIds.sort()).toEqual([PROG_ID, PROG_ID_2].sort());
+    }
+  });
+
+  it('ignores a sibling \\Application key that also carries the AppUserModelID', () => {
+    // The same search also turns up each ProgID's \Application key (not
+    // \Shell\open) — it must never be counted as a second candidate.
+    const lines = [
+      `HKEY_CURRENT_USER\\Software\\Classes\\${PROG_ID}\\Application`,
+      `    AppUserModelID    REG_SZ    ${APP_ID}`,
+      '',
+      ...regSearchLines([{ progId: PROG_ID, appUserModelId: APP_ID }]),
+    ];
+    const io = fakeIo({
+      protocolProgId: undefined,
+      parameters: PLAIN_PARAMETERS,
+      searchLines: lines,
+    });
+
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [windowsAppsRow()] })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'registry search',
+    });
+  });
+
+  it('returns not-found with the AppUserModelID when the search comes up with nothing', () => {
+    const io = fakeIo({ protocolProgId: undefined, searchLines: [] });
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [windowsAppsRow()] })).toEqual({
+      kind: 'not-found',
+      aumid: APP_ID,
+    });
+  });
+
+  it('returns not-found with no AppUserModelID when the installed app cannot be identified at all', () => {
+    const io = fakeIo({ protocolProgId: undefined, searchLines: [] });
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [] })).toEqual({ kind: 'not-found' });
+  });
+
+  it('verifies the resolved key actually carries Parameters before reporting it found', () => {
+    // The shell answers a ProgID whose key exists but, in this fake, carries
+    // no Parameters value at all — `keyExists` alone is not enough.
+    const io: HandlerIo = {
+      ...fakeIo({ protocolProgId: undefined, searchLines: [] }),
+      keyExists: (key) => key === OPEN_KEY,
+      readValue: () => ({}),
+      protocolProgId: () => PROG_ID,
+    };
+    expect(findProtocolProgId(io, { env: NO_ENV, list: () => [] })).toEqual({ kind: 'not-found' });
+  });
+
+  it('honours an explicit --progid, bypassing detection entirely', () => {
+    const io = fakeIo({ protocolProgId: undefined, parameters: PLAIN_PARAMETERS, searchLines: [] });
+    expect(findProtocolProgId(io, { progid: PROG_ID })).toEqual({
+      kind: 'found',
+      key: OPEN_KEY,
+      progId: PROG_ID,
+      how: 'explicit',
+    });
+  });
+
+  it('refuses an explicit --progid that does not exist, or has no Parameters', () => {
+    const io = fakeIo({ protocolProgId: undefined, searchLines: [] });
+    expect(findProtocolProgId(io, { progid: 'AppXnotreal' })).toEqual({
+      kind: 'not-found',
+      explicitProgId: 'AppXnotreal',
+    });
   });
 });
 
@@ -291,7 +546,60 @@ describe('planLogin', () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.key).toBe(OPEN_KEY);
+    expect(plan.progId).toBe(PROG_ID);
+    expect(plan.progIdSource).toBe('shell association');
     expect(plan.previous).toBe(PLAIN_PARAMETERS);
+    expect(plan.armed).toBe(armedParameters(plan.spelling));
+  });
+
+  it('refuses ambiguously when more than one ProgID carries the AppUserModelID, and points at --progid', () => {
+    const store = makePackagedStore();
+    const io = fakeIo({
+      parameters: PLAIN_PARAMETERS,
+      protocolProgId: undefined,
+      searchLines: regSearchLines([
+        { progId: PROG_ID, appUserModelId: APP_ID },
+        { progId: PROG_ID_2, appUserModelId: APP_ID },
+      ]),
+    });
+    const plan = planLogin(store, {
+      io,
+      events: [],
+      env: NO_ENV,
+      list: () => [windowsAppsRow()],
+      platform: 'win32',
+    });
+
+    expect(plan.key).toBeUndefined();
+    expect(plan.blockers).toHaveLength(1);
+    expect(plan.blockers[0]).toContain(APP_ID);
+    expect(plan.blockers[0]).toContain(PROG_ID);
+    expect(plan.blockers[0]).toContain(PROG_ID_2);
+    expect(plan.blockers[0]).toContain('--progid');
+  });
+
+  it('honours --progid to resolve what would otherwise be an ambiguous ProgID', () => {
+    const store = makePackagedStore();
+    const io = fakeIo({
+      parameters: PLAIN_PARAMETERS,
+      protocolProgId: undefined,
+      searchLines: regSearchLines([
+        { progId: PROG_ID, appUserModelId: APP_ID },
+        { progId: PROG_ID_2, appUserModelId: APP_ID },
+      ]),
+    });
+    const plan = planLogin(store, {
+      io,
+      events: [],
+      env: NO_ENV,
+      list: () => [windowsAppsRow()],
+      platform: 'win32',
+      progid: PROG_ID,
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.key).toBe(OPEN_KEY);
+    expect(plan.progIdSource).toBe('explicit');
     expect(plan.armed).toBe(armedParameters(plan.spelling));
   });
 
@@ -781,6 +1089,8 @@ describe('runLogin', () => {
           value = next;
         }
       },
+      protocolProgId: () => undefined,
+      searchData: () => [],
     };
 
     const result = await runLogin(plan, {
@@ -852,6 +1162,8 @@ describe('restoreHandler', () => {
       keyExists: () => true,
       readValue: () => ({ value: 'stuck' }),
       writeValue: () => {},
+      protocolProgId: () => undefined,
+      searchData: () => [],
     };
     const appended: LedgerEventInput[] = [];
 
@@ -867,14 +1179,15 @@ describe('restoreHandler', () => {
 
 describe('inspectHandler', () => {
   it('reports the current parsed handler and nothing armed', () => {
-    const store = makePackagedStore();
     const state = inspectHandler(
-      store,
       project([]),
       fakeIo({ parameters: PLAIN_PARAMETERS }),
       NO_ENV,
+      () => [],
     );
     expect(state.key).toBe(OPEN_KEY);
+    expect(state.progId).toBe(PROG_ID);
+    expect(state.progIdSource).toBe('shell association');
     expect(state.current).toEqual({ raw: PLAIN_PARAMETERS });
     expect(state.armed).toBeUndefined();
     expect(state.virtualizedView).toBe(false);
@@ -883,12 +1196,11 @@ describe('inspectHandler', () => {
   it('reports the routed userDataDir when Parameters carries one', () => {
     const store = makePackagedStore();
     const command = `--user-data-dir="${store.root}" "%1"`;
-    const state = inspectHandler(store, project([]), fakeIo({ parameters: command }), NO_ENV);
+    const state = inspectHandler(project([]), fakeIo({ parameters: command }), NO_ENV, () => []);
     expect(state.current).toEqual({ raw: command, userDataDir: store.root });
   });
 
   it('reports what the ledger says is armed', () => {
-    const store = makePackagedStore();
     const events: LedgerEvent[] = [
       {
         v: 1,
@@ -902,7 +1214,7 @@ describe('inspectHandler', () => {
         armed: '--user-data-dir=D:\\Claude-Work "%1"',
       },
     ];
-    const state = inspectHandler(store, project(events), fakeIo(), NO_ENV);
+    const state = inspectHandler(project(events), fakeIo(), NO_ENV, () => []);
     expect(state.armed).toEqual({
       root: 'D:\\Claude-Work',
       key: OPEN_KEY,
@@ -912,16 +1224,35 @@ describe('inspectHandler', () => {
   });
 
   it('flags a virtualized view from inside the app container', () => {
-    const store = makePackagedStore();
-    const state = inspectHandler(store, project([]), fakeIo({ parameters: PLAIN_PARAMETERS }), {
-      CLAUDE_CODE_HOST_SESSION_ID: 'session-1',
-    });
+    const state = inspectHandler(
+      project([]),
+      fakeIo({ parameters: PLAIN_PARAMETERS }),
+      { CLAUDE_CODE_HOST_SESSION_ID: 'session-1' },
+      () => [],
+    );
     expect(state.virtualizedView).toBe(true);
   });
 
-  it('reports no key when this install has no matching ProgID', () => {
-    const state = inspectHandler(makeStore(), project([]), fakeIo(), NO_ENV);
+  it('reports no key, and the AppUserModelID it looked for, when this install has no matching ProgID', () => {
+    const state = inspectHandler(project([]), fakeIoNoProgId(), NO_ENV, () => [windowsAppsRow()]);
     expect(state.key).toBeUndefined();
     expect(state.current).toBeUndefined();
+    expect(state.lookup).toEqual({ kind: 'not-found', aumid: APP_ID });
+  });
+
+  it('reports the ambiguous candidates when more than one ProgID carries the AppUserModelID', () => {
+    const io = fakeIo({
+      protocolProgId: undefined,
+      searchLines: regSearchLines([
+        { progId: PROG_ID, appUserModelId: APP_ID },
+        { progId: PROG_ID_2, appUserModelId: APP_ID },
+      ]),
+    });
+    const state = inspectHandler(project([]), io, NO_ENV, () => [windowsAppsRow()]);
+    expect(state.key).toBeUndefined();
+    expect(state.lookup?.kind).toBe('ambiguous');
+    if (state.lookup?.kind === 'ambiguous') {
+      expect(state.lookup.progIds.sort()).toEqual([PROG_ID, PROG_ID_2].sort());
+    }
   });
 });
