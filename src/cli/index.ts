@@ -73,6 +73,7 @@ import {
 } from '../engine/switch.js';
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
+import { buildFragment } from '../engine/fragment.js';
 import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
 import { Ledger } from '../ledger/log.js';
@@ -657,14 +658,33 @@ program
   )
   .option('--config-dir <path...>', 'extra Claude config directories to include')
   .option('--json', 'machine-readable output')
+  .option(
+    '--fragment',
+    'print a Windows Terminal fragment (JSON) with one profile per client, instead of a listing',
+  )
   .action(function (this: Command) {
-    const opts = this.optsWithGlobals<GlobalOptions & { configDir?: string[]; json?: boolean }>();
+    const opts = this.optsWithGlobals<
+      GlobalOptions & { configDir?: string[]; json?: boolean; fragment?: boolean }
+    >();
     const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     // Registered roots (`foster client register`) are always passed explicitly,
     // never read by a default inside listClients — see clients.ts and
     // identify.ts, which must keep asking for none of them.
     const registeredDirs = registeredClientDirs(project(ledger.read()));
     const clients = listClients(process.env, opts.configDir ?? [], registeredDirs);
+
+    if (opts.fragment) {
+      // Printing is not a write: the file this becomes is the caller's own
+      // redirect (see the two-command form in the README), so this needs no
+      // --yes and logs no ledger event — same as `client open` and `app
+      // start --print` in the family this belongs to.
+      console.error(
+        'These titles are the identities cached in each client right now; run this again after ' +
+          'a switch to pick up the new one.',
+      );
+      print(buildFragment(clients));
+      return;
+    }
 
     if (opts.json) {
       print(
