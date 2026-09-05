@@ -140,9 +140,12 @@ on as it is: rows added, rows retitled, and that the clean title is the row to c
 ## You cannot restart the app from a session the app started
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the
-app**. `app quit`, `app restart`, `consolidate --yes` and `return` all want the app closed,
-and closing it kills the session part-way through — which is why foster refuses to close an
-app it is running inside. `sweep --restart` asks first and hands over the command instead of
+app**. `app quit` and `app restart` want the app closed, and closing it kills the session
+part-way through — which is why foster refuses to close an app it is running inside.
+`consolidate --yes` and `return` are narrower than they used to be: since #15 they hold only
+what the app is actually holding — a native card, or a copy that already existed when the app
+started — so the rule is **run them before the restart, not after**, and a card the app itself
+made waits either way. `sweep --restart` asks first and hands over the command instead of
 failing at the end of a run that already wrote everything.
 
 Check before promising anything:
