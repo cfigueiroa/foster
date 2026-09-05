@@ -11,20 +11,38 @@ import type { LedgerEvent, LedgerEventInput } from '../ledger/types.js';
 /**
  * Signing a second profile in through the browser, without a permanent broker.
  *
- * Windows routes every `claude://` link through one per-user registry key —
- * `HKCU\Software\Classes\claude\shell\open\command` — whatever it says wins,
- * and the app rewrites it to point at itself on every start. That rules out
- * anything permanent: a broker sitting on the key would fight the app for it
- * on every launch. What is left is temporary and scoped instead — point the
- * key at the profile only for the duration of one sign-in, wait for the
- * sign-in to land, then put the exact previous value back. The user keeps the
- * ordinary browser flow, nothing captures URLs, and foster never sees the
- * callback.
+ * Measured on 2026-09-05: Claude Desktop is an MSIX package, and its manifest
+ * routes `claude://` through **package activation**, not through the classic
+ * per-user registry key this module used to assume was the whole story. The
+ * registry looks different depending on where you read it from:
  *
- * The one registry key this ever writes sits behind `HandlerIo` so tests never
- * touch it — they hand in an in-memory fake and assert against that instead.
+ *  - **Inside the app's container** (any process descended from it, including
+ *    every Code session it hosts): `HKCU\Software\Classes\claude\shell\open\
+ *    command` exists, holding the app's own executable — but this is MSIX
+ *    registry virtualization's private copy. Browsers run outside the
+ *    container and never see it. It is a decoy.
+ *  - **Outside the container** (an ordinary terminal): the `claude` class key
+ *    exists with just a `URL Protocol` marker; there is normally no `shell`
+ *    subkey at all, because package activation does not need one.
+ *
+ * A classic `HKCU\...\command` key created in the *real* hive is reported to
+ * take precedence over package activation for `ShellExecute` of a `claude:`
+ * URL (anthropics/claude-code#31476) — that is the hypothesis this module
+ * exists to test, not yet confirmed sign-in-to-sign-in. `app login` creates
+ * that key (and only the levels of it that do not already exist) for the
+ * length of one sign-in, then removes exactly what it added, or puts back
+ * exactly what it overwrote. It refuses to run at all from inside the
+ * container, where a change here is invisible to the browser regardless of
+ * the hypothesis. See CLAUDE.md, "The registry has two views".
+ *
+ * The one registry subtree this ever touches sits behind `HandlerIo` so tests
+ * never touch it — they hand in an in-memory fake and assert against that
+ * instead.
  */
-export const HANDLER_KEY = 'HKCU\\Software\\Classes\\claude\\shell\\open\\command';
+const CLASS_KEY = 'HKCU\\Software\\Classes\\claude';
+const SHELL_KEY = `${CLASS_KEY}\\shell`;
+const OPEN_KEY = `${SHELL_KEY}\\open`;
+export const HANDLER_KEY = `${OPEN_KEY}\\command`;
 
 /**
  * What reading the key came back with.
@@ -42,11 +60,60 @@ export interface HandlerReadResult {
   error?: string;
 }
 
-/** The one registry key foster ever writes, behind a seam so tests never touch the registry. */
+/** Which levels of the `claude\shell\open\command` subtree exist right now. */
+export interface HandlerLevels {
+  class: boolean;
+  shell: boolean;
+  open: boolean;
+  command: boolean;
+}
+
+/** The one registry subtree foster ever writes, behind a seam so tests never touch the registry. */
 export interface HandlerIo {
+  /** Default value of HKCU\Software\Classes\claude\shell\open\command; error when reg itself failed. */
   read(): HandlerReadResult;
-  /** Replace the key's default value (REG_SZ). Throws on failure. */
+  /** Which of these keys exist right now: the class root, shell, shell\open, shell\open\command. */
+  levels(): HandlerLevels;
+  /** Create the missing levels and set the command's default value (reg add ... /ve /d ... /f creates intermediate keys). Throws on failure. */
   write(value: string): void;
+  /** Delete a subtree: 'command' deletes shell\open\command, 'open' deletes shell\open, 'shell' deletes shell. Never the class root. */
+  remove(level: 'shell' | 'open' | 'command'): void;
+}
+
+function regKeyExists(key: string): boolean {
+  try {
+    execFileSync(regExePath(), ['query', key], {
+      windowsHide: true,
+      stdio: 'pipe',
+      encoding: 'utf8',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function keyForLevel(level: 'shell' | 'open' | 'command'): string {
+  switch (level) {
+    case 'shell':
+      return SHELL_KEY;
+    case 'open':
+      return OPEN_KEY;
+    case 'command':
+      return HANDLER_KEY;
+  }
+}
+
+/** `'shell'` -> `shell`, `'open'` -> `shell\open`, `'command'` -> `shell\open\command` — for messages. */
+export function levelPath(level: 'shell' | 'open' | 'command'): string {
+  switch (level) {
+    case 'shell':
+      return 'shell';
+    case 'open':
+      return 'shell\\open';
+    case 'command':
+      return 'shell\\open\\command';
+  }
 }
 
 /**
@@ -68,8 +135,8 @@ export const registryHandlerIo: HandlerIo = {
     } catch (err) {
       // A spawn failure (reg.exe not found, denied, etc.) sets `code`; reg
       // running and exiting non-zero — the ordinary "key not found" — does
-      // not. Only the former is worth telling apart: the latter is what
-      // MISSING_KEY_BLOCKER already covers.
+      // not. Only the former is worth telling apart: the latter is what the
+      // level checks below already cover.
       const spawnFailure = err as NodeJS.ErrnoException & { stderr?: string };
       if (spawnFailure.code !== undefined) {
         return { error: spawnFailure.stderr?.trim() || spawnFailure.message };
@@ -77,12 +144,36 @@ export const registryHandlerIo: HandlerIo = {
       return {};
     }
   },
+  levels(): HandlerLevels {
+    if (process.platform !== 'win32') {
+      return { class: false, shell: false, open: false, command: false };
+    }
+    return {
+      class: regKeyExists(CLASS_KEY),
+      shell: regKeyExists(SHELL_KEY),
+      open: regKeyExists(OPEN_KEY),
+      command: regKeyExists(HANDLER_KEY),
+    };
+  },
   write(value: string): void {
     execFileSync(regExePath(), ['add', HANDLER_KEY, '/ve', '/t', 'REG_SZ', '/d', value, '/f'], {
       windowsHide: true,
       stdio: 'pipe',
       encoding: 'utf8',
     });
+  },
+  remove(level: 'shell' | 'open' | 'command'): void {
+    try {
+      execFileSync(regExePath(), ['delete', keyForLevel(level), '/f'], {
+        windowsHide: true,
+        stdio: 'pipe',
+        encoding: 'utf8',
+      });
+    } catch {
+      // Already gone, or reg itself could not run — either way there is
+      // nothing left to delete here. The caller verifies with levels()
+      // afterward rather than trusting this call's exit code.
+    }
   },
 };
 
@@ -115,6 +206,18 @@ export function armedCommand(exe: string, spelling: string): string {
   return `"${exe}" --user-data-dir=${quoted} "%1"`;
 }
 
+/**
+ * What to put back once the sign-in window closes.
+ *
+ * `'command'` means a command already existed at `shell\open\command`, and
+ * its verbatim value is what restore writes back. `'absent'` means no
+ * command existed — `createdFrom` names the shallowest level foster has to
+ * create to arm the handler, which is exactly the level restore deletes.
+ */
+export type PreviousHandler =
+  | { kind: 'command'; value: string }
+  | { kind: 'absent'; createdFrom: 'shell' | 'open' | 'command' };
+
 export interface LoginPlan {
   root: string;
   /** Registered name, when the ledger has one — see `LedgerState.profiles`. */
@@ -125,8 +228,8 @@ export interface LoginPlan {
   exe?: string;
   /** The --user-data-dir spelling the running instance uses; see below. */
   spelling: string;
-  /** The key's current raw value, verbatim. */
-  previous?: string;
+  /** What was at shell\open\command before this run, and what to restore. */
+  previous?: PreviousHandler;
   armed?: string;
   blockers: string[];
   warnings: string[];
@@ -164,14 +267,47 @@ function spellingFor(root: string, list: ProcessLister): string {
   return match ?? root;
 }
 
+/**
+ * Whether this process is descended from Claude Desktop.
+ *
+ * Both markers are set by the app when it hosts a Code session, and either
+ * one surviving to this process is enough: `CLAUDE_CODE_ENTRYPOINT` is what
+ * makes a `claude` CLI register itself as hosted, `CLAUDE_CODE_HOST_SESSION_ID`
+ * is what `hostedByDesktop` (desktop.ts) reads for the same fact elsewhere.
+ * Inside either, the registry this module reads and writes is the
+ * container's private, virtualized copy — invisible to a browser running
+ * outside it — so nothing done here from inside can ever reach the sign-in.
+ */
+function insideAppContainer(env: NodeJS.ProcessEnv): boolean {
+  return (
+    env.CLAUDE_CODE_ENTRYPOINT === 'claude-desktop' || Boolean(env.CLAUDE_CODE_HOST_SESSION_ID)
+  );
+}
+
+const CONTAINER_BLOCKER =
+  'app login must run from a terminal outside Claude Desktop: inside the app the registry is ' +
+  'virtualized (MSIX), so a change made here never reaches the browser';
+
+/** The container blocker message, or undefined when this process is not inside the app. */
+export function containerBlocker(env: NodeJS.ProcessEnv): string | undefined {
+  return insideAppContainer(env) ? CONTAINER_BLOCKER : undefined;
+}
+
 const OFF_WINDOWS_BLOCKER =
   'the claude:// handler is a Windows registry key; there is nothing to route elsewhere';
 
-const MISSING_KEY_BLOCKER =
-  'HKCU\\...\\command is missing or not in the shape "<exe>" "%1"; start Claude Desktop once so ' +
-  'it registers itself, then retry';
+const CLASS_MISSING_BLOCKER =
+  `${CLASS_KEY} does not exist: Claude Desktop has never registered the claude:// protocol for ` +
+  'this user; start it once, then retry';
 
-/** reg ran and said nothing usable, as opposed to reg never running at all — see MISSING_KEY_BLOCKER. */
+const NO_RUNNING_APP_BLOCKER =
+  'no running Claude Desktop to read the executable from; start the app or the profile first';
+
+const UNPARSEABLE_COMMAND_BLOCKER =
+  `${HANDLER_KEY} exists but is not in the shape "<exe>" "%1"; foster will not guess what to ` +
+  'put back, so nothing is armed';
+
+/** reg ran and said nothing usable, as opposed to reg never running at all — see CLASS_MISSING_BLOCKER. */
 function couldNotReadBlocker(detail: string): string {
   return `could not read ${HANDLER_KEY}: ${detail}`;
 }
@@ -210,6 +346,10 @@ function notRunningWarning(label: string): string {
  * Every check runs and adds to `blockers`/`warnings` independently — the plan
  * always carries as much as it can work out, even when it ends up refused, so
  * a caller can explain the refusal with real facts rather than a bare message.
+ * The two exceptions are the container and off-Windows checks: inside either,
+ * nothing below has anything real to read, so the plan returns immediately
+ * with just that one blocker rather than a page of guesses about a registry
+ * this process cannot see.
  */
 export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan {
   const { io, events, env = process.env, list = readProcesses, platform = process.platform } = opts;
@@ -237,6 +377,12 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     warnings,
   };
 
+  const inside = containerBlocker(env);
+  if (inside !== undefined) {
+    blockers.push(inside);
+    return plan;
+  }
+
   if (platform !== 'win32') {
     blockers.push(OFF_WINDOWS_BLOCKER);
     return plan;
@@ -244,43 +390,68 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
 
   const read = io.read();
   const current = read.value;
-  if (current !== undefined) plan.previous = current;
   const parsed = read.error === undefined ? parseHandler(current) : undefined;
 
   if (read.error !== undefined) {
-    // reg itself never ran, so nothing below has anything to work with — an
-    // absent key and a wrong PATH both surface here as "no parsed handler",
-    // and only this message says which one actually happened.
+    // reg itself never ran, so nothing below has anything to work with.
     blockers.push(couldNotReadBlocker(read.error));
-  } else if (!parsed) {
-    blockers.push(MISSING_KEY_BLOCKER);
-    // Nothing parsed out of the registry, but a running instance's own process
-    // still names the executable Windows would launch — the same fallback
-    // `desktopExecutable` already uses, reading through `io` rather than a
-    // fresh registry query of its own.
-    const fallback = desktopExecutable(() => io.read().value, list, env);
-    if (fallback !== undefined) plan.exe = fallback;
   } else {
-    plan.exe = parsed.exe;
+    const levels = io.levels();
 
-    if (parsed.userDataDir !== undefined) {
-      const sameStore =
-        comparableUserDataDir(parsed.userDataDir) === comparableUserDataDir(store.root);
-      if (sameStore) {
-        warnings.push(alreadyRoutedSameStoreWarning(parsed.userDataDir));
-        plan.armed = current;
-        // The ledger is the normal source for what to restore to, but a reset
-        // or relocated FOSTER_HOME (or a key pointed at this store by
-        // something other than a tracked foster run) can leave it with no
-        // matching record. `restoreHandler` already falls back to rebuilding
-        // `"<exe>" "%1"` in that case; mirror it here so `runLogin` is never
-        // handed `undefined` and left to default to an empty string.
-        plan.previous = state.handlerArmed?.previous ?? `"${parsed.exe}" "%1"`;
-      } else {
-        blockers.push(alreadyRoutedBlocker(parsed.userDataDir));
-      }
+    if (!levels.class) {
+      // Foster never creates the class root — the `URL Protocol` marker
+      // belongs to the app, and a user for whom it does not exist has never
+      // run Claude Desktop at all.
+      blockers.push(CLASS_MISSING_BLOCKER);
+    } else if (!levels.command) {
+      const createdFrom: 'shell' | 'open' | 'command' = !levels.shell
+        ? 'shell'
+        : !levels.open
+          ? 'open'
+          : 'command';
+      plan.previous = { kind: 'absent', createdFrom };
+      // No command to read from here — that is the whole point of this
+      // branch — so the registry read is skipped and only the process table
+      // is consulted. The packaged app's real command line cannot be listed
+      // any other way: it lives inside a protected package directory a plain
+      // directory listing cannot reach, so a running process is the only
+      // source left for the executable to arm with.
+      const fallback = desktopExecutable(() => undefined, list, env);
+      if (fallback !== undefined) plan.exe = fallback;
+      else blockers.push(NO_RUNNING_APP_BLOCKER);
+    } else if (!parsed) {
+      plan.previous = { kind: 'command', value: current! };
+      blockers.push(UNPARSEABLE_COMMAND_BLOCKER);
     } else {
-      plan.armed = armedCommand(parsed.exe, spelling);
+      plan.exe = parsed.exe;
+      plan.previous = { kind: 'command', value: current! };
+
+      if (parsed.userDataDir !== undefined) {
+        const sameStore =
+          comparableUserDataDir(parsed.userDataDir) === comparableUserDataDir(store.root);
+        if (sameStore) {
+          warnings.push(alreadyRoutedSameStoreWarning(parsed.userDataDir));
+          plan.armed = current;
+          // The ledger is the normal source for what to restore to, but a
+          // reset or relocated FOSTER_HOME (or a key pointed at this store by
+          // something other than a tracked foster run) can leave it with no
+          // matching record. Falling back to "delete the command" mirrors
+          // restoreHandler's own no-record fallback: outside the container
+          // there is no natural plain command to rebuild, so deleting what
+          // this run cannot otherwise account for is the safe answer.
+          if (state.handlerArmed?.createdFrom !== undefined) {
+            plan.previous = { kind: 'absent', createdFrom: state.handlerArmed.createdFrom };
+          } else if (state.handlerArmed?.previous !== undefined) {
+            plan.previous = { kind: 'command', value: state.handlerArmed.previous };
+          } else {
+            plan.previous = { kind: 'absent', createdFrom: 'command' };
+          }
+        } else {
+          blockers.push(alreadyRoutedBlocker(parsed.userDataDir));
+        }
+      } else {
+        plan.armed = armedCommand(parsed.exe, spelling);
+      }
     }
   }
 
@@ -345,9 +516,9 @@ function messageFor(outcome: LoginOutcome, accountAfter: string | undefined): st
  * Run one sign-in through the armed handler.
  *
  * The order below is the safety argument: the ledger records what is about to
- * be overwritten *before* it is overwritten, so a run that dies between the
- * two writes still leaves the next one (or `app login --restore`) a record of
- * what belongs back in the key. Nothing here is undone silently — the restore
+ * be overwritten (or created) *before* it is touched, so a run that dies
+ * between the two writes still leaves the next one (or `app login --restore`)
+ * a record of what to put back. Nothing here is undone silently — the restore
  * step and its outcome are appended regardless of how the wait ended.
  */
 export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<LoginResult> {
@@ -358,12 +529,10 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
     throw new Error('the plan has nothing to arm the handler with');
   }
   if (plan.previous === undefined) {
-    // Never fall back to an empty string here: that would write a blank
-    // value to the registry key on restore, wiping the claude:// handler for
-    // every profile instead of putting anything back. A plan reaching this
-    // point should already have a real value (from the live key or, in the
-    // same-store branch, rebuilt from the ledger/exe) — this is a refusal of
-    // last resort, not a path any caller is expected to hit.
+    // Never fall back to guessing here: a plan reaching this point should
+    // already know what to restore to (a real command, or the level it is
+    // about to create) — this is a refusal of last resort, not a path any
+    // caller is expected to hit.
     throw new Error('the plan has nothing to restore to');
   }
 
@@ -381,7 +550,17 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
   const previous = plan.previous;
   const armed = plan.armed;
 
-  append({ kind: 'handler_armed', root: plan.root, previous, exe: plan.exe, armed });
+  append(
+    previous.kind === 'command'
+      ? { kind: 'handler_armed', root: plan.root, previous: previous.value, exe: plan.exe, armed }
+      : {
+          kind: 'handler_armed',
+          root: plan.root,
+          createdFrom: previous.createdFrom,
+          exe: plan.exe,
+          armed,
+        },
+  );
 
   io.write(armed);
   const readBack = io.read();
@@ -426,8 +605,13 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
   let restored = false;
   if (outcome !== 'handler-rewritten') {
     if (io.read().value === armed) {
-      io.write(previous);
-      restored = io.read().value === previous;
+      if (previous.kind === 'command') {
+        io.write(previous.value);
+        restored = io.read().value === previous.value;
+      } else {
+        io.remove(previous.createdFrom);
+        restored = !io.levels()[previous.createdFrom];
+      }
     }
   }
 
@@ -444,41 +628,82 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
 /** For `app login --restore` and for `doctor`: what the ledger says is armed, versus what the key holds. */
 export interface HandlerState {
   current?: ParsedHandler;
-  armed?: { root: string; previous: string; at: number };
+  armed?: LedgerState['handlerArmed'];
+  /**
+   * True when this process is inside Claude Desktop's container, where the
+   * registry read above is the app's own virtualized copy rather than what a
+   * browser would see. `doctor` shows this instead of judging the handler.
+   */
+  virtualizedView: boolean;
 }
 
-export function inspectHandler(state: LedgerState, io: HandlerIo): HandlerState {
+export function inspectHandler(
+  state: LedgerState,
+  io: HandlerIo,
+  env: NodeJS.ProcessEnv = process.env,
+): HandlerState {
   const current = parseHandler(io.read().value);
   return {
     ...(current !== undefined ? { current } : {}),
     ...(state.handlerArmed !== undefined ? { armed: state.handlerArmed } : {}),
+    virtualizedView: insideAppContainer(env),
   };
 }
 
-/** Puts the previous value back when the key still carries a --user-data-dir. Appends handler_restored. */
+/**
+ * Puts the handler back — for `app login --restore` and for `doctor`.
+ *
+ * Three cases, in order: the ledger says this run *created* a level (nothing
+ * existed before it), so that level is removed; the ledger says a *command*
+ * existed before it (its verbatim value is what comes back); or the ledger
+ * has no record at all but the key still carries a `--user-data-dir`, in
+ * which case the safest answer is to delete `shell\open\command` — there is
+ * no natural plain command to rebuild outside the app's container, so
+ * inventing one would put back something that was never really there.
+ */
 export function restoreHandler(
   state: LedgerState,
   io: HandlerIo,
   append: (event: LedgerEventInput) => void,
 ): { ok: boolean; message: string } {
+  const armed = state.handlerArmed;
+
+  if (armed?.createdFrom !== undefined) {
+    io.remove(armed.createdFrom);
+    const ok = !io.levels()[armed.createdFrom];
+    append({ kind: 'handler_restored', root: armed.root, restored: ok });
+    return {
+      ok,
+      message: ok
+        ? `removed ${levelPath(armed.createdFrom)}, which this login created`
+        : `could not remove ${levelPath(armed.createdFrom)}; it may still be routed`,
+    };
+  }
+
+  if (armed?.previous !== undefined) {
+    io.write(armed.previous);
+    const ok = io.read().value === armed.previous;
+    append({ kind: 'handler_restored', root: armed.root, restored: ok });
+    return {
+      ok,
+      message: ok
+        ? `put the handler back to "${armed.previous}"`
+        : `could not put the handler back to "${armed.previous}"`,
+    };
+  }
+
   const current = parseHandler(io.read().value);
   if (!current || current.userDataDir === undefined) {
     return { ok: false, message: 'the handler is not routed anywhere; nothing to restore' };
   }
 
-  const armed = state.handlerArmed;
-  const rebuilt = armed === undefined;
-  const previous = armed ? armed.previous : `"${current.exe}" "%1"`;
-
-  io.write(previous);
-  const ok = io.read().value === previous;
-  append({ kind: 'handler_restored', root: armed?.root ?? current.userDataDir, restored: ok });
-
+  io.remove('command');
+  const ok = !io.levels().command;
+  append({ kind: 'handler_restored', root: current.userDataDir, restored: ok });
   return {
     ok,
-    message: rebuilt
-      ? `no record of what the handler held before this login; rebuilt "${previous}" from the ` +
-        'current executable and wrote it back'
-      : `put the handler back to "${previous}"`,
+    message: ok
+      ? `no record of what the handler held before this login; deleted ${levelPath('command')}`
+      : `no record of what the handler held before this login; could not delete ${levelPath('command')}`,
   };
 }

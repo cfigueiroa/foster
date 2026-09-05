@@ -57,7 +57,10 @@ import {
 } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import {
+  containerBlocker,
+  HANDLER_KEY,
   inspectHandler,
+  levelPath,
   planLogin,
   registryHandlerIo,
   restoreHandler,
@@ -451,7 +454,14 @@ program
     // in another terminal or was interrupted, doctor cannot tell, so it points
     // at the one command that resolves either case.
     const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
-    if (handler.current?.userDataDir !== undefined) {
+    if (handler.virtualizedView) {
+      console.log(
+        pc.dim(
+          "  (registry seen from inside the app's container: the claude:// handler it shows may be " +
+            "the package's private copy)",
+        ),
+      );
+    } else if (handler.current?.userDataDir !== undefined) {
       const when = handler.armed ? formatDate(handler.armed.at) : 'unknown';
       console.log(
         pc.yellow(
@@ -3825,15 +3835,35 @@ app
     const events = ledger.read();
 
     if (opts.restore) {
+      const blocker = containerBlocker(process.env);
+      if (blocker !== undefined) {
+        console.log(pc.yellow(`  ! ${blocker}`));
+        process.exitCode = 1;
+        return;
+      }
+
       const state = project(events);
       if (!opts.yes) {
         const handler = inspectHandler(state, registryHandlerIo);
+        if (handler.armed?.createdFrom !== undefined) {
+          console.log(
+            `Dry run: restore  delete ${levelPath(handler.armed.createdFrom)} (created by this run).`,
+          );
+          console.log('Re-run with --yes to do it.');
+          return;
+        }
+        if (handler.armed?.previous !== undefined) {
+          console.log(`Dry run: the handler would be put back to "${handler.armed.previous}".`);
+          console.log('Re-run with --yes to do it.');
+          return;
+        }
         if (!handler.current || handler.current.userDataDir === undefined) {
           console.log('The handler is not routed anywhere; nothing to restore.');
           return;
         }
-        const previous = handler.armed ? handler.armed.previous : `"${handler.current.exe}" "%1"`;
-        console.log(`Dry run: the handler would be put back to "${previous}".`);
+        console.log(
+          `Dry run: restore  delete ${levelPath('command')} (no record of what it held before).`,
+        );
         console.log('Re-run with --yes to do it.');
         return;
       }
@@ -3859,9 +3889,13 @@ app
     for (const warning of plan.warnings) console.log(pc.yellow(`  ! ${warning}`));
 
     if (!opts.yes || opts.print) {
+      const restoreLine =
+        plan.previous?.kind === 'absent'
+          ? `delete ${levelPath(plan.previous.createdFrom)} (created by this run)`
+          : plan.previous?.value;
       console.log(`Dry run: claude:// links would be routed to ${label} for one sign-in.`);
-      console.log(`  arm      ${plan.armed}`);
-      console.log(`  restore  ${plan.previous}`);
+      console.log(`  arm      create ${HANDLER_KEY} = ${plan.armed}`);
+      console.log(`  restore  ${restoreLine}`);
       console.log('Re-run with --yes to do it.');
       return;
     }

@@ -2,12 +2,15 @@ import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   armedCommand,
+  containerBlocker,
   inspectHandler,
+  levelPath,
   parseHandler,
   planLogin,
   restoreHandler,
   runLogin,
   type HandlerIo,
+  type HandlerLevels,
   type LoginPlan,
 } from '../src/engine/protocolHandler.js';
 import { project } from '../src/ledger/project.js';
@@ -20,24 +23,70 @@ import { makeStore } from './helpers/store.js';
 const EXE = 'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
 const PLAIN_HANDLER = `"${EXE}" "%1"`;
 
-/** An in-memory HandlerIo. `log`, when given, records `write:<value>` in order. */
-function fakeIo(initial: string | undefined, log?: string[]): HandlerIo {
-  let value = initial;
+// Empty, not inherited: this suite runs inside a hosted Claude Code session
+// (this very repository is worked on from one), whose real process.env
+// carries CLAUDE_CODE_HOST_SESSION_ID / CLAUDE_CODE_ENTRYPOINT — exactly the
+// markers containerBlocker looks for. Every call below that does not mean to
+// test the container check itself must pass this rather than rely on the
+// default `process.env`, or the whole suite would refuse itself.
+const NO_ENV: NodeJS.ProcessEnv = {};
+
+/**
+ * An in-memory registry tree: the class root, `shell`, `shell\open` and
+ * `shell\open\command`, plus the command's value. `log`, when given, records
+ * `write:<value>` / `remove:<level>` in order — mirrors the real subtree's
+ * nesting, so `remove` takes a level and everything under it with it, the
+ * same as `reg delete` would.
+ */
+function fakeTree(
+  levels: Partial<HandlerLevels> = {},
+  value: string | undefined = undefined,
+  log?: string[],
+): HandlerIo {
+  const tree: HandlerLevels = { class: true, shell: false, open: false, command: false, ...levels };
+  let current = value;
   return {
-    read: () => ({ value }),
+    read: () => ({ value: tree.command ? current : undefined }),
+    levels: () => ({ ...tree }),
     write: (next: string) => {
       log?.push(`write:${next}`);
-      value = next;
+      tree.shell = true;
+      tree.open = true;
+      tree.command = true;
+      current = next;
+    },
+    remove: (level: 'shell' | 'open' | 'command') => {
+      log?.push(`remove:${level}`);
+      if (level === 'shell') tree.shell = false;
+      if (level === 'shell' || level === 'open') tree.open = false;
+      tree.command = false;
+      current = undefined;
     },
   };
+}
+
+/**
+ * The common case: the class root exists (it always does once Claude Desktop
+ * has run once), and either a command already sits at shell\open\command
+ * (`initial` given) or nothing does — measured on a real machine as the
+ * ordinary outside-the-container state, with no `shell` subkey at all.
+ */
+function fakeIo(initial: string | undefined, log?: string[]): HandlerIo {
+  return initial === undefined
+    ? fakeTree({ shell: false, open: false, command: false }, undefined, log)
+    : fakeTree({ shell: true, open: true, command: true }, initial, log);
 }
 
 /** A HandlerIo whose read() always reports a spawn failure, never a value. */
 function brokenIo(error: string): HandlerIo {
   return {
     read: () => ({ error }),
+    levels: () => ({ class: true, shell: false, open: false, command: false }),
     write: () => {
       throw new Error('not reached: write is never called once read fails');
+    },
+    remove: () => {
+      throw new Error('not reached: remove is never called once read fails');
     },
   };
 }
@@ -91,12 +140,33 @@ describe('armedCommand', () => {
   });
 });
 
-describe('planLogin', () => {
-  // Empty, not inherited: the suite runs on a real machine, and a real
-  // LOCALAPPDATA/APPDATA would make storeIdentity see this test's synthetic
-  // store as (or through) the real installation.
-  const NO_ENV: NodeJS.ProcessEnv = {};
+describe('levelPath', () => {
+  it('spells out the subtree under each level', () => {
+    expect(levelPath('shell')).toBe('shell');
+    expect(levelPath('open')).toBe('shell\\open');
+    expect(levelPath('command')).toBe('shell\\open\\command');
+  });
+});
 
+describe('containerBlocker', () => {
+  it('is undefined outside the app', () => {
+    expect(containerBlocker(NO_ENV)).toBeUndefined();
+  });
+
+  it('fires on the host session marker', () => {
+    expect(containerBlocker({ CLAUDE_CODE_HOST_SESSION_ID: 'abc' })).toContain(
+      'must run from a terminal outside Claude Desktop',
+    );
+  });
+
+  it('fires on the entrypoint marker alone', () => {
+    expect(containerBlocker({ CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' })).toContain(
+      'must run from a terminal outside Claude Desktop',
+    );
+  });
+});
+
+describe('planLogin', () => {
   it('refuses off Windows', () => {
     const store = makeStore();
     const plan = planLogin(store, {
@@ -112,37 +182,54 @@ describe('planLogin', () => {
     ]);
   });
 
-  it('refuses when the key is missing', () => {
+  it('refuses from inside the app container, before anything registry-shaped is read', () => {
     const store = makeStore();
     const plan = planLogin(store, {
-      io: fakeIo(undefined),
+      io: fakeIo(PLAIN_HANDLER),
       events: [],
-      env: NO_ENV,
+      env: { CLAUDE_CODE_HOST_SESSION_ID: 'session-1' },
       list: () => [],
       platform: 'win32',
     });
 
-    expect(plan.blockers[0]).toContain('is missing or not in the shape');
+    expect(plan.blockers).toEqual([
+      'app login must run from a terminal outside Claude Desktop: inside the app the registry is ' +
+        'virtualized (MSIX), so a change made here never reaches the browser',
+    ]);
   });
 
-  it('refuses when the key is unparseable', () => {
+  it('refuses from inside the app container by entrypoint alone', () => {
     const store = makeStore();
     const plan = planLogin(store, {
-      io: fakeIo('not a handler at all'),
+      io: fakeIo(PLAIN_HANDLER),
+      events: [],
+      env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' },
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers[0]).toContain('must run from a terminal outside Claude Desktop');
+  });
+
+  it('refuses when the class root does not exist', () => {
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: fakeTree({ class: false }),
       events: [],
       env: NO_ENV,
       list: () => [],
       platform: 'win32',
     });
 
-    expect(plan.blockers[0]).toContain('is missing or not in the shape');
+    expect(plan.blockers[0]).toContain('HKCU\\Software\\Classes\\claude does not exist');
+    expect(plan.blockers[0]).toContain('start it once, then retry');
   });
 
   it("refuses with reg's own message when reg itself could not be run", () => {
     // The reported case: an elevated PowerShell whose PATH does not resolve
     // `reg`, so the spawn throws before it ever touches the registry. That
-    // must not read as "the key is missing" — start Claude Desktop once would
-    // do nothing for a PATH problem.
+    // must not read as any registry-shape problem — start Claude Desktop
+    // once would do nothing for a PATH problem.
     const store = makeStore();
     const plan = planLogin(store, {
       io: brokenIo('spawnSync reg ENOENT'),
@@ -156,7 +243,86 @@ describe('planLogin', () => {
       'could not read HKCU\\Software\\Classes\\claude\\shell\\open\\command',
     );
     expect(plan.blockers[0]).toContain('spawnSync reg ENOENT');
-    expect(plan.blockers[0]).not.toContain('is missing or not in the shape');
+  });
+
+  it('records createdFrom "shell" when only the class root exists, and blocks without a running app', () => {
+    // Measured as the ordinary state outside the app's container: the class
+    // root exists, but there is no `shell` subkey at all.
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: fakeIo(undefined),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
+    expect(plan.exe).toBeUndefined();
+    expect(plan.blockers).toContain(
+      'no running Claude Desktop to read the executable from; start the app or the profile first',
+    );
+  });
+
+  it('records createdFrom "open" when shell exists but shell\\open does not', () => {
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: fakeTree({ shell: true, open: false, command: false }),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'open' });
+  });
+
+  it('records createdFrom "command" when shell\\open exists but the command does not', () => {
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: fakeTree({ shell: true, open: true, command: false }),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'command' });
+  });
+
+  it('takes the exe from a running instance under \\Packages\\Claude when no command exists', () => {
+    const store = makeStore();
+    const row: ProcessRow = {
+      pid: 700,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: EXE,
+      commandLine: `"${EXE}"`,
+    };
+    const plan = planLogin(store, {
+      io: fakeIo(undefined),
+      events: [],
+      env: NO_ENV,
+      list: () => [row],
+      platform: 'win32',
+    });
+
+    expect(plan.exe).toBe(EXE);
+    expect(plan.blockers).toEqual([]);
+  });
+
+  it('refuses when the command exists but is unparseable', () => {
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: fakeIo('not a handler at all'),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers[0]).toContain('exists but is not in the shape');
+    expect(plan.previous).toEqual({ kind: 'command', value: 'not a handler at all' });
   });
 
   it('refuses when claude:// already routes to a different profile', () => {
@@ -201,14 +367,41 @@ describe('planLogin', () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.warnings.some((w) => w.includes('already routed'))).toBe(true);
     expect(plan.armed).toBe(command);
-    expect(plan.previous).toBe(PLAIN_HANDLER);
+    expect(plan.previous).toEqual({ kind: 'command', value: PLAIN_HANDLER });
   });
 
-  it('rebuilds previous from the exe when routed to this same store but the ledger has no record', () => {
+  it('reuses a createdFrom record when routed to this same store by an interrupted absent-command login', () => {
+    const store = makeStore();
+    const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
+    const events: LedgerEvent[] = [
+      {
+        v: 1,
+        ts: 1_700_000_000_000,
+        toolVersion: '0.0.0-test',
+        kind: 'handler_armed',
+        root: store.root,
+        createdFrom: 'shell',
+        exe: EXE,
+        armed: command,
+      },
+    ];
+    const plan = planLogin(store, {
+      io: fakeIo(command),
+      events,
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
+  });
+
+  it('falls back to deleting the command when routed to this same store but the ledger has no record', () => {
     // No `handler_armed` event — a reset/relocated FOSTER_HOME, or the key
     // pointed at this store's directory by something other than a tracked
-    // foster run. `plan.previous` must still be a real value: runLogin would
-    // otherwise default it to an empty string and wipe the handler on restore.
+    // foster run. There is no natural plain command to rebuild outside the
+    // container, so the safe fallback is to delete the command entirely.
     const store = makeStore();
     const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
     const plan = planLogin(store, {
@@ -221,7 +414,7 @@ describe('planLogin', () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.armed).toBe(command);
-    expect(plan.previous).toBe(`"${EXE}" "%1"`);
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'command' });
   });
 
   it('refuses the installed app itself', () => {
@@ -310,7 +503,7 @@ describe('runLogin', () => {
       signedInBefore: false,
       spelling: 'D:\\Claude-Work',
       exe: EXE,
-      previous: PLAIN_HANDLER,
+      previous: { kind: 'command', value: PLAIN_HANDLER },
       armed: `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`,
       blockers: [],
       warnings: [],
@@ -332,7 +525,7 @@ describe('runLogin', () => {
   it('appends handler_armed before writing the key', async () => {
     const log: string[] = [];
     const plan = basePlan();
-    const io = fakeIo(plan.previous, log);
+    const io = fakeIo(PLAIN_HANDLER, log);
 
     await runLogin(plan, {
       io,
@@ -349,7 +542,7 @@ describe('runLogin', () => {
   it('restores verbatim and records the account on success', async () => {
     const plan = basePlan();
     const log: string[] = [];
-    const io = fakeIo(plan.previous, log);
+    const io = fakeIo(PLAIN_HANDLER, log);
     let calls = 0;
     const readState = () => {
       calls += 1;
@@ -367,17 +560,17 @@ describe('runLogin', () => {
     expect(result.outcome).toBe('signed-in');
     expect(result.accountAfter).toBe(account);
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(plan.previous);
+    expect(io.read().value).toBe(PLAIN_HANDLER);
     expect(log.filter((l) => l.startsWith('write:'))).toEqual([
       `write:${plan.armed}`,
-      `write:${plan.previous}`,
+      `write:${PLAIN_HANDLER}`,
     ]);
     expect(log.at(-1)).toBe('append:handler_restored');
   });
 
   it('restores on timeout', async () => {
     const plan = basePlan();
-    const io = fakeIo(plan.previous);
+    const io = fakeIo(PLAIN_HANDLER);
     let t = 0;
     const now = () => t;
     const sleep = async () => {
@@ -395,12 +588,12 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('timeout');
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(plan.previous);
+    expect(io.read().value).toBe(PLAIN_HANDLER);
   });
 
   it('restores when aborted', async () => {
     const plan = basePlan();
-    const io = fakeIo(plan.previous);
+    const io = fakeIo(PLAIN_HANDLER);
     const controller = new AbortController();
     controller.abort();
 
@@ -415,7 +608,7 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('aborted');
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(plan.previous);
+    expect(io.read().value).toBe(PLAIN_HANDLER);
   });
 
   it('stops without writing when the handler is rewritten underneath it', async () => {
@@ -431,9 +624,13 @@ describe('runLogin', () => {
         // fixture pretend the app restarted and rewrote the key.
         return { value: reads <= 1 ? value : 'rewritten-by-app' };
       },
+      levels: () => ({ class: true, shell: true, open: true, command: true }),
       write: (next) => {
         writes.push(next);
         value = next;
+      },
+      remove: () => {
+        throw new Error('not reached: this plan restores by writing, not removing');
       },
     };
 
@@ -448,6 +645,39 @@ describe('runLogin', () => {
     expect(result.outcome).toBe('handler-rewritten');
     expect(result.restored).toBe(false);
     expect(writes).toEqual([plan.armed]);
+  });
+
+  it('creates the tree when arming an absent command and removes exactly what it created', async () => {
+    const io = fakeTree({ shell: false, open: false, command: false });
+    const plan = basePlan({ previous: { kind: 'absent', createdFrom: 'shell' } });
+
+    const result = await runLogin(plan, {
+      io,
+      append: () => {},
+      readState: () => ({ hasTokenCache: true, accountUuid: account }),
+      now: () => 0,
+      sleep: async () => {},
+    });
+
+    expect(result.outcome).toBe('signed-in');
+    expect(result.restored).toBe(true);
+    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
+  });
+
+  it('leaves pre-existing levels alone when only the command itself was missing', async () => {
+    const io = fakeTree({ shell: true, open: true, command: false });
+    const plan = basePlan({ previous: { kind: 'absent', createdFrom: 'command' } });
+
+    const result = await runLogin(plan, {
+      io,
+      append: () => {},
+      readState: () => ({ hasTokenCache: true, accountUuid: account }),
+      now: () => 0,
+      sleep: async () => {},
+    });
+
+    expect(result.restored).toBe(true);
+    expect(io.levels()).toEqual({ class: true, shell: true, open: true, command: false });
   });
 });
 
@@ -485,7 +715,34 @@ describe('restoreHandler', () => {
     ]);
   });
 
-  it('rebuilds a plain handler from the exe when the ledger has no record', () => {
+  it('removes the created level when the ledger recorded createdFrom', () => {
+    const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
+    const events: LedgerEvent[] = [
+      {
+        v: 1,
+        ts: 1_700_000_000_000,
+        toolVersion: '0.0.0-test',
+        kind: 'handler_armed',
+        root: 'D:\\Claude-Work',
+        createdFrom: 'shell',
+        exe: EXE,
+        armed: command,
+      },
+    ];
+    const io = fakeTree({ shell: true, open: true, command: true }, command);
+    const appended: LedgerEventInput[] = [];
+
+    const result = restoreHandler(project(events), io, (e) => appended.push(e));
+
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('removed shell');
+    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
+    expect(appended).toEqual([
+      { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
+    ]);
+  });
+
+  it('deletes the command when the ledger has no record but it still carries --user-data-dir', () => {
     const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
     const io = fakeIo(command);
     const appended: LedgerEventInput[] = [];
@@ -493,8 +750,8 @@ describe('restoreHandler', () => {
     const result = restoreHandler(project([]), io, (e) => appended.push(e));
 
     expect(result.ok).toBe(true);
-    expect(result.message).toContain('rebuilt');
-    expect(io.read().value).toBe(PLAIN_HANDLER);
+    expect(result.message).toContain('deleted');
+    expect(io.read().value).toBeUndefined();
     expect(appended).toEqual([
       { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
     ]);
@@ -503,9 +760,10 @@ describe('restoreHandler', () => {
 
 describe('inspectHandler', () => {
   it('reports the current parsed handler and nothing armed', () => {
-    const state = inspectHandler(project([]), fakeIo(PLAIN_HANDLER));
+    const state = inspectHandler(project([]), fakeIo(PLAIN_HANDLER), NO_ENV);
     expect(state.current).toEqual({ exe: EXE, raw: PLAIN_HANDLER });
     expect(state.armed).toBeUndefined();
+    expect(state.virtualizedView).toBe(false);
   });
 
   it('reports what the ledger says is armed', () => {
@@ -521,11 +779,18 @@ describe('inspectHandler', () => {
         armed: `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`,
       },
     ];
-    const state = inspectHandler(project(events), fakeIo(undefined));
+    const state = inspectHandler(project(events), fakeIo(undefined), NO_ENV);
     expect(state.armed).toEqual({
       root: 'D:\\Claude-Work',
       previous: PLAIN_HANDLER,
       at: 1_700_000_000_000,
     });
+  });
+
+  it('flags a virtualized view from inside the app container', () => {
+    const state = inspectHandler(project([]), fakeIo(PLAIN_HANDLER), {
+      CLAUDE_CODE_HOST_SESSION_ID: 'session-1',
+    });
+    expect(state.virtualizedView).toBe(true);
   });
 });

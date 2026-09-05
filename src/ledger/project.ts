@@ -26,11 +26,18 @@ export interface LedgerState {
    */
   clientRoots: Map<string, 'client' | 'container'>;
   /**
-   * The `claude://` handler's previous value, while a login is in flight —
-   * see `HandlerArmedEvent`. Cleared by `handler_restored`, so its presence
-   * alone says a login was interrupted before it could put the handler back.
+   * The `claude://` handler's previous state, while a login is in flight —
+   * see `HandlerArmedEvent`. Exactly one of `previous`/`createdFrom` is set,
+   * carried straight from the event. Cleared by `handler_restored`, so its
+   * presence alone says a login was interrupted before it could put the
+   * handler back.
    */
-  handlerArmed?: { root: string; previous: string; at: number };
+  handlerArmed?: {
+    root: string;
+    previous?: string;
+    createdFrom?: 'shell' | 'open' | 'command';
+    at: number;
+  };
 }
 
 /**
@@ -208,7 +215,12 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
 
       case 'handler_armed':
-        handlerArmed = { root: event.root, previous: event.previous, at: event.ts };
+        handlerArmed = {
+          root: event.root,
+          at: event.ts,
+          ...(event.previous !== undefined ? { previous: event.previous } : {}),
+          ...(event.createdFrom !== undefined ? { createdFrom: event.createdFrom } : {}),
+        };
         break;
 
       case 'handler_restored':

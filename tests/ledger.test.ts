@@ -492,6 +492,24 @@ describe('handler_armed / handler_restored', () => {
     });
   });
 
+  it('folds createdFrom instead of previous when the run had to create a level', () => {
+    // The real MSIX registry outside the app's container normally has no
+    // `shell` subkey at all — see engine/protocolHandler.ts — so a login
+    // often has nothing to restore *to*, only a level to remove afterward.
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      createdFrom: 'shell',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '"C:\\Apps\\Claude.exe" --user-data-dir=D:\\Claude-Work "%1"',
+    });
+
+    const handlerArmed = project(ledger.read()).handlerArmed;
+    expect(handlerArmed).toMatchObject({ root: 'D:\\Claude-Work', createdFrom: 'shell' });
+    expect(handlerArmed?.previous).toBeUndefined();
+  });
+
   it('is cleared by a matching restore, whether or not it succeeded', () => {
     const ledger = makeLedger();
     ledger.append({

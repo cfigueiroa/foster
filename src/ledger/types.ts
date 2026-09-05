@@ -402,16 +402,21 @@ export interface ClientRootForgottenEvent extends BaseEvent {
  * sign-in — see `engine/protocolHandler.ts`.
  *
  * What it deliberately does not carry is any part of the sign-in itself: no
- * URL, no code, no account. `previous` is the registry value the handler held
- * before this write, kept so a run that is interrupted after this event but
- * before `handler_restored` still tells the next one what to put back —
- * without it, an interrupted login leaves the handler routed to a profile
- * with nothing in the log saying it should be undone.
+ * URL, no code, no account. Exactly one of `previous` and `createdFrom` is
+ * set, matching the two shapes the real MSIX registry can be in: `previous`
+ * is the command's verbatim value when one already existed; `createdFrom`
+ * names the shallowest level — `shell`, `shell\open` or `shell\open\command`
+ * — that this run had to create because nothing was there yet, which is also
+ * the level a restore deletes. Either way this is kept so a run interrupted
+ * after this event but before `handler_restored` still tells the next one
+ * what to put back — without it, an interrupted login leaves the handler
+ * routed to a profile with nothing in the log saying it should be undone.
  */
 export interface HandlerArmedEvent extends BaseEvent {
   kind: 'handler_armed';
   root: string;
-  previous: string;
+  previous?: string;
+  createdFrom?: 'shell' | 'open' | 'command';
   exe: string;
   armed: string;
 }

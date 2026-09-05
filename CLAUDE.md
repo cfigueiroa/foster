@@ -194,15 +194,38 @@ reach for on "bring everything here": `foster_sessions` leaves archived sessions
 cannot reach deleted conversations at all. **`consolidate`, `purge` and `live` are not among
 them** — `purge` is excluded on purpose and must not be reached through the shell either.
 
+## The registry has two views
+
+Measured on 2026-09-05, against a real MSIX install (`Claude_pzs8sxrjxfjjc`):
+
+- Claude Desktop's manifest routes `claude://` through **package activation**, not the classic
+  per-user registry key you would expect to find and edit — `HKCU\Software\Classes\claude\shell\
+open\command` is not what actually decides where a callback lands.
+- **Inside the app's container** — any process descended from it, including every Code session it
+  hosts — that key exists anyway, holding the app's own executable. It is MSIX registry
+  virtualization's private copy of the write Electron's `setAsDefaultProtocolClient` makes; a
+  browser running outside the container never sees it. It is a decoy.
+- **Outside the container** — an ordinary terminal — the `claude` class key exists with just a
+  `URL Protocol` marker, and there is normally no `shell` subkey at all.
+
+Any `reg` read `foster` does from inside a hosted session is the virtualized view: it can tell you
+what the app's container believes, never what a browser on the same machine would actually reach.
+`foster doctor` says so explicitly (`registry seen from inside the app's container: ...`) rather
+than judging a handler it cannot trust.
+
 ## Signing a second profile in
 
-`foster --store <profile> app login --yes` arms the one registry key that decides where a
-`claude://` callback lands, points it at `<profile>` for one sign-in, and puts the previous
-value back once the sign-in is detected or the wait times out. It needs `--yes` — without it,
-it only prints what it would do. **An agent must never run this**: it writes a machine-wide
-registry key and drives a sign-in only the human at the keyboard can finish in the browser.
-`foster app login --restore --yes` is the way out of a login left routed by a crash or a
-stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
+`foster --store <profile> app login --yes` creates only the levels of `HKCU\Software\Classes\
+claude\shell\open\command` that do not already exist — outside the container that is usually all
+of `shell`, `shell\open` and `shell\open\command` — points the command at `<profile>` for one
+sign-in, and undoes exactly what it changed once the sign-in is detected or the wait times out: a
+real previous command is written back verbatim, and a level this run created is deleted rather
+than guessed back into some rebuilt shape. It needs `--yes` — without it, it only prints what it
+would do. It refuses outright from inside Claude Desktop's own container (see above) — a change
+there is invisible to the browser regardless of what follows. **An agent must never run this**: it
+writes a machine-wide registry subtree and drives a sign-in only the human at the keyboard can
+finish in the browser. `foster app login --restore --yes` is the way out of a login left routed by
+a crash or a stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
 
 ## Before pushing
 
