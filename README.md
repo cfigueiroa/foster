@@ -1345,7 +1345,9 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
 
   **What reads the app's:** one command, `foster usage` (and the matching "Usage right now" in the
   menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
-  `accounts`, or the agent. The reader lives in one file, `store/credential.ts`.
+  `accounts`, `guard`, or the agent. `guard` copies the CLI's own credential (see "What copies the
+  CLI's" below); it never touches the app's sealed token. The reader lives in one file,
+  `store/credential.ts`.
 
   `foster stores` and `foster doctor` come closer than any of those and still stop short on
   purpose: `signedIn` in `--json` (and "gone"/"not signed in" in the text) says only whether a
