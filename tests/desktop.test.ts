@@ -19,7 +19,10 @@ import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
-const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
+// Under \Packages\Claude..., like the app's own MSIX package directory: proof
+// enough on its own that a row is the app, independent of any helper process.
+const DESKTOP =
+  'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
 // Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
 // that looks like somebody's home directory.
 const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
@@ -710,5 +713,62 @@ describe('a switchless process is not a wildcard', () => {
     const store = makeStore(); // a temp dir, never a candidate root
 
     expect(inspectDesktopFor(storeIdentity(store.root, {}), () => table, {}).running).toBe(false);
+  });
+});
+
+describe('a standalone claude.exe is never the app', () => {
+  /**
+   * `~/.local/bin/claude.exe` on a machine with a dozen Code CLIs running: named
+   * claude.exe, a readable path, and not under `\claude-code\` — every negative
+   * filter passes it, which is exactly the gap this proof requirement closes.
+   * With the app closed, the old rule made every one of them a `desktop` row and
+   * the tie-break in `inspectDesktop` handed one of their pids to
+   * `taskkill /F /T`.
+   */
+  const STANDALONE = 'C:\\home\\.local\\bin\\claude.exe';
+
+  it('is not the app with the app closed', () => {
+    const table = rows({
+      pid: 800,
+      parentPid: 9,
+      path: STANDALONE,
+      commandLine: `"${STANDALONE}"`,
+      startedAt: 1_000,
+    });
+
+    expect(inspectDesktop(() => table, {})).toMatchObject({ running: false });
+  });
+
+  it('stays out of the main pid with the real app up beside it', () => {
+    const table = rows(
+      {
+        pid: 800,
+        parentPid: 9,
+        path: STANDALONE,
+        commandLine: `"${STANDALONE}"`,
+        startedAt: 1_000,
+      },
+      { pid: 500, parentPid: 9, startedAt: 5_000 },
+      { pid: 501, parentPid: 500, commandLine: '"Claude.exe" --type=renderer' },
+    );
+
+    expect(inspectDesktop(() => table, {}).mainPid).toBe(500);
+  });
+
+  it('still recognises a profile whose executable sits under the store root', () => {
+    // Neither the \Packages\Claude proof nor a typed helper applies here — the
+    // store-root proof is the only one that can carry a profile whose exe was
+    // simply dropped inside the userData directory it points at.
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const exe = `${store.root}\\Claude.exe`;
+    const table = rows({
+      pid: 500,
+      parentPid: 9,
+      path: exe,
+      commandLine: `"${exe}" --user-data-dir="${store.root}"`,
+    });
+
+    expect(inspectDesktop(() => table, env).running).toBe(true);
   });
 });
