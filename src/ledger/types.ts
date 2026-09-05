@@ -21,7 +21,9 @@ export type LedgerEvent =
   | ProfileRegisteredEvent
   | ProfileForgottenEvent
   | ClientRootRegisteredEvent
-  | ClientRootForgottenEvent;
+  | ClientRootForgottenEvent
+  | HandlerArmedEvent
+  | HandlerRestoredEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -396,6 +398,39 @@ export interface ClientRootForgottenEvent extends BaseEvent {
 }
 
 /**
+ * The `claude://` handler was pointed at one profile for the duration of one
+ * sign-in — see `engine/protocolHandler.ts`.
+ *
+ * What it deliberately does not carry is any part of the sign-in itself: no
+ * URL, no code, no account. `previous` is the registry value the handler held
+ * before this write, kept so a run that is interrupted after this event but
+ * before `handler_restored` still tells the next one what to put back —
+ * without it, an interrupted login leaves the handler routed to a profile
+ * with nothing in the log saying it should be undone.
+ */
+export interface HandlerArmedEvent extends BaseEvent {
+  kind: 'handler_armed';
+  root: string;
+  previous: string;
+  exe: string;
+  armed: string;
+}
+
+/**
+ * The `claude://` handler put back, ending the window `handler_armed` opened.
+ *
+ * `restored` says whether the read-back actually matched what was written —
+ * false means the handler was left pointed somewhere, which is the fact
+ * `foster app login --restore` and `doctor` need to warn about a stale route.
+ * Nothing about the sign-in itself is recorded here either.
+ */
+export interface HandlerRestoredEvent extends BaseEvent {
+  kind: 'handler_restored';
+  root: string;
+  restored: boolean;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -420,7 +455,9 @@ export type LedgerEventInput =
   | Draft<ProfileRegisteredEvent>
   | Draft<ProfileForgottenEvent>
   | Draft<ClientRootRegisteredEvent>
-  | Draft<ClientRootForgottenEvent>;
+  | Draft<ClientRootForgottenEvent>
+  | Draft<HandlerArmedEvent>
+  | Draft<HandlerRestoredEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.

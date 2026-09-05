@@ -451,3 +451,59 @@ describe('client_root_registered / client_root_forgotten', () => {
     ]);
   });
 });
+
+/**
+ * The `claude://` handler, armed for one profile's sign-in and put back
+ * afterwards — see `engine/protocolHandler.ts`. `handlerArmed` in the folded
+ * state is the fact that a login is (or was left) in flight; a matching
+ * `handler_restored` clears it, whatever `restored` said.
+ */
+describe('handler_armed / handler_restored', () => {
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      previous: '"C:\\Apps\\Claude.exe" "%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '"C:\\Apps\\Claude.exe" --user-data-dir=D:\\Claude-Work "%1"',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      previous: '"C:\\Apps\\Claude.exe" "%1"',
+    });
+  });
+
+  it('folds to a record of what to put back', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      previous: '"C:\\Apps\\Claude.exe" "%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '"C:\\Apps\\Claude.exe" --user-data-dir=D:\\Claude-Work "%1"',
+    });
+
+    expect(project(ledger.read()).handlerArmed).toMatchObject({
+      root: 'D:\\Claude-Work',
+      previous: '"C:\\Apps\\Claude.exe" "%1"',
+    });
+  });
+
+  it('is cleared by a matching restore, whether or not it succeeded', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      previous: '"C:\\Apps\\Claude.exe" "%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '"C:\\Apps\\Claude.exe" --user-data-dir=D:\\Claude-Work "%1"',
+    });
+    ledger.append({ kind: 'handler_restored', root: 'D:\\Claude-Work', restored: false });
+
+    expect(project(ledger.read()).handlerArmed).toBeUndefined();
+    expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
+  });
+});
