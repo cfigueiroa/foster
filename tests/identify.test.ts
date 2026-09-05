@@ -25,6 +25,8 @@ vi.mock('../src/engine/anthropicApi.js', () => ({ fetchLiveProfile: vi.fn() }));
 
 const { readAccessToken } = await import('../src/store/credential.js');
 const { fetchLiveProfile } = await import('../src/engine/anthropicApi.js');
+const { listClients } = await import('../src/store/clients.js');
+const { readCliCredential } = await import('../src/store/cliCredential.js');
 const { identifyAccount, canIdentify } = await import('../src/engine/identify.js');
 
 const WANTED = '11111111-1111-4111-8111-111111111111';
@@ -100,5 +102,43 @@ describe('canIdentify', () => {
 
     vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted', expiresAt: 1 });
     expect(canIdentify(store, 10_000)).toBe(false);
+  });
+
+  // The D4 guard from the other direction: `client register` must never let
+  // identify present a fleet credential to the API. identify.ts calls
+  // `listClients()` with no arguments at all, so a registered root cannot
+  // reach it no matter what the ledger holds — proved here by handing
+  // `listClients` an implementation that WOULD return the container's signed-in
+  // child if it ever received registered dirs, then showing a registered
+  // container in the ledger changes nothing about what identify sees.
+  it('does not present a credential from a client root registered in the ledger', () => {
+    const log = ledger();
+    log.append({ kind: 'client_root_registered', root: 'C:\\accounts', as: 'container' });
+    expect(project(log.read()).clientRoots.get('C:\\accounts')).toBe('container');
+
+    vi.mocked(listClients).mockImplementationOnce((_env, _extra, registeredDirs) =>
+      registeredDirs && registeredDirs.length > 0
+        ? ([
+            {
+              configDir: 'C:\\accounts\\llm02',
+              isDefault: false,
+              inUse: false,
+              signedIn: true,
+              conversations: 0,
+              live: 0,
+            },
+          ] as ReturnType<typeof listClients>)
+        : [],
+    );
+    vi.mocked(readCliCredential).mockReturnValue({
+      raw: '{}',
+      accessToken: 'key-fleet',
+      oauth: { accessToken: 'key-fleet' },
+    } as unknown as ReturnType<typeof readCliCredential>);
+    vi.mocked(readAccessToken).mockReturnValue(undefined);
+
+    // If identify's call site ever grew a default that read the ledger, this
+    // would flip to true on the fleet credential above.
+    expect(canIdentify(store, 1000)).toBe(false);
   });
 });

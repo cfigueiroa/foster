@@ -5,14 +5,18 @@ import { describe, expect, it } from 'vitest';
 import { liveBranchNote } from '../src/engine/continued.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import {
+  buildHostedIndex,
   describeWriters,
   endableWriter,
+  hostedStoreFor,
   isSelfHostedBy,
   liveSessions,
   pruneRegistry,
   staleRegistryEntries,
   writerAliveWith,
+  type HostCandidate,
 } from '../src/store/liveSessions.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 const CONVERSATION = '00000000-0000-4000-8000-0000000000e1';
 
@@ -109,6 +113,147 @@ describe('describeWriters', () => {
     ];
 
     expect(describeWriters([CONVERSATION], [root], () => recycled, against(recycled))).toEqual([]);
+  });
+});
+
+describe('liveSessions reading entrypoint', () => {
+  it('carries the entrypoint the record wrote', () => {
+    const root = registryWith([
+      { pid: 900, sessionId: CONVERSATION, cwd: '/work/thing', entrypoint: 'claude-desktop' },
+    ]);
+
+    const live = liveSessions([root], () => true);
+    expect(live[0]?.entrypoint).toBe('claude-desktop');
+  });
+
+  it('leaves it undefined for a record too old to carry one', () => {
+    const root = registryWith([{ pid: 900, sessionId: CONVERSATION, cwd: '/work/thing' }]);
+
+    const live = liveSessions([root], () => true);
+    expect(live[0]?.entrypoint).toBeUndefined();
+  });
+});
+
+describe('hostedStoreFor', () => {
+  // The registry's own `sessionId` is the CLI's id for the conversation. The
+  // card the app writes is named after a *different* id — its own — and
+  // carries the CLI id inside itself as `cliSessionId`. These fixtures keep
+  // the two deliberately distinct, the way a real card does: a lookup that
+  // only matched by filename would pass every test here and still fail on a
+  // real machine, which is exactly what happened.
+  const CARD_ID = '00000000-0000-4000-8000-00000000000c';
+  const OTHER_CARD_ID = '00000000-0000-4000-8000-00000000000d';
+
+  function candidateFor(root: string, overrides: Partial<HostCandidate> = {}): HostCandidate {
+    return { root, exists: true, ...overrides };
+  }
+
+  it('names the store and account holding the card', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const candidate = candidateFor(store.root, {
+      name: 'work',
+      accountUuid: OLD_ACCOUNT.accountUuid,
+    });
+
+    const index = buildHostedIndex([candidate]);
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toEqual(candidate);
+  });
+
+  it('never looks up a terminal session, even when a card carries its id as cliSessionId', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const index = buildHostedIndex([candidateFor(store.root)]);
+
+    expect(hostedStoreFor({ sessionId: CONVERSATION }, index)).toBeUndefined();
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'terminal' }, index),
+    ).toBeUndefined();
+  });
+
+  it('leaves a hosted entry unlabeled when no card claims its id, instead of guessing', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: CARD_ID, cliSessionId: 'unrelated-conversation' }),
+    );
+    const index = buildHostedIndex([candidateFor(store.root)]);
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toBeUndefined();
+  });
+
+  it('does not check inside a store that no longer exists', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const index = buildHostedIndex([candidateFor(store.root, { exists: false })]);
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toBeUndefined();
+  });
+
+  it('assigns each session to its own store when two are standing', () => {
+    const storeA = makeStore();
+    writeSession(storeA, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: 'session-a' }));
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: 'session-b' }),
+    );
+    const candidateA = candidateFor(storeA.root, { name: 'a' });
+    const candidateB = candidateFor(storeB.root, { name: 'b' });
+    const index = buildHostedIndex([candidateA, candidateB]);
+
+    expect(hostedStoreFor({ sessionId: 'session-a', entrypoint: 'claude-desktop' }, index)).toEqual(
+      candidateA,
+    );
+    expect(hostedStoreFor({ sessionId: 'session-b', entrypoint: 'claude-desktop' }, index)).toEqual(
+      candidateB,
+    );
+  });
+
+  it('attributes an entry to the second of two stores when only that one holds its card', () => {
+    const storeA = makeStore();
+    writeSession(
+      storeA,
+      OLD_ACCOUNT,
+      session({ sessionId: CARD_ID, cliSessionId: 'unrelated-conversation' }),
+    );
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: CONVERSATION }),
+    );
+    const candidateA = candidateFor(storeA.root, { name: 'a' });
+    const candidateB = candidateFor(storeB.root, { name: 'b' });
+    const index = buildHostedIndex([candidateA, candidateB]);
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toEqual(candidateB);
+  });
+
+  it('leaves an entry unlabelled when no card anywhere claims its id', () => {
+    const storeA = makeStore();
+    writeSession(storeA, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: 'unrelated-a' }));
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: 'unrelated-b' }),
+    );
+    const index = buildHostedIndex([candidateFor(storeA.root), candidateFor(storeB.root)]);
+
+    expect(
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toBeUndefined();
   });
 });
 
@@ -289,6 +434,68 @@ describe('ending a writer', () => {
     // record either: refusing here would leave those sessions unstoppable.
     const older = { pid: 4242, recordedAt: RECORDED_AT };
     expect(endableWriter(older, [process_({ pid: 4242 })])).toEqual({ ok: true });
+  });
+});
+
+/**
+ * A partial row — everything tasklist reports once wmic and PowerShell have
+ * both failed — carries a pid and a name and nothing else: no path, no parent,
+ * no creation time. That is the weakest evidence this module ever reasons
+ * from, and it must never come out looking stronger than it is: a name alone
+ * still proves a stranger, but it can never confirm or even suggest a match,
+ * because there is no creation time left to contradict a wrong guess and no
+ * parent link left for isSelfHostedBy to see foster's own ancestry with.
+ */
+describe('a partial row (tasklist)', () => {
+  const partialClaude: ProcessRow = {
+    pid: 4242,
+    parentPid: 0,
+    name: 'claude.exe',
+    path: '',
+    commandLine: '',
+    partial: true,
+  };
+  const partialGit: ProcessRow = {
+    pid: 4242,
+    parentPid: 0,
+    name: 'git.exe',
+    path: '',
+    commandLine: '',
+    partial: true,
+  };
+
+  it('refuses to end a claude.exe row even when the record carries a creation time', () => {
+    const identity = { pid: 4242, procStartedAt: WRITER_STARTED, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialClaude]);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.reason).toContain('tasklist');
+    expect(verdict.reason).toContain('creation time');
+
+    // The registry still says a writer exists, and nothing here contradicts
+    // it — fork protection must not fall away just because the table is thin.
+    expect(against([partialClaude])(4242, identity)).toBe(true);
+  });
+
+  it('refuses a claude.exe row even for a record with no creation time to compare at all', () => {
+    // The weaker check other records fall back to ('plausible') must never be
+    // reached here: with no path and no parent link, foster cannot tell this
+    // pid apart from itself, let alone from a stranger.
+    const identity = { pid: 4242, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialClaude]);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('still recognises an unrelated process name as a stranger', () => {
+    const identity = { pid: 4242, procStartedAt: WRITER_STARTED, recordedAt: RECORDED_AT };
+    const verdict = endableWriter(identity, [partialGit]);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) return;
+    expect(verdict.reason).toContain('4242');
+    expect(verdict.reason).toContain('git.exe');
+    expect(verdict.reason).toContain('Windows reuses pids');
+
+    expect(against([partialGit])(4242, identity)).toBe(false);
   });
 });
 

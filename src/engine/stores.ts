@@ -4,35 +4,65 @@ import {
   directoryKey,
   layoutFor,
   resolveStore,
+  samePath,
+  storeIdentity,
   storeRootOfCopy,
 } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
+import { uniquePrefix } from '../domain/prefix.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
+import { project, type LedgerState } from '../ledger/project.js';
+import {
+  desktopExecutable,
+  inspectDesktopFor,
+  readProcesses,
+  runningStores,
+  type ProcessLister,
+} from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
 import { readConfig } from '../store/config.js';
 
 /**
  * Every installation foster can name without being told.
  *
- * Three sources, and all three are needed. The installed app, so switching back
+ * Four sources, and all four are needed. The installed app, so switching back
  * to it from a profile does not mean typing a package path. The instances that
  * are up, because a profile announces itself nowhere but on its own command
- * line. And the stores the ledger has written into before — a stopped profile is
+ * line. The stores the ledger has written into before — a stopped profile is
  * written down nowhere else, and having to retype its path on every visit was
- * the whole friction.
+ * the whole friction. And the names registered on purpose — `foster profile
+ * register` — for a profile that has neither run nor been fostered into yet.
  *
- * Directories that have since gone are dropped rather than offered: a menu entry
- * that fails when picked is worse than one that was never there.
+ * Directories that have since gone are dropped rather than offered: a menu
+ * entry that fails when picked is worse than one that was never there. A
+ * registered name is the one exception — see `KnownStore.exists`.
  */
 export interface KnownStore {
   root: string;
   /**
+   * The name it was registered under, when it has one — `foster profile
+   * register <path> --name work`. A store reached only through the ledger or a
+   * running process has none; one that is also registered keeps whichever hint
+   * says how foster first found it, name attached, rather than being relisted
+   * as a second, redundant entry.
+   */
+  name?: string;
+  /**
    * How foster came to know about it. A store that only a command line names is
    * a profile by definition — nothing else could have started it that way.
+   * `registered` is the one hint that can outlive the directory: see `exists`.
    */
-  hint: 'installed app' | 'profile' | 'used before';
+  hint: 'installed app' | 'profile' | 'used before' | 'registered';
   running: boolean;
+  /**
+   * Whether the directory is still there. Every other hint requires this to be
+   * true to be offered at all — a menu entry that fails when picked is worse
+   * than one that was never there. A registered name is the exception: it is
+   * the one thing foster remembers on purpose, so a root that has gone stays
+   * listed, marked gone, instead of silently dropping the name that pointed at
+   * it — `foster profile forget` is how you actually stop hearing about it.
+   */
+  exists: boolean;
   /**
    * The account this installation last recorded, when it has one. With profiles
    * the whole point is that each holds a different account, so which one is the
@@ -40,6 +70,14 @@ export interface KnownStore {
    * which is why fostering into it refuses.
    */
   accountUuid?: string;
+  /**
+   * Whether this store's config.json carries an OAuth token cache entry —
+   * presence only, from `readConfig`. This is a stronger signal than
+   * `accountUuid`: a hint can point at an account nobody is signed into any
+   * more, while this says a credential was cached here at some point. Neither
+   * one reads the token itself, so neither proves who is signed in *now*.
+   */
+  hasTokenCache?: boolean;
 }
 
 /** Just the read: this takes the ledger's events, not the object holding them. */
@@ -48,10 +86,10 @@ export function knownStores(
   env: NodeJS.ProcessEnv = process.env,
   list: ProcessLister = readProcesses,
 ): KnownStore[] {
-  const seen = new Set<string>();
+  const seen = new Map<string, KnownStore>();
   const stores: KnownStore[] = [];
 
-  const offer = (root: string, hint: KnownStore['hint']): void => {
+  const offer = (root: string, hint: KnownStore['hint'], name?: string): void => {
     const store = layoutFor(root);
     // The filesystem decides what is the same store and what still exists. A
     // directory that has gone is dropped rather than offered — a menu entry that
@@ -59,33 +97,171 @@ export function knownStores(
     // with no sessions yet is kept, because that is exactly a store you would be
     // sending sessions to.
     const key = directoryKey(store.root);
-    if (key === undefined || seen.has(key)) return;
-    seen.add(key);
-    const accountUuid = readConfig(store).lastKnownAccountUuid;
-    stores.push({
+
+    if (key === undefined) {
+      // Every other hint means the directory was just seen to exist — installed
+      // app, a running process, a copy fostered into before — so gone here means
+      // stale and it is dropped. A registered name is the one hint that survives
+      // its target vanishing on purpose: that is what lets `resolveStoreArg` say
+      // *which* profile went missing instead of just failing to find one.
+      if (hint === 'registered' && name !== undefined) {
+        stores.push({ root: store.root, name, hint, running: false, exists: false });
+      }
+      return;
+    }
+
+    const known = seen.get(key);
+    if (known) {
+      // Already offered through another route. A registered name attaches to
+      // that row rather than adding a second, redundant one for the same
+      // directory — the installed app or a running profile keeps its own hint,
+      // it just also has a name now.
+      if (name !== undefined) known.name ??= name;
+      return;
+    }
+
+    const config = readConfig(store);
+    const found: KnownStore = {
       root: store.root,
       hint,
       running: lockfileHeld(store),
-      ...(accountUuid ? { accountUuid } : {}),
-    });
+      exists: true,
+      ...(name !== undefined ? { name } : {}),
+      ...(config.lastKnownAccountUuid ? { accountUuid: config.lastKnownAccountUuid } : {}),
+      ...(config.hasTokenCache ? { hasTokenCache: true } : {}),
+    };
+    seen.set(key, found);
+    stores.push(found);
   };
 
-  for (const dir of candidateStoreRoots(env)) offer(dir, 'installed app');
+  for (const dir of candidateStoreRoots(env)) {
+    // `CLAUDE_USER_DATA_DIR` relocates userData the same way `--user-data-dir`
+    // does — it is how a second profile is started at all — so a root that came
+    // from it is a profile even though `candidateStoreRoots` lists it first. Only
+    // the roots after it are the installed app's own conventional locations.
+    const fromEnvProfile =
+      env.CLAUDE_USER_DATA_DIR !== undefined && samePath(dir, env.CLAUDE_USER_DATA_DIR);
+    offer(dir, fromEnvProfile ? 'profile' : 'installed app');
+  }
   for (const dir of runningStores(list)) offer(dir, 'profile');
   for (const event of events) {
     if (event.kind === 'fostered') offer(storeRootOfCopy(event.copyPath), 'used before');
   }
+  // Registered names go last, so one landing on a root already offered above
+  // attaches to that row instead of duplicating it — see `offer`.
+  for (const [name, root] of project(events).profiles) offer(root, 'registered', name);
 
   return stores;
 }
 
+/** What `storeExecutable` reports about one installation. */
+export interface StoreExecutableInfo {
+  executable?: string;
+  /** Parsed out of the MSIX package folder name in `executable` — see below. */
+  version?: string;
+}
+
+/** `Claude_0.13.15.0_x64__8wekyb3d8bbwe` — the version sits between two underscores. */
+const PACKAGE_VERSION = /claude_([\d.]+)_/i;
+
 /**
- * What `--store` names: a directory, or a distinctive piece of one.
+ * The executable that would run one particular store, and the version folded
+ * into its own path.
  *
- * The paths are long, and a profile's is the sort of thing nobody remembers
- * exactly — `--store work` for `D:\Claude-Work` is the same abbreviation the
- * identifier flags already allow. A path that exists is always taken as a path,
- * so this can only add meanings, never change one.
+ * A running instance is proof: `inspectDesktopFor` already works out which
+ * process is *this* store's own — two profiles up means two mains, and only the
+ * ancestry walk tells them apart — so its live path beats anything guessed.
+ * `updaterLastSeenVersion` in config.json is not used here on purpose: it is
+ * the release the updater last *saw*, which after a staged update runs ahead of
+ * the build actually on disk (see `store/config.ts`), while a running process's
+ * own path names the file that is actually executing.
+ *
+ * A stopped store has no live process to ask, but every profile launches
+ * through the one binary Windows knows how to start on this machine — the
+ * `claude://` handler names it — so the registered command is the best
+ * available answer, not a guess specific to this store.
+ */
+export function storeExecutable(
+  root: string,
+  list: ProcessLister = readProcesses,
+  env: NodeJS.ProcessEnv = process.env,
+  read?: () => string | undefined,
+): StoreExecutableInfo {
+  const state = inspectDesktopFor(storeIdentity(root, env), list, env);
+  const runningPath =
+    state.running && state.mainPid !== undefined
+      ? list().find((row) => row.pid === state.mainPid)?.path
+      : undefined;
+  const executable = runningPath || desktopExecutable(read, list, env);
+  if (!executable) return {};
+  const version = PACKAGE_VERSION.exec(executable)?.[1];
+  return { executable, ...(version ? { version } : {}) };
+}
+
+/**
+ * The account half of `resolveStoreArg`: a label, an e-mail, or a uuid prefix,
+ * matched against the accounts `knownStores` actually holds — not every account
+ * the ledger has ever heard of, which would happily resolve a name to a store
+ * that was retired years ago. `undefined` means none of the three named this
+ * account at all, which is not the same as naming it ambiguously; the caller
+ * moves on to the substring pass for the first and throws for the second.
+ */
+function resolveByAccount(
+  arg: string,
+  stores: KnownStore[],
+  state: LedgerState,
+): StoreLayout | undefined {
+  const uuids = [
+    ...new Set(
+      stores.map((store) => store.accountUuid).filter((u): u is string => u !== undefined),
+    ),
+  ];
+  const wanted = arg.toLowerCase();
+
+  const byLabel = uuids.filter((uuid) => state.labels.get(uuid)?.toLowerCase() === wanted);
+  const byEmail = byLabel.length
+    ? []
+    : uuids.filter((uuid) => state.identities.get(uuid)?.email?.toLowerCase() === wanted);
+
+  let matched: string[];
+  if (byLabel.length) matched = byLabel;
+  else if (byEmail.length) matched = byEmail;
+  else {
+    const prefix = uniquePrefix(uuids, arg, (uuid) => uuid);
+    if (prefix.kind === 'none') return undefined;
+    matched = prefix.kind === 'one' ? [prefix.id] : prefix.ids;
+  }
+
+  // A label or an e-mail names an account, not an installation, and the same
+  // account can sit in more than one store — the case `--store` cannot guess
+  // through, same as an ambiguous path piece below.
+  const matchingStores = stores.filter(
+    (store) => store.accountUuid !== undefined && matched.includes(store.accountUuid),
+  );
+  if (matchingStores.length === 1) return layoutFor(matchingStores[0]!.root);
+
+  const lines = matchingStores.map((store) => `  ${store.root}`).join('\n');
+  throw new Error(
+    `--store "${arg}" names an account last seen by ${matchingStores.length} installations:\n${lines}`,
+  );
+}
+
+/**
+ * What `--store` names: a directory, a registered profile name, an account, or
+ * a distinctive piece of a path.
+ *
+ * In that order. A path that exists is always taken as a path, so this can only
+ * add meanings, never change one. A registered name — `foster profile register
+ * <path> --name work` — is exact and deliberate, so it is tried next and wins
+ * over a path piece that happens to match too; matching it against a profile
+ * that has since gone still resolves the name, just to a refusal that says so,
+ * because a name is the one thing `knownStores` remembers on purpose past the
+ * directory disappearing. Then an account — a label, an e-mail, or a unique
+ * uuid prefix, the same three `foster clients` already prints — because
+ * `--store work@example.com` and `--store llm03` are both things a person
+ * reaches for before they reach for a path. Last, the paths are long and a
+ * profile's is the sort of thing nobody remembers exactly — `--store work` for
+ * `D:\Claude-Work` is the same abbreviation the identifier flags already allow.
  *
  * An abbreviation matching two installations is reported rather than guessed at,
  * for the same reason `--from` refuses an ambiguous prefix: with `--store` the
@@ -103,9 +279,30 @@ export function resolveStoreArg(
   if (arg === undefined) return resolveStore(undefined, env);
   if (existsSync(arg)) return layoutFor(arg);
 
+  const events = readEvents();
+  const stores = knownStores(events, env, list);
   const wanted = arg.toLowerCase();
-  const stores = knownStores(readEvents(), env, list);
-  const matches = stores.filter((store) => store.root.toLowerCase().includes(wanted));
+
+  const named = stores.find((store) => store.name?.toLowerCase() === wanted);
+  if (named) {
+    if (!named.exists) {
+      throw new Error(
+        `profile "${named.name}" is registered at ${named.root}, which is gone. ` +
+          `foster profile forget ${named.name}, or foster profile register <path> --name ${named.name}`,
+      );
+    }
+    return layoutFor(named.root);
+  }
+
+  const byAccount = resolveByAccount(arg, stores, project(events));
+  if (byAccount) return byAccount;
+
+  // A registered name already had its chance above; a gone profile matching
+  // here by path piece would resolve to a directory that is not there, so it
+  // is excluded the same way `knownStores` excludes every other gone entry.
+  const matches = stores.filter(
+    (store) => store.exists && store.root.toLowerCase().includes(wanted),
+  );
 
   if (matches.length === 1) return layoutFor(matches[0]!.root);
   if (matches.length > 1) {
@@ -113,11 +310,18 @@ export function resolveStoreArg(
     throw new Error(`--store "${arg}" matches ${matches.length} installations:\n${lines}`);
   }
 
-  // Nothing on disk and nothing known: a typo, most likely, and continuing would
-  // quietly report an empty store rather than say so.
-  const known = stores.map((store) => `  ${store.root}`).join('\n');
+  // Nothing on disk and nothing known — by name, by account, or by path piece:
+  // a typo, most likely, and continuing would quietly report an empty store
+  // rather than say so.
+  const known = stores
+    .map(
+      (store) =>
+        `  ${store.name ? `${store.name} — ` : ''}${store.root}${store.exists ? '' : ' (gone)'}`,
+    )
+    .join('\n');
   throw new Error(
-    `--store "${arg}" is not a directory, and no installation foster knows about matches it.` +
+    `--store "${arg}" is not a directory, a registered profile name, a known account, or a piece ` +
+      `of a known path.` +
       (known ? `\nKnown installations:\n${known}` : ''),
   );
 }

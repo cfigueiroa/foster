@@ -666,7 +666,10 @@ describe('one row per branch', () => {
  * writing everything.
  */
 describe('restartPlan', () => {
-  const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
+  // Under \Packages\Claude..., like the app's own MSIX package directory: proof
+  // enough on its own that a row is the app (isDesktopProcess now requires it).
+  const DESKTOP =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
   const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
 
   function table(root: string, entries: Partial<ProcessRow>[]): ProcessRow[] {
@@ -707,6 +710,20 @@ describe('restartPlan', () => {
 
   it('allows it when the app is not running at all', () => {
     expect(restartPlan(store, env, () => [])).toMatchObject({ possible: true, running: false });
+  });
+
+  it('hands over the command rather than restart on an uncertain table', () => {
+    // A partial table (tasklist) with a claude.exe on it is neither a clean
+    // "running" nor a clean "not running" — restarting on that evidence risks
+    // starting a second instance on top of one that may already be up.
+    const rows: ProcessRow[] = [
+      { pid: 4242, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+
+    const plan = restartPlan(store, env, () => rows);
+    expect(plan.possible).toBe(false);
+    expect(plan.reason).toMatch(/tasklist/);
+    expect(plan.command).toBe('foster app restart');
   });
 });
 

@@ -14,6 +14,29 @@ export interface LedgerState {
   repointed: Map<string, RepointedCard>;
   /** Cards wearing a title, or an archived flag, the app did not give them, keyed by session id. */
   retitled: Map<string, RetitledCard>;
+  /**
+   * Named Desktop installations, keyed by name. Re-registering a name points it
+   * at a new root — the fold keeps only the latest, which is the rename.
+   */
+  profiles: Map<string, string>;
+  /**
+   * Registered CLI client roots, keyed by the root itself, holding whether it is
+   * a single client directory or a container of several — see
+   * `ClientRootRegisteredEvent`.
+   */
+  clientRoots: Map<string, 'client' | 'container'>;
+  /**
+   * The `claude://` handler's previous state, while a login is in flight —
+   * see `HandlerArmedEvent`. `key` and `previous` are carried straight from
+   * the event. Cleared by `handler_restored`, so its presence alone says a
+   * login was interrupted before it could put the handler back.
+   */
+  handlerArmed?: {
+    root: string;
+    key: string;
+    previous: string;
+    at: number;
+  };
 }
 
 /**
@@ -26,6 +49,9 @@ export function project(events: LedgerEvent[]): LedgerState {
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
   const retitled = new Map<string, RetitledCard>();
+  const profiles = new Map<string, string>();
+  const clientRoots = new Map<string, 'client' | 'container'>();
+  let handlerArmed: LedgerState['handlerArmed'];
   // Which fostering a copy belongs to, so a repoint can find it. The fold is
   // keyed on the origin session, and a repoint knows only the card it rewrote.
   const fosteringOfCopy = new Map<string, string>();
@@ -168,6 +194,38 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      // Re-registering a known name is the rename: `set` replaces the root a
+      // name pointed at rather than refusing, because a profile is the name,
+      // not the path underneath it.
+      case 'profile_registered':
+        profiles.set(event.name, event.root);
+        break;
+
+      case 'profile_forgotten':
+        profiles.delete(event.name);
+        break;
+
+      case 'client_root_registered':
+        clientRoots.set(event.root, event.as);
+        break;
+
+      case 'client_root_forgotten':
+        clientRoots.delete(event.root);
+        break;
+
+      case 'handler_armed':
+        handlerArmed = {
+          root: event.root,
+          key: event.key,
+          previous: event.previous,
+          at: event.ts,
+        };
+        break;
+
+      case 'handler_restored':
+        handlerArmed = undefined;
+        break;
+
       case 'account_switched':
       case 'conversation_purged':
       case 'failed':
@@ -177,7 +235,16 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels, identities, repointed, retitled };
+  return {
+    active,
+    labels,
+    identities,
+    repointed,
+    retitled,
+    profiles,
+    clientRoots,
+    ...(handlerArmed ? { handlerArmed } : {}),
+  };
 }
 
 /** Cards currently pointed somewhere the app did not point them, oldest move first. */

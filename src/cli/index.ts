@@ -49,8 +49,21 @@ import {
   type ConsolidationEntry,
 } from '../engine/consolidate.js';
 import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
-import { knownStores, resolveStoreArg } from '../engine/stores.js';
+import {
+  knownStores,
+  resolveStoreArg,
+  storeExecutable,
+  type KnownStore,
+} from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
+import {
+  containerBlocker,
+  inspectHandler,
+  planLogin,
+  registryHandlerIo,
+  restoreHandler,
+  runLogin,
+} from '../engine/protocolHandler.js';
 import {
   applySwitch,
   identify,
@@ -60,6 +73,7 @@ import {
 } from '../engine/switch.js';
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
+import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
 import { Ledger } from '../ledger/log.js';
 import {
@@ -74,7 +88,9 @@ import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
-import { inUseConfigDir } from '../store/configDirs.js';
+import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
+import { isDirectory, safeReaddir } from '../util/fs.js';
+import { processTableProvenance, type ProcessTableProvenance } from '../util/processes.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -100,11 +116,14 @@ import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
 import {
+  buildHostedIndex,
   describeWriters,
+  hostedStoreFor,
   liveSessions,
   pruneRegistry,
   sessionRegistryRoots,
   staleRegistryEntries,
+  type HostCandidate,
   type LiveCliSession,
 } from '../store/liveSessions.js';
 import { selectWriters, stopWriters } from '../ops/writers.js';
@@ -189,6 +208,15 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
+}
+
+/**
+ * The ledger alone, for commands that have no store to resolve — a profile is
+ * bookkeeping about a *root*, not about the installation `--store` would pick.
+ */
+function ledgerFrom(command: Command): Ledger {
+  const opts = command.optsWithGlobals<GlobalOptions>();
+  return opts.ledger ? new Ledger(opts.ledger) : new Ledger();
 }
 
 function print(value: unknown): void {
@@ -319,6 +347,33 @@ function sameStore(a: StoreLayout, b: StoreLayout): boolean {
   return samePath(a.root, b.root);
 }
 
+/**
+ * The `process table` line `doctor` prints: which reader answered, and — for
+ * anything short of a clean PowerShell read — why the ones before it were
+ * passed over. Coloured by how much the answer can be trusted: wmic still has
+ * every field PowerShell does, tasklist is missing the ones foster reasons
+ * from (paths, parent links, command lines, start times), and no reader
+ * answering at all is the state that used to look exactly like an idle
+ * machine.
+ */
+function describeProcessTable(provenance: ProcessTableProvenance): string {
+  const passedOver = provenance.passedOver.join('; ');
+  switch (provenance.source) {
+    case 'powershell':
+      return 'via PowerShell';
+    case 'wmic':
+      return `via wmic — ${passedOver}`;
+    case 'tasklist':
+      return pc.yellow(
+        `via tasklist (partial: no paths, parent links, command lines or start times) — ${passedOver}`,
+      );
+    case 'installed':
+      return 'via a test fixture';
+    case 'none':
+      return pc.red(`unreadable — ${passedOver}`);
+  }
+}
+
 program
   .command('doctor')
   .description('check the environment before doing anything else')
@@ -347,6 +402,8 @@ program
         updaterLastSeenVersion: config.updaterLastSeenVersion ?? null,
         appRunning: app.running,
         appId: packagedAppId(store) ?? null,
+        // Populated by the inspectApp call above, so this costs no extra read.
+        processTable: processTableProvenance(),
       });
       return;
     }
@@ -357,10 +414,27 @@ program
     console.log(pc.bold('Store'));
     console.log(`  ${store.root}`);
     if (process.env.CLAUDE_USER_DATA_DIR) {
-      // Worth saying out loud: with this set, the app and foster are both looking
-      // at a profile rather than the default install, and someone debugging "my
-      // sessions are missing" should know which one they are being shown.
-      console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
+      const envDir = process.env.CLAUDE_USER_DATA_DIR;
+      if (roots.some((dir) => samePath(dir, envDir))) {
+        // Worth saying out loud: with this set, the app and foster are both
+        // looking at a profile rather than the default install, and someone
+        // debugging "my sessions are missing" should know which one they are
+        // being shown — and which hint it carries in the Profiles list below.
+        console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
+        console.log(pc.dim('  listed below with hint: profile, never installed app'));
+      } else {
+        // candidateStoreRoots drops a root with no claude-code-sessions yet —
+        // silently, because most callers have no business asking why a
+        // candidate was not offered (domain/paths.ts). Here it would be: the
+        // store above is some other installation, not the profile this
+        // variable names.
+        console.log(
+          pc.yellow(
+            `  CLAUDE_USER_DATA_DIR is set to ${envDir}, but it has no claude-code-sessions yet — ` +
+              'ignored until the app has started once with this profile.',
+          ),
+        );
+      }
     }
     // Counted as directories, not as paths: the packaged store answers to two
     // names, and "2 candidates found" for one directory reads as a second
@@ -379,6 +453,9 @@ program
     console.log(`  updater sees  ${config.updaterLastSeenVersion ?? 'unknown'}`);
     console.log(`  account       ${config.lastKnownAccountUuid ?? 'unknown'}`);
     console.log(`  launches as   ${packagedAppId(store) ?? 'unknown'}`);
+    // Populated by the inspectApp call above, so this line costs no extra read
+    // of the process table — it only reports how the one already taken went.
+    console.log(`  process table ${describeProcessTable(processTableProvenance())}`);
 
     // A profile started with the --user-data-dir switch is invisible to a process
     // that did not launch it, so the running instances are the only place to learn
@@ -396,6 +473,62 @@ program
       console.log(pc.dim('  pass one to --store to work on that profile'));
     }
 
+    // The same rows `foster stores` prints, so a first run answers "which
+    // store, which account" without a second command — CLAUDE.md says to start
+    // here for exactly that reason.
+    console.log(pc.bold('Profiles'));
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    const profiles = knownStores(ledger.read());
+    const labels = project(ledger.read()).labels;
+    if (profiles.length === 0) {
+      console.log(pc.dim('  none known — foster stores lists them once one exists'));
+    } else {
+      for (const profile of profiles) console.log(`  ${storeLine(profile, labels, store)}`);
+    }
+
+    // Read-only: nothing here writes. A routed handler is the fingerprint of an
+    // `app login` that has not yet been put back — whether it is still running
+    // in another terminal or was interrupted, doctor cannot tell, so it points
+    // at the one command that resolves either case.
+    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    if (handler.key !== undefined) {
+      console.log(pc.dim(`  packaged ProgID ${handler.key} (via ${handler.progIdSource})`));
+      if (handler.current !== undefined) {
+        console.log(pc.dim(`  Parameters      ${handler.current.raw}`));
+      }
+    } else if (handler.lookup?.kind === 'ambiguous') {
+      console.log(
+        pc.yellow(
+          `  packaged ProgID not found: more than one candidate carries AppUserModelID ` +
+            `${handler.lookup.aumid} (${handler.lookup.progIds.join(', ')}) — pass --progid to ` +
+            'app login to choose',
+        ),
+      );
+    } else {
+      const aumid = handler.lookup?.aumid;
+      console.log(
+        pc.dim(
+          `  packaged ProgID not found${aumid !== undefined ? ` (looked for AppUserModelID ${aumid})` : ''}`,
+        ),
+      );
+    }
+    if (handler.virtualizedView) {
+      console.log(
+        pc.dim(
+          "  (registry seen from inside the app's container: the claude:// handler it shows may be " +
+            "the package's private copy)",
+        ),
+      );
+    } else if (handler.current?.userDataDir !== undefined) {
+      const when = handler.armed ? formatDate(handler.armed.at) : 'unknown';
+      console.log(
+        pc.yellow(
+          `  claude:// links are routed to ${handler.current.userDataDir} (foster app login, since ${when}).\n` +
+            '  If no sign-in is in flight: foster app login --restore --yes',
+        ),
+      );
+    }
+
     console.log(pc.bold('State'));
     if (app.running) {
       console.log(pc.yellow(`  Claude Desktop is running (${app.evidence.join('; ')})`));
@@ -409,52 +542,95 @@ program
   .command('stores')
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
-  .action(function (this: Command) {
-    const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
-    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
-    // Everything the menu offers, printed instead of picked: without this, using
-    // foster from a script meant knowing a profile's path by heart.
-    const stores = knownStores(ledger.read());
-    // Resolved leniently, because this is the command you reach for when nothing
-    // resolves: refusing to list the installations because it could not pick one
-    // of them would be exactly backwards.
-    const current = resolveQuietly(opts.store, () => ledger.read());
-    const labels = project(ledger.read()).labels;
+  .action(describeStores);
 
-    if (opts.json) {
-      print(
-        stores.map((known) => ({
+/**
+ * How a `KnownStore`'s hint, existence and run state read on one line —
+ * `installed app`, `profile`, `used before` or `registered`, `, gone` only for
+ * a registered name whose directory has since vanished (every other hint
+ * requires the directory to exist to be offered at all), `, running` when the
+ * lockfile is held.
+ */
+function storeState(known: KnownStore): string {
+  return `${known.hint}${known.exists ? '' : ', gone'}${known.running ? ', running' : ''}`;
+}
+
+/**
+ * The account column every store line ends with. Read from config.json's
+ * `lastKnownAccountUuid`, which the app itself never consults to decide who is
+ * signed in — so this is a hint about which directory the sidebar was on last,
+ * not proof of who is signed in now. See README's "What about switching
+ * accounts?" section.
+ */
+function lastSeenAs(known: KnownStore, labels: Map<string, string>): string {
+  if (!known.accountUuid) return 'not signed in';
+  return labels.get(known.accountUuid) ?? shortId(known.accountUuid);
+}
+
+/** One line of `foster stores`, shared with the doctor "Profiles" block. */
+function storeLine(
+  known: KnownStore,
+  labels: Map<string, string>,
+  current: StoreLayout | undefined,
+): string {
+  const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
+  const label = known.name ?? known.root;
+  return `${marker} ${label} ${pc.dim(`(${storeState(known)}) last seen as ${lastSeenAs(known, labels)}`)}`;
+}
+
+/** Shared with `profile list`, which is this command under another name. */
+function describeStores(this: Command): void {
+  const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
+  const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+  // Everything the menu offers, printed instead of picked: without this, using
+  // foster from a script meant knowing a profile's path by heart.
+  const stores = knownStores(ledger.read());
+  // Resolved leniently, because this is the command you reach for when nothing
+  // resolves: refusing to list the installations because it could not pick one
+  // of them would be exactly backwards.
+  const current = resolveQuietly(opts.store, () => ledger.read());
+  const labels = project(ledger.read()).labels;
+
+  if (opts.json) {
+    print(
+      stores.map((known) => {
+        const { executable, version } = storeExecutable(known.root);
+        return {
           root: known.root,
+          name: known.name ?? null,
           knownBy: known.hint,
+          exists: known.exists,
           running: known.running,
           account: known.accountUuid ?? null,
           label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
+          // Presence only — see `StoreConfig.hasTokenCache`. A stronger signal
+          // than `account` above, which is a hint the app itself never reads
+          // back, not proof anything is actually cached.
+          signedIn: known.hasTokenCache ?? false,
+          executable: executable ?? null,
+          version: version ?? null,
           isCurrent: current ? samePath(known.root, current.root) : false,
-        })),
-      );
-      return;
-    }
+        };
+      }),
+    );
+    return;
+  }
 
-    if (stores.length === 0) {
-      console.log('No Claude Desktop installation found.');
-      console.log(pc.dim('Pass --store <path> to name one, or start the app once.'));
-      return;
-    }
+  if (stores.length === 0) {
+    console.log('No Claude Desktop installation found.');
+    console.log(pc.dim('Pass --store <path> to name one, or start the app once.'));
+    return;
+  }
 
-    for (const known of stores) {
-      const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
-      const state = known.running ? `${known.hint}, running` : known.hint;
-      // Which account an installation holds is the question a second profile
-      // exists to answer, and a store with none is one that fostering into will
-      // refuse — better said here than discovered there.
-      const who = known.accountUuid
-        ? (labels.get(known.accountUuid) ?? shortId(known.accountUuid))
-        : 'not signed in';
-      console.log(`${marker} ${known.root} ${pc.dim(`(${state}) ${who}`)}`);
-    }
-    const marked = current && stores.some((known) => samePath(known.root, current.root));
-    console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
-  });
+  for (const known of stores) console.log(storeLine(known, labels, current));
+  const marked = current && stores.some((known) => samePath(known.root, current.root));
+  console.log(
+    pc.dim(
+      `\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store. ` +
+        '"last seen as" comes from each installation\'s own config, a hint and not proof of who is signed in now.',
+    ),
+  );
+}
 
 /** The store a bare command would use, or nothing when there is not one. */
 function resolveQuietly(
@@ -482,8 +658,13 @@ program
   .option('--config-dir <path...>', 'extra Claude config directories to include')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const opts = this.opts<{ configDir?: string[]; json?: boolean }>();
-    const clients = listClients(process.env, opts.configDir ?? []);
+    const opts = this.optsWithGlobals<GlobalOptions & { configDir?: string[]; json?: boolean }>();
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    // Registered roots (`foster client register`) are always passed explicitly,
+    // never read by a default inside listClients — see clients.ts and
+    // identify.ts, which must keep asking for none of them.
+    const registeredDirs = registeredClientDirs(project(ledger.read()));
+    const clients = listClients(process.env, opts.configDir ?? [], registeredDirs);
 
     if (opts.json) {
       print(
@@ -498,6 +679,7 @@ program
           conversations: client.conversations,
           lastUsedAt: client.lastUsedAt ?? null,
           live: client.live,
+          linkTarget: client.linkTarget ?? null,
         })),
       );
       return;
@@ -511,6 +693,9 @@ program
 
     for (const client of clients) {
       const marker = client.inUse ? pc.green('*') : ' ';
+      const name = client.linkTarget
+        ? `${client.configDir} -> ${client.linkTarget}`
+        : client.configDir;
       const details = [
         client.isDefault ? 'default' : undefined,
         client.live > 0 ? `${client.live} live` : undefined,
@@ -518,7 +703,7 @@ program
         client.lastUsedAt !== undefined ? `used ${formatAge(client.lastUsedAt)}` : undefined,
       ].filter(Boolean);
       console.log(
-        `${marker} ${client.configDir}  ${clientIdentityLine(client)}  ${pc.dim(`(${details.join(', ')})`)}`,
+        `${marker} ${name}  ${clientIdentityLine(client)}  ${pc.dim(`(${details.join(', ')})`)}`,
       );
     }
 
@@ -528,9 +713,14 @@ program
         `\n${marked ? '* is the one this process runs under. ' : ''}Run another by setting CLAUDE_CONFIG_DIR to its directory.`,
       ),
     );
+    // Registered roots feed this listing, and `client open` launches into them —
+    // but purge, restore and live --prune/--stop still only ever see what
+    // configDirCandidates enumerates, so a registered root needs --config-dir to
+    // put it in their reach too.
     console.log(
       pc.dim(
-        'restore, purge and live already read all of them; --config-dir adds one from elsewhere.',
+        'Registered roots are listed and opened here; purge, restore and live still need\n' +
+          '--config-dir to reach them.',
       ),
     );
   });
@@ -2585,6 +2775,234 @@ client
     console.log(outcome.message);
   });
 
+client
+  .command('register')
+  .summary('remember a directory (or a directory of directories) for `clients` and `open`')
+  .description(
+    'Add a config directory outside the ~/.claude* siblings foster enumerates on its own, so it\n' +
+      'shows up in `foster clients` and can be launched into.\n\n' +
+      'A single directory is registered as `client` and listed as itself. `--container` registers\n' +
+      'a directory that holds one client per immediate child instead — `~/.claude-contas`, one\n' +
+      'folder per account — and each child still has to look like a client on its own to be\n' +
+      'listed; a folder of notes sitting next to them is not offered just because it is there.\n\n' +
+      'This is listing and launch only. A registered root never reaches `purge`, `restore` or\n' +
+      '`live --prune/--stop` — those keep needing `--config-dir` to see it, on purpose.',
+  )
+  .argument('<path>', 'the directory to register')
+  .option('--container', 'the directory holds one client per immediate child, not a client itself')
+  .option('--yes', 'actually register; without it nothing is written')
+  .action(function (this: Command, target: string) {
+    const opts = this.opts<{ container?: boolean; yes?: boolean }>();
+    const ledgerOpt = this.optsWithGlobals<GlobalOptions>().ledger;
+    const ledger = ledgerOpt ? new Ledger(ledgerOpt) : new Ledger();
+    const root = path.resolve(target);
+    const as: 'client' | 'container' = opts.container ? 'container' : 'client';
+
+    const blockers: string[] = [];
+    if (!isDirectory(root)) {
+      blockers.push(`${target} is not a directory`);
+    } else if (as === 'client' && !looksLikeClient(root)) {
+      blockers.push(
+        `${target} does not look like a Claude Code client — pass --container if it holds several`,
+      );
+    }
+    for (const blocker of blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      if (as === 'container') {
+        const children = safeReaddir(root).filter((entry) =>
+          looksLikeClient(path.join(root, entry)),
+        ).length;
+        console.log(
+          `Dry run: ${target} would be registered as a container, listing ${children} client${children === 1 ? '' : 's'} today.`,
+        );
+      } else {
+        console.log(`Dry run: ${target} would be registered as a client.`);
+      }
+      console.log('Re-run with --yes to register it.');
+      return;
+    }
+
+    ledger.append({ kind: 'client_root_registered', root, as });
+    console.log(`Registered ${target} as a ${as}.`);
+    console.log(
+      pc.dim(
+        'It shows up in `foster clients` now; purge, restore and live still need --config-dir to reach it.',
+      ),
+    );
+  });
+
+client
+  .command('forget')
+  .summary('withdraw a registered client root')
+  .description(
+    'Stop offering a directory registered with `client register` for listing and launch.\n\n' +
+      'Nothing under the directory is touched — the account, its conversations and its\n' +
+      'credential are exactly as they were. This only removes the entry that made foster look\n' +
+      'there on its own.',
+  )
+  .argument('<path>', 'the registered directory to forget')
+  .option('--yes', 'actually forget; without it nothing is written')
+  .action(function (this: Command, target: string) {
+    const opts = this.opts<{ yes?: boolean }>();
+    const ledgerOpt = this.optsWithGlobals<GlobalOptions>().ledger;
+    const ledger = ledgerOpt ? new Ledger(ledgerOpt) : new Ledger();
+    const root = path.resolve(target);
+
+    const registered = project(ledger.read()).clientRoots;
+    const known = [...registered.keys()].find((candidate) => samePath(candidate, root));
+    if (!known) {
+      console.log(`${target} is not a registered client root.`);
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${target} would stop being listed and launched.`);
+      console.log('Re-run with --yes to forget it.');
+      return;
+    }
+
+    ledger.append({ kind: 'client_root_forgotten', root: known });
+    console.log(`Forgot ${target}. Nothing under it was touched.`);
+  });
+
+const profile = program
+  .command('profile')
+  .description('name a Claude Desktop profile — a second userData root — for --store');
+
+profile
+  .command('new')
+  .summary('reserve an empty userData directory and give it a name')
+  .description(
+    'Create a new userData directory for a second Claude Desktop profile, and register the\n' +
+      'name it answers to for --store.\n\n' +
+      'foster writes nothing inside it beyond the directory itself: Claude Desktop populates a\n' +
+      'profile — config.json, Local State, everything else — the first time it runs with\n' +
+      '--user-data-dir pointed there (see "What about switching accounts?" in the README).\n' +
+      'This does not sign anything in, and a profile is never copied, synced, restored from\n' +
+      'backup, or moved to another machine — its credential cache is sealed to the one that\n' +
+      'made it, so doing any of that only signs it out in silence.',
+  )
+  .argument('<path>', 'the userData directory to create')
+  .requiredOption('--name <name>', 'what to call it, for --store')
+  .option('--yes', 'actually create it; without it nothing is written')
+  .action(function (this: Command, targetPath: string) {
+    const opts = this.opts<{ name: string; yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planProfile(targetPath, opts.name, { events: ledger.read() });
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${plan.root} would be created and registered as "${plan.name}".`);
+      console.log('Re-run with --yes to create it.');
+      return;
+    }
+
+    const outcome = applyProfile(plan);
+    if (!outcome.ok) {
+      process.exitCode = 1;
+      console.log(pc.red(outcome.message));
+      return;
+    }
+    ledger.append({
+      kind: 'profile_registered',
+      name: plan.name,
+      root: plan.root,
+    });
+    console.log(outcome.message);
+  });
+
+profile
+  .command('register')
+  .summary('adopt a userData directory the app already ran in')
+  .description(
+    'Give a name to a Claude Desktop profile that already exists — a directory that has\n' +
+      'gone through its own first launch, rather than one foster is about to create.\n\n' +
+      'Refuses a directory with none of the marks of a real profile (config.json, Local\n' +
+      "State, claude-code-sessions): that is somebody's unrelated folder, and registering it\n" +
+      'would let every later command that trusts a registered name act on it.',
+  )
+  .argument('<path>', 'the userData directory to adopt')
+  .requiredOption('--name <name>', 'what to call it, for --store')
+  .option('--yes', 'actually register it; without it nothing is written')
+  .action(function (this: Command, targetPath: string) {
+    const opts = this.opts<{ name: string; yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planProfile(targetPath, opts.name, { events: ledger.read(), adopt: true });
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${plan.root} would be registered as "${plan.name}".`);
+      console.log('Re-run with --yes to register it.');
+      return;
+    }
+
+    const outcome = applyProfile(plan);
+    if (!outcome.ok) {
+      process.exitCode = 1;
+      console.log(pc.red(outcome.message));
+      return;
+    }
+    ledger.append({
+      kind: 'profile_registered',
+      name: plan.name,
+      root: plan.root,
+    });
+    console.log(outcome.message);
+  });
+
+profile
+  .command('forget')
+  .summary('stop naming a profile — never deletes anything')
+  .description(
+    'Remove a profile name from the ledger. The directory it pointed at is never touched: ' +
+      'forgetting only means --store can no longer find it by that name.',
+  )
+  .argument('<name>', 'the profile name to forget')
+  .option('--yes', 'actually forget it; without it nothing is written')
+  .action(function (this: Command, name: string) {
+    const opts = this.opts<{ yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planForget(name, ledger.read());
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(
+        `Dry run: "${name}" (${plan.root}) would be forgotten. Nothing on disk is touched.`,
+      );
+      console.log('Re-run with --yes to forget it.');
+      return;
+    }
+
+    ledger.append({ kind: 'profile_forgotten', name });
+    console.log(`"${name}" is forgotten. ${plan.root} is untouched.`);
+  });
+
+profile
+  .command('list')
+  .description('alias of `stores`: installations foster knows about, and what to pass to --store')
+  .option('--json', 'machine-readable output')
+  .action(describeStores);
+
 program
   .command('labels')
   .description('list the names given to accounts')
@@ -2859,7 +3277,9 @@ program
   .option('--prune', 'remove registry entries whose process is gone or has been replaced')
   .option('--yes', 'actually do it; without it nothing is stopped or removed')
   .action(async function (this: Command) {
-    const opts = this.opts<{ json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }>();
+    const opts = this.optsWithGlobals<
+      GlobalOptions & { json?: boolean; stop?: string[]; prune?: boolean; yes?: boolean }
+    >();
     const roots = sessionRegistryRoots(process.env);
 
     if (opts.prune) {
@@ -2874,14 +3294,42 @@ program
       return;
     }
 
+    // Which installation, if any, is actually hosting each entry. The registry
+    // names no store — the card is the only place that link exists on disk —
+    // so every installation foster knows about is checked for one.
+    const events = (opts.ledger ? new Ledger(opts.ledger) : new Ledger()).read();
+    const labels = project(events).labels;
+    const storeCandidates: HostCandidate[] = knownStores(events, process.env).map((known) => ({
+      root: known.root,
+      name: known.name,
+      accountUuid: known.accountUuid,
+      exists: known.exists,
+    }));
+    // Built once for every entry `live` is about to report, rather than once per
+    // entry — the card tree it reads does not get any smaller for asking one at
+    // a time. See `buildHostedIndex`.
+    const hostedIndex = buildHostedIndex(storeCandidates);
+
     if (opts.json) {
       print(
-        sessions.map((s) => ({
-          pid: s.pid,
-          cliSessionId: s.sessionId,
-          cwd: s.cwd ?? null,
-          registryFile: s.registryFile,
-        })),
+        sessions.map((s) => {
+          const hosted = hostedStoreFor(s, hostedIndex);
+          return {
+            pid: s.pid,
+            cliSessionId: s.sessionId,
+            cwd: s.cwd ?? null,
+            registryFile: s.registryFile,
+            hostedBy: hosted
+              ? {
+                  root: hosted.root,
+                  name: hosted.name ?? null,
+                  lastSeenAs: hosted.accountUuid
+                    ? (labels.get(hosted.accountUuid) ?? shortId(hosted.accountUuid))
+                    : null,
+                }
+              : null,
+          };
+        }),
       );
       return;
     }
@@ -2892,7 +3340,9 @@ program
       return;
     }
     for (const s of sessions) {
-      console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(s.cwd ?? '')}`);
+      const hosted = hostedStoreFor(s, hostedIndex);
+      const detail = hosted ? hostedByLine(hosted, labels) : terminalSessionLine(s);
+      console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(detail)}`);
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
@@ -3143,6 +3593,34 @@ program
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {
   return bytes === undefined ? '' : formatBytes(bytes);
+}
+
+/**
+ * `hosted by <name|root>`, with `· last seen as <label>` appended when the
+ * store carries the config's account hint. Without a hint nothing is guessed
+ * at — the store is still named, the account just is not.
+ */
+function hostedByLine(hosted: HostCandidate, labels: Map<string, string>): string {
+  const label = hosted.accountUuid
+    ? (labels.get(hosted.accountUuid) ?? shortId(hosted.accountUuid))
+    : undefined;
+  return `hosted by ${hosted.name ?? hosted.root}` + (label ? ` · last seen as ${label}` : '');
+}
+
+/**
+ * What to print for a session no installation claims — a plain terminal.
+ *
+ * "Client" means the config directory everywhere else this CLI says it
+ * (`clients`, `src/store/clients.ts`), not the process's launch directory, so
+ * that is what gets named here: two `dirname`s above the registry file, since
+ * a session registers itself at `<configDir>/sessions/<pid>.json`. The launch
+ * directory is still worth a line when it differs from the client root.
+ */
+function terminalSessionLine(session: LiveCliSession): string {
+  const clientDir = path.dirname(path.dirname(session.registryFile));
+  return session.cwd && session.cwd !== clientDir
+    ? `${clientDir}  (cwd ${session.cwd})`
+    : clientDir;
 }
 
 /**
@@ -3407,24 +3885,54 @@ app
   });
 
 function reportDesktop(command: Command): void {
-  const { store } = context(command);
+  const { store, ledger } = context(command);
   // The instance running this store, so `--store <profile> app status` describes
   // that profile rather than whichever app was found first.
   const state = inspectDesktopFor(storeIdentity(store.root));
 
+  // The registry entries the card cross-reference says belong to this store —
+  // see `hostedStoreFor` — checked against this one installation rather than
+  // every known one, since that is the question `app status` is asked.
+  const accountUuid = readConfig(store).lastKnownAccountUuid;
+  const candidate: HostCandidate = { root: store.root, accountUuid, exists: true };
+  const hostedIndex = buildHostedIndex([candidate]);
+  const hosted = liveSessions(sessionRegistryRoots(process.env)).filter(
+    (session) => hostedStoreFor(session, hostedIndex) !== undefined,
+  );
+
+  // Computed unconditionally so `--json` carries the same label `live --json`
+  // does for the same concept (`hostedBy.lastSeenAs`) — a JSON consumer should
+  // not see less than the text branch prints below.
+  const labels = project(ledger.read()).labels;
+  const lastSeenAs = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : null;
+
   if (command.opts<{ json?: boolean }>().json) {
-    print({ ...state, appId: packagedAppId(store) ?? null });
+    print({
+      ...state,
+      appId: packagedAppId(store) ?? null,
+      hostedSessions: hosted.map((s) => ({ pid: s.pid, cliSessionId: s.sessionId, lastSeenAs })),
+    });
     return;
   }
 
   if (!state.running) {
-    console.log('Claude Desktop is not running.');
+    // uncertain rides along on the object spread in the --json branch above, so
+    // this text branch is the only place that has to say it out loud.
+    if (state.uncertain) {
+      console.log(pc.yellow(`Cannot tell whether Claude Desktop is running: ${state.uncertain}`));
+    } else {
+      console.log('Claude Desktop is not running.');
+    }
     return;
   }
   console.log(`Claude Desktop is running (pid ${state.mainPid}).`);
   if (state.startedAt) console.log(pc.dim(`  started ${formatAge(state.startedAt)}`));
   if (state.codeSessions > 0)
     console.log(pc.dim(`  hosting ${state.codeSessions} Claude Code session(s)`));
+  if (hosted.length > 0) {
+    console.log(pc.dim(`  hosted sessions${lastSeenAs ? ` · last seen as ${lastSeenAs}` : ''}:`));
+    for (const s of hosted) console.log(pc.dim(`    ${s.sessionId}  (pid ${s.pid})`));
+  }
   if (state.selfHosted)
     console.log(pc.yellow('  foster is running inside it, so it cannot close it'));
 }
@@ -3443,7 +3951,22 @@ app
   .description('start Claude Desktop')
   .action(async function (this: Command) {
     const { store } = context(this);
-    const started = await startDesktop(store);
+    let launchedWith: 'identity' | 'direct' | undefined;
+    const started = await startDesktop(store, {
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+      onWindowRaised: () =>
+        console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+    });
+    if (launchedWith === 'identity') console.log(pc.dim('started with package identity'));
+    else if (launchedWith === 'direct') {
+      console.log(
+        pc.yellow(
+          'started without package identity: the browser callback will not reach it; use the e-mail code',
+        ),
+      );
+    }
     console.log(started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.');
   });
 
@@ -3462,6 +3985,208 @@ app
     const { store } = context(this);
     deliverUrl(store, url);
     console.log(`Handed to the installation at ${store.root}.`);
+  });
+
+app
+  .command('login')
+  .summary('sign a second profile in through the ordinary browser flow')
+  .description(
+    "Windows hands every claude:// link to the installed app, so a second profile's sign-in\n" +
+      'never completes on its own. This routes the next callback to the profile named by\n' +
+      '--store — the one registry key that decides, changed for the duration of one sign-in\n' +
+      'and put back verbatim — so the browser flow works unchanged. Nothing captures URLs,\n' +
+      'and foster never sees the code.',
+  )
+  .option('--yes', 'arm the handler and wait for the sign-in; without it, a dry run')
+  .option(
+    '--timeout <seconds>',
+    'cap the wait for the sign-in, in seconds; without it, waits until the sign-in lands or Ctrl+C',
+  )
+  .option('--print', 'show what would happen without arming anything')
+  .option('--restore', 'put a routed handler back — for a login interrupted mid-run')
+  .option(
+    '--restart-profile',
+    'when the profile is running without package identity, close it and start it again with it',
+  )
+  .option(
+    '--progid <name>',
+    'choose the packaged ProgID explicitly (an AppX... name) when more than one carries this ' +
+      "install's AppUserModelID",
+  )
+  .action(async function (this: Command) {
+    const opts = this.opts<{
+      yes?: boolean;
+      timeout?: string;
+      print?: boolean;
+      restore?: boolean;
+      restartProfile?: boolean;
+      progid?: string;
+    }>();
+    const { store, ledger } = context(this);
+    const events = ledger.read();
+
+    if (opts.restore) {
+      const blocker = containerBlocker(process.env);
+      if (blocker !== undefined) {
+        console.log(pc.yellow(`  ! ${blocker}`));
+        process.exitCode = 1;
+        return;
+      }
+
+      const state = project(events);
+      if (!opts.yes) {
+        if (state.handlerArmed === undefined) {
+          console.log('No login is in flight; nothing to restore.');
+          return;
+        }
+        console.log(
+          `Dry run: put ${state.handlerArmed.key}\\Parameters back to "${state.handlerArmed.previous}".`,
+        );
+        console.log('Re-run with --yes to do it.');
+        return;
+      }
+      const result = restoreHandler(state, registryHandlerIo, (e) => ledger.append(e));
+      console.log(result.message);
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
+
+    let timeoutSeconds: number | undefined;
+    if (opts.timeout !== undefined) {
+      timeoutSeconds = Number(opts.timeout);
+      if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+        throw new Error(`--timeout must be a positive integer, not "${opts.timeout}".`);
+      }
+    }
+
+    let plan = planLogin(store, { io: registryHandlerIo, events, progid: opts.progid });
+
+    // The one blocker `app login` can fix for itself: a profile running
+    // without package identity can never receive the callback, however the
+    // handler is armed — closing it and letting foster start it again (see
+    // startDesktop) is the whole fix, so offer to do exactly that rather than
+    // making the user close it by hand.
+    if (opts.yes && !opts.print && opts.restartProfile && plan.identity === 'none') {
+      const label = plan.name ?? plan.root;
+      console.log(`${label} is running without package identity; restarting it...`);
+      await quitDesktop(store, { terminate: true });
+      let launchedWith: 'identity' | 'direct' | undefined;
+      await startDesktop(store, {
+        onProfileLaunch: (method) => {
+          launchedWith = method;
+        },
+        onWindowRaised: () =>
+          console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+      });
+      if (launchedWith !== 'identity') {
+        console.log(
+          pc.yellow(
+            'could not restart it with package identity; the sign-in callback will not reach it',
+          ),
+        );
+      }
+      plan = planLogin(store, { io: registryHandlerIo, events, progid: opts.progid });
+    }
+
+    const label = plan.name ?? plan.root;
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+    for (const warning of plan.warnings) console.log(pc.yellow(`  ! ${warning}`));
+
+    if (!opts.yes || opts.print) {
+      console.log(`Dry run: claude:// links would be routed to ${label} for one sign-in.`);
+      console.log(`  arm      ${plan.key}\\Parameters = ${plan.armed}`);
+      console.log(`  restore  ${plan.previous}`);
+      console.log('Re-run with --yes to do it.');
+      return;
+    }
+
+    if (!plan.running) {
+      let launchedWith: 'identity' | 'direct' | undefined;
+      const started = await startDesktop(store, {
+        onProfileLaunch: (method) => {
+          launchedWith = method;
+        },
+        onWindowRaised: () =>
+          console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+      });
+      if (!started) {
+        // The same refusal `app start` prints when the app does not take the
+        // store within its own timeout — no point inventing a second wording
+        // for the same fact.
+        console.log('Started it; it has not taken the store yet.');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Started ${label}.`);
+      if (launchedWith === 'direct') {
+        console.log(
+          pc.yellow(
+            'started without package identity: the browser callback will not reach it; use the e-mail code',
+          ),
+        );
+      }
+    }
+
+    const controller = new AbortController();
+    const onSigint = () => controller.abort();
+    process.once('SIGINT', onSigint);
+    let result;
+    try {
+      result = await runLogin(plan, {
+        io: registryHandlerIo,
+        append: (e) => ledger.append(e),
+        readState: () => {
+          const config = readConfig(store);
+          return {
+            hasTokenCache: config.hasTokenCache === true,
+            accountUuid: config.lastKnownAccountUuid,
+          };
+        },
+        ...(timeoutSeconds !== undefined ? { timeoutMs: timeoutSeconds * 1000 } : {}),
+        // Arm first, then sign in: printed only once the write has actually
+        // landed, so these instructions are never on screen before the
+        // handler really routes there — a browser with a standing permission
+        // to auto-launch claude:// can fire the callback the instant the user
+        // starts the Google flow, with no dialog in between.
+        onArmed: () => {
+          console.log(
+            timeoutSeconds !== undefined
+              ? `claude:// links now go to ${label} for the next ${timeoutSeconds}s.`
+              : `claude:// links now go to ${label} until the sign-in lands or you press Ctrl+C.`,
+          );
+          console.log(
+            'Now, in that window, click "Continue with Google" and finish in the browser.',
+          );
+          console.log('If the browser opens Claude by itself, that is fine: the link is routed.');
+        },
+        onHeartbeat: (elapsedMs) => {
+          const minutes = Math.round(elapsedMs / 60_000);
+          console.log(
+            pc.dim(
+              `still waiting: the handler has been armed for ${minutes} min; Ctrl+C puts it back`,
+            ),
+          );
+        },
+        signal: controller.signal,
+      });
+    } finally {
+      process.removeListener('SIGINT', onSigint);
+    }
+
+    console.log(result.message);
+    if (result.outcome === 'signed-in') {
+      console.log('Run foster stores to see both instances.');
+    } else {
+      process.exitCode = 1;
+    }
+    if (!result.restored) {
+      console.log(pc.yellow('foster app login --restore --yes'));
+    }
   });
 
 app

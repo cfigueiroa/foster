@@ -445,6 +445,19 @@ export function restartPlan(
   list: ProcessLister | undefined = readProcesses,
 ): RestartPlan {
   const state = inspectDesktopFor(storeIdentity(store.root, env), list ?? readProcesses, env);
+  // An uncertain state means the process table could not tell the app from a
+  // Code session at all (tasklist, no paths or command lines) — restarting on
+  // that evidence risks starting a second instance on top of one that may
+  // already be running. Same shape as the selfHosted refusal below: hand over
+  // the command instead of a plan that could try and throw.
+  if (state.uncertain) {
+    return {
+      possible: false,
+      running: state.running,
+      reason: state.uncertain,
+      command: RESTART_COMMAND,
+    };
+  }
   if (!state.selfHosted) {
     return { possible: true, running: state.running, command: RESTART_COMMAND };
   }
