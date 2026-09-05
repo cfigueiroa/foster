@@ -1,7 +1,9 @@
 import { cpSync, mkdirSync, symlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { hasCredential } from '../store/cliCredential.js';
 import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
+import { clientNameOf } from './launch.js';
 
 /**
  * Making a config directory that is a working client rather than an empty one.
@@ -142,6 +144,13 @@ export function applySeed(plan: SeedPlan): SeedOutcome {
     linked,
     message:
       `${plan.target} is ready, and signed out. ` +
-      `Open it with \`foster client open ${path.basename(plan.target)}\` and sign in there.`,
+      // `client open`'s resolver strips a `.claude-` prefix (and special-cases the
+      // home `.claude` directory to `default`) before it will match a bare name —
+      // print the name that resolver actually accepts, not a raw basename that
+      // only agrees with it outside that convention (e.g. `.claude-work` itself
+      // does not resolve; the resolver wants `work`). A target outside that
+      // convention gets its own full path instead of an unregistered basename,
+      // which the resolver's path-like branch accepts unconditionally.
+      `Open it with \`foster client open ${clientNameOf(plan.target, homedir())}\` and sign in there.`,
   };
 }

@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { planLaunch } from '../src/engine/launch.js';
 import { applySeed, planSeed } from '../src/engine/seed.js';
 
 function scratch(): string {
@@ -132,6 +133,50 @@ describe('applySeed', () => {
 
     expect(outcome.message).toContain('foster client open');
     expect(outcome.message.trim().endsWith('and sign in there.')).toBe(true);
+  });
+
+  it('names the slug, not the raw basename, for the `~/.claude-<slug>` sibling convention', () => {
+    // Regression: a target following the very `~/.claude-<slug>` sibling
+    // convention the README demonstrates (`foster client new ~\.claude-work`)
+    // used to get a success message naming the raw basename `.claude-work` —
+    // which `client open`'s resolver does not treat as that slug at all, so
+    // the exact command the message just printed refused. `.claude-work`
+    // itself never resolves; the resolver wants `work`.
+    const home = scratch();
+    const target = path.join(home, '.claude-work');
+    const outcome = applySeed(planSeed(target, source()));
+
+    expect(outcome.message).toContain('Open it with `foster client open work`');
+
+    // Round-trip the printed name through `planLaunch` to catch this class of
+    // drift even if the exact wording above ever changes.
+    const match = outcome.message.match(/foster client open ([^`\s]+)/);
+    expect(match).not.toBeNull();
+    const printedName = match![1]!;
+
+    const plan = planLaunch(printedName, { clients: [], home, env: {} });
+    expect(plan.blockers).toEqual([]);
+    expect(path.resolve(plan.configDir!)).toBe(path.resolve(target));
+  });
+
+  it('names the full path, not an unresolvable basename, for a target outside that convention', () => {
+    // A target that is not `~/.claude` and does not follow the `.claude-<slug>`
+    // sibling convention has no short name `client open` would accept without
+    // registering it first — and a freshly seeded directory is never
+    // registered yet. Printing its bare basename (`Claude-Work`, say) would
+    // hand back a command that refuses with "No client named". The full path
+    // is what the resolver's path-like branch (tried first, before any of the
+    // name conventions) accepts unconditionally.
+    const home = scratch();
+    const target = path.join(scratch(), 'fleet', 'Claude-Work');
+    const outcome = applySeed(planSeed(target, source()));
+
+    const resolvedTarget = path.resolve(target);
+    expect(outcome.message).toContain(`Open it with \`foster client open ${resolvedTarget}\``);
+
+    const plan = planLaunch(resolvedTarget, { clients: [], home, env: {} });
+    expect(plan.blockers).toEqual([]);
+    expect(path.resolve(plan.configDir!)).toBe(resolvedTarget);
   });
 
   it('writes nothing for a blocked plan', () => {

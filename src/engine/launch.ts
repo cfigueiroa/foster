@@ -279,11 +279,25 @@ function knownClientNames(home: string, registered: string[]): string[] {
   return [...names].sort();
 }
 
-/** The slug a directory would be opened by: `default` for `~/.claude`, the rest by convention. */
-function clientNameOf(dir: string, home: string): string {
+/**
+ * The argument `client open` would accept for this directory: `default` for `~/.claude`,
+ * `<slug>` for a `~/.claude-<slug>` sibling — the two names the resolver above accepts
+ * without anything registered. Anything else is not nameable that way at all (a bare
+ * basename would only resolve once it is registered, which a fresh directory never is
+ * yet), so this hands back the directory's own resolved path instead — not a slug, but
+ * still exactly what step 1 of the same resolver, the path-like branch, accepts
+ * unconditionally.
+ *
+ * Exported so callers that print "open it with `foster client open <name>`" — `seed.ts`'s
+ * success message is the one that exists today — name the argument this same resolver will
+ * actually accept, instead of a raw `path.basename` that only happens to agree for names
+ * outside the `.claude-<slug>` convention.
+ */
+export function clientNameOf(dir: string, home: string): string {
   if (samePath(dir, path.join(home, '.claude'))) return 'default';
   const base = path.basename(dir);
-  return base.startsWith('.claude-') ? base.slice('.claude-'.length) : base;
+  if (base.startsWith('.claude-')) return base.slice('.claude-'.length);
+  return path.resolve(dir);
 }
 
 function warningsFor(
