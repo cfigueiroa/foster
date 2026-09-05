@@ -7,8 +7,9 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
+import { uniquePrefix } from '../domain/prefix.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { project } from '../ledger/project.js';
+import { project, type LedgerState } from '../ledger/project.js';
 import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
 import { readConfig } from '../store/config.js';
@@ -129,12 +130,69 @@ export function knownStores(
 }
 
 /**
- * What `--store` names: a directory, or a distinctive piece of one.
+ * The account half of `resolveStoreArg`: a label, an e-mail, or a uuid prefix,
+ * matched against the accounts `knownStores` actually holds — not every account
+ * the ledger has ever heard of, which would happily resolve a name to a store
+ * that was retired years ago. `undefined` means none of the three named this
+ * account at all, which is not the same as naming it ambiguously; the caller
+ * moves on to the substring pass for the first and throws for the second.
+ */
+function resolveByAccount(
+  arg: string,
+  stores: KnownStore[],
+  state: LedgerState,
+): StoreLayout | undefined {
+  const uuids = [
+    ...new Set(
+      stores.map((store) => store.accountUuid).filter((u): u is string => u !== undefined),
+    ),
+  ];
+  const wanted = arg.toLowerCase();
+
+  const byLabel = uuids.filter((uuid) => state.labels.get(uuid)?.toLowerCase() === wanted);
+  const byEmail = byLabel.length
+    ? []
+    : uuids.filter((uuid) => state.identities.get(uuid)?.email?.toLowerCase() === wanted);
+
+  let matched: string[];
+  if (byLabel.length) matched = byLabel;
+  else if (byEmail.length) matched = byEmail;
+  else {
+    const prefix = uniquePrefix(uuids, arg, (uuid) => uuid);
+    if (prefix.kind === 'none') return undefined;
+    matched = prefix.kind === 'one' ? [prefix.id] : prefix.ids;
+  }
+
+  // A label or an e-mail names an account, not an installation, and the same
+  // account can sit in more than one store — the case `--store` cannot guess
+  // through, same as an ambiguous path piece below.
+  const matchingStores = stores.filter(
+    (store) => store.accountUuid !== undefined && matched.includes(store.accountUuid),
+  );
+  if (matchingStores.length === 1) return layoutFor(matchingStores[0]!.root);
+
+  const lines = matchingStores.map((store) => `  ${store.root}`).join('\n');
+  throw new Error(
+    `--store "${arg}" names an account last seen by ${matchingStores.length} installations:\n${lines}`,
+  );
+}
+
+/**
+ * What `--store` names: a directory, a registered profile name, an account, or
+ * a distinctive piece of a path.
  *
- * The paths are long, and a profile's is the sort of thing nobody remembers
- * exactly — `--store work` for `D:\Claude-Work` is the same abbreviation the
- * identifier flags already allow. A path that exists is always taken as a path,
- * so this can only add meanings, never change one.
+ * In that order. A path that exists is always taken as a path, so this can only
+ * add meanings, never change one. A registered name — `foster profile register
+ * <path> --name work` — is exact and deliberate, so it is tried next and wins
+ * over a path piece that happens to match too; matching it against a profile
+ * that has since gone still resolves the name, just to a refusal that says so,
+ * because a name is the one thing `knownStores` remembers on purpose past the
+ * directory disappearing. Then an account — a label, an e-mail, or a unique
+ * uuid prefix, the same three `foster clients` already prints — because
+ * `--store work@example.com` and `--store llm03` are both things a person
+ * reaches for before they reach for a path. Last, the paths are long and a
+ * profile's is the sort of thing nobody remembers exactly — `--store work` for
+ * `D:\Claude-Work` is the same abbreviation the identifier flags already allow.
  *
  * An abbreviation matching two installations is reported rather than guessed at,
  * for the same reason `--from` refuses an ambiguous prefix: with `--store` the
@@ -152,9 +210,30 @@ export function resolveStoreArg(
   if (arg === undefined) return resolveStore(undefined, env);
   if (existsSync(arg)) return layoutFor(arg);
 
+  const events = readEvents();
+  const stores = knownStores(events, env, list);
   const wanted = arg.toLowerCase();
-  const stores = knownStores(readEvents(), env, list);
-  const matches = stores.filter((store) => store.root.toLowerCase().includes(wanted));
+
+  const named = stores.find((store) => store.name?.toLowerCase() === wanted);
+  if (named) {
+    if (!named.exists) {
+      throw new Error(
+        `profile "${named.name}" is registered at ${named.root}, which is gone. ` +
+          `foster profile forget ${named.name}, or foster profile register <path> --name ${named.name}`,
+      );
+    }
+    return layoutFor(named.root);
+  }
+
+  const byAccount = resolveByAccount(arg, stores, project(events));
+  if (byAccount) return byAccount;
+
+  // A registered name already had its chance above; a gone profile matching
+  // here by path piece would resolve to a directory that is not there, so it
+  // is excluded the same way `knownStores` excludes every other gone entry.
+  const matches = stores.filter(
+    (store) => store.exists && store.root.toLowerCase().includes(wanted),
+  );
 
   if (matches.length === 1) return layoutFor(matches[0]!.root);
   if (matches.length > 1) {
@@ -162,11 +241,18 @@ export function resolveStoreArg(
     throw new Error(`--store "${arg}" matches ${matches.length} installations:\n${lines}`);
   }
 
-  // Nothing on disk and nothing known: a typo, most likely, and continuing would
-  // quietly report an empty store rather than say so.
-  const known = stores.map((store) => `  ${store.root}`).join('\n');
+  // Nothing on disk and nothing known — by name, by account, or by path piece:
+  // a typo, most likely, and continuing would quietly report an empty store
+  // rather than say so.
+  const known = stores
+    .map(
+      (store) =>
+        `  ${store.name ? `${store.name} — ` : ''}${store.root}${store.exists ? '' : ' (gone)'}`,
+    )
+    .join('\n');
   throw new Error(
-    `--store "${arg}" is not a directory, and no installation foster knows about matches it.` +
+    `--store "${arg}" is not a directory, a registered profile name, a known account, or a piece ` +
+      `of a known path.` +
       (known ? `\nKnown installations:\n${known}` : ''),
   );
 }

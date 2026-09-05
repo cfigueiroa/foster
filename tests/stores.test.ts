@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { knownStores, resolveStoreArg } from '../src/engine/stores.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import type { LedgerEvent } from '../src/ledger/types.js';
+import type { StoreLayout } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 /**
@@ -50,6 +51,35 @@ function registered(name: string, root: string): LedgerEvent {
     name,
     root,
   };
+}
+
+function labelled(accountUuid: string, label: string): LedgerEvent {
+  return {
+    v: 1,
+    ts: 1_700_000_000_000,
+    toolVersion: '0.0.0-test',
+    kind: 'account_labelled',
+    accountUuid,
+    label,
+  };
+}
+
+function identitySeen(accountUuid: string, email: string): LedgerEvent {
+  return {
+    v: 1,
+    ts: 1_700_000_000_000,
+    toolVersion: '0.0.0-test',
+    kind: 'account_identity_seen',
+    accountUuid,
+    email,
+  };
+}
+
+/** A store signed into the given account, findable by `knownStores`. */
+function signedInto(accountUuid: string): StoreLayout {
+  const store = makeStore();
+  writeFileSync(store.configFile, JSON.stringify({ lastKnownAccountUuid: accountUuid }), 'utf8');
+  return store;
 }
 
 /** Where a copy fostered into that store would sit. */
@@ -226,6 +256,137 @@ describe('what --store names', () => {
       resolveStoreArg(
         'nowhere-at-all',
         () => [],
+        {},
+        () => [],
+      ),
+    ).toThrow(/not a directory/);
+  });
+});
+
+describe('what --store names, by registered name and by account', () => {
+  it('resolves by registered name before falling back to a path piece', () => {
+    // "work" is both a registered name and, coincidentally, a piece of the decoy
+    // profile's own path. The deliberate match wins.
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-named-'));
+    const decoy = mkdtempSync(path.join(tmpdir(), 'work-decoy-'));
+
+    const found = resolveStoreArg(
+      'work',
+      () => [registered('work', profile)],
+      {},
+      () => running(decoy),
+    );
+
+    expect(found.root).toBe(path.resolve(profile));
+  });
+
+  it('resolves a registered name case-insensitively', () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-named-case-'));
+
+    const found = resolveStoreArg(
+      'WORK',
+      () => [registered('work', profile)],
+      {},
+      () => [],
+    );
+
+    expect(found.root).toBe(path.resolve(profile));
+  });
+
+  it('names which profile is missing when a registered name points at a gone directory', () => {
+    const gone = path.join(tmpdir(), 'foster-named-gone-that-does-not-exist');
+
+    expect(() =>
+      resolveStoreArg(
+        'work',
+        () => [registered('work', gone)],
+        {},
+        () => [],
+      ),
+    ).toThrow(/profile "work" is registered at .*, which is gone/);
+  });
+
+  it('resolves an account label to the only store last seen with it', () => {
+    const store = signedInto(NEW_ACCOUNT.accountUuid);
+
+    const found = resolveStoreArg(
+      'work',
+      () => [labelled(NEW_ACCOUNT.accountUuid, 'work')],
+      { CLAUDE_USER_DATA_DIR: store.root },
+      () => [],
+    );
+
+    expect(found.root).toBe(store.root);
+  });
+
+  it('resolves an e-mail to the only store last seen with that account', () => {
+    const store = signedInto(NEW_ACCOUNT.accountUuid);
+
+    const found = resolveStoreArg(
+      'you@example.com',
+      () => [identitySeen(NEW_ACCOUNT.accountUuid, 'you@example.com')],
+      { CLAUDE_USER_DATA_DIR: store.root },
+      () => [],
+    );
+
+    expect(found.root).toBe(store.root);
+  });
+
+  it('resolves a unique uuid prefix to the store last seen with that account', () => {
+    const store = signedInto(NEW_ACCOUNT.accountUuid);
+    const prefix = NEW_ACCOUNT.accountUuid.slice(0, 8);
+
+    const found = resolveStoreArg(
+      prefix,
+      () => [],
+      { CLAUDE_USER_DATA_DIR: store.root },
+      () => [],
+    );
+
+    expect(found.root).toBe(store.root);
+  });
+
+  it('refuses a label two stores were last seen with', () => {
+    // The installed app and a separate running profile happen to share the same
+    // account — a real state, since a profile can be pointed at any account. The
+    // label cannot say which of the two the user means.
+    const installed = signedInto(NEW_ACCOUNT.accountUuid);
+    const profile = signedInto(NEW_ACCOUNT.accountUuid);
+
+    expect(() =>
+      resolveStoreArg(
+        'work',
+        () => [labelled(NEW_ACCOUNT.accountUuid, 'work')],
+        { CLAUDE_USER_DATA_DIR: installed.root },
+        () => running(profile.root),
+      ),
+    ).toThrow(/names an account last seen by 2 installations/);
+  });
+
+  it('falls through to the path-piece pass when no rule names an account', () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-fallback-'));
+    const piece = path.basename(profile).slice(-8);
+
+    const found = resolveStoreArg(
+      piece,
+      () => [],
+      {},
+      () => running(profile),
+    );
+
+    expect(found.root).toBe(path.resolve(profile));
+  });
+
+  it('excludes a gone registered profile from the path-piece pass', () => {
+    // The name is the sanctioned way to reach a gone profile, with a refusal
+    // that says so — matching it again by path piece here would silently
+    // resolve to a directory that is not there.
+    const gone = path.join(tmpdir(), 'foster-gone-piece-that-does-not-exist');
+
+    expect(() =>
+      resolveStoreArg(
+        'gone-piece',
+        () => [registered('elsewhere', gone)],
         {},
         () => [],
       ),
