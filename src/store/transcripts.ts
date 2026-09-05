@@ -1,4 +1,4 @@
-import { openSync, readSync, closeSync, statSync } from 'node:fs';
+import { openSync, readSync, closeSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { samePath } from '../domain/paths.js';
@@ -134,6 +134,39 @@ export function conversationRoot(file: string): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * Which of `wanted` this transcript mentions as a record id.
+ *
+ * Deliberately not a JSON walk. The caller asks this of every transcript it can
+ * see, and on a real store that is 6.7 GB: parsing costs 118 seconds, while
+ * reading and matching the id shape costs under 5. Nothing here needs the
+ * records — only whether an id occurs — so the parse is the whole expense and
+ * none of the answer.
+ *
+ * Read as latin1 because the ids are ASCII and the decoder is the second cost
+ * after the parse; a multi-byte character cannot forge or hide one.
+ */
+export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): string[] {
+  if (wanted.size === 0) return [];
+  let text: string;
+  try {
+    text = readFileSync(file, 'latin1');
+  } catch {
+    // Unreadable says nothing about lineage, exactly as a missing root does.
+    return [];
+  }
+
+  const found = new Set<string>();
+  for (const match of text.matchAll(RECORD_ID)) {
+    const id = match[1]!;
+    if (wanted.has(id)) found.add(id);
+  }
+  return [...found];
+}
+
+/** A record's own id, as the transcript writes it. */
+const RECORD_ID = /"uuid":"([0-9a-fA-F-]{36})"/g;
 
 export interface TranscriptFacts {
   path: string;

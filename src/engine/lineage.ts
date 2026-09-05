@@ -1,5 +1,6 @@
 import {
   conversationRoot,
+  idsMentionedIn,
   indexAllTranscripts,
   scanConversation,
   transcriptRoots,
@@ -47,6 +48,27 @@ export interface Lineage {
    */
   scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
   /**
+   * Resolve roots that only look unrelated, for these conversations.
+   *
+   * `conversationRoot` reads the first record a transcript holds, which is the
+   * shared ancestor only when the app copied the conversation from its
+   * beginning. Fork it from a point in the middle instead and the copy opens on
+   * a record from the middle — rewritten with no parent, so nothing in the head
+   * says where it came from — and the two halves answer with different roots
+   * while holding thousands of records in common. Measured on a real store: two
+   * halves of one conversation sharing 2097 records, the second's root sitting
+   * at position 16818 of the first.
+   *
+   * The evidence is that record itself. A root found *inside* another
+   * conversation is that conversation's own history, so the branch it heads
+   * belongs to the same work, and its root is filed as an alias of the host's.
+   *
+   * Called by whoever is about to group conversations, never on the way in: it
+   * reads every transcript named here, which is seconds rather than
+   * milliseconds. Idempotent, and remembers what it has already been given.
+   */
+  deepen(cliSessionIds: Iterable<string>): void;
+  /**
    * Every transcript on disk, every path it occupies, keyed by conversation.
    *
    * The same directory walk the other answers are built on, exposed so a caller
@@ -72,6 +94,9 @@ export function lineageAt(projectsDirs: string[]): Lineage {
   let index: Map<string, string[]> | undefined;
   const roots = new Map<string, string | undefined>();
   const scans = new Map<string, ConversationScan | undefined>();
+  /** A root that turned out to be a record of another conversation, and whose. */
+  const alias = new Map<string, string>();
+  const deepened = new Set<string>();
 
   const transcripts = (): Map<string, string[]> => {
     index ??= indexAllTranscripts(projectsDirs);
@@ -85,8 +110,7 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     return transcripts().get(cliSessionId)?.[0];
   };
 
-  const rootOf = (cliSessionId: string | undefined): string | undefined => {
-    if (cliSessionId === undefined || cliSessionId === '') return undefined;
+  const headOf = (cliSessionId: string): string | undefined => {
     // `has` rather than a truthy check: a conversation whose root could not be
     // read is remembered as unanswerable, so a failed read is not repeated for
     // every card that points at it.
@@ -96,6 +120,30 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     const root = file ? conversationRoot(file) : undefined;
     roots.set(cliSessionId, root);
     return root;
+  };
+
+  /**
+   * Follow the aliases to the root that stands for the whole work.
+   *
+   * Guarded against a cycle rather than assumed free of one: two transcripts
+   * can each hold the other's first record, and a chain that returns to where
+   * it started must stop somewhere rather than spin.
+   */
+  const canonical = (root: string): string => {
+    let at = root;
+    const seen = new Set<string>([at]);
+    for (;;) {
+      const next = alias.get(at);
+      if (next === undefined || seen.has(next)) return at;
+      seen.add(next);
+      at = next;
+    }
+  };
+
+  const rootOf = (cliSessionId: string | undefined): string | undefined => {
+    if (cliSessionId === undefined || cliSessionId === '') return undefined;
+    const head = headOf(cliSessionId);
+    return head === undefined ? undefined : canonical(head);
   };
 
   return {
@@ -115,6 +163,35 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       const scan = file === undefined ? undefined : scanConversation(file);
       scans.set(cliSessionId, scan);
       return scan;
+    },
+
+    deepen(cliSessionIds) {
+      const heads = new Map<string, string>();
+      for (const id of cliSessionIds) {
+        if (deepened.has(id)) continue;
+        deepened.add(id);
+        const head = headOf(id);
+        if (head !== undefined) heads.set(id, head);
+      }
+      // One conversation cannot be a fork of itself, and one root cannot be
+      // found inside another transcript that does not exist yet to be read.
+      if (heads.size < 2) return;
+
+      const wanted = new Set(heads.values());
+      for (const [id, head] of heads) {
+        const file = fileOf(id);
+        if (file === undefined) continue;
+        for (const found of idsMentionedIn(file, wanted)) {
+          // Its own head is not evidence of anything, and a root already spoken
+          // for keeps the first answer: the alias is a claim about one record,
+          // and two hosts holding it say the same thing.
+          if (found === head || alias.has(found)) continue;
+          // A root that is this conversation's own head would make the work
+          // point at itself once canonicalised.
+          if (canonical(head) === found) continue;
+          alias.set(found, head);
+        }
+      }
     },
 
     transcripts,

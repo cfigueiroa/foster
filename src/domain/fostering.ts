@@ -259,7 +259,27 @@ export function buildFosterCopy(
   return copy;
 }
 
-/** Key used to make fostering idempotent: one active copy per origin session per target account. */
-export function fosteringKey(originSessionId: string, target: AccountRef): string {
-  return `${originSessionId}@${target.accountUuid}/${target.organizationUuid}`;
+/**
+ * Key used to make fostering idempotent: one active copy per origin session, per
+ * target account, **per conversation**.
+ *
+ * The conversation is part of the identity because a card is not one. Opening a
+ * conversation that is live elsewhere makes the app branch it: it writes a new
+ * transcript and repoints the card at the branch. That happens to origin cards
+ * too, and then the ledger — keyed on the card alone — answered "already
+ * fostered" for a conversation it had never copied, and no sweep would bring it
+ * again. Measured on a real store: 38 of 8312 active fosterings had an origin
+ * card holding a conversation other than the one recorded for it.
+ *
+ * Left out when the conversation is unknown, which keeps the key events written
+ * before it was recorded still fold to what they always did.
+ */
+export function fosteringKey(
+  originSessionId: string,
+  target: AccountRef,
+  cliSessionId?: string,
+): string {
+  // Case folded, as this identifier is everywhere else it is compared.
+  const work = cliSessionId ? `#${cliSessionId.toLowerCase()}` : '';
+  return `${originSessionId}${work}@${target.accountUuid}/${target.organizationUuid}`;
 }

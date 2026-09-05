@@ -95,10 +95,36 @@ stay archived, so they arrive in the app's _archived_ view rather than in Recent
 the user will look for rows that are not there.
 
 A fork is one conversation continued in more than one account, each continuation on a
-transcript of its own. The sweep does not choose between them: the branch that carried on
-keeps its title, and every other branch is retitled `(stale, stopped DD/MM HH:MM) …` — or
-whatever `--stale-prefix` says — and filed in the archived view, native rows included. Nothing
-is hidden; `foster consolidate` is the optional tidy-up for anyone who wants one row.
+transcript of its own. The sweep does not choose between them, and it no longer calls every
+other branch stopped. Three outcomes, decided per branch:
+
+- the **tip** — the branch holding most records no sibling holds — keeps its title;
+- a branch whose own last **answer** is later than the tip's, and that holds records of its
+  own, **went on after the tip**: it is retitled `(other branch, went on DD/MM HH:MM) …` — or
+  whatever `--branch-prefix` says — and **stays in the sidebar**, unarchived. Measured on a
+  real store, two of the 40 forks the sweep could see looked like this — the fresher half 50
+  and 77 hours ahead — and the old rule filed exactly the half the user had been working in;
+- only a branch that really did stop earlier is retitled `(stale, stopped DD/MM HH:MM) …` —
+  `--stale-prefix` — and filed in the archived view, native rows included.
+
+"Went on" is judged on the last answer, never the last record: opening a stale row appends a
+user record to its transcript, so the last _message_ can be a click rather than work
+(`divergedFrom`, `src/engine/branches.ts`). Nothing is hidden; `foster consolidate` is the
+optional tidy-up for anyone who wants one row.
+
+Which conversations are branches of each other is decided before any of that, and
+`conversationRoot` — the first record a transcript holds — only answers it when the app copied
+the conversation from its beginning. A fork begun in the middle opens on a middle record,
+rewritten with no parent, and the halves disagree about their root while sharing thousands of
+records. `Lineage.deepen` closes that: a root found _inside_ another conversation is filed as
+that conversation's work. It reads every transcript it is given without parsing them — 6.7 GB in
+about 5 seconds against 118 for a JSON walk — and `forksOf` calls it before grouping, which is
+why a sweep on a large store takes about half a minute rather than nine seconds.
+
+**Pass both prefixes or neither.** A mark is recognised only when the run is told the words it
+was written with, so a sweep with a different `--stale-prefix` than the one that wrote a row
+stacks a second mark in front of the first instead of replacing it. `--branch-prefix` defaults to
+English; the `/fosteia` skill passes both in Portuguese.
 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
@@ -114,9 +140,12 @@ on as it is: rows added, rows retitled, and that the clean title is the row to c
 ## You cannot restart the app from a session the app started
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the
-app**. `app quit`, `app restart`, `consolidate --yes` and `return` all want the app closed,
-and closing it kills the session part-way through — which is why foster refuses to close an
-app it is running inside. `sweep --restart` asks first and hands over the command instead of
+app**. `app quit` and `app restart` want the app closed, and closing it kills the session
+part-way through — which is why foster refuses to close an app it is running inside.
+`consolidate --yes` and `return` are narrower than they used to be: since #15 they hold only
+what the app is actually holding — a native card, or a copy that already existed when the app
+started — so the rule is **run them before the restart, not after**, and a card the app itself
+made waits either way. `sweep --restart` asks first and hands over the command instead of
 failing at the end of a run that already wrote everything.
 
 Check before promising anything:
