@@ -1139,6 +1139,24 @@ and the tree it takes with it would be a stranger's. Reading the process table i
 of foster: anywhere else there is none, every entry stays listed, and `--stop` refuses everything
 rather than guessing.
 
+Reading the table itself has its own fallback. PowerShell's `Get-CimInstance Win32_Process` answers
+first — it is the only reader that reports a parent pid — but PowerShell can hang at start-up rather
+than fail quickly: measured 05/09/2026, a machine whose PowerShell was blocked at start-up by a
+WinFsp/Cryptomator drive that had stopped answering made every `powershell.exe` invocation wait 20 s
+and then error, and every foster command that reads the process table reported an empty machine as a
+result. When PowerShell fails or is missing, `wmic` answers next with the same six fields (pid,
+parent pid, name, path, command line, start time); when wmic also fails or is not installed (it is a
+Feature on Demand as of Windows 11 24H2, so a fresh install may not have it), `tasklist` answers with
+pid and name only. A table read through `wmic` changes nothing; a table read through `tasklist`
+changes what foster is willing to conclude from it: `app status` reports that it cannot tell the app
+from a Claude Code session rather than guessing "not running", `live --stop` refuses a partial row
+outright rather than risk `taskkill /F /T` against the wrong process, and `sweep --restart` hands
+over the command instead of trying. `foster doctor` names which reader actually answered and why the
+ones before it were passed over. A PowerShell that fails once is not retried for the rest of that
+run — the hang is paid at most once, not once per read. The native readers decode their output as
+`latin1` rather than Unicode, so a path or command line containing non-ASCII characters can come back
+wrong; the ASCII markers foster actually greps for are unaffected.
+
 The session foster is running in is never ended, for the same reason it refuses to close the app it
 runs inside — the kill would take the command with it, part-way through. That used to be answered by
 walking parent links, which breaks the moment any process in the chain has exited: launched through

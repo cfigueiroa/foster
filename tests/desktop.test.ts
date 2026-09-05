@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  DesktopControlError,
   inspectDesktop,
   inspectDesktopFor,
   packagedAppId,
@@ -190,6 +191,31 @@ describe('inspectDesktop', () => {
 
     expect(inspectDesktop(() => table, {}).selfHosted).toBe(false);
   });
+
+  it('reports uncertain rather than not-running when a partial table still shows a claude.exe', () => {
+    // tasklist reports nothing but a name and a pid, so isDesktopProcess (which
+    // demands a readable path) fails every row — same shape as "not running",
+    // but there is a claude.exe sitting right there that this table cannot
+    // explain either way.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktop(() => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toMatch(/tasklist/);
+    expect(state.uncertain).toMatch(/1 claude\.exe/);
+  });
+
+  it('stays a certain not-running on a partial table with no claude.exe at all', () => {
+    // A name alone proves absence even when it cannot prove identity: nothing
+    // here is called claude.exe, so there is nothing to be uncertain about.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'git.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktop(() => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toBeUndefined();
+  });
 });
 
 describe('packagedAppId', () => {
@@ -321,6 +347,22 @@ describe('quitDesktop', () => {
   it('says nothing to do when the app is not running', async () => {
     const result = await quitDesktop(storeWith({}), { list: () => [], env: outside });
     expect(result.outcome).toBe('not-running');
+  });
+
+  it('refuses rather than guesses when the table is too thin to tell', async () => {
+    // Returning 'not-running' here would let a restart flow start a second
+    // instance on top of one that may already be up — the table simply cannot
+    // rule that out, so this must not look like the certain case above.
+    const store = storeWith({});
+    const table: ProcessRow[] = [
+      { pid: PID, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
+      DesktopControlError,
+    );
+    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
+      /cannot tell/,
+    );
   });
 
   it('refuses to close the app it is running inside', async () => {
@@ -589,7 +631,13 @@ describe('storeExecutable (engine/stores.ts)', () => {
   const exeTwo =
     'C:\\home\\AppData\\Local\\Packages\\Claude_9.9.9.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
 
-  it('reports the executable of each running instance', () => {
+  // Windows only: storeExecutable resolves the root it is given through
+  // path.resolve, and on the POSIX CI runner a literal `C:\one` is a relative
+  // path — it comes back under the working directory, matches neither
+  // instance's --user-data-dir, and the lookup falls through to the first app
+  // process for both stores. The identity logic itself is covered above with
+  // roots that exist on any platform.
+  it.skipIf(process.platform !== 'win32')('reports the executable of each running instance', () => {
     const table = rows(
       {
         pid: 500,
@@ -681,6 +729,13 @@ describe('runningStores', () => {
   it('says nothing when no instance names a profile', () => {
     expect(runningStores(() => rows(withCmd('"Claude.exe"')))).toEqual([]);
   });
+
+  it('ignores a partial row — it has no command line to read a profile out of', () => {
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    expect(runningStores(() => table)).toEqual([]);
+  });
 });
 
 describe('inspectDesktopFor', () => {
@@ -737,6 +792,19 @@ describe('inspectDesktopFor', () => {
       commandLine: 'node',
     });
     expect(inspectDesktopFor(profile(ONE), () => table, {}).selfHosted).toBe(true);
+  });
+
+  it('still reports uncertain for a non-default store on a partial table', () => {
+    // A partial row has no --user-data-dir to filter by, so filtering it away
+    // would have turned this profile's "cannot tell" into a confident "not
+    // running" — instead every row is kept and inspectDesktop's own handling
+    // decides.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktopFor(profile(ONE), () => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toMatch(/tasklist/);
   });
 });
 

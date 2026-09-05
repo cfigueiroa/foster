@@ -673,6 +673,20 @@ describe('restartPlan', () => {
   it('allows it when the app is not running at all', () => {
     expect(restartPlan(store, env, () => [])).toMatchObject({ possible: true, running: false });
   });
+
+  it('hands over the command rather than restart on an uncertain table', () => {
+    // A partial table (tasklist) with a claude.exe on it is neither a clean
+    // "running" nor a clean "not running" — restarting on that evidence risks
+    // starting a second instance on top of one that may already be up.
+    const rows: ProcessRow[] = [
+      { pid: 4242, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+
+    const plan = restartPlan(store, env, () => rows);
+    expect(plan.possible).toBe(false);
+    expect(plan.reason).toMatch(/tasklist/);
+    expect(plan.command).toBe('foster app restart');
+  });
 });
 
 /**

@@ -57,7 +57,7 @@ export async function desktopFlow(ui: Ui, store: StoreLayout, target: AccountRef
 }
 
 function describeDesktop(state: DesktopState): string {
-  if (!state.running) return 'not running';
+  if (!state.running) return state.uncertain ? `unknown — ${state.uncertain}` : 'not running';
   const parts = [`running (pid ${state.mainPid})`];
   if (state.codeSessions > 0) parts.push(`hosting ${state.codeSessions} Code session(s)`);
   if (state.startedAt) parts.push(`started ${formatAge(state.startedAt)}`);
