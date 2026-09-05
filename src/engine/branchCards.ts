@@ -1,8 +1,8 @@
 import { UNTITLED } from '../domain/fostering.js';
-import { staleMark, stripStale } from '../domain/stale.js';
+import { staleMark, stripMarks } from '../domain/stale.js';
 import type { DiscoveredSession } from '../domain/types.js';
 import type { LedgerState } from '../ledger/project.js';
-import type { BranchWeight, Forks } from './branches.js';
+import { divergedFrom, type BranchWeight, type Forks } from './branches.js';
 import { fosterSessions, type FosterOptions, type Outcome } from './executor.js';
 import { retitleCards, type RetitleOutcome, type RetitleRequest } from './retitle.js';
 import type { Sidebar } from './sidebar.js';
@@ -20,21 +20,36 @@ import type { Sidebar } from './sidebar.js';
  *
  * So the sweep gives every branch its own row instead, and hides nothing. The
  * branch that carried on — `branches[0]`, by the measure `branches.ts` defends
- * — keeps its title untouched. Every other branch is marked stale in the title
- * and filed in the archived view: it is still there, still opens, and no longer
- * looks like the row to continue in. A row this account already holds on a
- * stale branch is marked the same way, native or not; `retitle.ts` says why
- * that write is safe with the app open.
+ * — keeps its title untouched. A row this account already holds on another
+ * branch is marked the same way as a copy would be, native or not;
+ * `retitle.ts` says why that write is safe with the app open.
+ *
+ * What the other branches wear depends on whether they stopped. A branch that
+ * holds records of its own and went on after the tip did is not stale — it is
+ * where the work was left, and on this store it was where two of the forks the
+ * sweep could see had been left, 50 and 77 hours after the tip stopped.
+ * It keeps its place in the sidebar and says which branch it is. Only a branch
+ * that really did stop earlier is marked stale and filed in the archived view:
+ * still there, still opens, no longer looking like the row to continue in.
  *
  * Nothing here decides between branches, which is what kept `consolidate` a
  * question for the user. Every branch keeps a row, so there is nothing to lose
  * and no threshold to set.
  */
 
+/**
+ * What a row is, among the branches of one conversation.
+ *
+ * `tip` holds most work of its own; `diverged` went on after the tip did and
+ * keeps its place; `stale` stopped earlier and is filed away.
+ */
+export type BranchKind = 'tip' | 'diverged' | 'stale';
+
 export interface BranchRow {
   cliSessionId: string;
   /** True for the branch that carried on. */
   tip: boolean;
+  kind: BranchKind;
   total: number;
   only: number;
   /** When the last answer on this branch was written, when the transcript says. */
@@ -78,13 +93,17 @@ export interface BranchPlanInput {
   /** The caller's ordinary title prefix. */
   prefix: string;
   staleTemplate: string;
+  /** The mark a branch wears when it went on after the tip. */
+  divergedTemplate: string;
   /** Conversations a live `claude` is writing, lower-cased. */
   live: ReadonlySet<string>;
   state: LedgerState;
 }
 
 export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
-  const { forks, here, hereCards, candidates, orphans, prefix, staleTemplate, live, state } = input;
+  const { forks, here, hereCards, candidates, orphans, prefix, live, state } = input;
+  const { staleTemplate, divergedTemplate } = input;
+  const templates = [staleTemplate, divergedTemplate];
 
   // Cards foster itself filed away, by session id. Only those are lifted back
   // out when their branch turns out to be the one that carried on: a flag the
@@ -106,12 +125,21 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
     for (const branch of fork.branches) {
       const id = branch.cliSessionId;
       const isTip = id === tip;
+      const kind: BranchKind = isTip
+        ? 'tip'
+        : divergedFrom(branch, fork.branches[0]!)
+          ? 'diverged'
+          : 'stale';
       const stoppedAt = stoppedAtOf(branch);
-      const mark = isTip ? '' : staleMark(staleTemplate, stoppedAt);
+      const mark =
+        kind === 'tip'
+          ? ''
+          : staleMark(kind === 'diverged' ? divergedTemplate : staleTemplate, stoppedAt);
       const held = hereCards.filter((card) => sameId(card.data.cliSessionId, id));
       const row: BranchRow = {
         cliSessionId: id,
         tip: isTip,
+        kind,
         total: branch.total,
         only: branch.only,
         ...(stoppedAt === undefined ? {} : { stoppedAt }),
@@ -122,7 +150,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
       if (held.length > 0) {
         row.action = 'keep';
         for (const card of held) {
-          const request = retitleFor(card, { isTip, mark, staleTemplate, archivedByFoster });
+          const request = retitleFor(card, { kind, mark, templates, archivedByFoster });
           if (!request) continue;
           if (live.has(id.toLowerCase())) {
             plan.skipped.push({
@@ -135,7 +163,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
           plan.retitle.push(request);
           row.action = 'retitle';
         }
-      } else if (!isTip && branch.only === 0) {
+      } else if (kind === 'stale' && branch.only === 0) {
         // Every record it holds, the branch that carried on holds too: a row
         // for it would open nothing the clean row does not, and the sidebar
         // is the one place a row costs something. A row already here on such
@@ -149,9 +177,9 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
         const pick = fromSource ?? orphans.find((session) => sameId(session.data.cliSessionId, id));
         if (pick) {
           plan.bring.push({
-            session: withTitle(pick, stripStale(pick.data.title ?? '', staleTemplate)),
+            session: withTitle(pick, stripMarks(pick.data.title ?? '', templates)),
             prefix: `${mark}${prefix}`,
-            archive: !isTip,
+            archive: kind === 'stale',
             origin: fromSource ? 'source' : 'deleted',
             tip: isTip,
           });
@@ -183,18 +211,27 @@ function sameId(a: string | undefined, b: string): boolean {
 
 function retitleFor(
   card: DiscoveredSession,
-  context: { isTip: boolean; mark: string; staleTemplate: string; archivedByFoster: Set<string> },
+  context: {
+    kind: BranchKind;
+    mark: string;
+    templates: readonly string[];
+    archivedByFoster: Set<string>;
+  },
 ): RetitleRequest | undefined {
-  const { isTip, mark, staleTemplate, archivedByFoster } = context;
+  const { kind, mark, templates, archivedByFoster } = context;
   const current = card.data.title ?? '';
-  const clean = stripStale(current, staleTemplate);
-  const title = isTip ? clean : `${mark}${clean.trim() ? clean : UNTITLED}`;
+  const clean = stripMarks(current, templates);
+  const title = kind === 'tip' ? clean : `${mark}${clean.trim() ? clean : UNTITLED}`;
 
+  // Only a branch that stopped is filed away. A branch that went on comes back
+  // out of the archived view when foster is the one that put it there — an
+  // earlier sweep, ranking by weight alone, filed the half the user was working
+  // in; a flag the user set is still the user's.
   let archived: boolean | undefined;
-  if (isTip) {
-    if (card.data.isArchived && archivedByFoster.has(card.data.sessionId)) archived = false;
-  } else if (!card.data.isArchived) {
-    archived = true;
+  if (kind === 'stale') {
+    if (!card.data.isArchived) archived = true;
+  } else if (card.data.isArchived && archivedByFoster.has(card.data.sessionId)) {
+    archived = false;
   }
 
   if (title === current && archived === undefined) return undefined;
@@ -204,7 +241,7 @@ function retitleFor(
     native: !card.isCopy,
     title,
     ...(archived === undefined ? {} : { archived }),
-    as: isTip ? 'tip' : 'stale',
+    as: kind,
   };
 }
 

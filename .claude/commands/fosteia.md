@@ -24,13 +24,20 @@ in a checkout is usually older; do not reach for it, and do not build from sourc
 One command, one tool call:
 
 ```
-foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) "
+foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
 ```
+
+Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
+names only one marks the other in English on a sidebar read in Portuguese — worse, a later run
+with a different wording stacks a second mark in front of the first instead of replacing it,
+because a mark is only recognised when the run is told the words it was written with.
 
 That is the whole sweep. It copies every fosterable session from the other accounts —
 **archived included**, which is where the volume is — gives every branch of a forked
 conversation a row of its own, brings back conversations the app deleted that nothing still
 points at, re-scans to say whether anything is left, and counts what can never come at all.
+It takes about half a minute on a large store: it reads every transcript it can see once, to
+catch forks that began in the middle of a conversation.
 Do not run `foster doctor` first and do not run anything to confirm afterwards: the sweep
 fails loudly on its own and confirms itself.
 
@@ -48,9 +55,12 @@ on rather than re-deriving it:
   many rows were added or retitled for branches;
 - that the archived ones landed in the **archived view**, not Recents — otherwise they will look
   for rows that are not there;
-- what a fork looks like now: the branch that carried on keeps its title, and every other branch
-  wears "(defasada, parou DD/MM HH:MM)" and sits in the archived view. If a row they had pinned
-  was one of those, the current row needs pinning again;
+- what a fork looks like now, which is three outcomes and not two: the branch holding most work
+  of its own keeps its title; a branch that **stopped earlier** wears "(defasada, parou DD/MM
+  HH:MM)" and sits in the archived view; and a branch that **went on after it** wears "(outro
+  ramo, seguiu DD/MM HH:MM)" and stays in the sidebar — that last one is where the most recent
+  work is, so say it plainly. If a row they had pinned was archived as stale, the current row
+  needs pinning again;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
   command again and say why;
 - the "can never come" line, when there is one: scheduled tasks, sessions never opened, files

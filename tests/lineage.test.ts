@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findDuplicates } from '../src/engine/duplicates.js';
 import { FOLLOWED_BRANCH, fosterSessions } from '../src/engine/executor.js';
+import { forksOf } from '../src/engine/branches.js';
 import { lineageAt } from '../src/engine/lineage.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, listRepointed, project } from '../src/ledger/project.js';
@@ -29,6 +30,10 @@ const BRANCH = '00000000-0000-4000-8000-0000000000e2';
 const UNRELATED = '00000000-0000-4000-8000-0000000000e3';
 /** A second fork of the same work, for the case where a card is moved twice. */
 const SECOND = '00000000-0000-4000-8000-0000000000f2';
+/** A branch the app copied from the middle of ORIGINAL, so it heads its own root. */
+const MIDWAY = '00000000-0000-4000-8000-0000000000f4';
+/** The record MIDWAY opens on, which ORIGINAL holds in the middle of its history. */
+const MID_RECORD = '00000000-0000-4000-8000-0000000000f5';
 
 /** A config directory with transcripts in it, as CLAUDE_CONFIG_DIR points at. */
 function transcripts(files: Record<string, string[]>): NodeJS.ProcessEnv {
@@ -70,6 +75,29 @@ function forked(): NodeJS.ProcessEnv {
     // No card points at this one, so it is invisible to every weighing until
     // something moves a card onto it.
     [SECOND]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000f3')],
+  });
+}
+
+/**
+ * The same work forked from the middle, on its own tree.
+ *
+ * Kept apart from `forked()` because that fixture's shape is load-bearing:
+ * which half carried on is read off the records each holds, and adding any
+ * would answer a different question in the tests that use it.
+ */
+function forkedMidway(): NodeJS.ProcessEnv {
+  return transcripts({
+    [ORIGINAL]: [
+      META,
+      record(ROOT),
+      record('00000000-0000-4000-8000-0000000000e4'),
+      record(MID_RECORD),
+      record('00000000-0000-4000-8000-0000000000f6'),
+    ],
+    // Opens on a record ORIGINAL holds well past its own first, rewritten with
+    // no parent — so `conversationRoot` gives the two different answers.
+    [MIDWAY]: [META, record(MID_RECORD), record('00000000-0000-4000-8000-0000000000f7')],
+    [UNRELATED]: [META, record('00000000-0000-4000-8000-0000000000e6')],
   });
 }
 
@@ -645,5 +673,130 @@ describe('the transcript index', () => {
     expect(kin.transcripts().get(ORIGINAL)).toHaveLength(1);
     expect(kin.transcripts().has(SECOND)).toBe(true);
     expect(kin.rootOf(ORIGINAL)).toBe(ROOT);
+  });
+});
+
+/**
+ * The mirror of "a copy the app branched": the card that was copied *from* is
+ * the one the app moved.
+ *
+ * Measured on a real store: 38 of 8312 active fosterings had an origin card
+ * holding a conversation other than the one recorded against it. Keyed on the
+ * card alone, the ledger answered "already fostered" for work it had never
+ * copied — and no sweep, not even one naming the session outright, would bring
+ * it. The conversation is what was fostered; the card is only where it was
+ * found.
+ */
+describe('an origin card the app branched', () => {
+  function fosteredFrom(): {
+    store: StoreLayout;
+    ledger: Ledger;
+    projectsDirs: string[];
+    originPath: string;
+  } {
+    const store = makeStore();
+    const originPath = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f1', cliSessionId: ORIGINAL }),
+    );
+    const ledger = ledgerIn();
+    const projectsDirs = projects(forked());
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+    return { store, ledger, projectsDirs, originPath };
+  }
+
+  it('brings the conversation the card now holds, instead of calling it already fostered', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again).toHaveLength(1);
+    expect(again[0]!.status).toBe('fostered');
+  });
+
+  it('keeps the fostering of the conversation it copied before', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // Two rows, two fosterings: the second must not evict the first, or the copy
+    // already in the sidebar would stop being anything `foster return` knows.
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(active.map((entry) => entry.cliSessionId).sort()).toEqual([ORIGINAL, UNRELATED].sort());
+  });
+
+  it('is still skipped when the card holds the conversation it was fostered for', () => {
+    const { store, ledger, projectsDirs } = fosteredFrom();
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again[0]).toMatchObject({ status: 'skipped', detail: 'already fostered' });
+  });
+});
+
+/**
+ * A fork that began in the middle of a conversation.
+ *
+ * `conversationRoot` reads the first record, which is the shared ancestor only
+ * when the copy started at the beginning. Fork from the middle and the copy
+ * opens on a record from the middle, rewritten with no parent — so the halves
+ * disagree about their root while holding the same history. Measured on a real
+ * store: 2097 records in common, the second's root at position 16818 of the
+ * first, and every sweep treating them as unrelated work.
+ */
+describe('deepen', () => {
+  it('leaves the roots alone until it is asked', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    expect(kin.rootOf(MIDWAY)).toBe(MID_RECORD);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(false);
+  });
+
+  it('files a root found inside another conversation as that conversation’s work', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    kin.deepen([ORIGINAL, MIDWAY]);
+
+    expect(kin.rootOf(MIDWAY)).toBe(ROOT);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+
+  it('does not join conversations that merely both exist', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    kin.deepen([ORIGINAL, MIDWAY, UNRELATED]);
+
+    expect(kin.sameWork(ORIGINAL, UNRELATED)).toBe(false);
+  });
+
+  it('groups the pair into one fork, which is what the sweep reads', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    const forks = forksOf([ORIGINAL, MIDWAY], kin).all();
+
+    expect(forks).toHaveLength(1);
+    expect(forks[0]!.branches.map((branch) => branch.cliSessionId).sort()).toEqual(
+      [ORIGINAL, MIDWAY].sort(),
+    );
   });
 });
