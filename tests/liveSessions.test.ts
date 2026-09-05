@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { liveBranchNote } from '../src/engine/continued.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import {
+  buildHostedIndex,
   describeWriters,
   endableWriter,
   hostedStoreFor,
@@ -15,6 +16,7 @@ import {
   writerAliveWith,
   type HostCandidate,
 } from '../src/store/liveSessions.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 const CONVERSATION = '00000000-0000-4000-8000-0000000000e1';
 
@@ -133,67 +135,125 @@ describe('liveSessions reading entrypoint', () => {
 });
 
 describe('hostedStoreFor', () => {
-  const ACCOUNT = '00000000-0000-4000-8000-00000000000a';
-  const ORG = '00000000-0000-4000-8000-00000000000b';
+  // The registry's own `sessionId` is the CLI's id for the conversation. The
+  // card the app writes is named after a *different* id — its own — and
+  // carries the CLI id inside itself as `cliSessionId`. These fixtures keep
+  // the two deliberately distinct, the way a real card does: a lookup that
+  // only matched by filename would pass every test here and still fail on a
+  // real machine, which is exactly what happened.
+  const CARD_ID = '00000000-0000-4000-8000-00000000000c';
+  const OTHER_CARD_ID = '00000000-0000-4000-8000-00000000000d';
 
-  /** A store root holding a session card at the real path `storeHoldsSession` reads. */
-  function storeWithCard(sessionId: string): string {
-    const root = mkdtempSync(path.join(tmpdir(), 'foster-store-'));
-    const dir = path.join(root, 'claude-code-sessions', ACCOUNT, ORG);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(path.join(dir, `${sessionId}.json`), '{}', 'utf8');
-    return root;
+  function candidateFor(root: string, overrides: Partial<HostCandidate> = {}): HostCandidate {
+    return { root, exists: true, ...overrides };
   }
 
   it('names the store and account holding the card', () => {
-    const root = storeWithCard(CONVERSATION);
-    const store: HostCandidate = { root, name: 'work', accountUuid: ACCOUNT, exists: true };
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const candidate = candidateFor(store.root, {
+      name: 'work',
+      accountUuid: OLD_ACCOUNT.accountUuid,
+    });
 
+    const index = buildHostedIndex([candidate]);
     expect(
-      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
-    ).toEqual(store);
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toEqual(candidate);
   });
 
-  it('never looks up a terminal session, even one that shares an id with a card', () => {
-    const root = storeWithCard(CONVERSATION);
-    const store: HostCandidate = { root, exists: true };
+  it('never looks up a terminal session, even when a card carries its id as cliSessionId', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const index = buildHostedIndex([candidateFor(store.root)]);
 
-    expect(hostedStoreFor({ sessionId: CONVERSATION }, [store])).toBeUndefined();
+    expect(hostedStoreFor({ sessionId: CONVERSATION }, index)).toBeUndefined();
     expect(
-      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'terminal' }, [store]),
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'terminal' }, index),
     ).toBeUndefined();
   });
 
-  it('leaves a hosted entry unlabeled when no known store holds its card, instead of guessing', () => {
-    const root = storeWithCard('some-other-session');
-    const store: HostCandidate = { root, exists: true };
+  it('leaves a hosted entry unlabeled when no card claims its id, instead of guessing', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: CARD_ID, cliSessionId: 'unrelated-conversation' }),
+    );
+    const index = buildHostedIndex([candidateFor(store.root)]);
 
     expect(
-      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
     ).toBeUndefined();
   });
 
   it('does not check inside a store that no longer exists', () => {
-    const root = storeWithCard(CONVERSATION);
-    const store: HostCandidate = { root, exists: false };
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: CONVERSATION }));
+    const index = buildHostedIndex([candidateFor(store.root, { exists: false })]);
 
     expect(
-      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, [store]),
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
     ).toBeUndefined();
   });
 
   it('assigns each session to its own store when two are standing', () => {
-    const rootA = storeWithCard('session-a');
-    const rootB = storeWithCard('session-b');
-    const storeA: HostCandidate = { root: rootA, name: 'a', exists: true };
-    const storeB: HostCandidate = { root: rootB, name: 'b', exists: true };
+    const storeA = makeStore();
+    writeSession(storeA, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: 'session-a' }));
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: 'session-b' }),
+    );
+    const candidateA = candidateFor(storeA.root, { name: 'a' });
+    const candidateB = candidateFor(storeB.root, { name: 'b' });
+    const index = buildHostedIndex([candidateA, candidateB]);
+
+    expect(hostedStoreFor({ sessionId: 'session-a', entrypoint: 'claude-desktop' }, index)).toEqual(
+      candidateA,
+    );
+    expect(hostedStoreFor({ sessionId: 'session-b', entrypoint: 'claude-desktop' }, index)).toEqual(
+      candidateB,
+    );
+  });
+
+  it('attributes an entry to the second of two stores when only that one holds its card', () => {
+    const storeA = makeStore();
+    writeSession(
+      storeA,
+      OLD_ACCOUNT,
+      session({ sessionId: CARD_ID, cliSessionId: 'unrelated-conversation' }),
+    );
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: CONVERSATION }),
+    );
+    const candidateA = candidateFor(storeA.root, { name: 'a' });
+    const candidateB = candidateFor(storeB.root, { name: 'b' });
+    const index = buildHostedIndex([candidateA, candidateB]);
 
     expect(
-      hostedStoreFor({ sessionId: 'session-a', entrypoint: 'claude-desktop' }, [storeA, storeB]),
-    ).toEqual(storeA);
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toEqual(candidateB);
+  });
+
+  it('leaves an entry unlabelled when no card anywhere claims its id', () => {
+    const storeA = makeStore();
+    writeSession(storeA, OLD_ACCOUNT, session({ sessionId: CARD_ID, cliSessionId: 'unrelated-a' }));
+    const storeB = makeStore();
+    writeSession(
+      storeB,
+      NEW_ACCOUNT,
+      session({ sessionId: OTHER_CARD_ID, cliSessionId: 'unrelated-b' }),
+    );
+    const index = buildHostedIndex([candidateFor(storeA.root), candidateFor(storeB.root)]);
+
     expect(
-      hostedStoreFor({ sessionId: 'session-b', entrypoint: 'claude-desktop' }, [storeA, storeB]),
-    ).toEqual(storeB);
+      hostedStoreFor({ sessionId: CONVERSATION, entrypoint: 'claude-desktop' }, index),
+    ).toBeUndefined();
   });
 });
 

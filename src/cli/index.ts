@@ -113,6 +113,7 @@ import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
 import { resumeConversation } from '../engine/resume.js';
 import {
+  buildHostedIndex,
   describeWriters,
   hostedStoreFor,
   liveSessions,
@@ -3236,11 +3237,15 @@ program
       accountUuid: known.accountUuid,
       exists: known.exists,
     }));
+    // Built once for every entry `live` is about to report, rather than once per
+    // entry — the card tree it reads does not get any smaller for asking one at
+    // a time. See `buildHostedIndex`.
+    const hostedIndex = buildHostedIndex(storeCandidates);
 
     if (opts.json) {
       print(
         sessions.map((s) => {
-          const hosted = hostedStoreFor(s, storeCandidates);
+          const hosted = hostedStoreFor(s, hostedIndex);
           return {
             pid: s.pid,
             cliSessionId: s.sessionId,
@@ -3267,7 +3272,7 @@ program
       return;
     }
     for (const s of sessions) {
-      const hosted = hostedStoreFor(s, storeCandidates);
+      const hosted = hostedStoreFor(s, hostedIndex);
       const detail = hosted ? hostedByLine(hosted, labels) : terminalSessionLine(s);
       console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(detail)}`);
     }
@@ -3724,8 +3729,9 @@ function reportDesktop(command: Command): void {
   // every known one, since that is the question `app status` is asked.
   const accountUuid = readConfig(store).lastKnownAccountUuid;
   const candidate: HostCandidate = { root: store.root, accountUuid, exists: true };
+  const hostedIndex = buildHostedIndex([candidate]);
   const hosted = liveSessions(sessionRegistryRoots(process.env)).filter(
-    (session) => hostedStoreFor(session, [candidate]) !== undefined,
+    (session) => hostedStoreFor(session, hostedIndex) !== undefined,
   );
 
   // Computed unconditionally so `--json` carries the same label `live --json`
