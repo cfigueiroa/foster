@@ -628,7 +628,10 @@ describe('one row per branch', () => {
  * writing everything.
  */
 describe('restartPlan', () => {
-  const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
+  // Under \Packages\Claude..., like the app's own MSIX package directory: proof
+  // enough on its own that a row is the app (isDesktopProcess now requires it).
+  const DESKTOP =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
   const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
 
   function table(root: string, entries: Partial<ProcessRow>[]): ProcessRow[] {
