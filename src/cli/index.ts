@@ -74,7 +74,8 @@ import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
-import { inUseConfigDir } from '../store/configDirs.js';
+import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
+import { isDirectory, safeReaddir } from '../util/fs.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -476,8 +477,13 @@ program
   .option('--config-dir <path...>', 'extra Claude config directories to include')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
-    const opts = this.opts<{ configDir?: string[]; json?: boolean }>();
-    const clients = listClients(process.env, opts.configDir ?? []);
+    const opts = this.optsWithGlobals<GlobalOptions & { configDir?: string[]; json?: boolean }>();
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    // Registered roots (`foster client register`) are always passed explicitly,
+    // never read by a default inside listClients — see clients.ts and
+    // identify.ts, which must keep asking for none of them.
+    const registeredDirs = registeredClientDirs(project(ledger.read()));
+    const clients = listClients(process.env, opts.configDir ?? [], registeredDirs);
 
     if (opts.json) {
       print(
@@ -492,6 +498,7 @@ program
           conversations: client.conversations,
           lastUsedAt: client.lastUsedAt ?? null,
           live: client.live,
+          linkTarget: client.linkTarget ?? null,
         })),
       );
       return;
@@ -505,6 +512,9 @@ program
 
     for (const client of clients) {
       const marker = client.inUse ? pc.green('*') : ' ';
+      const name = client.linkTarget
+        ? `${client.configDir} -> ${client.linkTarget}`
+        : client.configDir;
       const details = [
         client.isDefault ? 'default' : undefined,
         client.live > 0 ? `${client.live} live` : undefined,
@@ -512,7 +522,7 @@ program
         client.lastUsedAt !== undefined ? `used ${formatAge(client.lastUsedAt)}` : undefined,
       ].filter(Boolean);
       console.log(
-        `${marker} ${client.configDir}  ${clientIdentityLine(client)}  ${pc.dim(`(${details.join(', ')})`)}`,
+        `${marker} ${name}  ${clientIdentityLine(client)}  ${pc.dim(`(${details.join(', ')})`)}`,
       );
     }
 
@@ -522,9 +532,14 @@ program
         `\n${marked ? '* is the one this process runs under. ' : ''}Run another by setting CLAUDE_CONFIG_DIR to its directory.`,
       ),
     );
+    // Registered roots feed this listing, and `client open` launches into them —
+    // but purge, restore and live --prune/--stop still only ever see what
+    // configDirCandidates enumerates, so a registered root needs --config-dir to
+    // put it in their reach too.
     console.log(
       pc.dim(
-        'restore, purge and live already read all of them; --config-dir adds one from elsewhere.',
+        'Registered roots are listed and opened here; purge, restore and live still need\n' +
+          '--config-dir to reach them.',
       ),
     );
   });
@@ -2577,6 +2592,101 @@ client
     if (outcome.copied.length > 0) console.log(`  copied  ${outcome.copied.join(', ')}`);
     if (outcome.linked.length > 0) console.log(`  linked  ${outcome.linked.join(', ')}`);
     console.log(outcome.message);
+  });
+
+client
+  .command('register')
+  .summary('remember a directory (or a directory of directories) for `clients` and `open`')
+  .description(
+    'Add a config directory outside the ~/.claude* siblings foster enumerates on its own, so it\n' +
+      'shows up in `foster clients` and can be launched into.\n\n' +
+      'A single directory is registered as `client` and listed as itself. `--container` registers\n' +
+      'a directory that holds one client per immediate child instead — `~/.claude-contas`, one\n' +
+      'folder per account — and each child still has to look like a client on its own to be\n' +
+      'listed; a folder of notes sitting next to them is not offered just because it is there.\n\n' +
+      'This is listing and launch only. A registered root never reaches `purge`, `restore` or\n' +
+      '`live --prune/--stop` — those keep needing `--config-dir` to see it, on purpose.',
+  )
+  .argument('<path>', 'the directory to register')
+  .option('--container', 'the directory holds one client per immediate child, not a client itself')
+  .option('--yes', 'actually register; without it nothing is written')
+  .action(function (this: Command, target: string) {
+    const opts = this.opts<{ container?: boolean; yes?: boolean }>();
+    const ledgerOpt = this.optsWithGlobals<GlobalOptions>().ledger;
+    const ledger = ledgerOpt ? new Ledger(ledgerOpt) : new Ledger();
+    const root = path.resolve(target);
+    const as: 'client' | 'container' = opts.container ? 'container' : 'client';
+
+    const blockers: string[] = [];
+    if (!isDirectory(root)) {
+      blockers.push(`${target} is not a directory`);
+    } else if (as === 'client' && !looksLikeClient(root)) {
+      blockers.push(
+        `${target} does not look like a Claude Code client — pass --container if it holds several`,
+      );
+    }
+    for (const blocker of blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      if (as === 'container') {
+        const children = safeReaddir(root).filter((entry) =>
+          looksLikeClient(path.join(root, entry)),
+        ).length;
+        console.log(
+          `Dry run: ${target} would be registered as a container, listing ${children} client${children === 1 ? '' : 's'} today.`,
+        );
+      } else {
+        console.log(`Dry run: ${target} would be registered as a client.`);
+      }
+      console.log('Re-run with --yes to register it.');
+      return;
+    }
+
+    ledger.append({ kind: 'client_root_registered', root, as });
+    console.log(`Registered ${target} as a ${as}.`);
+    console.log(
+      pc.dim(
+        'It shows up in `foster clients` now; purge, restore and live still need --config-dir to reach it.',
+      ),
+    );
+  });
+
+client
+  .command('forget')
+  .summary('withdraw a registered client root')
+  .description(
+    'Stop offering a directory registered with `client register` for listing and launch.\n\n' +
+      'Nothing under the directory is touched — the account, its conversations and its\n' +
+      'credential are exactly as they were. This only removes the entry that made foster look\n' +
+      'there on its own.',
+  )
+  .argument('<path>', 'the registered directory to forget')
+  .option('--yes', 'actually forget; without it nothing is written')
+  .action(function (this: Command, target: string) {
+    const opts = this.opts<{ yes?: boolean }>();
+    const ledgerOpt = this.optsWithGlobals<GlobalOptions>().ledger;
+    const ledger = ledgerOpt ? new Ledger(ledgerOpt) : new Ledger();
+    const root = path.resolve(target);
+
+    const registered = project(ledger.read()).clientRoots;
+    const known = [...registered.keys()].find((candidate) => samePath(candidate, root));
+    if (!known) {
+      console.log(`${target} is not a registered client root.`);
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${target} would stop being listed and launched.`);
+      console.log('Re-run with --yes to forget it.');
+      return;
+    }
+
+    ledger.append({ kind: 'client_root_forgotten', root: known });
+    console.log(`Forgot ${target}. Nothing under it was touched.`);
   });
 
 program
