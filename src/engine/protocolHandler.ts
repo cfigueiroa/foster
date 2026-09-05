@@ -235,7 +235,13 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
       if (sameStore) {
         warnings.push(alreadyRoutedSameStoreWarning(parsed.userDataDir));
         plan.armed = current;
-        plan.previous = state.handlerArmed?.previous;
+        // The ledger is the normal source for what to restore to, but a reset
+        // or relocated FOSTER_HOME (or a key pointed at this store by
+        // something other than a tracked foster run) can leave it with no
+        // matching record. `restoreHandler` already falls back to rebuilding
+        // `"<exe>" "%1"` in that case; mirror it here so `runLogin` is never
+        // handed `undefined` and left to default to an empty string.
+        plan.previous = state.handlerArmed?.previous ?? `"${parsed.exe}" "%1"`;
       } else {
         blockers.push(alreadyRoutedBlocker(parsed.userDataDir));
       }
@@ -317,6 +323,15 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
   if (plan.exe === undefined || plan.armed === undefined) {
     throw new Error('the plan has nothing to arm the handler with');
   }
+  if (plan.previous === undefined) {
+    // Never fall back to an empty string here: that would write a blank
+    // value to the registry key on restore, wiping the claude:// handler for
+    // every profile instead of putting anything back. A plan reaching this
+    // point should already have a real value (from the live key or, in the
+    // same-store branch, rebuilt from the ledger/exe) — this is a refusal of
+    // last resort, not a path any caller is expected to hit.
+    throw new Error('the plan has nothing to restore to');
+  }
 
   const {
     io,
@@ -329,7 +344,7 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
     sleep = defaultSleep,
   } = opts;
 
-  const previous = plan.previous ?? '';
+  const previous = plan.previous;
   const armed = plan.armed;
 
   append({ kind: 'handler_armed', root: plan.root, previous, exe: plan.exe, armed });

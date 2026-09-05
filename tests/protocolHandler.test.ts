@@ -173,6 +173,26 @@ describe('planLogin', () => {
     expect(plan.previous).toBe(PLAIN_HANDLER);
   });
 
+  it('rebuilds previous from the exe when routed to this same store but the ledger has no record', () => {
+    // No `handler_armed` event — a reset/relocated FOSTER_HOME, or the key
+    // pointed at this store's directory by something other than a tracked
+    // foster run. `plan.previous` must still be a real value: runLogin would
+    // otherwise default it to an empty string and wipe the handler on restore.
+    const store = makeStore();
+    const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
+    const plan = planLogin(store, {
+      io: fakeIo(command),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.armed).toBe(command);
+    expect(plan.previous).toBe(`"${EXE}" "%1"`);
+  });
+
   it('refuses the installed app itself', () => {
     const store = makeStore();
     const plan = planLogin(store, {
