@@ -76,7 +76,7 @@ import {
   selectByTarget,
   whereCopiesAre,
 } from '../ledger/project.js';
-import type { LedgerEvent, LedgerEventInput, RepointedCard } from '../ledger/types.js';
+import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
@@ -2826,7 +2826,7 @@ profile
       kind: 'profile_registered',
       name: plan.name,
       root: plan.root,
-    } as unknown as LedgerEventInput);
+    });
     console.log(outcome.message);
   });
 
@@ -2870,7 +2870,7 @@ profile
       kind: 'profile_registered',
       name: plan.name,
       root: plan.root,
-    } as unknown as LedgerEventInput);
+    });
     console.log(outcome.message);
   });
 
@@ -2902,7 +2902,7 @@ profile
       return;
     }
 
-    ledger.append({ kind: 'profile_forgotten', name } as unknown as LedgerEventInput);
+    ledger.append({ kind: 'profile_forgotten', name });
     console.log(`"${name}" is forgotten. ${plan.root} is untouched.`);
   });
 

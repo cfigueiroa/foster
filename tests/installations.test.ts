@@ -2,12 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  applyProfile,
-  planForget,
-  planProfile,
-  type ProfileEvent,
-} from '../src/engine/installations.js';
+import { applyProfile, planForget, planProfile } from '../src/engine/installations.js';
+import type { LedgerEvent } from '../src/ledger/types.js';
 
 function scratch(): string {
   return mkdtempSync(path.join(tmpdir(), 'foster-installations-'));
@@ -24,7 +20,7 @@ function fakeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   };
 }
 
-function registered(name: string, root: string): ProfileEvent {
+function registered(name: string, root: string): LedgerEvent {
   return {
     v: 1,
     ts: 1_700_000_000_000,
@@ -35,7 +31,7 @@ function registered(name: string, root: string): ProfileEvent {
   };
 }
 
-function forgotten(name: string): ProfileEvent {
+function forgotten(name: string): LedgerEvent {
   return {
     v: 1,
     ts: 1_700_000_100_000,

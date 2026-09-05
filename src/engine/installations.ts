@@ -30,37 +30,6 @@ import type { LedgerEvent } from '../ledger/types.js';
  * discovered later as a profile that quietly stopped working.
  */
 
-/**
- * The two ledger event kinds this module needs.
- *
- * They belong in `ledger/types.ts` next to the rest of `LedgerEvent`, folded by
- * `ledger/project.ts` into `LedgerState.profiles` — that is D1's job, tracked
- * separately, and out of reach for this change (see the file list this work
- * package was scoped to). Declared locally so `planProfile`/`planForget` can be
- * written and tested now: once D1 lands, a caller can pass real `LedgerEvent`s
- * of these kinds straight through, because the shapes below are exactly what
- * the ledger already expects a written event to carry once the log stamps `v`,
- * `ts` and `toolVersion` onto it.
- */
-export interface ProfileRegisteredEvent {
-  v: 1;
-  ts: number;
-  toolVersion: string;
-  kind: 'profile_registered';
-  name: string;
-  root: string;
-}
-
-export interface ProfileForgottenEvent {
-  v: 1;
-  ts: number;
-  toolVersion: string;
-  kind: 'profile_forgotten';
-  name: string;
-}
-
-export type ProfileEvent = ProfileRegisteredEvent | ProfileForgottenEvent;
-
 /** Profile names double as `wt` tab titles and `pwsh -Command` arguments — see `rescue.ts`. */
 const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
@@ -95,7 +64,7 @@ function isUnderPackagedClaude(root: string): boolean {
  * `profile_forgotten` removes the name rather than leaving a tombstone,
  * because forgetting is meant to free the name for reuse.
  */
-function registeredProfiles(events: (LedgerEvent | ProfileEvent)[]): Map<string, string> {
+function registeredProfiles(events: LedgerEvent[]): Map<string, string> {
   const registered = new Map<string, string>();
   for (const event of events) {
     if (event.kind === 'profile_registered') registered.set(event.name, path.resolve(event.root));
@@ -106,7 +75,7 @@ function registeredProfiles(events: (LedgerEvent | ProfileEvent)[]): Map<string,
 
 export interface PlanProfileOptions {
   /** The ledger's own events, so a name or root already claimed is caught before anything is written. */
-  events: (LedgerEvent | ProfileEvent)[];
+  events: LedgerEvent[];
   env?: NodeJS.ProcessEnv;
   /**
    * True for `register`, which adopts a directory the app has already run in;
@@ -244,7 +213,7 @@ export interface ForgetPlan {
  * memory of the name — the directory it pointed at is never touched, and
  * nothing here or in `applyProfile` deletes it.
  */
-export function planForget(name: string, events: (LedgerEvent | ProfileEvent)[]): ForgetPlan {
+export function planForget(name: string, events: LedgerEvent[]): ForgetPlan {
   const root = registeredProfiles(events).get(name);
   const blockers: string[] = [];
   if (root === undefined) {
