@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { win32 } from 'node:path';
 
 /**
  * The process table, reduced to what foster needs: parent links, the image
@@ -55,7 +55,11 @@ export type ProcessLister = () => ProcessRow[];
  * always calls this with no argument.
  */
 export function systemExePath(relative: string, env: NodeJS.ProcessEnv = process.env): string {
-  return join(env.SystemRoot ?? 'C:\\Windows', 'System32', relative);
+  // The Windows flavour of join, whatever the host: this is a Windows path by
+  // definition, and the platform-native join on the Linux CI runner would spell
+  // it `C:\Windows/System32/…` — which every caller here only ever sees on
+  // Windows, where it never runs, but which the tests see everywhere.
+  return win32.join(env.SystemRoot ?? 'C:\\Windows', 'System32', relative);
 }
 
 /** `reg.exe`, by the rule above. Kept as its own name: `desktop.ts` and `protocolHandler.ts` import it. */

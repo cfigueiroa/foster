@@ -631,7 +631,13 @@ describe('storeExecutable (engine/stores.ts)', () => {
   const exeTwo =
     'C:\\home\\AppData\\Local\\Packages\\Claude_9.9.9.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
 
-  it('reports the executable of each running instance', () => {
+  // Windows only: storeExecutable resolves the root it is given through
+  // path.resolve, and on the POSIX CI runner a literal `C:\one` is a relative
+  // path — it comes back under the working directory, matches neither
+  // instance's --user-data-dir, and the lookup falls through to the first app
+  // process for both stores. The identity logic itself is covered above with
+  // roots that exist on any platform.
+  it.skipIf(process.platform !== 'win32')('reports the executable of each running instance', () => {
     const table = rows(
       {
         pid: 500,
