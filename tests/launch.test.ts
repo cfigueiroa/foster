@@ -238,7 +238,23 @@ describe('planLaunch: the command line', () => {
     const psCommand = plan.args![commandIndex + 1]!;
     expect(psCommand).toContain('Get-ChildItem Env:CLAUDE* | Remove-Item');
     expect(psCommand).toContain(`$env:CLAUDE_CONFIG_DIR='${dir}'`);
-    expect(psCommand).toContain('claude --resume abc-123');
+    expect(psCommand).toContain("claude '--resume' 'abc-123'");
+  });
+
+  it('single-quotes every claude argument unconditionally, so PowerShell syntax cannot run', () => {
+    // Quoting only when an argument held whitespace or an apostrophe let
+    // anything else — `$(...)`, backticks, `;` — through unquoted, and pwsh
+    // evaluates it the moment the tab opens. A single-quoted string is always
+    // literal, so every argument is quoted regardless of its own content.
+    const h = home();
+    signIn(path.join(h, '.claude-work'));
+
+    const plan = planLaunch('work', baseOpts({ home: h, claudeArgs: ['$(calc.exe)'] }));
+
+    expect(plan.blockers).toEqual([]);
+    const psCommand = plan.args![plan.args!.indexOf('-Command') + 1]!;
+    expect(psCommand).toContain("claude '$(calc.exe)'");
+    expect(psCommand).not.toContain('claude $(calc.exe)');
   });
 
   it('doubles an embedded single quote in the directory', () => {
@@ -258,6 +274,16 @@ describe('planLaunch: the command line', () => {
 
     const withNewline = planLaunch('evil\nname', baseOpts({ home: home() }));
     expect(withNewline.blockers[0]).toContain('quote or control character');
+  });
+
+  it('refuses a claude argument holding a control character too, for the same reason', () => {
+    const h = home();
+    mkdirSync(path.join(h, '.claude-work'), { recursive: true });
+
+    const plan = planLaunch('work', baseOpts({ home: h, claudeArgs: ['--flag', 'evil\nvalue'] }));
+
+    expect(plan.blockers).toHaveLength(1);
+    expect(plan.blockers[0]).toContain('quote or control character');
   });
 
   it('gives a hyphenated title, so `wt` does not split it on a space', () => {
@@ -327,5 +353,24 @@ describe('openTerminalTab', () => {
 
     expect(called).toBe(false);
     expect(outcome).toEqual({ outcome: 'failed', line: '(nothing to run)' });
+  });
+
+  it('prints the line instead of opening, off win32, without calling the opener', () => {
+    const h = home();
+    mkdirSync(path.join(h, '.claude-work'), { recursive: true });
+    const plan = planLaunch('work', baseOpts({ home: h }));
+
+    let called = false;
+    const outcome = openTerminalTab(
+      plan,
+      () => {
+        called = true;
+      },
+      'linux',
+    );
+
+    expect(called).toBe(false);
+    expect(outcome.outcome).toBe('not-windows');
+    expect(outcome.outcome === 'not-windows' && outcome.line.startsWith('wt ')).toBe(true);
   });
 });

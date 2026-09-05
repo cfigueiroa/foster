@@ -2971,20 +2971,6 @@ client
       return;
     }
 
-    if (process.platform !== 'win32') {
-      if (opts.json) {
-        return print({
-          ok: false,
-          reason: 'not-windows',
-          configDir: plan.configDir,
-          command: line,
-        });
-      }
-      console.log(pc.yellow('client open drives Windows Terminal; on this machine run:'));
-      console.log(line);
-      return;
-    }
-
     const outcome = openTerminalTab(plan);
     if (opts.json) {
       return print({
@@ -2992,11 +2978,14 @@ client
         outcome: outcome.outcome,
         configDir: plan.configDir,
         warnings: plan.warnings,
-        ...(outcome.outcome === 'failed' ? { command: outcome.line } : {}),
+        ...(outcome.outcome !== 'opened' ? { command: outcome.line } : {}),
       });
     }
     if (outcome.outcome === 'opened') {
       console.log(`Opened a tab for ${plan.configDir}.`);
+    } else if (outcome.outcome === 'not-windows') {
+      console.log(pc.yellow('client open drives Windows Terminal; on this machine run:'));
+      console.log(outcome.line);
     } else {
       console.log(pc.yellow('Could not open a terminal tab. Run this instead:'));
       console.log(outcome.line);
