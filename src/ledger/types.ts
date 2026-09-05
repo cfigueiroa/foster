@@ -17,7 +17,11 @@ export type LedgerEvent =
   | CardRepointedEvent
   | CardRetitledEvent
   | ConversationPurgedEvent
-  | OperationFailedEvent;
+  | OperationFailedEvent
+  | ProfileRegisteredEvent
+  | ProfileForgottenEvent
+  | ClientRootRegisteredEvent
+  | ClientRootForgottenEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -331,6 +335,67 @@ export interface OperationFailedEvent extends BaseEvent {
 }
 
 /**
+ * A name given to a Desktop installation other than the one on the machine's
+ * default path — a profile, in the sense `--store <name>` resolves.
+ *
+ * What it deliberately does not carry is any part of the account inside that
+ * root: no `accountUuid`, no token, no URL. The name and the path are the only
+ * facts that outlive the installation itself — the account a profile holds
+ * changes underneath it, exactly the way the default installation's does, and
+ * recording one here would make this event stale the moment someone signs out.
+ *
+ * Registering a name already in use is not a refusal: it is the rename. The
+ * fold keeps only the latest root for a name, so pointing `work` at a new
+ * directory is indistinguishable from renaming that directory, which is
+ * deliberate — a profile is the name, not the path underneath it.
+ */
+export interface ProfileRegisteredEvent extends BaseEvent {
+  kind: 'profile_registered';
+  name: string;
+  root: string;
+}
+
+/**
+ * A profile name withdrawn.
+ *
+ * Removes the name from the folded state so `--store <name>` stops resolving
+ * it; the registration itself stays in the log, because append-only means
+ * exactly that. Nothing on disk is touched — the installation the name pointed
+ * at is neither opened nor deleted, only forgotten as a name for it.
+ */
+export interface ProfileForgottenEvent extends BaseEvent {
+  kind: 'profile_forgotten';
+  name: string;
+}
+
+/**
+ * A filesystem root registered as a place `foster` looks for CLI client config
+ * directories, beyond the `~/.claude*` siblings it enumerates on its own.
+ *
+ * What it deliberately does not carry is any part of what lives under that
+ * root: no `accountUuid`, no token, no URL — the same restraint as a profile
+ * registration, and for the same reason: the root outlives whatever account
+ * currently sits inside it. `as` distinguishes a container that holds several
+ * client directories from a single client directory registered directly,
+ * because the two are walked differently and the event has to say which one
+ * this root is without re-reading the filesystem every time.
+ */
+export interface ClientRootRegisteredEvent extends BaseEvent {
+  kind: 'client_root_registered';
+  root: string;
+  as: 'client' | 'container';
+}
+
+/**
+ * A registered client root withdrawn — see `ProfileForgottenEvent`. The root
+ * stops being offered for listing and launch; nothing under it is touched.
+ */
+export interface ClientRootForgottenEvent extends BaseEvent {
+  kind: 'client_root_forgotten';
+  root: string;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -351,7 +416,11 @@ export type LedgerEventInput =
   | Draft<CardRepointedEvent>
   | Draft<CardRetitledEvent>
   | Draft<ConversationPurgedEvent>
-  | Draft<OperationFailedEvent>;
+  | Draft<OperationFailedEvent>
+  | Draft<ProfileRegisteredEvent>
+  | Draft<ProfileForgottenEvent>
+  | Draft<ClientRootRegisteredEvent>
+  | Draft<ClientRootForgottenEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
