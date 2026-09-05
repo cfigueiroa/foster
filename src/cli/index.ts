@@ -57,6 +57,13 @@ import {
 } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import {
+  inspectHandler,
+  planLogin,
+  registryHandlerIo,
+  restoreHandler,
+  runLogin,
+} from '../engine/protocolHandler.js';
+import {
   applySwitch,
   identify,
   planSwitch,
@@ -436,6 +443,21 @@ program
       console.log(pc.dim('  none known — foster stores lists them once one exists'));
     } else {
       for (const profile of profiles) console.log(`  ${storeLine(profile, labels, store)}`);
+    }
+
+    // Read-only: nothing here writes. A routed handler is the fingerprint of an
+    // `app login` that has not yet been put back — whether it is still running
+    // in another terminal or was interrupted, doctor cannot tell, so it points
+    // at the one command that resolves either case.
+    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    if (handler.current?.userDataDir !== undefined) {
+      const when = handler.armed ? formatDate(handler.armed.at) : 'unknown';
+      console.log(
+        pc.yellow(
+          `  claude:// links are routed to ${handler.current.userDataDir} (foster app login, since ${when}).\n` +
+            '  If no sign-in is in flight: foster app login --restore --yes',
+        ),
+      );
     }
 
     console.log(pc.bold('State'));
@@ -3770,6 +3792,128 @@ app
     const { store } = context(this);
     deliverUrl(store, url);
     console.log(`Handed to the installation at ${store.root}.`);
+  });
+
+app
+  .command('login')
+  .summary('sign a second profile in through the ordinary browser flow')
+  .description(
+    "Windows hands every claude:// link to the installed app, so a second profile's sign-in\n" +
+      'never completes on its own. This routes the next callback to the profile named by\n' +
+      '--store — the one registry key that decides, changed for the duration of one sign-in\n' +
+      'and put back verbatim — so the browser flow works unchanged. Nothing captures URLs,\n' +
+      'and foster never sees the code.',
+  )
+  .option('--yes', 'arm the handler and wait for the sign-in; without it, a dry run')
+  .option('--timeout <seconds>', 'how long to wait for the sign-in, in seconds', '300')
+  .option('--print', 'show what would happen without arming anything')
+  .option('--restore', 'put a routed handler back — for a login interrupted mid-run')
+  .action(async function (this: Command) {
+    const opts = this.opts<{
+      yes?: boolean;
+      timeout: string;
+      print?: boolean;
+      restore?: boolean;
+    }>();
+    const { store, ledger } = context(this);
+    const events = ledger.read();
+
+    if (opts.restore) {
+      const state = project(events);
+      if (!opts.yes) {
+        const handler = inspectHandler(state, registryHandlerIo);
+        if (!handler.current || handler.current.userDataDir === undefined) {
+          console.log('The handler is not routed anywhere; nothing to restore.');
+          return;
+        }
+        const previous = handler.armed ? handler.armed.previous : `"${handler.current.exe}" "%1"`;
+        console.log(`Dry run: the handler would be put back to "${previous}".`);
+        console.log('Re-run with --yes to do it.');
+        return;
+      }
+      const result = restoreHandler(state, registryHandlerIo, (e) => ledger.append(e));
+      console.log(result.message);
+      if (!result.ok) process.exitCode = 1;
+      return;
+    }
+
+    const timeoutSeconds = Number(opts.timeout);
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+      throw new Error(`--timeout must be a positive integer, not "${opts.timeout}".`);
+    }
+
+    const plan = planLogin(store, { io: registryHandlerIo, events });
+    const label = plan.name ?? plan.root;
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+    for (const warning of plan.warnings) console.log(pc.yellow(`  ! ${warning}`));
+
+    if (!opts.yes || opts.print) {
+      console.log(`Dry run: claude:// links would be routed to ${label} for one sign-in.`);
+      console.log(`  arm      ${plan.armed}`);
+      console.log(`  restore  ${plan.previous}`);
+      console.log('Re-run with --yes to do it.');
+      return;
+    }
+
+    if (!plan.running) {
+      const started = await startDesktop(store);
+      if (!started) {
+        // The same refusal `app start` prints when the app does not take the
+        // store within its own timeout — no point inventing a second wording
+        // for the same fact.
+        console.log('Started it; it has not taken the store yet.');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Started ${label}.`);
+    }
+
+    // Printed before arming, so the instructions are on screen while the wait
+    // that follows keeps the terminal otherwise silent.
+    console.log(`claude:// links now go to ${label} for the next ${timeoutSeconds}s.`);
+    console.log(
+      'In that window, click "Continue with Google" or "Continue with browser" and finish in the browser as usual.',
+    );
+    console.log(
+      'Leave every Claude window alone until this says done. Ctrl+C puts the handler back.',
+    );
+
+    const controller = new AbortController();
+    const onSigint = () => controller.abort();
+    process.once('SIGINT', onSigint);
+    let result;
+    try {
+      result = await runLogin(plan, {
+        io: registryHandlerIo,
+        append: (e) => ledger.append(e),
+        readState: () => {
+          const config = readConfig(store);
+          return {
+            hasTokenCache: config.hasTokenCache === true,
+            accountUuid: config.lastKnownAccountUuid,
+          };
+        },
+        timeoutMs: timeoutSeconds * 1000,
+        signal: controller.signal,
+      });
+    } finally {
+      process.removeListener('SIGINT', onSigint);
+    }
+
+    console.log(result.message);
+    if (result.outcome === 'signed-in') {
+      console.log('Run foster stores to see both instances.');
+    } else {
+      process.exitCode = 1;
+    }
+    if (!result.restored) {
+      console.log(pc.yellow('foster app login --restore --yes'));
+    }
   });
 
 app

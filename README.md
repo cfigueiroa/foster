@@ -502,7 +502,28 @@ symptom. The `claude://` protocol belongs to the installed package, so when the 
 the OAuth callback, Windows routes it to the package and starts an instance on the **default**
 `userData`. The profile never receives its own callback and sits on the sign-in screen forever.
 
-But look at what that registration actually is:
+The recommended path is `foster app login`:
+
+```bash
+foster --store work app login --yes
+```
+
+It changes the same one per-user key the rest of this section is about, points it at the named
+profile for the length of one sign-in — 300 seconds by default, `--timeout` to change it — and
+records the exact previous value in the ledger _before_ writing, so the key can always be put
+back even if this process dies mid-wait. Success is detected without reading the callback at
+all: the profile's own token cache appears, or its account changes, either of which ends the
+wait early and puts the key back on the spot. There is one hazard worth knowing before you run
+it — if any Claude window restarts while the login is armed, the app rewrites the key itself and
+the sign-in lands in the default app instead of the profile that asked for it. `foster app login`
+watches for exactly that and says so rather than overwriting what the app just wrote; a login
+left routed by a crash, or by Ctrl+C reaching something other than this process, is what
+`foster app login --restore --yes` and the warning in `foster doctor` are for. This is verified
+against the registry layout on one machine; the sign-in itself still needs measuring.
+
+For the cases `app login` cannot change the routing for — an installed app that already owns the
+handler, or a machine where the registry key cannot be touched — the manual delivery below is
+the fallback. But look at what that registration actually is:
 
 ```
 HKCU\Software\Classes\claude\shell\open\command
@@ -818,6 +839,8 @@ foster consolidate # one row per piece of work, on the branch that carried on
 foster status    # what is currently fostered
 foster pin       # pin sessions in the sidebar, or see what is pinned
 foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
+                 #   an interrupted run)
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
 foster live      # conversations a claude process is holding open right now (--stop ends one,
@@ -1217,6 +1240,13 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   to apply, the ledger entry only after a finished write. Starting an instance or handing it a
   link is not a write at all — `app start`, `app restart` and `app link` never touch the ledger,
   because launching a profile that already exists changes nothing foster remembers about it.
+- **One system setting is ever touched, and only for the length of one sign-in.**
+  `HKCU\Software\Classes\claude\shell\open\command` is the only registry key, or setting of any
+  kind outside `~/.foster`, that `foster` ever writes — `app login` points it at a second
+  profile, per user, and the value it is about to overwrite is recorded in the ledger before the
+  write happens, then put back verbatim once the sign-in lands or the wait gives up. `app login --restore`
+  and the warning `foster doctor` prints when the key is still routed cover the run that does not
+  get to put it back itself.
 - **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
   already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
   It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,

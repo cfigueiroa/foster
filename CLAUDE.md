@@ -194,6 +194,16 @@ reach for on "bring everything here": `foster_sessions` leaves archived sessions
 cannot reach deleted conversations at all. **`consolidate`, `purge` and `live` are not among
 them** — `purge` is excluded on purpose and must not be reached through the shell either.
 
+## Signing a second profile in
+
+`foster --store <profile> app login --yes` arms the one registry key that decides where a
+`claude://` callback lands, points it at `<profile>` for one sign-in, and puts the previous
+value back once the sign-in is detected or the wait times out. It needs `--yes` — without it,
+it only prints what it would do. **An agent must never run this**: it writes a machine-wide
+registry key and drives a sign-in only the human at the keyboard can finish in the browser.
+`foster app login --restore --yes` is the way out of a login left routed by a crash or a
+stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
+
 ## Before pushing
 
 ```bash
