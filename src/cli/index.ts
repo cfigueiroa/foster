@@ -60,6 +60,7 @@ import {
 } from '../engine/switch.js';
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
+import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
 import { Ledger } from '../ledger/log.js';
 import {
@@ -70,7 +71,7 @@ import {
   selectByTarget,
   whereCopiesAre,
 } from '../ledger/project.js';
-import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
+import type { LedgerEvent, LedgerEventInput, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
@@ -183,6 +184,15 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
+}
+
+/**
+ * The ledger alone, for commands that have no store to resolve — a profile is
+ * bookkeeping about a *root*, not about the installation `--store` would pick.
+ */
+function ledgerFrom(command: Command): Ledger {
+  const opts = command.optsWithGlobals<GlobalOptions>();
+  return opts.ledger ? new Ledger(opts.ledger) : new Ledger();
 }
 
 function print(value: unknown): void {
@@ -403,52 +413,55 @@ program
   .command('stores')
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
-  .action(function (this: Command) {
-    const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
-    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
-    // Everything the menu offers, printed instead of picked: without this, using
-    // foster from a script meant knowing a profile's path by heart.
-    const stores = knownStores(ledger.read());
-    // Resolved leniently, because this is the command you reach for when nothing
-    // resolves: refusing to list the installations because it could not pick one
-    // of them would be exactly backwards.
-    const current = resolveQuietly(opts.store, () => ledger.read());
-    const labels = project(ledger.read()).labels;
+  .action(describeStores);
 
-    if (opts.json) {
-      print(
-        stores.map((known) => ({
-          root: known.root,
-          knownBy: known.hint,
-          running: known.running,
-          account: known.accountUuid ?? null,
-          label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
-          isCurrent: current ? samePath(known.root, current.root) : false,
-        })),
-      );
-      return;
-    }
+/** Shared with `profile list`, which is this command under another name. */
+function describeStores(this: Command): void {
+  const opts = this.optsWithGlobals<GlobalOptions & { json?: boolean }>();
+  const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+  // Everything the menu offers, printed instead of picked: without this, using
+  // foster from a script meant knowing a profile's path by heart.
+  const stores = knownStores(ledger.read());
+  // Resolved leniently, because this is the command you reach for when nothing
+  // resolves: refusing to list the installations because it could not pick one
+  // of them would be exactly backwards.
+  const current = resolveQuietly(opts.store, () => ledger.read());
+  const labels = project(ledger.read()).labels;
 
-    if (stores.length === 0) {
-      console.log('No Claude Desktop installation found.');
-      console.log(pc.dim('Pass --store <path> to name one, or start the app once.'));
-      return;
-    }
+  if (opts.json) {
+    print(
+      stores.map((known) => ({
+        root: known.root,
+        knownBy: known.hint,
+        running: known.running,
+        account: known.accountUuid ?? null,
+        label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
+        isCurrent: current ? samePath(known.root, current.root) : false,
+      })),
+    );
+    return;
+  }
 
-    for (const known of stores) {
-      const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
-      const state = known.running ? `${known.hint}, running` : known.hint;
-      // Which account an installation holds is the question a second profile
-      // exists to answer, and a store with none is one that fostering into will
-      // refuse — better said here than discovered there.
-      const who = known.accountUuid
-        ? (labels.get(known.accountUuid) ?? shortId(known.accountUuid))
-        : 'not signed in';
-      console.log(`${marker} ${known.root} ${pc.dim(`(${state}) ${who}`)}`);
-    }
-    const marked = current && stores.some((known) => samePath(known.root, current.root));
-    console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
-  });
+  if (stores.length === 0) {
+    console.log('No Claude Desktop installation found.');
+    console.log(pc.dim('Pass --store <path> to name one, or start the app once.'));
+    return;
+  }
+
+  for (const known of stores) {
+    const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
+    const state = known.running ? `${known.hint}, running` : known.hint;
+    // Which account an installation holds is the question a second profile
+    // exists to answer, and a store with none is one that fostering into will
+    // refuse — better said here than discovered there.
+    const who = known.accountUuid
+      ? (labels.get(known.accountUuid) ?? shortId(known.accountUuid))
+      : 'not signed in';
+    console.log(`${marker} ${known.root} ${pc.dim(`(${state}) ${who}`)}`);
+  }
+  const marked = current && stores.some((known) => samePath(known.root, current.root));
+  console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
+}
 
 /** The store a bare command would use, or nothing when there is not one. */
 function resolveQuietly(
@@ -2578,6 +2591,139 @@ client
     if (outcome.linked.length > 0) console.log(`  linked  ${outcome.linked.join(', ')}`);
     console.log(outcome.message);
   });
+
+const profile = program
+  .command('profile')
+  .description('name a Claude Desktop profile — a second userData root — for --store');
+
+profile
+  .command('new')
+  .summary('reserve an empty userData directory and give it a name')
+  .description(
+    'Create a new userData directory for a second Claude Desktop profile, and register the\n' +
+      'name it answers to for --store.\n\n' +
+      'foster writes nothing inside it beyond the directory itself: Claude Desktop populates a\n' +
+      'profile — config.json, Local State, everything else — the first time it runs with\n' +
+      '--user-data-dir pointed there (see "What about switching accounts?" in the README).\n' +
+      'This does not sign anything in, and a profile is never copied, synced, restored from\n' +
+      'backup, or moved to another machine — its credential cache is sealed to the one that\n' +
+      'made it, so doing any of that only signs it out in silence.',
+  )
+  .argument('<path>', 'the userData directory to create')
+  .requiredOption('--name <name>', 'what to call it, for --store')
+  .option('--yes', 'actually create it; without it nothing is written')
+  .action(function (this: Command, targetPath: string) {
+    const opts = this.opts<{ name: string; yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planProfile(targetPath, opts.name, { events: ledger.read() });
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${plan.root} would be created and registered as "${plan.name}".`);
+      console.log('Re-run with --yes to create it.');
+      return;
+    }
+
+    const outcome = applyProfile(plan);
+    if (!outcome.ok) {
+      process.exitCode = 1;
+      console.log(pc.red(outcome.message));
+      return;
+    }
+    ledger.append({
+      kind: 'profile_registered',
+      name: plan.name,
+      root: plan.root,
+    } as unknown as LedgerEventInput);
+    console.log(outcome.message);
+  });
+
+profile
+  .command('register')
+  .summary('adopt a userData directory the app already ran in')
+  .description(
+    'Give a name to a Claude Desktop profile that already exists — a directory that has\n' +
+      'gone through its own first launch, rather than one foster is about to create.\n\n' +
+      'Refuses a directory with none of the marks of a real profile (config.json, Local\n' +
+      "State, claude-code-sessions): that is somebody's unrelated folder, and registering it\n" +
+      'would let every later command that trusts a registered name act on it.',
+  )
+  .argument('<path>', 'the userData directory to adopt')
+  .requiredOption('--name <name>', 'what to call it, for --store')
+  .option('--yes', 'actually register it; without it nothing is written')
+  .action(function (this: Command, targetPath: string) {
+    const opts = this.opts<{ name: string; yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planProfile(targetPath, opts.name, { events: ledger.read(), adopt: true });
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(`Dry run: ${plan.root} would be registered as "${plan.name}".`);
+      console.log('Re-run with --yes to register it.');
+      return;
+    }
+
+    const outcome = applyProfile(plan);
+    if (!outcome.ok) {
+      process.exitCode = 1;
+      console.log(pc.red(outcome.message));
+      return;
+    }
+    ledger.append({
+      kind: 'profile_registered',
+      name: plan.name,
+      root: plan.root,
+    } as unknown as LedgerEventInput);
+    console.log(outcome.message);
+  });
+
+profile
+  .command('forget')
+  .summary('stop naming a profile — never deletes anything')
+  .description(
+    'Remove a profile name from the ledger. The directory it pointed at is never touched: ' +
+      'forgetting only means --store can no longer find it by that name.',
+  )
+  .argument('<name>', 'the profile name to forget')
+  .option('--yes', 'actually forget it; without it nothing is written')
+  .action(function (this: Command, name: string) {
+    const opts = this.opts<{ yes?: boolean }>();
+    const ledger = ledgerFrom(this);
+    const plan = planForget(name, ledger.read());
+
+    for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+    if (plan.blockers.length > 0) {
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.yes) {
+      console.log(
+        `Dry run: "${name}" (${plan.root}) would be forgotten. Nothing on disk is touched.`,
+      );
+      console.log('Re-run with --yes to forget it.');
+      return;
+    }
+
+    ledger.append({ kind: 'profile_forgotten', name } as unknown as LedgerEventInput);
+    console.log(`"${name}" is forgotten. ${plan.root} is untouched.`);
+  });
+
+profile
+  .command('list')
+  .description('alias of `stores`: installations foster knows about, and what to pass to --store')
+  .option('--json', 'machine-readable output')
+  .action(describeStores);
 
 program
   .command('labels')
