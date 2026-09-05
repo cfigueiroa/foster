@@ -1,7 +1,9 @@
 import { cpSync, mkdirSync, symlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { hasCredential } from '../store/cliCredential.js';
 import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
+import { clientNameOf } from './launch.js';
 
 /**
  * Making a config directory that is a working client rather than an empty one.
@@ -142,6 +144,6 @@ export function applySeed(plan: SeedPlan): SeedOutcome {
     linked,
     message:
       `${plan.target} is ready, and signed out. ` +
-      `Open it with \`foster client open ${path.basename(plan.target)}\` and sign in there.`,
+      `Open it with \`foster client open ${clientNameOf(plan.target, homedir())}\` and sign in there.`,
   };
 }

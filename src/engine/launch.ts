@@ -122,6 +122,20 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
       warnings: [],
     };
   }
+  // Every claude argument ends up single-quoted in the `-Command` string
+  // (`quoteArg`), which closes off subexpressions and backticks, but a raw
+  // control character is refused outright anyway — the same rule and the same
+  // message the config directory gets below, for consistency.
+  const badArg = claudeArgs.find(hasQuoteOrControlChar);
+  if (badArg !== undefined) {
+    return {
+      blockers: [
+        `"${badArg}" contains a quote or control character and cannot be embedded in a ` +
+          'terminal command.',
+      ],
+      warnings: [],
+    };
+  }
 
   const resolution = resolveClientDir(client, home, opts.clients);
   if (resolution.blockers.length > 0) {
@@ -279,8 +293,14 @@ function knownClientNames(home: string, registered: string[]): string[] {
   return [...names].sort();
 }
 
-/** The slug a directory would be opened by: `default` for `~/.claude`, the rest by convention. */
-function clientNameOf(dir: string, home: string): string {
+/**
+ * The slug a directory would be opened by: `default` for `~/.claude`, the
+ * rest by convention. Exported so `seed.ts`'s success message can suggest a
+ * name that actually resolves back through `planLaunch`, instead of
+ * re-deriving the same `.claude-` stripping rule a second time and risking
+ * the two drifting apart.
+ */
+export function clientNameOf(dir: string, home: string): string {
   if (samePath(dir, path.join(home, '.claude'))) return 'default';
   const base = path.basename(dir);
   return base.startsWith('.claude-') ? base.slice('.claude-'.length) : base;
@@ -360,8 +380,17 @@ function quoteSingle(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/**
+ * Every `claude` argument is single-quoted unconditionally, not just the ones
+ * that look like they need it. A single-quoted PowerShell string is always
+ * literal — no subexpression evaluation, no interpolation, no backtick
+ * escapes — so this is the one form that is safe for a value this module did
+ * not choose. Quoting only on whitespace or an apostrophe (the earlier rule)
+ * let anything else — `$(...)`, backticks, `;` — pass through unquoted and
+ * run in the tab's shell before `claude` itself ever started.
+ */
 function quoteArg(value: string): string {
-  return /\s|'/.test(value) ? quoteSingle(value) : value;
+  return quoteSingle(value);
 }
 
 /**
@@ -397,7 +426,10 @@ export function spawnWt(plan: LaunchPlan): void {
   if (result.status !== 0) throw new Error(`wt exited with ${result.status}`);
 }
 
-export type LaunchOutcome = { outcome: 'opened' } | { outcome: 'failed'; line: string };
+export type LaunchOutcome =
+  | { outcome: 'opened' }
+  | { outcome: 'not-windows'; line: string }
+  | { outcome: 'failed'; line: string };
 
 /**
  * Open the tab, or say what to run instead.
@@ -406,10 +438,23 @@ export type LaunchOutcome = { outcome: 'opened' } | { outcome: 'failed'; line: s
  * past here — it comes back as `failed` carrying the exact line `--print`
  * would have shown, so the caller has something to hand the user rather than
  * a stack trace.
+ *
+ * `wt` only exists on Windows, so a platform other than `win32` is checked
+ * before the opener is ever called and comes back as its own `not-windows`
+ * outcome carrying the same line — testable here, with an injected
+ * `platform`, rather than living only inside the CLI action where nothing in
+ * `tests/launch.test.ts` could reach it.
  */
-export function openTerminalTab(plan: LaunchPlan, open: TabOpener = spawnWt): LaunchOutcome {
+export function openTerminalTab(
+  plan: LaunchPlan,
+  open: TabOpener = spawnWt,
+  platform: NodeJS.Platform = process.platform,
+): LaunchOutcome {
   if (plan.blockers.length > 0 || !plan.command || !plan.args) {
     return { outcome: 'failed', line: formatLaunchCommand(plan) };
+  }
+  if (platform !== 'win32') {
+    return { outcome: 'not-windows', line: formatLaunchCommand(plan) };
   }
   try {
     open(plan);

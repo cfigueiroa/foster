@@ -9,6 +9,7 @@ import {
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { planLaunch } from '../src/engine/launch.js';
 import { applySeed, planSeed } from '../src/engine/seed.js';
 
 function scratch(): string {
@@ -132,6 +133,24 @@ describe('applySeed', () => {
 
     expect(outcome.message).toContain('foster client open');
     expect(outcome.message.trim().endsWith('and sign in there.')).toBe(true);
+  });
+
+  it('suggests a name that actually resolves back through `planLaunch`', () => {
+    // The documented worked example (README) is `foster client new
+    // ~\.claude-work`, whose basename is the literal `.claude-work` — not a
+    // name `planLaunch` recognizes at all (it would look for the
+    // double-prefixed `~/.claude-.claude-work`). The message must suggest the
+    // stripped slug (`work`), the one name that round-trips.
+    const h = scratch();
+    const target = path.join(h, '.claude-work');
+    const outcome = applySeed(planSeed(target, source()));
+
+    expect(outcome.message).toContain('foster client open work`');
+    expect(outcome.message).not.toContain('.claude-work`');
+
+    const plan = planLaunch('work', { clients: [], home: h });
+    expect(plan.blockers).toEqual([]);
+    expect(plan.configDir).toBe(target);
   });
 
   it('writes nothing for a blocked plan', () => {
