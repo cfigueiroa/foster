@@ -26,7 +26,8 @@ import type { Sidebar } from './sidebar.js';
  *
  * What the other branches wear depends on whether they stopped. A branch that
  * holds records of its own and went on after the tip did is not stale — it is
- * where the work was left, and on this store that described 111 of 209 forks.
+ * where the work was left, and on this store it was where two of the forks the
+ * sweep could see had been left, 50 and 77 hours after the tip stopped.
  * It keeps its place in the sidebar and says which branch it is. Only a branch
  * that really did stop earlier is marked stale and filed in the archived view:
  * still there, still opens, no longer looking like the row to continue in.

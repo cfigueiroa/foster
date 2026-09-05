@@ -777,10 +777,10 @@ describe('sweep_everything', () => {
  * A fork whose halves both hold work of their own, and the half that is not the
  * tip is the one that answered last.
  *
- * Measured on a real store: of 209 forked conversations, 111 looked like this.
- * Ranking by weight alone called the fresher half "stale, stopped ..." and
- * filed it in the archived view, sending the reader to the half they had left
- * hours earlier. The tip is still the half holding most work of its own — that
+ * Measured on a real store: two of the forks the sweep could see looked like
+ * this, the fresher half 50 and 77 hours ahead of the tip. Ranking by weight
+ * alone called that half "stale, stopped ..." and filed it in the archived
+ * view, sending the reader to the half they had left days earlier. The tip is still the half holding most work of its own — that
  * measure is not the bug; calling the other half stopped was.
  */
 function wentOn(): void {

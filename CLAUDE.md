@@ -102,8 +102,8 @@ other branch stopped. Three outcomes, decided per branch:
 - a branch whose own last **answer** is later than the tip's, and that holds records of its
   own, **went on after the tip**: it is retitled `(other branch, went on DD/MM HH:MM) …` — or
   whatever `--branch-prefix` says — and **stays in the sidebar**, unarchived. Measured on a
-  real store, 111 of 209 forks looked like this, and the old rule filed exactly the half the
-  user had been working in;
+  real store, two of the 40 forks the sweep could see looked like this — the fresher half 50
+  and 77 hours ahead — and the old rule filed exactly the half the user had been working in;
 - only a branch that really did stop earlier is retitled `(stale, stopped DD/MM HH:MM) …` —
   `--stale-prefix` — and filed in the archived view, native rows included.
 
