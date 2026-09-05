@@ -91,7 +91,7 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
 
       case 'fostered': {
-        const key = fosteringKey(event.originSessionId, event.target);
+        const key = fosteringKey(event.originSessionId, event.target, event.cliSessionId);
         active.set(key, {
           originSessionId: event.originSessionId,
           origin: event.origin,
@@ -109,7 +109,15 @@ export function project(events: LedgerEvent[]): LedgerState {
       }
 
       case 'returned':
-        active.delete(fosteringKey(event.originSessionId, event.target));
+        // Resolved through the copy rather than recomputed. The key carries the
+        // conversation now, and a `returned` written before it did — or after
+        // the fostering followed a branch — cannot rebuild the key it was filed
+        // under. The copy id can: it is what the fostering was indexed by when
+        // it was written, whatever the key looked like.
+        active.delete(
+          fosteringOfCopy.get(event.copySessionId) ??
+            fosteringKey(event.originSessionId, event.target),
+        );
         fosteringOfCopy.delete(event.copySessionId);
         break;
 
@@ -118,7 +126,13 @@ export function project(events: LedgerEvent[]): LedgerState {
         // holds has moved. Keeping the fostering and moving its pointer is the
         // whole point — dropping it is what used to make the next sweep write a
         // second card for work that already had a row.
-        const key = fosteringKey(event.originSessionId, event.target);
+        // Resolved through the copy, and filed back under the same key. The key
+        // names the conversation that was copied *from the origin*, which does
+        // not move when the app branches the copy; `cliSessionId` is what tracks
+        // where the copy went, and that is the field to update.
+        const key =
+          fosteringOfCopy.get(event.copySessionId) ??
+          fosteringKey(event.originSessionId, event.target, event.from);
         const fostering = active.get(key);
         if (fostering) {
           active.set(key, { ...fostering, cliSessionId: event.to, followedBranch: true });
@@ -142,6 +156,7 @@ export function project(events: LedgerEvent[]): LedgerState {
         const key = fosteringOfCopy.get(event.sessionId);
         const fostering = key === undefined ? undefined : active.get(key);
         if (key !== undefined && fostering) {
+          // Same as above: the key stays, only where the copy points moves.
           active.set(key, { ...fostering, cliSessionId: event.to });
         }
 
@@ -347,6 +362,9 @@ export function isFostered(
   state: LedgerState,
   originSessionId: string,
   target: { accountUuid: string; organizationUuid: string },
+  cliSessionId?: string,
 ): boolean {
-  return state.active.has(fosteringKey(originSessionId, target));
+  if (state.active.has(fosteringKey(originSessionId, target, cliSessionId))) return true;
+  // The legacy key, for fosterings written before the conversation was recorded.
+  return cliSessionId !== undefined && state.active.has(fosteringKey(originSessionId, target));
 }

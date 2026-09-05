@@ -151,7 +151,7 @@ import {
   type BranchesPhase,
   type SweepReport,
 } from '../ops/sweep.js';
-import { DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
+import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -945,7 +945,8 @@ sourceOptions(
       : pc.yellow(
           `\n${behind} of the skipped ${behind === 1 ? 'is' : 'are'} the half of a fork that carried on; ` +
             `this account is showing the half that stopped.\n` +
-            'foster consolidate lists them with their record counts, and needs the app closed.',
+            'foster consolidate lists them with their record counts. Run it before the restart, ' +
+            'not after: a card the app itself made waits either way.',
         );
 
   if (dryRun) {
@@ -1002,6 +1003,11 @@ program
     'what a row for a branch that stopped wears in front of its title; {when} is its last answer',
     DEFAULT_STALE_TEMPLATE,
   )
+  .option(
+    '--branch-prefix <template>',
+    'what a row for a branch that went on after the tip wears; it is not filed away',
+    DEFAULT_DIVERGED_TEMPLATE,
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -1014,6 +1020,7 @@ program
       configDir?: string[];
       prefix: string;
       stalePrefix: string;
+      branchPrefix: string;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
@@ -1028,6 +1035,7 @@ program
       target,
       prefix: opts.prefix,
       staleTemplate: opts.stalePrefix,
+      divergedTemplate: opts.branchPrefix,
       dryRun,
       configDirs: opts.configDir ?? [],
     });
@@ -1106,6 +1114,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
       counts: report.branches.counts,
       archived: report.branches.archived,
       staleTemplate: report.branches.staleTemplate,
+      divergedTemplate: report.branches.divergedTemplate,
       forks: report.branches.forks.map((fork) => ({
         root: fork.root,
         tip: fork.tip,
@@ -1628,7 +1637,7 @@ program
       if (appMade.length > 0) {
         console.log(pc.dim(`${appMade.length} left to the app — see above.`));
       }
-      console.log(pc.dim('Re-run with --yes to write. Claude Desktop has to be closed.'));
+      console.log(pc.dim('Re-run with --yes to write, before the restart rather than after it.'));
       return;
     }
 
@@ -1713,7 +1722,7 @@ async function undoConsolidation(
 
   if (dryRun) {
     console.log(pc.bold(`\nDry run: ${outcomes.length} would be put back.`));
-    console.log(pc.dim('Re-run with --yes to write. Claude Desktop has to be closed.'));
+    console.log(pc.dim('Re-run with --yes to write, before the restart rather than after it.'));
     return;
   }
 
@@ -3447,6 +3456,16 @@ function formatLifetime(ms: number | undefined): string {
   return minutes < 90 ? `lasted ${minutes}m` : `lasted ${Math.round(minutes / 60)}h`;
 }
 
+/**
+ * The wider window `rescue` offers when a narrow one found nothing.
+ *
+ * One literal, read both as the words in the sentence and — through
+ * `parseSince`, the same parser the flag itself uses — as the moment to compare
+ * against. Encoding it twice is what put a hint and a threshold out of step
+ * once already.
+ */
+const SUGGESTED_RESCUE_WINDOW = '7d';
+
 program
   .command('rescue')
   .summary('conversations stranded by a crash, and the resumes that bring them back')
@@ -3506,13 +3525,21 @@ program
 
     if (stranded.length === 0) {
       console.log(`Nothing looks stranded from the last ${opts.since}.`);
-      const windowIsShorterThanWeek = Date.now() - since < 7 * 24 * 3_600_000;
+      // The window and the sentence offering it come from one literal, parsed
+      // the way the flag itself is. Written twice — a string here and a
+      // millisecond constant there — the next person to widen the suggestion
+      // moves one and reintroduces the bug be44061 fixed.
+      const now = Date.now();
+      const wider = parseSince(SUGGESTED_RESCUE_WINDOW, now) ?? now;
+      const windowIsShorterThanWeek = since > wider;
       if (windowIsShorterThanWeek && !opts.archived) {
         console.log(
-          pc.dim('A longer window is --since 7d; sessions you archived need --archived.'),
+          pc.dim(
+            `A longer window is --since ${SUGGESTED_RESCUE_WINDOW}; sessions you archived need --archived.`,
+          ),
         );
       } else if (windowIsShorterThanWeek) {
-        console.log(pc.dim('A longer window is --since 7d.'));
+        console.log(pc.dim(`A longer window is --since ${SUGGESTED_RESCUE_WINDOW}.`));
       } else if (!opts.archived) {
         console.log(pc.dim('Sessions you archived need --archived.'));
       }

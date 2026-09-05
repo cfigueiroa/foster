@@ -1,7 +1,7 @@
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
-import { DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
+import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import type { AccountRef, DiscoveredSession, StoreLayout, Unfosterable } from '../domain/types.js';
 import { requireCurrentAccount } from '../engine/account.js';
 import {
@@ -74,6 +74,11 @@ export interface SweepOptions {
    * is where the moment of its last answer goes. See `domain/stale.ts`.
    */
   staleTemplate?: string;
+  /**
+   * What a row for a branch that went on after the tip wears instead. Such a
+   * branch is not stale and is not filed away; see `domain/stale.ts`.
+   */
+  divergedTemplate?: string;
   /** When true, plan everything and write nothing. */
   dryRun?: boolean;
   /** Extra Claude config directories to search for deleted conversations. */
@@ -98,6 +103,8 @@ export interface BranchesPhase extends BranchesResult {
   counts: Record<OutcomeStatus, number>;
   /** The template the stale rows were marked with, for the summary to quote. */
   staleTemplate: string;
+  /** The template the rows that went on were marked with. */
+  divergedTemplate: string;
 }
 
 /**
@@ -197,6 +204,7 @@ interface SweepRun {
   sources: AccountRef[];
   prefix: string;
   staleTemplate: string;
+  divergedTemplate: string;
   configDirs: string[];
   env: NodeJS.ProcessEnv;
   live: ReadonlySet<string>;
@@ -216,6 +224,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   const env = options.env ?? process.env;
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   const staleTemplate = options.staleTemplate ?? DEFAULT_STALE_TEMPLATE;
+  const divergedTemplate = options.divergedTemplate ?? DEFAULT_DIVERGED_TEMPLATE;
   const configDirs = options.configDirs ?? [];
   const accounts = listAccountDirs(store);
   const target = options.target ?? requireCurrentAccount(store, accounts);
@@ -238,6 +247,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     sources,
     prefix,
     staleTemplate,
+    divergedTemplate,
     configDirs,
     env,
     live,
@@ -260,6 +270,7 @@ export function runSweep(options: SweepOptions): SweepReport {
       ...passes.branches,
       counts: summariseOutcomes(passes.branches.outcomes),
       staleTemplate,
+      divergedTemplate,
     },
     restored: phase(passes.restored),
     archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
@@ -288,7 +299,8 @@ export function runSweep(options: SweepOptions): SweepReport {
  * it keeps.
  */
 function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolean): Passes {
-  const { store, ledger, target, sources, prefix, staleTemplate, configDirs, env, live, kin } = run;
+  const { store, ledger, target, sources, prefix, configDirs, env, live, kin } = run;
+  const { staleTemplate, divergedTemplate } = run;
   const here = sidebarFrom(hereCards, kin);
 
   const candidates = fosterableFrom(run.fromSources, sources, { includeArchived: true });
@@ -321,6 +333,7 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
     orphans: orphans.filter(inFork),
     prefix,
     staleTemplate,
+    divergedTemplate,
     live,
     state: project(ledger.read()),
   });
