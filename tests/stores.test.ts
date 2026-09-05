@@ -41,6 +41,17 @@ function fostered(copyPath: string): LedgerEvent {
   };
 }
 
+function registered(name: string, root: string): LedgerEvent {
+  return {
+    v: 1,
+    ts: 1_700_000_000_000,
+    toolVersion: '0.0.0-test',
+    kind: 'profile_registered',
+    name,
+    root,
+  };
+}
+
 /** Where a copy fostered into that store would sit. */
 function copyIn(root: string): string {
   return path.join(
@@ -60,7 +71,9 @@ describe('knownStores', () => {
     const profile = mkdtempSync(path.join(tmpdir(), 'foster-fresh-'));
 
     const found = knownStores([], {}, () => running(profile));
-    expect(found).toEqual([{ root: path.resolve(profile), hint: 'profile', running: false }]);
+    expect(found).toEqual([
+      { root: path.resolve(profile), hint: 'profile', running: false, exists: true },
+    ]);
   });
 
   it('drops a store the ledger remembers but that has since gone', () => {
@@ -109,6 +122,57 @@ describe('knownStores', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0]!.hint).toBe('installed app');
+  });
+
+  it('offers a registered profile that has neither run nor been fostered into', () => {
+    // The whole reason to register one: a profile that has not started yet, and
+    // has no fostered copy in it, is otherwise invisible to `knownStores`.
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-registered-'));
+
+    const found = knownStores([registered('work', profile)], {}, () => []);
+    expect(found).toEqual([
+      {
+        root: path.resolve(profile),
+        name: 'work',
+        hint: 'registered',
+        running: false,
+        exists: true,
+      },
+    ]);
+  });
+
+  it('keeps a registered profile that has since gone, marked exists: false', () => {
+    // Every other hint drops a directory that is no longer there. A registered
+    // name is the one exception, because `foster profile forget` needs
+    // something to name when it tells the user their profile has vanished.
+    const gone = path.join(tmpdir(), 'foster-registered-gone-that-does-not-exist');
+
+    const found = knownStores([registered('work', gone)], {}, () => []);
+    expect(found).toEqual([
+      { root: path.resolve(gone), name: 'work', hint: 'registered', running: false, exists: false },
+    ]);
+  });
+
+  it('attaches a registered name to the installed app instead of duplicating it', () => {
+    const store = makeStore();
+
+    const found = knownStores(
+      [registered('main', store.root)],
+      { CLAUDE_USER_DATA_DIR: store.root },
+      () => [],
+    );
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ hint: 'installed app', name: 'main', exists: true });
+  });
+
+  it('attaches a registered name to a running profile instead of duplicating it', () => {
+    const profile = mkdtempSync(path.join(tmpdir(), 'foster-registered-running-'));
+
+    const found = knownStores([registered('work', profile)], {}, () => running(profile));
+
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ hint: 'profile', name: 'work', exists: true });
   });
 });
 

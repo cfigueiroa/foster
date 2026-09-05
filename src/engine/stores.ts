@@ -8,6 +8,7 @@ import {
 } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
+import { project } from '../ledger/project.js';
 import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
 import { readConfig } from '../store/config.js';
@@ -15,24 +16,44 @@ import { readConfig } from '../store/config.js';
 /**
  * Every installation foster can name without being told.
  *
- * Three sources, and all three are needed. The installed app, so switching back
+ * Four sources, and all four are needed. The installed app, so switching back
  * to it from a profile does not mean typing a package path. The instances that
  * are up, because a profile announces itself nowhere but on its own command
- * line. And the stores the ledger has written into before — a stopped profile is
+ * line. The stores the ledger has written into before — a stopped profile is
  * written down nowhere else, and having to retype its path on every visit was
- * the whole friction.
+ * the whole friction. And the names registered on purpose — `foster profile
+ * register` — for a profile that has neither run nor been fostered into yet.
  *
- * Directories that have since gone are dropped rather than offered: a menu entry
- * that fails when picked is worse than one that was never there.
+ * Directories that have since gone are dropped rather than offered: a menu
+ * entry that fails when picked is worse than one that was never there. A
+ * registered name is the one exception — see `KnownStore.exists`.
  */
 export interface KnownStore {
   root: string;
   /**
+   * The name it was registered under, when it has one — `foster profile
+   * register <path> --name work`. A store reached only through the ledger or a
+   * running process has none; one that is also registered keeps whichever hint
+   * says how foster first found it, name attached, rather than being relisted
+   * as a second, redundant entry.
+   */
+  name?: string;
+  /**
    * How foster came to know about it. A store that only a command line names is
    * a profile by definition — nothing else could have started it that way.
+   * `registered` is the one hint that can outlive the directory: see `exists`.
    */
-  hint: 'installed app' | 'profile' | 'used before';
+  hint: 'installed app' | 'profile' | 'used before' | 'registered';
   running: boolean;
+  /**
+   * Whether the directory is still there. Every other hint requires this to be
+   * true to be offered at all — a menu entry that fails when picked is worse
+   * than one that was never there. A registered name is the exception: it is
+   * the one thing foster remembers on purpose, so a root that has gone stays
+   * listed, marked gone, instead of silently dropping the name that pointed at
+   * it — `foster profile forget` is how you actually stop hearing about it.
+   */
+  exists: boolean;
   /**
    * The account this installation last recorded, when it has one. With profiles
    * the whole point is that each holds a different account, so which one is the
@@ -48,10 +69,10 @@ export function knownStores(
   env: NodeJS.ProcessEnv = process.env,
   list: ProcessLister = readProcesses,
 ): KnownStore[] {
-  const seen = new Set<string>();
+  const seen = new Map<string, KnownStore>();
   const stores: KnownStore[] = [];
 
-  const offer = (root: string, hint: KnownStore['hint']): void => {
+  const offer = (root: string, hint: KnownStore['hint'], name?: string): void => {
     const store = layoutFor(root);
     // The filesystem decides what is the same store and what still exists. A
     // directory that has gone is dropped rather than offered — a menu entry that
@@ -59,15 +80,40 @@ export function knownStores(
     // with no sessions yet is kept, because that is exactly a store you would be
     // sending sessions to.
     const key = directoryKey(store.root);
-    if (key === undefined || seen.has(key)) return;
-    seen.add(key);
+
+    if (key === undefined) {
+      // Every other hint means the directory was just seen to exist — installed
+      // app, a running process, a copy fostered into before — so gone here means
+      // stale and it is dropped. A registered name is the one hint that survives
+      // its target vanishing on purpose: that is what lets `resolveStoreArg` say
+      // *which* profile went missing instead of just failing to find one.
+      if (hint === 'registered' && name !== undefined) {
+        stores.push({ root: store.root, name, hint, running: false, exists: false });
+      }
+      return;
+    }
+
+    const known = seen.get(key);
+    if (known) {
+      // Already offered through another route. A registered name attaches to
+      // that row rather than adding a second, redundant one for the same
+      // directory — the installed app or a running profile keeps its own hint,
+      // it just also has a name now.
+      if (name !== undefined) known.name ??= name;
+      return;
+    }
+
     const accountUuid = readConfig(store).lastKnownAccountUuid;
-    stores.push({
+    const found: KnownStore = {
       root: store.root,
       hint,
       running: lockfileHeld(store),
+      exists: true,
+      ...(name !== undefined ? { name } : {}),
       ...(accountUuid ? { accountUuid } : {}),
-    });
+    };
+    seen.set(key, found);
+    stores.push(found);
   };
 
   for (const dir of candidateStoreRoots(env)) offer(dir, 'installed app');
@@ -75,6 +121,9 @@ export function knownStores(
   for (const event of events) {
     if (event.kind === 'fostered') offer(storeRootOfCopy(event.copyPath), 'used before');
   }
+  // Registered names go last, so one landing on a root already offered above
+  // attaches to that row instead of duplicating it — see `offer`.
+  for (const [name, root] of project(events).profiles) offer(root, 'registered', name);
 
   return stores;
 }
