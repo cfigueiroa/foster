@@ -58,9 +58,7 @@ import {
 import { inspectApp } from '../engine/safety.js';
 import {
   containerBlocker,
-  HANDLER_KEY,
   inspectHandler,
-  levelPath,
   planLogin,
   registryHandlerIo,
   restoreHandler,
@@ -486,7 +484,8 @@ program
     // `app login` that has not yet been put back — whether it is still running
     // in another terminal or was interrupted, doctor cannot tell, so it points
     // at the one command that resolves either case.
-    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    const handler = inspectHandler(store, project(ledger.read()), registryHandlerIo);
+    console.log(pc.dim(`  packaged ProgID ${handler.key ?? 'not found'}`));
     if (handler.virtualizedView) {
       console.log(
         pc.dim(
@@ -3828,7 +3827,22 @@ app
   .description('start Claude Desktop')
   .action(async function (this: Command) {
     const { store } = context(this);
-    const started = await startDesktop(store);
+    let launchedWith: 'identity' | 'direct' | undefined;
+    const started = await startDesktop(store, {
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+      onWindowRaised: () =>
+        console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+    });
+    if (launchedWith === 'identity') console.log(pc.dim('started with package identity'));
+    else if (launchedWith === 'direct') {
+      console.log(
+        pc.yellow(
+          'started without package identity: the browser callback will not reach it; use the e-mail code',
+        ),
+      );
+    }
     console.log(started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.');
   });
 
@@ -3866,12 +3880,17 @@ app
   )
   .option('--print', 'show what would happen without arming anything')
   .option('--restore', 'put a routed handler back — for a login interrupted mid-run')
+  .option(
+    '--restart-profile',
+    'when the profile is running without package identity, close it and start it again with it',
+  )
   .action(async function (this: Command) {
     const opts = this.opts<{
       yes?: boolean;
       timeout?: string;
       print?: boolean;
       restore?: boolean;
+      restartProfile?: boolean;
     }>();
     const { store, ledger } = context(this);
     const events = ledger.read();
@@ -3886,25 +3905,12 @@ app
 
       const state = project(events);
       if (!opts.yes) {
-        const handler = inspectHandler(state, registryHandlerIo);
-        if (handler.armed?.createdFrom !== undefined) {
-          console.log(
-            `Dry run: restore  delete ${levelPath(handler.armed.createdFrom)} (created by this run).`,
-          );
-          console.log('Re-run with --yes to do it.');
-          return;
-        }
-        if (handler.armed?.previous !== undefined) {
-          console.log(`Dry run: the handler would be put back to "${handler.armed.previous}".`);
-          console.log('Re-run with --yes to do it.');
-          return;
-        }
-        if (!handler.current || handler.current.userDataDir === undefined) {
-          console.log('The handler is not routed anywhere; nothing to restore.');
+        if (state.handlerArmed === undefined) {
+          console.log('No login is in flight; nothing to restore.');
           return;
         }
         console.log(
-          `Dry run: restore  delete ${levelPath('command')} (no record of what it held before).`,
+          `Dry run: put ${state.handlerArmed.key}\\Parameters back to "${state.handlerArmed.previous}".`,
         );
         console.log('Re-run with --yes to do it.');
         return;
@@ -3923,7 +3929,35 @@ app
       }
     }
 
-    const plan = planLogin(store, { io: registryHandlerIo, events });
+    let plan = planLogin(store, { io: registryHandlerIo, events });
+
+    // The one blocker `app login` can fix for itself: a profile running
+    // without package identity can never receive the callback, however the
+    // handler is armed — closing it and letting foster start it again (see
+    // startDesktop) is the whole fix, so offer to do exactly that rather than
+    // making the user close it by hand.
+    if (opts.yes && !opts.print && opts.restartProfile && plan.identity === 'none') {
+      const label = plan.name ?? plan.root;
+      console.log(`${label} is running without package identity; restarting it...`);
+      await quitDesktop(store, { terminate: true });
+      let launchedWith: 'identity' | 'direct' | undefined;
+      await startDesktop(store, {
+        onProfileLaunch: (method) => {
+          launchedWith = method;
+        },
+        onWindowRaised: () =>
+          console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+      });
+      if (launchedWith !== 'identity') {
+        console.log(
+          pc.yellow(
+            'could not restart it with package identity; the sign-in callback will not reach it',
+          ),
+        );
+      }
+      plan = planLogin(store, { io: registryHandlerIo, events });
+    }
+
     const label = plan.name ?? plan.root;
 
     for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
@@ -3934,19 +3968,22 @@ app
     for (const warning of plan.warnings) console.log(pc.yellow(`  ! ${warning}`));
 
     if (!opts.yes || opts.print) {
-      const restoreLine =
-        plan.previous?.kind === 'absent'
-          ? `delete ${levelPath(plan.previous.createdFrom)} (created by this run)`
-          : plan.previous?.value;
       console.log(`Dry run: claude:// links would be routed to ${label} for one sign-in.`);
-      console.log(`  arm      create ${HANDLER_KEY} = ${plan.armed}`);
-      console.log(`  restore  ${restoreLine}`);
+      console.log(`  arm      ${plan.key}\\Parameters = ${plan.armed}`);
+      console.log(`  restore  ${plan.previous}`);
       console.log('Re-run with --yes to do it.');
       return;
     }
 
     if (!plan.running) {
-      const started = await startDesktop(store);
+      let launchedWith: 'identity' | 'direct' | undefined;
+      const started = await startDesktop(store, {
+        onProfileLaunch: (method) => {
+          launchedWith = method;
+        },
+        onWindowRaised: () =>
+          console.log(pc.dim('the window came up hidden; sent another launch to raise it')),
+      });
       if (!started) {
         // The same refusal `app start` prints when the app does not take the
         // store within its own timeout — no point inventing a second wording
@@ -3956,21 +3993,14 @@ app
         return;
       }
       console.log(`Started ${label}.`);
+      if (launchedWith === 'direct') {
+        console.log(
+          pc.yellow(
+            'started without package identity: the browser callback will not reach it; use the e-mail code',
+          ),
+        );
+      }
     }
-
-    // Printed before arming, so the instructions are on screen while the wait
-    // that follows keeps the terminal otherwise silent.
-    console.log(
-      timeoutSeconds !== undefined
-        ? `claude:// links now go to ${label} for the next ${timeoutSeconds}s.`
-        : `claude:// links now go to ${label} until the sign-in lands or you press Ctrl+C.`,
-    );
-    console.log(
-      'In that window, click "Continue with Google" or "Continue with browser" and finish in the browser as usual.',
-    );
-    console.log(
-      'Leave every Claude window alone until this says done. Ctrl+C puts the handler back.',
-    );
 
     const controller = new AbortController();
     const onSigint = () => controller.abort();
@@ -3988,6 +4018,22 @@ app
           };
         },
         ...(timeoutSeconds !== undefined ? { timeoutMs: timeoutSeconds * 1000 } : {}),
+        // Arm first, then sign in: printed only once the write has actually
+        // landed, so these instructions are never on screen before the
+        // handler really routes there — a browser with a standing permission
+        // to auto-launch claude:// can fire the callback the instant the user
+        // starts the Google flow, with no dialog in between.
+        onArmed: () => {
+          console.log(
+            timeoutSeconds !== undefined
+              ? `claude:// links now go to ${label} for the next ${timeoutSeconds}s.`
+              : `claude:// links now go to ${label} until the sign-in lands or you press Ctrl+C.`,
+          );
+          console.log(
+            'Now, in that window, click "Continue with Google" and finish in the browser.',
+          );
+          console.log('If the browser opens Claude by itself, that is fine: the link is routed.');
+        },
         onHeartbeat: (elapsedMs) => {
           const minutes = Math.round(elapsedMs / 60_000);
           console.log(

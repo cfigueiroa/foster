@@ -539,6 +539,185 @@ describe('starting the app', () => {
   });
 });
 
+describe('starting a profile with package identity', () => {
+  /**
+   * Not a real machine path (this repo is public) — the same shape measured
+   * 05/09/2026: a real MSIX install under `\WindowsApps\`, with the version and
+   * architecture folded into the package's full name.
+   */
+  const WINDOWSAPPS_EXE =
+    'C:\\Program Files\\WindowsApps\\Claude_1.46388.2.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe';
+
+  it('prefers Invoke-CommandInDesktopPackage when the executable is a real MSIX install', async () => {
+    const store = makeStore();
+    const identityLaunches: Array<[string, string, string]> = [];
+    let launchedWith: 'identity' | 'direct' | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: () => expect.unreachable('identity should win when it is available'),
+      launchProfileWithIdentity: (appId, exe, root) => {
+        identityLaunches.push([appId, exe, root]);
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+    });
+
+    expect(identityLaunches).toEqual([
+      ['Claude_pzs8sxrjxfjjc!Claude', WINDOWSAPPS_EXE, store.root],
+    ]);
+    expect(launchedWith).toBe('identity');
+  });
+
+  it('falls back to the direct launcher when the identity launch throws', async () => {
+    const store = makeStore();
+    const direct: string[][] = [];
+    let launchedWith: 'identity' | 'direct' | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => direct.push([exe, root]),
+      launchProfileWithIdentity: () => {
+        throw new Error('Invoke-CommandInDesktopPackage is not recognised');
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+    });
+
+    expect(direct).toEqual([[WINDOWSAPPS_EXE, store.root]]);
+    expect(launchedWith).toBe('direct');
+  });
+
+  it('gives the identity launcher a scrubbed environment, the same as the direct one', async () => {
+    const store = makeStore();
+    let received: NodeJS.ProcessEnv | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfileWithIdentity: (_appId, _exe, _root, env) => {
+        received = env;
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      env: { CLAUDE_CODE_HOST_SESSION_ID: '00000000-0000-4000-8000-00000000000a', PATH: 'kept' },
+    });
+
+    expect(received).toEqual({ PATH: 'kept' });
+  });
+
+  it('never attempts identity for an executable outside \\WindowsApps\\', async () => {
+    const store = makeStore();
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfileWithIdentity: () =>
+        expect.unreachable('not a WindowsApps executable; identity should never be tried'),
+      launchProfile: () => {},
+      executable: () => 'C:\\Apps\\Claude_1.0.0_x64__test\\app\\Claude.exe',
+    });
+  });
+});
+
+describe('raising a hidden window after starting a profile', () => {
+  const EXE = 'C:\\Apps\\Claude_1.0.0_x64__test\\app\\Claude.exe';
+
+  /**
+   * A row this environment can prove is the app: its own path sits under the
+   * store's root, which `CLAUDE_USER_DATA_DIR` makes a known store root — see
+   * `underKnownStoreRoot` in desktop.ts. Independent of `EXE` above, which is
+   * only ever what `executable()` hands `startDesktop` to launch with.
+   */
+  function runningRow(store: StoreLayout): ProcessRow {
+    const path = `${store.root}\\Claude.exe`;
+    return {
+      pid: 900,
+      parentPid: 9,
+      name: 'claude.exe',
+      path,
+      commandLine: `"${path}" --user-data-dir="${store.root}"`,
+    };
+  }
+
+  it('sends a second launch when the window is still hidden after the check window', async () => {
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const launches: string[][] = [];
+    let raised = false;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [runningRow(store)],
+      env,
+      lockfileHeld: () => true,
+      windowVisible: () => false,
+      windowCheckTimeoutMs: 10,
+      windowCheckStepMs: 5,
+      onWindowRaised: () => {
+        raised = true;
+      },
+    });
+
+    expect(launches).toEqual([
+      [EXE, store.root],
+      [EXE, store.root],
+    ]);
+    expect(raised).toBe(true);
+  });
+
+  it('does not relaunch when the window is already visible', async () => {
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const launches: string[][] = [];
+    let raised = false;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [runningRow(store)],
+      env,
+      lockfileHeld: () => true,
+      windowVisible: () => true,
+      windowCheckStepMs: 5,
+      onWindowRaised: () => {
+        raised = true;
+      },
+    });
+
+    expect(launches).toEqual([[EXE, store.root]]);
+    expect(raised).toBe(false);
+  });
+
+  it('skips the window check entirely when no main pid can be attributed', async () => {
+    const store = makeStore();
+    const launches: string[][] = [];
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [],
+      env: {},
+      lockfileHeld: () => true,
+      windowVisible: () => expect.unreachable('nothing running to check the window of'),
+      onWindowRaised: () => expect.unreachable('nothing to raise'),
+    });
+
+    expect(launches).toEqual([[EXE, store.root]]);
+  });
+});
+
 describe('handing a link to one installation', () => {
   /**
    * Windows routes claude:// to the installed package, so a profile never

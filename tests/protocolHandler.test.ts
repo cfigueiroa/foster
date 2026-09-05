@@ -1,28 +1,36 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  armedCommand,
+  armedParameters,
   armingIncomplete,
   containerBlocker,
+  findProtocolProgId,
   inspectHandler,
-  levelPath,
-  parseHandler,
+  parseParameters,
   planLogin,
   restoreHandler,
   runLogin,
   type HandlerIo,
-  type HandlerLevels,
   type LoginPlan,
 } from '../src/engine/protocolHandler.js';
+import { layoutFor } from '../src/domain/paths.js';
 import { project } from '../src/ledger/project.js';
 import type { LedgerEvent, LedgerEventInput } from '../src/ledger/types.js';
+import type { StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import { makeStore } from './helpers/store.js';
 
-// Not a real machine path (this repo is public) — the same shape the registry
-// actually holds: a quoted exe followed by a quoted argument.
-const EXE = 'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
-const PLAIN_HANDLER = `"${EXE}" "%1"`;
+// Not a real machine identifier (this repo is public) — the same shape
+// measured on 05/09/2026: a Package Family Name followed by its application.
+const APP_ID = 'Claude_pzs8sxrjxfjjc!Claude';
+const PROG_ID = 'AppXaem4n1tckgw588q10avtdbzpbgt71c77';
+const OPEN_KEY = `HKCU\\Software\\Classes\\${PROG_ID}\\Shell\\open`;
+const EXE =
+  'C:\\home\\AppData\\Local\\Packages\\Claude_pzs8sxrjxfjjc\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+// The bare, unrouted value every fresh install carries.
+const PLAIN_PARAMETERS = '"%1"';
 
 // Empty, not inherited: this suite runs inside a hosted Claude Code session
 // (this very repository is worked on from one), whose real process.env
@@ -33,62 +41,72 @@ const PLAIN_HANDLER = `"${EXE}" "%1"`;
 const NO_ENV: NodeJS.ProcessEnv = {};
 
 /**
- * An in-memory registry tree: the class root, `shell`, `shell\open` and
- * `shell\open\command`, plus the command's value. `log`, when given, records
- * `write:<value>` / `remove:<level>` in order — mirrors the real subtree's
- * nesting, so `remove` takes a level and everything under it with it, the
- * same as `reg delete` would.
+ * A store whose root sits under `\Packages\Claude_pzs8sxrjxfjjc\...`, so
+ * `packagedAppId` resolves it to `APP_ID` — the precondition `findProtocolProgId`
+ * needs to find anything at all. A real temp directory, unlike `makeStore()`'s
+ * plain one, so a test can still write `config.json` into it.
  */
-function fakeTree(
-  levels: Partial<HandlerLevels> = {},
-  value: string | undefined = undefined,
-  log?: string[],
+function makePackagedStore(): StoreLayout {
+  const base = mkdtempSync(path.join(tmpdir(), 'foster-test-'));
+  const root = path.join(
+    base,
+    'Packages',
+    'Claude_pzs8sxrjxfjjc',
+    'LocalCache',
+    'Roaming',
+    'Claude',
+  );
+  const store = layoutFor(root);
+  mkdirSync(store.codeSessionsDir, { recursive: true });
+  return store;
+}
+
+/**
+ * An in-memory registry tree with one packaged ProgID, whose `Shell\open`
+ * holds `AppUserModelID` and `Parameters`. `log`, when given, records
+ * `write:<key>:<name>=<value>` in call order.
+ */
+function fakeIo(
+  options: { appUserModelId?: string; parameters?: string; log?: string[] } = {},
 ): HandlerIo {
-  const tree: HandlerLevels = { class: true, shell: false, open: false, command: false, ...levels };
-  let current = value;
+  const appUserModelId = options.appUserModelId ?? APP_ID;
+  let parameters = options.parameters;
+  const log = options.log;
+
   return {
-    read: () => ({ value: tree.command ? current : undefined }),
-    levels: () => ({ ...tree }),
-    write: (next: string) => {
-      log?.push(`write:${next}`);
-      tree.shell = true;
-      tree.open = true;
-      tree.command = true;
-      current = next;
+    listSubkeys: (key) => (key === 'HKCU\\Software\\Classes' ? [PROG_ID] : []),
+    keyExists: (key) => key === OPEN_KEY,
+    readValue: (key, name) => {
+      if (key !== OPEN_KEY) return {};
+      if (name === 'AppUserModelID') return { value: appUserModelId };
+      if (name === 'Parameters') return { value: parameters };
+      return {};
     },
-    remove: (level: 'shell' | 'open' | 'command') => {
-      log?.push(`remove:${level}`);
-      if (level === 'shell') tree.shell = false;
-      if (level === 'shell' || level === 'open') tree.open = false;
-      tree.command = false;
-      current = undefined;
+    writeValue: (key, name, value) => {
+      log?.push(`write:${key}:${name}=${value}`);
+      if (key === OPEN_KEY && name === 'Parameters') parameters = value;
     },
   };
 }
 
-/**
- * The common case: the class root exists (it always does once Claude Desktop
- * has run once), and either a command already sits at shell\open\command
- * (`initial` given) or nothing does — measured on a real machine as the
- * ordinary outside-the-container state, with no `shell` subkey at all.
- */
-function fakeIo(initial: string | undefined, log?: string[]): HandlerIo {
-  return initial === undefined
-    ? fakeTree({ shell: false, open: false, command: false }, undefined, log)
-    : fakeTree({ shell: true, open: true, command: true }, initial, log);
+/** No AppX ProgID registered at all — a machine that has never run Claude Desktop. */
+function fakeIoNoProgId(): HandlerIo {
+  return {
+    listSubkeys: () => [],
+    keyExists: () => false,
+    readValue: () => ({}),
+    writeValue: () => {
+      throw new Error('not reached: no ProgID was found to write to');
+    },
+  };
 }
 
-/** A HandlerIo whose read() always reports a spawn failure, never a value. */
-function brokenIo(error: string): HandlerIo {
+/** A HandlerIo whose Parameters read always reports a spawn failure, never a value. */
+function brokenParametersIo(error: string): HandlerIo {
+  const io = fakeIo();
   return {
-    read: () => ({ error }),
-    levels: () => ({ class: true, shell: false, open: false, command: false }),
-    write: () => {
-      throw new Error('not reached: write is never called once read fails');
-    },
-    remove: () => {
-      throw new Error('not reached: remove is never called once read fails');
-    },
+    ...io,
+    readValue: (key, name) => (name === 'Parameters' ? { error } : io.readValue(key, name)),
   };
 }
 
@@ -96,56 +114,38 @@ function fakeAppend(log: string[]): (event: LedgerEventInput) => void {
   return (event) => log.push(`append:${event.kind}`);
 }
 
-describe('parseHandler', () => {
-  it('parses a plain handler', () => {
-    expect(parseHandler(PLAIN_HANDLER)).toEqual({ exe: EXE, raw: PLAIN_HANDLER });
+describe('parseParameters', () => {
+  it('parses the bare, unrouted value', () => {
+    expect(parseParameters(PLAIN_PARAMETERS)).toEqual({});
   });
 
   it('parses an unquoted --user-data-dir', () => {
-    const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
-    expect(parseHandler(command)).toEqual({
-      exe: EXE,
+    expect(parseParameters('--user-data-dir=D:\\Claude-Work "%1"')).toEqual({
       userDataDir: 'D:\\Claude-Work',
-      raw: command,
     });
   });
 
   it('parses a quoted --user-data-dir', () => {
-    const command = `"${EXE}" --user-data-dir="D:\\Claude Work" "%1"`;
-    expect(parseHandler(command)).toEqual({
-      exe: EXE,
+    expect(parseParameters('--user-data-dir="D:\\Claude Work" "%1"')).toEqual({
       userDataDir: 'D:\\Claude Work',
-      raw: command,
     });
   });
 
   it('returns undefined for anything else', () => {
-    expect(parseHandler(undefined)).toBeUndefined();
-    expect(parseHandler('')).toBeUndefined();
-    expect(parseHandler('not a handler at all')).toBeUndefined();
-    expect(parseHandler(`"${EXE}"`)).toBeUndefined();
+    expect(parseParameters(undefined)).toBeUndefined();
+    expect(parseParameters('')).toBeUndefined();
+    expect(parseParameters('not a handler at all')).toBeUndefined();
+    expect(parseParameters(`"${EXE}" "%1"`)).toBeUndefined();
   });
 });
 
-describe('armedCommand', () => {
+describe('armedParameters', () => {
   it('quotes a spelling that contains a space', () => {
-    expect(armedCommand(EXE, 'D:\\Claude Work')).toBe(
-      `"${EXE}" --user-data-dir="D:\\Claude Work" "%1"`,
-    );
+    expect(armedParameters('D:\\Claude Work')).toBe('--user-data-dir="D:\\Claude Work" "%1"');
   });
 
   it('leaves a spelling with no space unquoted', () => {
-    expect(armedCommand(EXE, 'D:\\Claude-Work')).toBe(
-      `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`,
-    );
-  });
-});
-
-describe('levelPath', () => {
-  it('spells out the subtree under each level', () => {
-    expect(levelPath('shell')).toBe('shell');
-    expect(levelPath('open')).toBe('shell\\open');
-    expect(levelPath('command')).toBe('shell\\open\\command');
+    expect(armedParameters('D:\\Claude-Work')).toBe('--user-data-dir=D:\\Claude-Work "%1"');
   });
 });
 
@@ -167,11 +167,31 @@ describe('containerBlocker', () => {
   });
 });
 
+describe('findProtocolProgId', () => {
+  it('finds the ProgID whose AppUserModelID matches this install', () => {
+    const store = makePackagedStore();
+    expect(findProtocolProgId(fakeIo(), store)).toBe(OPEN_KEY);
+  });
+
+  it('returns undefined when this store has no package identity of its own', () => {
+    // A plain makeStore() root has no \Packages\ segment, so packagedAppId
+    // cannot even ask the question.
+    expect(findProtocolProgId(fakeIo(), makeStore())).toBeUndefined();
+  });
+
+  it('returns undefined when nothing registered matches', () => {
+    const store = makePackagedStore();
+    expect(
+      findProtocolProgId(fakeIo({ appUserModelId: 'Someone_else!App' }), store),
+    ).toBeUndefined();
+  });
+});
+
 describe('planLogin', () => {
   it('refuses off Windows', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -184,9 +204,9 @@ describe('planLogin', () => {
   });
 
   it('refuses from inside the app container, before anything registry-shaped is read', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: { CLAUDE_CODE_HOST_SESSION_ID: 'session-1' },
       list: () => [],
@@ -200,9 +220,9 @@ describe('planLogin', () => {
   });
 
   it('refuses from inside the app container by entrypoint alone', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: { CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' },
       list: () => [],
@@ -212,170 +232,44 @@ describe('planLogin', () => {
     expect(plan.blockers[0]).toContain('must run from a terminal outside Claude Desktop');
   });
 
-  it('refuses when the class root does not exist', () => {
-    const store = makeStore();
+  it('refuses when no packaged ProgID is registered for this install', () => {
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeTree({ class: false }),
+      io: fakeIoNoProgId(),
       events: [],
       env: NO_ENV,
       list: () => [],
       platform: 'win32',
     });
 
-    expect(plan.blockers[0]).toContain('HKCU\\Software\\Classes\\claude does not exist');
-    expect(plan.blockers[0]).toContain('start it once, then retry');
+    expect(plan.blockers).toEqual([
+      'this Claude Desktop does not register claude:// as a packaged app; only the MSIX install is ' +
+        'supported by app login',
+    ]);
+    expect(plan.key).toBeUndefined();
   });
 
   it("refuses with reg's own message when reg itself could not be run", () => {
     // The reported case: an elevated PowerShell whose PATH does not resolve
     // `reg`, so the spawn throws before it ever touches the registry. That
-    // must not read as any registry-shape problem — start Claude Desktop
-    // once would do nothing for a PATH problem.
-    const store = makeStore();
+    // must not read as any registry-shape problem.
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: brokenIo('spawnSync reg ENOENT'),
+      io: brokenParametersIo('spawnSync reg ENOENT'),
       events: [],
       env: NO_ENV,
       list: () => [],
       platform: 'win32',
     });
 
-    expect(plan.blockers[0]).toContain(
-      'could not read HKCU\\Software\\Classes\\claude\\shell\\open\\command',
-    );
+    expect(plan.blockers[0]).toContain(`could not read ${OPEN_KEY}\\Parameters`);
     expect(plan.blockers[0]).toContain('spawnSync reg ENOENT');
   });
 
-  it('records createdFrom "shell" when only the class root exists, and blocks without a running app', () => {
-    // Measured as the ordinary state outside the app's container: the class
-    // root exists, but there is no `shell` subkey at all.
-    const store = makeStore();
+  it('refuses when Parameters exists but is unparseable', () => {
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(undefined),
-      events: [],
-      env: NO_ENV,
-      list: () => [],
-      platform: 'win32',
-    });
-
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
-    expect(plan.exe).toBeUndefined();
-    expect(plan.blockers).toContain(
-      'no running Claude Desktop to read the executable from; start the app or the profile first',
-    );
-  });
-
-  it('records createdFrom "open" when shell exists but shell\\open does not, and arms from the process table', () => {
-    const store = makeStore();
-    const row: ProcessRow = {
-      pid: 700,
-      parentPid: 1,
-      name: 'claude.exe',
-      path: EXE,
-      commandLine: `"${EXE}"`,
-    };
-    const plan = planLogin(store, {
-      io: fakeTree({ shell: true, open: false, command: false }),
-      events: [],
-      env: NO_ENV,
-      list: () => [row],
-      platform: 'win32',
-    });
-
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'open' });
-    expect(plan.blockers).toEqual([]);
-    expect(plan.exe).toBe(EXE);
-    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
-  });
-
-  it('records createdFrom "command" when shell\\open exists but the command does not, and arms from the process table', () => {
-    const store = makeStore();
-    const row: ProcessRow = {
-      pid: 700,
-      parentPid: 1,
-      name: 'claude.exe',
-      path: EXE,
-      commandLine: `"${EXE}"`,
-    };
-    const plan = planLogin(store, {
-      io: fakeTree({ shell: true, open: true, command: false }),
-      events: [],
-      env: NO_ENV,
-      list: () => [row],
-      platform: 'win32',
-    });
-
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'command' });
-    expect(plan.blockers).toEqual([]);
-    expect(plan.exe).toBe(EXE);
-    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
-  });
-
-  it('takes the exe from a running instance under \\Packages\\Claude when no command exists, and arms the handler with it', () => {
-    const store = makeStore();
-    const row: ProcessRow = {
-      pid: 700,
-      parentPid: 1,
-      name: 'claude.exe',
-      path: EXE,
-      commandLine: `"${EXE}"`,
-    };
-    const plan = planLogin(store, {
-      io: fakeIo(undefined),
-      events: [],
-      env: NO_ENV,
-      list: () => [row],
-      platform: 'win32',
-    });
-
-    expect(plan.exe).toBe(EXE);
-    expect(plan.blockers).toEqual([]);
-    // The regression measured 2026-09-05: this branch used to set `exe` but
-    // never `armed`, so the CLI printed its instructions and only then blew
-    // up inside runLogin, after the user had already started signing in.
-    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
-  });
-
-  it('flags an exe with nothing armed as incomplete, the guard against the regression above', () => {
-    // Every branch planLogin can reach today keeps `exe` and `armed` in
-    // lock-step (see the tests above) — this is the belt-and-suspenders check
-    // for a *future* branch that does not, so the CLI refuses before printing
-    // anything rather than surfacing as runLogin's last-resort throw after
-    // instructions are already on screen (measured 2026-09-05: exactly that,
-    // from the absent-command branch before this fix).
-    expect(armingIncomplete({ exe: EXE, armed: undefined })).toBe(true);
-    expect(armingIncomplete({ exe: undefined, armed: undefined })).toBe(true);
-    expect(armingIncomplete({ exe: undefined, armed: `"${EXE}" "%1"` })).toBe(true);
-    expect(armingIncomplete({ exe: EXE, armed: `"${EXE}" "%1"` })).toBe(false);
-  });
-
-  it('every no-blocker plan produced above has both exe and armed set', () => {
-    // Cross-check against the real thing, not just the pure predicate: none
-    // of planLogin's actual no-blocker outcomes trip armingIncomplete.
-    const store = makeStore();
-    const row: ProcessRow = {
-      pid: 700,
-      parentPid: 1,
-      name: 'claude.exe',
-      path: EXE,
-      commandLine: `"${EXE}"`,
-    };
-    const plan = planLogin(store, {
-      io: fakeIo(undefined),
-      events: [],
-      env: NO_ENV,
-      list: () => [row],
-      platform: 'win32',
-    });
-
-    expect(plan.blockers).toEqual([]);
-    expect(armingIncomplete(plan)).toBe(false);
-  });
-
-  it('refuses when the command exists but is unparseable', () => {
-    const store = makeStore();
-    const plan = planLogin(store, {
-      io: fakeIo('not a handler at all'),
+      io: fakeIo({ parameters: 'not a handler at all' }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -383,14 +277,49 @@ describe('planLogin', () => {
     });
 
     expect(plan.blockers[0]).toContain('exists but is not in the shape');
-    expect(plan.previous).toEqual({ kind: 'command', value: 'not a handler at all' });
+  });
+
+  it('arms Parameters with --user-data-dir from the bare value', () => {
+    const store = makePackagedStore();
+    const plan = planLogin(store, {
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.key).toBe(OPEN_KEY);
+    expect(plan.previous).toBe(PLAIN_PARAMETERS);
+    expect(plan.armed).toBe(armedParameters(plan.spelling));
+  });
+
+  it('flags a plan with nothing armed as incomplete', () => {
+    expect(armingIncomplete({ key: OPEN_KEY, armed: undefined })).toBe(true);
+    expect(armingIncomplete({ key: undefined, armed: undefined })).toBe(true);
+    expect(armingIncomplete({ key: undefined, armed: '--user-data-dir=x "%1"' })).toBe(true);
+    expect(armingIncomplete({ key: OPEN_KEY, armed: '--user-data-dir=x "%1"' })).toBe(false);
+  });
+
+  it('every no-blocker plan produced above has both key and armed set', () => {
+    const store = makePackagedStore();
+    const plan = planLogin(store, {
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(armingIncomplete(plan)).toBe(false);
   });
 
   it('refuses when claude:// already routes to a different profile', () => {
-    const store = makeStore();
-    const command = `"${EXE}" --user-data-dir=D:\\Claude-Other "%1"`;
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(command),
+      io: fakeIo({ parameters: '--user-data-dir=D:\\Claude-Other "%1"' }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -403,8 +332,8 @@ describe('planLogin', () => {
   });
 
   it('only warns when the handler is already routed to this same store', () => {
-    const store = makeStore();
-    const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
+    const store = makePackagedStore();
+    const command = `--user-data-dir="${store.root}" "%1"`;
     const events: LedgerEvent[] = [
       {
         v: 1,
@@ -412,13 +341,14 @@ describe('planLogin', () => {
         toolVersion: '0.0.0-test',
         kind: 'handler_armed',
         root: store.root,
-        previous: PLAIN_HANDLER,
+        key: OPEN_KEY,
+        previous: PLAIN_PARAMETERS,
         exe: EXE,
         armed: command,
       },
     ];
     const plan = planLogin(store, {
-      io: fakeIo(command),
+      io: fakeIo({ parameters: command }),
       events,
       env: NO_ENV,
       list: () => [],
@@ -428,45 +358,17 @@ describe('planLogin', () => {
     expect(plan.blockers).toEqual([]);
     expect(plan.warnings.some((w) => w.includes('already routed'))).toBe(true);
     expect(plan.armed).toBe(command);
-    expect(plan.previous).toEqual({ kind: 'command', value: PLAIN_HANDLER });
+    expect(plan.previous).toBe(PLAIN_PARAMETERS);
   });
 
-  it('reuses a createdFrom record when routed to this same store by an interrupted absent-command login', () => {
-    const store = makeStore();
-    const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
-    const events: LedgerEvent[] = [
-      {
-        v: 1,
-        ts: 1_700_000_000_000,
-        toolVersion: '0.0.0-test',
-        kind: 'handler_armed',
-        root: store.root,
-        createdFrom: 'shell',
-        exe: EXE,
-        armed: command,
-      },
-    ];
-    const plan = planLogin(store, {
-      io: fakeIo(command),
-      events,
-      env: NO_ENV,
-      list: () => [],
-      platform: 'win32',
-    });
-
-    expect(plan.blockers).toEqual([]);
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
-  });
-
-  it('falls back to deleting the command when routed to this same store but the ledger has no record', () => {
-    // No `handler_armed` event — a reset/relocated FOSTER_HOME, or the key
+  it('falls back to the bare value when routed to this same store but the ledger has no record', () => {
+    // No `handler_armed` event — a reset/relocated FOSTER_HOME, or Parameters
     // pointed at this store's directory by something other than a tracked
-    // foster run. There is no natural plain command to rebuild outside the
-    // container, so the safe fallback is to delete the command entirely.
-    const store = makeStore();
-    const command = `"${EXE}" --user-data-dir="${store.root}" "%1"`;
+    // foster run. There is no other natural value to restore to.
+    const store = makePackagedStore();
+    const command = `--user-data-dir="${store.root}" "%1"`;
     const plan = planLogin(store, {
-      io: fakeIo(command),
+      io: fakeIo({ parameters: command }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -475,13 +377,13 @@ describe('planLogin', () => {
 
     expect(plan.blockers).toEqual([]);
     expect(plan.armed).toBe(command);
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'command' });
+    expect(plan.previous).toBe(PLAIN_PARAMETERS);
   });
 
   it('refuses the installed app itself', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       // The same trick paths.test.ts uses to make a synthetic store answer as
       // the default installation: CLAUDE_USER_DATA_DIR is one of the paths
       // storeIdentity treats as naming it.
@@ -495,7 +397,7 @@ describe('planLogin', () => {
   });
 
   it('warns when the profile already holds a token cache', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     writeFileSync(
       store.configFile,
       JSON.stringify({
@@ -505,7 +407,7 @@ describe('planLogin', () => {
       'utf8',
     );
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -521,7 +423,7 @@ describe('planLogin', () => {
   });
 
   it('takes the spelling from a running instance of this store', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const row: ProcessRow = {
       pid: 500,
       parentPid: 9,
@@ -530,7 +432,7 @@ describe('planLogin', () => {
       commandLine: `"${EXE}" --user-data-dir="${store.root}\\"`,
     };
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: NO_ENV,
       list: () => [row],
@@ -541,9 +443,9 @@ describe('planLogin', () => {
   });
 
   it('falls back to the store root when nothing is running', () => {
-    const store = makeStore();
+    const store = makePackagedStore();
     const plan = planLogin(store, {
-      io: fakeIo(PLAIN_HANDLER),
+      io: fakeIo({ parameters: PLAIN_PARAMETERS }),
       events: [],
       env: NO_ENV,
       list: () => [],
@@ -551,6 +453,89 @@ describe('planLogin', () => {
     });
 
     expect(plan.spelling).toBe(store.root);
+    expect(plan.warnings.some((w) => w.includes('is not running'))).toBe(true);
+  });
+
+  describe('package identity', () => {
+    // A row this environment can prove is the app: under \Packages\Claude,
+    // orphaned (no parent among desktop rows) so it is picked as the main
+    // process — see isDesktopProcess/inspectDesktop in desktop.ts.
+    function runningRow(store: StoreLayout): ProcessRow {
+      return {
+        pid: 700,
+        parentPid: 1,
+        name: 'claude.exe',
+        path: EXE,
+        commandLine: `"${EXE}" --user-data-dir="${store.root}"`,
+      };
+    }
+
+    it('blocks when the running profile has no package identity', () => {
+      const store = makePackagedStore();
+      const plan = planLogin(store, {
+        io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+        events: [],
+        env: NO_ENV,
+        list: () => [runningRow(store)],
+        platform: 'win32',
+        identity: () => 'none',
+        lockfileHeld: () => true,
+      });
+
+      expect(plan.identity).toBe('none');
+      expect(plan.blockers.some((b) => b.includes('without package identity'))).toBe(true);
+    });
+
+    it('warns but proceeds when identity cannot be determined', () => {
+      const store = makePackagedStore();
+      const plan = planLogin(store, {
+        io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+        events: [],
+        env: NO_ENV,
+        list: () => [runningRow(store)],
+        platform: 'win32',
+        identity: () => 'unknown',
+        lockfileHeld: () => true,
+      });
+
+      expect(plan.identity).toBe('unknown');
+      expect(plan.blockers).toEqual([]);
+      expect(plan.warnings.some((w) => w.includes('package identity'))).toBe(true);
+    });
+
+    it('has no identity blocker or warning when the profile runs packaged', () => {
+      const store = makePackagedStore();
+      const plan = planLogin(store, {
+        io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+        events: [],
+        env: NO_ENV,
+        list: () => [runningRow(store)],
+        platform: 'win32',
+        identity: () => 'packaged',
+        lockfileHeld: () => true,
+      });
+
+      expect(plan.identity).toBe('packaged');
+      expect(plan.blockers).toEqual([]);
+      expect(plan.warnings.some((w) => w.includes('package identity'))).toBe(false);
+    });
+
+    it('skips the identity check entirely when the profile is not running', () => {
+      const store = makePackagedStore();
+      const plan = planLogin(store, {
+        io: fakeIo({ parameters: PLAIN_PARAMETERS }),
+        events: [],
+        env: NO_ENV,
+        list: () => [],
+        platform: 'win32',
+        identity: () => {
+          throw new Error('not reached: nothing is running to ask about');
+        },
+      });
+
+      expect(plan.identity).toBeUndefined();
+      expect(plan.blockers).toEqual([]);
+    });
   });
 });
 
@@ -564,8 +549,9 @@ describe('runLogin', () => {
       signedInBefore: false,
       spelling: 'D:\\Claude-Work',
       exe: EXE,
-      previous: { kind: 'command', value: PLAIN_HANDLER },
-      armed: `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`,
+      key: OPEN_KEY,
+      previous: PLAIN_PARAMETERS,
+      armed: '--user-data-dir=D:\\Claude-Work "%1"',
       blockers: [],
       warnings: [],
       ...overrides,
@@ -576,7 +562,7 @@ describe('runLogin', () => {
     const plan = basePlan({ blockers: ['nope'] });
     await expect(
       runLogin(plan, {
-        io: fakeIo(undefined),
+        io: fakeIo(),
         append: () => {},
         readState: () => ({ hasTokenCache: false }),
       }),
@@ -586,7 +572,7 @@ describe('runLogin', () => {
   it('appends handler_armed before writing the key', async () => {
     const log: string[] = [];
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER, log);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS, log });
 
     await runLogin(plan, {
       io,
@@ -597,13 +583,34 @@ describe('runLogin', () => {
     });
 
     expect(log[0]).toBe('append:handler_armed');
-    expect(log[1]).toBe(`write:${plan.armed}`);
+    expect(log[1]).toBe(`write:${OPEN_KEY}:Parameters=${plan.armed}`);
+  });
+
+  it('fires onArmed once the write has landed, before the wait begins', async () => {
+    const plan = basePlan();
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
+    const order: string[] = [];
+
+    await runLogin(plan, {
+      io,
+      append: () => {},
+      readState: () => {
+        order.push('read-state');
+        return { hasTokenCache: true, accountUuid: account };
+      },
+      onArmed: () => order.push('armed'),
+      now: () => 0,
+      sleep: async () => {},
+    });
+
+    expect(order[0]).toBe('armed');
+    expect(order.slice(1)).toContain('read-state');
   });
 
   it('restores verbatim and records the account on success', async () => {
     const plan = basePlan();
     const log: string[] = [];
-    const io = fakeIo(PLAIN_HANDLER, log);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS, log });
     let calls = 0;
     const readState = () => {
       calls += 1;
@@ -621,17 +628,17 @@ describe('runLogin', () => {
     expect(result.outcome).toBe('signed-in');
     expect(result.accountAfter).toBe(account);
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(PLAIN_HANDLER);
+    expect(io.readValue(OPEN_KEY, 'Parameters').value).toBe(PLAIN_PARAMETERS);
     expect(log.filter((l) => l.startsWith('write:'))).toEqual([
-      `write:${plan.armed}`,
-      `write:${PLAIN_HANDLER}`,
+      `write:${OPEN_KEY}:Parameters=${plan.armed}`,
+      `write:${OPEN_KEY}:Parameters=${PLAIN_PARAMETERS}`,
     ]);
     expect(log.at(-1)).toBe('append:handler_restored');
   });
 
   it('restores on timeout', async () => {
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     let t = 0;
     const now = () => t;
     const sleep = async () => {
@@ -649,20 +656,18 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('timeout');
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(PLAIN_HANDLER);
+    expect(io.readValue(OPEN_KEY, 'Parameters').value).toBe(PLAIN_PARAMETERS);
   });
 
   it('keeps polling past what would have been the old default timeout when timeoutMs is absent, then succeeds', async () => {
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     let t = 0;
     const now = () => t;
     let calls = 0;
     const readState = () => {
       calls += 1;
       t += 100_000;
-      // Only succeeds once elapsed time is well past the old 300_000ms
-      // default — proof that no implicit deadline is doing the stopping.
       return calls < 5 ? { hasTokenCache: false } : { hasTokenCache: true, accountUuid: account };
     };
 
@@ -681,7 +686,7 @@ describe('runLogin', () => {
 
   it('keeps polling with no timeoutMs until aborted', async () => {
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     let t = 0;
     const now = () => t;
     const controller = new AbortController();
@@ -708,7 +713,7 @@ describe('runLogin', () => {
 
   it('fires onHeartbeat once per heartbeatMs while waiting', async () => {
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     let t = 0;
     const now = () => t;
     const heartbeats: number[] = [];
@@ -736,7 +741,7 @@ describe('runLogin', () => {
 
   it('restores when aborted', async () => {
     const plan = basePlan();
-    const io = fakeIo(PLAIN_HANDLER);
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     const controller = new AbortController();
     controller.abort();
 
@@ -751,29 +756,30 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('aborted');
     expect(result.restored).toBe(true);
-    expect(io.read().value).toBe(PLAIN_HANDLER);
+    expect(io.readValue(OPEN_KEY, 'Parameters').value).toBe(PLAIN_PARAMETERS);
   });
 
-  it('stops without writing when the handler is rewritten underneath it', async () => {
+  it('stops without writing the restore when the handler is rewritten underneath it', async () => {
     const plan = basePlan();
     const writes: string[] = [];
     let reads = 0;
     let value: string | undefined;
     const io: HandlerIo = {
-      read: () => {
+      listSubkeys: () => [PROG_ID],
+      keyExists: () => true,
+      readValue: (key, name) => {
+        if (key !== OPEN_KEY || name !== 'Parameters') return {};
         reads += 1;
         // The very next read after the arm-write is runLogin's own
         // verification that the write landed; only after that does this
-        // fixture pretend the app restarted and rewrote the key.
+        // fixture pretend the app restarted and rewrote the value.
         return { value: reads <= 1 ? value : 'rewritten-by-app' };
       },
-      levels: () => ({ class: true, shell: true, open: true, command: true }),
-      write: (next) => {
-        writes.push(next);
-        value = next;
-      },
-      remove: () => {
-        throw new Error('not reached: this plan restores by writing, not removing');
+      writeValue: (key, name, next) => {
+        if (key === OPEN_KEY && name === 'Parameters') {
+          writes.push(next);
+          value = next;
+        }
       },
     };
 
@@ -789,94 +795,18 @@ describe('runLogin', () => {
     expect(result.restored).toBe(false);
     expect(writes).toEqual([plan.armed]);
   });
-
-  it('creates the tree when arming an absent command and removes exactly what it created', async () => {
-    const io = fakeTree({ shell: false, open: false, command: false });
-    const plan = basePlan({ previous: { kind: 'absent', createdFrom: 'shell' } });
-
-    const result = await runLogin(plan, {
-      io,
-      append: () => {},
-      readState: () => ({ hasTokenCache: true, accountUuid: account }),
-      now: () => 0,
-      sleep: async () => {},
-    });
-
-    expect(result.outcome).toBe('signed-in');
-    expect(result.restored).toBe(true);
-    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
-  });
-
-  it('leaves pre-existing levels alone when only the command itself was missing', async () => {
-    const io = fakeTree({ shell: true, open: true, command: false });
-    const plan = basePlan({ previous: { kind: 'absent', createdFrom: 'command' } });
-
-    const result = await runLogin(plan, {
-      io,
-      append: () => {},
-      readState: () => ({ hasTokenCache: true, accountUuid: account }),
-      now: () => 0,
-      sleep: async () => {},
-    });
-
-    expect(result.restored).toBe(true);
-    expect(io.levels()).toEqual({ class: true, shell: true, open: true, command: false });
-  });
-
-  it('runs end to end from a planLogin-produced plan in the absent case, not a hand-built one', async () => {
-    // The regression this whole package guards against was in planLogin's
-    // output, not in runLogin — a hand-built basePlan always had `armed` set,
-    // so it could never have caught it. This drives runLogin off the real
-    // plan(), the same object the CLI itself passes through.
-    const store = makeStore();
-    const log: string[] = [];
-    const io = fakeTree({ shell: false, open: false, command: false }, undefined, log);
-    const row: ProcessRow = {
-      pid: 700,
-      parentPid: 1,
-      name: 'claude.exe',
-      path: EXE,
-      commandLine: `"${EXE}"`,
-    };
-    const plan = planLogin(store, {
-      io,
-      events: [],
-      env: NO_ENV,
-      list: () => [row],
-      platform: 'win32',
-    });
-
-    expect(plan.blockers).toEqual([]);
-    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
-    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
-
-    const result = await runLogin(plan, {
-      io,
-      append: fakeAppend(log),
-      readState: () => ({ hasTokenCache: true, accountUuid: account }),
-      now: () => 0,
-      sleep: async () => {},
-    });
-
-    expect(result.outcome).toBe('signed-in');
-    expect(result.restored).toBe(true);
-    expect(log.filter((l) => l.startsWith('write:'))).toEqual([`write:${plan.armed}`]);
-    expect(log).toContain('remove:shell');
-    // Removing what it created leaves the tree exactly as it found it.
-    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
-  });
 });
 
 describe('restoreHandler', () => {
-  it('says there is nothing to restore when the handler carries no --user-data-dir', () => {
-    const io = fakeIo(PLAIN_HANDLER);
+  it('says there is nothing to restore when no login is in flight', () => {
+    const io = fakeIo({ parameters: PLAIN_PARAMETERS });
     const result = restoreHandler(project([]), io, () => {});
 
     expect(result).toEqual({ ok: false, message: expect.stringContaining('nothing to restore') });
   });
 
   it('restores from the ledger record', () => {
-    const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
+    const command = '--user-data-dir=D:\\Claude-Work "%1"';
     const events: LedgerEvent[] = [
       {
         v: 1,
@@ -884,25 +814,25 @@ describe('restoreHandler', () => {
         toolVersion: '0.0.0-test',
         kind: 'handler_armed',
         root: 'D:\\Claude-Work',
-        previous: PLAIN_HANDLER,
+        key: OPEN_KEY,
+        previous: PLAIN_PARAMETERS,
         exe: EXE,
         armed: command,
       },
     ];
-    const io = fakeIo(command);
+    const io = fakeIo({ parameters: command });
     const appended: LedgerEventInput[] = [];
 
     const result = restoreHandler(project(events), io, (e) => appended.push(e));
 
     expect(result.ok).toBe(true);
-    expect(io.read().value).toBe(PLAIN_HANDLER);
+    expect(io.readValue(OPEN_KEY, 'Parameters').value).toBe(PLAIN_PARAMETERS);
     expect(appended).toEqual([
       { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
     ]);
   });
 
-  it('removes the created level when the ledger recorded createdFrom', () => {
-    const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
+  it('reports failure when the write does not read back as expected', () => {
     const events: LedgerEvent[] = [
       {
         v: 1,
@@ -910,49 +840,55 @@ describe('restoreHandler', () => {
         toolVersion: '0.0.0-test',
         kind: 'handler_armed',
         root: 'D:\\Claude-Work',
-        createdFrom: 'shell',
+        key: OPEN_KEY,
+        previous: PLAIN_PARAMETERS,
         exe: EXE,
-        armed: command,
+        armed: '--user-data-dir=D:\\Claude-Work "%1"',
       },
     ];
-    const io = fakeTree({ shell: true, open: true, command: true }, command);
+    // A write that silently does nothing — the read-back never matches.
+    const io: HandlerIo = {
+      listSubkeys: () => [PROG_ID],
+      keyExists: () => true,
+      readValue: () => ({ value: 'stuck' }),
+      writeValue: () => {},
+    };
     const appended: LedgerEventInput[] = [];
 
     const result = restoreHandler(project(events), io, (e) => appended.push(e));
 
-    expect(result.ok).toBe(true);
-    expect(result.message).toContain('removed shell');
-    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('could not put the handler back');
     expect(appended).toEqual([
-      { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
-    ]);
-  });
-
-  it('deletes the command when the ledger has no record but it still carries --user-data-dir', () => {
-    const command = `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`;
-    const io = fakeIo(command);
-    const appended: LedgerEventInput[] = [];
-
-    const result = restoreHandler(project([]), io, (e) => appended.push(e));
-
-    expect(result.ok).toBe(true);
-    expect(result.message).toContain('deleted');
-    expect(io.read().value).toBeUndefined();
-    expect(appended).toEqual([
-      { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
+      { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: false },
     ]);
   });
 });
 
 describe('inspectHandler', () => {
   it('reports the current parsed handler and nothing armed', () => {
-    const state = inspectHandler(project([]), fakeIo(PLAIN_HANDLER), NO_ENV);
-    expect(state.current).toEqual({ exe: EXE, raw: PLAIN_HANDLER });
+    const store = makePackagedStore();
+    const state = inspectHandler(
+      store,
+      project([]),
+      fakeIo({ parameters: PLAIN_PARAMETERS }),
+      NO_ENV,
+    );
+    expect(state.key).toBe(OPEN_KEY);
+    expect(state.current).toEqual({ raw: PLAIN_PARAMETERS });
     expect(state.armed).toBeUndefined();
     expect(state.virtualizedView).toBe(false);
   });
 
+  it('reports the routed userDataDir when Parameters carries one', () => {
+    const store = makePackagedStore();
+    const command = `--user-data-dir="${store.root}" "%1"`;
+    const state = inspectHandler(store, project([]), fakeIo({ parameters: command }), NO_ENV);
+    expect(state.current).toEqual({ raw: command, userDataDir: store.root });
+  });
+
   it('reports what the ledger says is armed', () => {
+    const store = makePackagedStore();
     const events: LedgerEvent[] = [
       {
         v: 1,
@@ -960,23 +896,32 @@ describe('inspectHandler', () => {
         toolVersion: '0.0.0-test',
         kind: 'handler_armed',
         root: 'D:\\Claude-Work',
-        previous: PLAIN_HANDLER,
+        key: OPEN_KEY,
+        previous: PLAIN_PARAMETERS,
         exe: EXE,
-        armed: `"${EXE}" --user-data-dir=D:\\Claude-Work "%1"`,
+        armed: '--user-data-dir=D:\\Claude-Work "%1"',
       },
     ];
-    const state = inspectHandler(project(events), fakeIo(undefined), NO_ENV);
+    const state = inspectHandler(store, project(events), fakeIo(), NO_ENV);
     expect(state.armed).toEqual({
       root: 'D:\\Claude-Work',
-      previous: PLAIN_HANDLER,
+      key: OPEN_KEY,
+      previous: PLAIN_PARAMETERS,
       at: 1_700_000_000_000,
     });
   });
 
   it('flags a virtualized view from inside the app container', () => {
-    const state = inspectHandler(project([]), fakeIo(PLAIN_HANDLER), {
+    const store = makePackagedStore();
+    const state = inspectHandler(store, project([]), fakeIo({ parameters: PLAIN_PARAMETERS }), {
       CLAUDE_CODE_HOST_SESSION_ID: 'session-1',
     });
     expect(state.virtualizedView).toBe(true);
+  });
+
+  it('reports no key when this install has no matching ProgID', () => {
+    const state = inspectHandler(makeStore(), project([]), fakeIo(), NO_ENV);
+    expect(state.key).toBeUndefined();
+    expect(state.current).toBeUndefined();
   });
 });

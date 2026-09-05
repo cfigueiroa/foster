@@ -516,6 +516,107 @@ export const execFileSyncRunner: CommandRunner = (exe, args, options) => {
 };
 
 /**
+ * Whether one process is running with MSIX package identity.
+ *
+ * Measured 05/09/2026: a `claude://` callback launched by a browser is a
+ * packaged process, and it forwards its argv to an existing instance only when
+ * that instance's single-instance lock was itself created *with* package
+ * identity — a profile started by running `Claude.exe` directly (no identity)
+ * never sees the callback's argv at all, and ends up a second, broken instance
+ * on the same userData. `app login` needs to know which case a running profile
+ * is in before it arms anything.
+ *
+ * There is no plain way to ask "does pid N have package identity" from a
+ * script: the answer lives behind the `GetPackageFullName` Win32 call, which
+ * this reaches through a small P/Invoke shim run once in a disposable
+ * PowerShell process. `'none'` is the documented `APPMODEL_ERROR_NO_PACKAGE`
+ * return; anything else this could not establish — no PowerShell, the pid
+ * gone, a permissions error opening the handle — comes back `'unknown'`
+ * rather than a guess, exactly like every other reader in this file.
+ */
+export type PackageIdentity = 'packaged' | 'none' | 'unknown';
+
+const APPMODEL_ERROR_NO_PACKAGE = 15700;
+
+const PACKAGE_IDENTITY_SCRIPT = (pid: number): string =>
+  "$ErrorActionPreference='Stop'; try {" +
+  "Add-Type -Namespace FosterNative -Name Pkg -MemberDefinition '" +
+  '[DllImport("kernel32.dll")] public static extern System.IntPtr OpenProcess(uint a, bool b, uint pid);' +
+  '[DllImport("kernel32.dll")] public static extern int GetPackageFullName(System.IntPtr h, ref uint len, System.Text.StringBuilder name);' +
+  '[DllImport("kernel32.dll")] public static extern bool CloseHandle(System.IntPtr h);\'; ' +
+  `$h = [FosterNative.Pkg]::OpenProcess(0x1000, $false, ${pid}); ` +
+  'if ($h -eq [System.IntPtr]::Zero) { Write-Output unknown; exit }; ' +
+  '$len = 0; $sb = New-Object System.Text.StringBuilder; ' +
+  '$rc = [FosterNative.Pkg]::GetPackageFullName($h, [ref]$len, $sb); ' +
+  `if ($rc -eq ${APPMODEL_ERROR_NO_PACKAGE}) { Write-Output none } ` +
+  'elseif ($len -gt 0) { $sb = New-Object System.Text.StringBuilder($len); ' +
+  '$rc2 = [FosterNative.Pkg]::GetPackageFullName($h, [ref]$len, $sb); ' +
+  'Write-Output ($(if ($rc2 -eq 0) { "packaged" } else { "unknown" })) } ' +
+  'else { Write-Output unknown }; ' +
+  '[FosterNative.Pkg]::CloseHandle($h) | Out-Null ' +
+  '} catch { Write-Output unknown }';
+
+export function processPackageIdentity(
+  pid: number,
+  env: NodeJS.ProcessEnv = process.env,
+): PackageIdentity {
+  if (process.platform !== 'win32') return 'unknown';
+  try {
+    const exe = systemExePath(POWERSHELL_RELATIVE, env);
+    const out = execFileSync(
+      exe,
+      ['-NoProfile', '-NonInteractive', '-Command', PACKAGE_IDENTITY_SCRIPT(pid)],
+      { windowsHide: true, stdio: 'pipe', encoding: 'utf8', timeout: TIMEOUT_MS },
+    ).trim();
+    return out === 'packaged' || out === 'none' ? out : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Whether one process currently has a visible main window.
+ *
+ * Measured 05/09/2026: a profile closed with `app quit --terminate` and
+ * reopened by a plain `Claude.exe` launch (no package identity — see
+ * `processPackageIdentity` above) came back signed in, but hidden:
+ * `window_visible_ms` was never observed and `MainWindowHandle` was `0`, the
+ * same "closed to tray" state carried across the restart. A *second* launch
+ * with the same `--user-data-dir` — second-instance forwarding finding the
+ * lock the first launch created — is what actually raised the window; waiting
+ * longer on the first launch never did. `startDesktop` uses this to decide
+ * whether that second nudge is needed.
+ *
+ * `undefined` means this could not be established (no working PowerShell, the
+ * pid already gone) — never a guess, exactly like `processPackageIdentity`.
+ */
+export function mainWindowVisible(
+  pid: number,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean | undefined {
+  if (process.platform !== 'win32') return undefined;
+  try {
+    const exe = systemExePath(POWERSHELL_RELATIVE, env);
+    const script =
+      "$ErrorActionPreference='Stop'; try { " +
+      `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
+      'if ($p.MainWindowHandle -ne 0) { Write-Output visible } else { Write-Output hidden } ' +
+      '} catch { Write-Output unknown }';
+    const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+      windowsHide: true,
+      stdio: 'pipe',
+      encoding: 'utf8',
+      timeout: TIMEOUT_MS,
+    }).trim();
+    if (out === 'visible') return true;
+    if (out === 'hidden') return false;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Both the desktop app and the Code CLI are called claude.exe. Only the path
  * tells them apart, and only the CLI lives under a claude-code directory.
  *

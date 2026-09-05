@@ -247,18 +247,42 @@ than judging a handler it cannot trust.
 
 ## Signing a second profile in
 
-`foster --store <profile> app login --yes` creates only the levels of `HKCU\Software\Classes\
-claude\shell\open\command` that do not already exist — outside the container that is usually all
-of `shell`, `shell\open` and `shell\open\command` — points the command at `<profile>` for one
-sign-in, and undoes exactly what it changed once the sign-in is detected, the wait is cut short, or
-it is cancelled: a real previous command is written back verbatim, and a level this run created is
-deleted rather than guessed back into some rebuilt shape. It waits until the sign-in lands or
+Measured 05/09/2026, superseding the classic-key hypothesis above: what actually decides where a
+`claude://` callback lands is a **packaged ProgID** — `HKCU\Software\Classes\AppX<hash>`, the key
+Windows itself created when it registered the package — never the classic
+`…\claude\shell\open\command` key, which `foster` no longer touches at all. The ProgID's `Shell\open`
+subkey carries `AppUserModelID` (which package this is) and `Parameters`, the argument string
+appended to the package's own executable at activation time, normally just `"%1"`.
+`foster --store <profile> app login --yes` finds that key (`findProtocolProgId`), points
+`Parameters` at `--user-data-dir=<profile> "%1"` for one sign-in, and puts back the exact value read
+before it wrote — **the one registry VALUE this ever touches, never a key, never a level**: the key
+always already exists, so there is nothing to create or delete. It waits until the sign-in lands or
 Ctrl+C; `--timeout <seconds>` caps it. It needs `--yes` — without it, it only prints what it would
 do. It refuses outright from inside Claude Desktop's own container (see above) — a change there is
-invisible to the browser regardless of what follows. **An agent must never run this**: it writes a
-machine-wide registry subtree and drives a sign-in only the human at the keyboard can finish in the
-browser. `foster app login --restore --yes` is the way out of a login left routed by a crash or a
-stray Ctrl+C; `foster doctor` warns when the key is still routed to a profile.
+invisible to the browser regardless of what follows.
+
+A second, independent fact the same measurement uncovered: the callback process only _finds_ the
+profile it means to forward to when that profile's own instance was itself started **with package
+identity** (`Invoke-CommandInDesktopPackage`, not a bare `Claude.exe` child process) — `app start`
+and `app login` both start a profile this way now on a real MSIX install, falling back to a direct
+launch only when the cmdlet is missing or fails, and say which one won. `app login` refuses when the
+running profile has no package identity rather than arming a handler whose callback cannot land;
+`--restart-profile` closes it and starts it again the right way in one step. Separately, a profile
+that comes back from a restart can come up with its window hidden (signed in, nothing visible); both
+`app start` and `app login` give it a few seconds and, if it has not appeared, send one more launch
+to raise it.
+
+Edge and some Chrome profiles hold a standing permission to auto-launch `claude://` from claude.ai
+with no dialog — so `app login` arms `Parameters` _before_ telling the user to click "Continue with
+Google", never after, and its own instructions say an auto-opened Claude window is expected, not a
+mistake.
+
+**An agent must never run this**: it writes a machine-wide registry value and drives a sign-in only
+the human at the keyboard can finish in the browser. **Never print a `claude://` URL: it carries a
+single-use code** — not in `app login`'s own output, not in `app link`, not anywhere a log or a
+transcript could keep it. `foster app login --restore --yes` is the way out of a login left routed
+by a crash or a stray Ctrl+C; `foster doctor` reports the ProgID found and warns when `Parameters`
+is still routed to a profile.
 
 ## Before pushing
 

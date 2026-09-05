@@ -498,55 +498,67 @@ starts, populates its own store, takes its own instance lock, and runs beside th
 installation without disturbing it.
 
 Signing in is where it gets awkward, and it is worth understanding why rather than giving up at the
-symptom. Claude Desktop ships as an MSIX package, and measured on 2026-09-05, its manifest routes
-`claude://` through **package activation** — not the classic per-user registry key you might expect
-to find and edit. That key still exists, but it means two different things depending on where you
-read it from: inside the app's own container (including any terminal the app itself hosts) it holds
-the app's executable, a copy MSIX's registry virtualization keeps private to the package and that a
-browser running outside the container never sees; outside the container — an ordinary terminal —
-there is normally no such key at all, only the bare `claude` class marker. Either way, the browser's
-OAuth callback lands on package activation, which always starts an instance on the **default**
-`userData`. The profile never receives its own callback and sits on the sign-in screen forever.
+symptom. Claude Desktop ships as an MSIX package, and Windows resolves the `claude://` protocol
+through **package activation**, not the classic per-user registry key you might expect to find and
+edit — that key still exists, but it is MSIX registry virtualization's private copy, visible only
+from inside the app's own container, and a browser running outside the container never sees it. So
+the browser's OAuth callback always lands on package activation, which starts an instance on
+whichever `userData` the packaged registration currently names — normally the default installation.
+The profile never receives its own callback and sits on the sign-in screen forever.
 
-The recommended path is `foster app login`, run from an ordinary terminal — it refuses from inside
-the app's own container, because a change made there is invisible to the browser regardless of what
-follows:
+**Measured on 05/09/2026 (Claude Desktop 1.46388.2, foster 0.39.0): two Claude Desktop windows
+signed into two accounts, the second through the ordinary Google flow.** Three facts made it work:
+
+- What actually decides the destination is a **packaged ProgID** —
+  `HKCU\Software\Classes\AppX<hash>`, the key Windows creates when it registers the package for
+  `claude://` — not the classic `…\claude\shell\open\command` key. Its `Shell\open` subkey carries
+  `AppUserModelID` (which package this is) and `Parameters`, the argument string appended to the
+  package's own executable the moment a link is activated — normally just `"%1"`.
+- `Parameters` is the user's own registry value (`FullControl`, no elevation needed), so pointing it
+  at `--user-data-dir=<profile> "%1"` for the length of one sign-in routes the very next callback to
+  that profile. This is the one registry **value** `foster` ever writes — never a key, never a
+  level — restored verbatim once the sign-in lands, times out, or is cancelled.
+- The callback process only _finds_ the profile it is meant to forward to when that profile's own
+  instance was itself started **with package identity** (`Invoke-CommandInDesktopPackage`, not a
+  bare `Claude.exe` child process). A profile started by running the executable directly never sees
+  the callback at all and ends up a second, broken instance on the same `userData`. `foster app
+start` and `foster app login` both start a profile this way now, falling back to a direct launch
+  only when the cmdlet is missing or fails.
 
 ```bash
 foster --store work app login --yes
 ```
 
-A classic `HKCU\Software\Classes\claude\shell\open\command` key created in the _real_ hive is
-reported to take precedence over package activation for a `claude:` URL
-(anthropics/claude-code#31476) — that is the hypothesis `app login` exists to test, not yet
-confirmed sign-in-to-sign-in. It creates only the levels of that key which do not already exist —
-usually all of `shell`, `shell\open` and `shell\open\command`, since outside the container none of
-them normally are — points the command at the named profile for the length of one sign-in — it waits until the sign-in
-lands or Ctrl+C; `--timeout <seconds>` caps it — and records what it is about to create or overwrite
-in the ledger _before_ touching anything, so the key can always be put back (or the levels it
-created removed) even if this process dies mid-wait. Success is detected without reading the
-callback at all: the profile's own token cache appears, or its account changes, either of which ends
-the wait early and undoes the change on the spot. There is one hazard worth knowing before you run
-it — if any Claude window restarts while the login is armed, the app rewrites the command itself and
-the sign-in lands in the default app instead of the profile that asked for it. `foster app login`
-watches for exactly that and says so rather than overwriting what the app just wrote; a login left
+**Arm first, then sign in.** `app login` only prints the instruction to click "Continue with
+Google" once the handler is actually routed — not a moment before — because Edge and some Chrome
+profiles hold a standing permission to auto-launch `claude://` from claude.ai with no dialog in
+between, so the routing has to already be in place before the sign-in can possibly fire the
+callback. If the browser opens Claude by itself the instant you start the Google flow, that is
+expected: the link is routed. Success is detected without reading the callback at all — the
+profile's own token cache appears, or its account changes, either of which ends the wait early and
+restores `Parameters` on the spot; `--timeout <seconds>` caps the wait instead of leaving it open
+until Ctrl+C. If the profile is running without package identity, `app login` refuses rather than
+arming a handler whose callback cannot land — `--restart-profile` closes it and starts it again the
+right way in one step. There is one hazard worth knowing regardless: if any Claude window restarts
+while the login is armed (an app update or repair), the packaged registration gets rewritten out
+from under it, and `app login` says so rather than overwriting what the app just wrote. A login left
 routed by a crash, or by Ctrl+C reaching something other than this process, is what
-`foster app login --restore --yes` and the warning in `foster doctor` are for. This is verified
-against the registry layout on one machine; whether the real hive actually wins over package
-activation, and the sign-in itself, both still need measuring.
+`foster app login --restore --yes` and the warning in `foster doctor` are for.
 
 For the cases `app login` cannot change the routing for — an installed app that already owns the
-handler, or a machine where the registry key cannot be touched — the manual delivery below is
-the fallback. But look at what that registration actually is:
+handler, or a machine where the registry value cannot be touched — manual delivery and the e-mail
+code are the fallbacks. Manual delivery works off what the packaged registration actually is:
 
 ```
-HKCU\Software\Classes\claude\shell\open\command
-  "…\WindowsApps\Claude_…\app\Claude.exe" "%1"
+HKCU\Software\Classes\AppX<hash>\Shell\open
+  AppUserModelID = Claude_<publisher>!Claude
+  Parameters     = "%1"
 ```
 
-A plain executable with the URL as an argument — no package activation, no broker. And a second
-invocation carrying the same `--user-data-dir` loses that profile's single-instance lock and
-forwards its argv to the instance holding it. So the callback can simply be delivered by hand:
+Just an argument string appended to the package's own executable at activation — no broker beyond
+that. And a second invocation carrying the same `--user-data-dir` finds that profile's
+single-instance lock and forwards its argv to the instance holding it (again, only when that
+instance was itself started with package identity). So the callback can simply be delivered by hand:
 
 ```powershell
 & "…\app\Claude.exe" --user-data-dir="<profile>" "claude://<the callback URL>"
@@ -563,11 +575,13 @@ authorization code is single-use and short-lived, so do it promptly.
 foster --store "D:\Claude-Work" app link "claude://<the callback URL>"
 ```
 
-It refuses anything that is not a `claude://` link, and never prints or records the URL.
+It refuses anything that is not a `claude://` link, and never prints or records the URL — the same
+rule `app login` follows: a single-use sign-in code has no business in foster's own output.
 
-Demonstrated once, end to end: two accounts signed in simultaneously in the same Windows session,
-each in its own instance, with the default installation untouched. An account whose organization
-requires SSO will still refuse — that is the account's policy, not this mechanism.
+This has been demonstrated both ways — the browser flow above, and hand-delivering the callback URL
+— with two accounts signed in simultaneously in the same Windows session, each in its own instance,
+the default installation untouched. An account whose organization requires SSO will still refuse —
+that is the account's policy, not this mechanism.
 
 `foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
 for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
@@ -575,13 +589,18 @@ directories of every running instance so you know what to pass to `--store` — 
 once with `foster profile new|register` so you never have to retype the path (see `foster stores`
 under [Usage](#usage)).
 
-It can also start one. `foster --store <profile> app start` runs the installed executable — the one
-Windows records when it registers the `claude://` handler — with the switch that points it at that
-profile, so `app restart` works there too:
+It can also start one. `foster --store <profile> app start` prefers
+`Invoke-CommandInDesktopPackage` when the executable found is a real MSIX install — see the package
+identity fact above — falling back to running the executable directly, and says which one it used;
+`app restart` works there too:
 
 ```bash
 foster --store "D:\Claude-Work" app restart --terminate
 ```
+
+A profile that comes back from a restart can come up with its window hidden (signed in, but nothing
+visible — the "closed to tray" state carried across the relaunch); `app start` and `app login` both
+give it a few seconds to appear and, if it has not, send one more launch to raise it, and say so.
 
 Everything that inspects or closes an app is scoped to the store you name. The installed app is the
 one whose main process carries no switch; a profile is matched by its own path. And `foster` refuses
@@ -1272,19 +1291,17 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   to apply, the ledger entry only after a finished write. Starting an instance or handing it a
   link is not a write at all — `app start`, `app restart` and `app link` never touch the ledger,
   because launching a profile that already exists changes nothing foster remembers about it.
-- **One system setting is ever touched, and only for the length of one sign-in.**
-  `HKCU\Software\Classes\claude\shell\open\command` — and, when they do not already exist, its
-  parents `shell` and `shell\open` — is the only registry subtree, or setting of any kind outside
-  `~/.foster`, that `foster` ever writes. `app login` never creates the `claude` class root itself:
-  that marker belongs to Claude Desktop, and a user for whom it does not exist has never run the app
-  at all. What the run is about to overwrite or create is recorded in the ledger before it happens —
-  a verbatim command to put back, or the shallowest level that had to be created, whichever applies —
-  then undone once the sign-in lands or the wait gives up: a real previous command is written back
-  verbatim, and a level this run created is deleted, never rebuilt as a guess. `app login --restore`
-  and the warning `foster doctor` prints when the key is still routed cover the run that does not get
-  to undo it itself. It also refuses to run at all from inside Claude Desktop's own container, where
-  the registry it would read and write is MSIX's private, virtualized copy — a change there could
-  never reach the browser in the first place.
+- **One system setting is ever touched, and only for the length of one sign-in.** The `Parameters`
+  value under the packaged ProgID's `Shell\open` key (`HKCU\Software\Classes\AppX<hash>\Shell\open`)
+  is the only registry value, or setting of any kind outside `~/.foster`, that `foster` ever writes —
+  never a key, never a level: the key always already exists, because it is the app's own
+  registration. What the run is about to overwrite is recorded in the ledger, verbatim, before it
+  happens, then undone once the sign-in lands or the wait gives up — the real previous value is
+  written back exactly as read. `app login --restore` and the warning `foster doctor` prints when
+  `Parameters` is still routed cover the run that does not get to undo it itself. It also refuses to
+  run at all from inside Claude Desktop's own container, where the registry it would read and write
+  is MSIX's private, virtualized copy — a change there could never reach the browser in the first
+  place.
 - **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
   already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
   It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,

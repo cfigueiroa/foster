@@ -401,23 +401,29 @@ export interface ClientRootForgottenEvent extends BaseEvent {
  * The `claude://` handler was pointed at one profile for the duration of one
  * sign-in — see `engine/protocolHandler.ts`.
  *
+ * Measured 05/09/2026: what actually decides where `claude:` activates is a
+ * packaged ProgID's `Parameters` value, not the classic per-user command key
+ * this event used to describe (`createdFrom`, an optional `previous`) —
+ * foster no longer creates or deletes registry keys, only replaces this one
+ * existing value. `key` is the ProgID's `Shell\open` key `Parameters` lives
+ * under — it varies per install, so it travels with the event rather than
+ * being re-derived every time. `previous` is always set now: the value read
+ * back before this run touched it (normally the bare `"%1"`). `exe` is kept
+ * only for messages — arming never needs it, since `Parameters` never
+ * includes the executable — so it is optional.
+ *
  * What it deliberately does not carry is any part of the sign-in itself: no
- * URL, no code, no account. Exactly one of `previous` and `createdFrom` is
- * set, matching the two shapes the real MSIX registry can be in: `previous`
- * is the command's verbatim value when one already existed; `createdFrom`
- * names the shallowest level — `shell`, `shell\open` or `shell\open\command`
- * — that this run had to create because nothing was there yet, which is also
- * the level a restore deletes. Either way this is kept so a run interrupted
- * after this event but before `handler_restored` still tells the next one
- * what to put back — without it, an interrupted login leaves the handler
- * routed to a profile with nothing in the log saying it should be undone.
+ * URL, no code, no account. Kept so a run interrupted after this event but
+ * before `handler_restored` still tells the next one what to put back —
+ * without it, an interrupted login leaves the handler routed to a profile
+ * with nothing in the log saying it should be undone.
  */
 export interface HandlerArmedEvent extends BaseEvent {
   kind: 'handler_armed';
   root: string;
-  previous?: string;
-  createdFrom?: 'shell' | 'open' | 'command';
-  exe: string;
+  key: string;
+  previous: string;
+  exe?: string;
   armed: string;
 }
 

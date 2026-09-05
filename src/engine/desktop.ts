@@ -10,10 +10,12 @@ import {
 import { closingWindowQuits } from '../store/config.js';
 import {
   isCodeCliProcess,
+  mainWindowVisible,
   parseProcessCsv,
   partialTable,
   readProcesses,
   regExePath,
+  systemExePath,
   type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
@@ -566,12 +568,55 @@ export interface StartOptions {
    * Injectable: starting a profile takes the executable, not the app identity.
    * Receives the environment already scrubbed of `CLAUDE*` — see launchEnv.ts —
    * so a profile started from inside a hosted Code session does not inherit the
-   * markers that would make the new instance think it, too, is hosted.
+   * markers that would make the new instance think it, too, is hosted. This is
+   * the fallback used when the identity launch below is not attempted, or fails.
    */
   launchProfile?: (executable: string, root: string, env: NodeJS.ProcessEnv) => void;
+  /**
+   * Injectable: launches a profile *with* MSIX package identity, when the
+   * executable found is under `\WindowsApps\` — see the docblock below. Throws
+   * on failure (a missing `Invoke-CommandInDesktopPackage`, a PowerShell that
+   * cannot run); `startDesktop` catches that and falls back to `launchProfile`.
+   */
+  launchProfileWithIdentity?: (
+    appId: string,
+    executable: string,
+    root: string,
+    env: NodeJS.ProcessEnv,
+  ) => void;
   executable?: () => string | undefined;
   /** The environment to scrub before handing it to a launched profile. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Called once a profile has actually been launched, saying which launcher
+   * won — 'identity' or 'direct'. Never called for the installed app (started
+   * by application id, not by either launcher here).
+   */
+  onProfileLaunch?: (method: 'identity' | 'direct') => void;
+  /** Injectable: the process table, to find the started profile's main pid. */
+  list?: ProcessLister;
+  /**
+   * Injectable: whether a pid's main window is currently visible — see
+   * `mainWindowVisible` in util/processes.ts. `undefined` means this could not
+   * be established.
+   */
+  windowVisible?: (pid: number, env: NodeJS.ProcessEnv) => boolean | undefined;
+  /** How long to give the window to appear before sending the raising relaunch. */
+  windowCheckTimeoutMs?: number;
+  windowCheckStepMs?: number;
+  /**
+   * Called when a profile came up with its window hidden and a second launch
+   * was sent to raise it — see the docblock on `mainWindowVisible`.
+   */
+  onWindowRaised?: () => void;
+  /**
+   * Injectable: whether this store's lockfile is currently held. Real
+   * Electron single-instance locking cannot be reproduced by a plain
+   * `writeFileSync` in a test (renaming an unlocked file to itself always
+   * succeeds), so tests that need `startDesktop` to see a profile as already
+   * running inject this rather than faking the file.
+   */
+  lockfileHeld?: (store: StoreLayout) => boolean;
 }
 
 /**
@@ -583,8 +628,30 @@ export interface StartOptions {
  *
  * The installed app is activated by its application id, which is what Windows
  * does from the Start menu. A profile has no identity of its own — it is the same
- * application pointed at another `userData` — so it is started by running the
- * executable with the switch that relocates it.
+ * application pointed at another `userData`.
+ *
+ * Measured 05/09/2026: which way a profile is *started* matters for signing it
+ * in later. A `claude://` callback launched by the browser is itself a
+ * packaged process, and it only finds an existing profile instance — to
+ * forward its argv to — when that instance's own single-instance lock was
+ * created *with* package identity. A profile started by running `Claude.exe`
+ * directly never sees the callback at all and ends up a second, broken
+ * instance on the same userData. So when the executable found lives under
+ * `\WindowsApps\` (a real MSIX install), starting a profile first tries
+ * `Invoke-CommandInDesktopPackage` — the documented way to run a packaged
+ * executable with identity but pointed at different arguments — and only
+ * falls back to running the executable directly when that cmdlet is missing
+ * or fails. See `engine/protocolHandler.ts` for the sign-in side of this.
+ *
+ * Measured 05/09/2026, separately: a profile closed with `app quit
+ * --terminate` and reopened by a plain launch (no package identity) came back
+ * signed in but with its window hidden (`MainWindowHandle` 0) — the "closed to
+ * tray" state carried across the restart. Waiting longer never raised it; a
+ * *second* launch with the same `--user-data-dir` did, by forwarding to the
+ * instance's own single-instance lock. So once a profile's lockfile is held,
+ * this gives its window up to `windowCheckTimeoutMs` to appear and, if it has
+ * not, launches it once more the same way to raise it — see
+ * `mainWindowVisible` in util/processes.ts.
  */
 export async function startDesktop(
   store: StoreLayout,
@@ -594,24 +661,69 @@ export async function startDesktop(
     timeoutMs = 60_000,
     launch = launchPackagedApp,
     launchProfile = launchProfileApp,
+    launchProfileWithIdentity = launchProfileAppWithIdentity,
     executable = desktopExecutable,
     env = process.env,
+    onProfileLaunch,
+    list = readProcesses,
+    windowVisible = mainWindowVisible,
+    windowCheckTimeoutMs = 3_000,
+    windowCheckStepMs = 500,
+    onWindowRaised,
+    lockfileHeld: heldCheck = lockfileHeld,
   } = options;
 
   const appId = packagedAppId(store);
-  if (appId) launch(appId);
-  else {
-    const exe = executable();
-    if (!exe) {
-      throw new DesktopControlError(
-        'Could not work out how to start Claude Desktop: this store is a separate profile, and the\n' +
-          'installed app was not found to start it with. Start it yourself; everything else still works.',
-      );
-    }
-    launchProfile(exe, store.root, scrubbedEnv(env));
+  if (appId) {
+    launch(appId);
+    return waitFor(() => heldCheck(store), timeoutMs, 500);
   }
 
-  return waitFor(() => lockfileHeld(store), timeoutMs, 500);
+  const exe = executable();
+  if (!exe) {
+    throw new DesktopControlError(
+      'Could not work out how to start Claude Desktop: this store is a separate profile, and the\n' +
+        'installed app was not found to start it with. Start it yourself; everything else still works.',
+    );
+  }
+
+  const identityAppId = /[\\/]WindowsApps[\\/]/i.test(exe)
+    ? appIdFromWindowsAppsPath(exe)
+    : undefined;
+  const launchOnce = (): boolean => {
+    if (identityAppId !== undefined) {
+      try {
+        launchProfileWithIdentity(identityAppId, exe, store.root, scrubbedEnv(env));
+        return true;
+      } catch {
+        // Falls through to the direct launch below.
+      }
+    }
+    launchProfile(exe, store.root, scrubbedEnv(env));
+    return false;
+  };
+
+  const usedIdentity = launchOnce();
+  onProfileLaunch?.(usedIdentity ? 'identity' : 'direct');
+
+  const holding = await waitFor(() => heldCheck(store), timeoutMs, 500);
+  if (!holding) return false;
+
+  const desktopState = inspectDesktopFor(storeIdentity(store.root, env), list, env);
+  if (desktopState.mainPid !== undefined) {
+    const mainPid = desktopState.mainPid;
+    const visible = await waitFor(
+      () => windowVisible(mainPid, env) === true,
+      windowCheckTimeoutMs,
+      windowCheckStepMs,
+    );
+    if (!visible) {
+      launchOnce();
+      onWindowRaised?.();
+    }
+  }
+
+  return true;
 }
 
 export interface DeliverOptions {
@@ -692,6 +804,56 @@ function launchProfileApp(executable: string, root: string, env: NodeJS.ProcessE
     env,
   });
   child.unref();
+}
+
+/**
+ * `<Name>_<Version>_<Architecture>[_~<ResourceId>]_<PublisherId>`, the full
+ * package name that appears in a `\WindowsApps\` path — to the Package Family
+ * Name (`<Name>_<PublisherId>`) `Invoke-CommandInDesktopPackage` actually
+ * takes. The family name drops the version and architecture, which is the
+ * whole reason it exists: it stays the same across updates, while the full
+ * name in the path does not.
+ */
+function appIdFromWindowsAppsPath(executablePath: string): string | undefined {
+  const match = /[\\/]WindowsApps[\\/]([^\\/]+)/i.exec(executablePath);
+  if (!match) return undefined;
+  const fullName = match[1]!;
+  const parts = fullName.split('_');
+  const name = parts[0];
+  const publisherId = parts.at(-1);
+  if (!name || !publisherId || parts.length < 2) return undefined;
+  return `${name}_${publisherId}!${name}`;
+}
+
+/**
+ * Starts a profile through `Invoke-CommandInDesktopPackage`, so its main
+ * process carries the same package identity the installed app's own does —
+ * see `startDesktop`'s docblock for why that is what makes the sign-in
+ * callback able to find it later. Throws on any failure (cmdlet missing,
+ * PowerShell unavailable, access denied); `startDesktop` falls back to
+ * `launchProfileApp` when it does.
+ */
+function launchProfileAppWithIdentity(
+  appId: string,
+  executable: string,
+  root: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  const [family, application] = appId.split('!');
+  if (!family || !application) {
+    throw new DesktopControlError(`not a valid application id: ${appId}`);
+  }
+  const psExe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
+  const command =
+    `Invoke-CommandInDesktopPackage -PackageFamilyName '${family}' -AppId '${application}' ` +
+    `-Command '${executable}' -Args '--user-data-dir=${root}'`;
+  execFileSync(psExe, ['-NoProfile', '-NonInteractive', '-Command', command], {
+    windowsHide: true,
+    stdio: 'pipe',
+    encoding: 'utf8',
+    env,
+    timeout: 20_000,
+  });
 }
 
 /**
