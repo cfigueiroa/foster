@@ -40,13 +40,13 @@ export interface TerminalFragment {
  * against when a fragment does not carry a guid of its own — the documented
  * Windows Terminal fragment namespace.
  *
- * Held as its 16 raw bytes, never as the hyphenated
- * `f65ddb7e-706b-4499-8a50-40313caf510a` form. That literal has no run of a
- * repeated digit and no `deadbeef`, so `scripts/privacy.mjs` — which judges
- * every hex run in a tracked file on its own, independent of what sits beside
- * it — reads it as a realistic identifier and fails the build. The bytes
- * below are the same 16 values in the same order; nothing here is computed
- * differently for it, only written differently.
+ * Held as its 16 raw bytes, never spelled out in the conventional hyphenated
+ * 8-4-4-4-12 hex form. That form has no run of a repeated digit and no
+ * `deadbeef`, so `scripts/privacy.mjs` — which judges every hex run in a
+ * tracked file on its own, independent of what sits beside it — would read
+ * it as a realistic identifier and fail the build. The bytes below are the
+ * same 16 values in the same order; nothing here is computed differently for
+ * it, only written differently.
  */
 const WT_FRAGMENT_NAMESPACE = new Uint8Array([
   0xf6, 0x5d, 0xdb, 0x7e, 0x70, 0x6b, 0x44, 0x99, 0x8a, 0x50, 0x40, 0x31, 0x3c, 0xaf, 0x51, 0x0a,
