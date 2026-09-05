@@ -13,6 +13,7 @@ import {
   WRITES_DISABLED,
   type AgentToolContext,
 } from '../src/agent/tools.js';
+import { SYSTEM_PROMPT } from '../src/agent/run.js';
 import { AppRunningError } from '../src/engine/safety.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, project } from '../src/ledger/project.js';
@@ -371,6 +372,15 @@ describe('resume_headless', () => {
     expect(() => resumeHeadless(ctx, { cliSessionId: 'not; an id', prompt: 'hi' })).toThrow(
       /does not look like/,
     );
+  });
+});
+
+describe('SYSTEM_PROMPT fence around launching an account', () => {
+  it('names the four command families the model must never run through the shell', () => {
+    expect(SYSTEM_PROMPT).toContain('foster profile open');
+    expect(SYSTEM_PROMPT).toContain('foster client open');
+    expect(SYSTEM_PROMPT).toContain('foster profile new|register|forget');
+    expect(SYSTEM_PROMPT).toContain('foster client register|forget');
   });
 });
 

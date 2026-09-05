@@ -1,9 +1,9 @@
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { comparablePath, samePath } from '../domain/paths.js';
-import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
-import { configDirCandidates, inUseConfigDir } from './configDirs.js';
+import { comparablePath, directoryKey, samePath } from '../domain/paths.js';
+import { fileExists } from '../util/fs.js';
+import { configDirCandidates, inUseConfigDir, looksLikeClient } from './configDirs.js';
 import { planName, type CachedIdentity } from './identity.js';
 import { liveSessions, writerAlive, type WriterCheck } from './liveSessions.js';
 import { indexTranscripts } from './transcripts.js';
@@ -41,20 +41,40 @@ export interface ClaudeClient {
   lastUsedAt?: number;
   /** Live `claude` processes registered in this client right now. */
   live: number;
+  /**
+   * What this names, when the directory itself is a junction to elsewhere —
+   * `~/.claude-frota -> ~/.claude-contas/llm02`, measured. The junction is
+   * still `configDir`: it is the path anything pointed at it would open. This
+   * is only ever set from the directory's own filesystem entry, never from
+   * folding two enumerated candidates together.
+   */
+  linkTarget?: string;
 }
 
 /**
  * Every client on the machine, the default first.
  *
- * The candidates are the shared enumeration's; what is asked of one here is
- * whether it is a client at all, and then what it says for itself. Two
- * spellings of one directory — `CLAUDE_CONFIG_DIR` naming the default in a
- * different capitalisation, say — are folded before reading, because a machine
- * with one client should not be told it has two.
+ * The candidates are `configDirCandidates`' plus, when the caller passes them,
+ * registered client roots (`registeredClientDirs`, `configDirs.ts`) —
+ * `registeredDirs` is always an explicit argument here, never a default that
+ * reads the ledger itself: `identify` calls this with nothing and must keep
+ * getting nothing, because a default that quietly grew to include registered
+ * roots would hand fleet credentials to `identify`'s API call without anyone
+ * asking for that. See `tests/clients.test.ts` for the guard.
+ *
+ * Folded by `directoryKey`, not by comparing path strings: a junction and its
+ * target are two spellings of one directory to the filesystem, and a machine
+ * with one client should not be told it has two just because one candidate
+ * arrived via `configDirCandidates`' sibling scan and the other via a
+ * registered container's children. `configDirCandidates` is read first, so a
+ * junction sibling wins the row and carries its target in `linkTarget`; the
+ * container child that duplicates it is folded away silently, its identity
+ * already shown through the link.
  */
 export function listClients(
   env: NodeJS.ProcessEnv = process.env,
   extra: string[] = [],
+  registeredDirs: string[] = [],
   alive: WriterCheck = writerAlive,
   home: string = homedir(),
 ): ClaudeClient[] {
@@ -63,8 +83,8 @@ export function listClients(
 
   const seen = new Set<string>();
   const clients: ClaudeClient[] = [];
-  for (const dir of configDirCandidates(env, extra, home)) {
-    const key = comparablePath(dir);
+  for (const dir of [...configDirCandidates(env, extra, home), ...registeredDirs]) {
+    const key = directoryKey(dir) ?? comparablePath(dir);
     if (seen.has(key)) continue;
     seen.add(key);
     if (!looksLikeClient(dir)) continue;
@@ -77,23 +97,28 @@ export function listClients(
 }
 
 /**
- * Whether a directory is a client at all.
+ * What a client directory names, when the directory itself is a junction.
  *
- * Inspection, not naming, as everywhere else — but the evidence accepted is
- * wider than the transcript scan's, because the question is wider: a client
- * that has never held a conversation is still a client. Any artefact the CLI
- * itself leaves counts. An empty directory counts too: that is what a client
- * looks like between `mkdir` and its first run, and refusing to list it would
- * answer "where is the client I just created?" with silence. What does not
- * count is a directory holding only unrelated files — a `.claude-notes` full
- * of markdown is somebody's folder, not an account.
+ * Reading through it — `.claude.json`, `projects/`, `sessions/` — already
+ * reaches the target transparently, so identity and counts need no separate
+ * target-aware path; only the display needs to know a link is there at all,
+ * and what it names.
  */
-const CLIENT_MARKS = ['.claude.json', '.credentials.json', 'settings.json', 'projects', 'sessions'];
+function readLinkTarget(dir: string): string | undefined {
+  let stats;
+  try {
+    stats = lstatSync(dir);
+  } catch {
+    return undefined;
+  }
+  if (!stats.isSymbolicLink()) return undefined;
 
-function looksLikeClient(dir: string): boolean {
-  if (!isDirectory(dir)) return false;
-  const entries = safeReaddir(dir);
-  return entries.length === 0 || entries.some((entry) => CLIENT_MARKS.includes(entry));
+  try {
+    // Windows hands back the verbatim \\?\ form; not part of any path anyone typed.
+    return readlinkSync(dir).replace(/^\\\\\?\\/, '');
+  } catch {
+    return undefined;
+  }
 }
 
 function readClient(
@@ -104,6 +129,7 @@ function readClient(
   const transcripts = indexTranscripts(path.join(dir, 'projects'));
   const lastUsedAt = newestMtime(transcripts.values());
   const identity = readClientIdentity(dir, isDefault, ctx.home);
+  const linkTarget = readLinkTarget(dir);
 
   return {
     configDir: dir,
@@ -114,6 +140,7 @@ function readClient(
     conversations: transcripts.size,
     ...(lastUsedAt !== undefined ? { lastUsedAt } : {}),
     live: liveSessions([path.join(dir, 'sessions')], ctx.alive).length,
+    ...(linkTarget ? { linkTarget } : {}),
   };
 }
 

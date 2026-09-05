@@ -3,6 +3,7 @@ import type { StoreLayout } from '../domain/types.js';
 import {
   candidateStoreRoots,
   comparableUserDataDir,
+  layoutFor,
   storeHoldsSession,
   storeIdentity,
   type StoreIdentity,
@@ -10,12 +11,17 @@ import {
 import { closingWindowQuits } from '../store/config.js';
 import {
   isCodeCliProcess,
+  mainWindowVisible,
   parseProcessCsv,
+  partialTable,
   readProcesses,
+  regExePath,
+  systemExePath,
   type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
 import { lockfileHeld } from './lockfile.js';
+import { scrubbedEnv } from './launchEnv.js';
 
 export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
 
@@ -48,11 +54,64 @@ export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
  * killed it and left the real app running to report "still running". Requiring
  * proof costs at most a manual restart when the app's own path is unreadable;
  * the other way round ends someone else's process.
+ *
+ * "Not the CLI" alone is not enough, either. A standalone `claude.exe` — a
+ * `~/.local/bin/claude.exe` run from a terminal, never installed as the app at
+ * all — is not under `\claude-code\` and so passed every check above, which is
+ * exactly the failure this function exists to close: with the app closed, a
+ * machine carrying a dozen such CLIs turned every one of them into an orphaned
+ * `desktop` row, and the tie-break in `inspectDesktop` handed `taskkill /F /T`
+ * whichever was oldest. So absence of proof that a row is the CLI no longer
+ * qualifies it; presence of proof that it is the app does. Two are cheap and
+ * available without spawning anything new: its path sits under a store root
+ * this environment already knows about (`candidateStoreRoots`, or the MSIX
+ * package directory itself — a fresh install without a `claude-code-sessions`
+ * folder yet still lives under `\Packages\Claude...`), or it has at least one
+ * child carrying `--type=`, which only Electron's own helpers ever do. Without
+ * either, the row is a stranger and stays out of `DesktopState` — same rule
+ * `util/processes.ts` already argues in prose for the CLI side of this line.
  */
-function isDesktopProcess(row: ProcessRow): boolean {
+function isDesktopProcess(row: ProcessRow, rows: ProcessRow[], env: NodeJS.ProcessEnv): boolean {
   if (row.name.toLowerCase() !== 'claude.exe') return false;
   if (row.path === '') return false;
-  return !isCodeCliProcess(row);
+  if (isCodeCliProcess(row)) return false;
+  return hasProofOfBeingTheApp(row, rows, env);
+}
+
+/** A path under a store root this environment already knows about. */
+function underKnownStoreRoot(candidatePath: string, env: NodeJS.ProcessEnv): boolean {
+  const candidate = comparableUserDataDir(candidatePath);
+  return candidateStoreRoots(env).some((root) => {
+    const known = comparableUserDataDir(root);
+    return candidate === known || candidate.startsWith(`${known}\\`);
+  });
+}
+
+/** A path under the MSIX package directory, whoever's family folder it is. */
+function underAppPackageDirectory(candidatePath: string): boolean {
+  return /[\\/]Packages[\\/]Claude/i.test(candidatePath);
+}
+
+/** Whether some other row is a child of this one and carries an Electron `--type=`. */
+function hasTypedHelperChild(row: ProcessRow, rows: ProcessRow[]): boolean {
+  return rows.some(
+    (other) =>
+      other.parentPid === row.pid &&
+      other.name.toLowerCase() === 'claude.exe' &&
+      /--type=/.test(other.commandLine),
+  );
+}
+
+function hasProofOfBeingTheApp(
+  row: ProcessRow,
+  rows: ProcessRow[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  return (
+    underKnownStoreRoot(row.path, env) ||
+    underAppPackageDirectory(row.path) ||
+    hasTypedHelperChild(row, rows)
+  );
 }
 
 export interface DesktopState {
@@ -68,6 +127,17 @@ export interface DesktopState {
    * asking for it, part-way through whatever it was doing.
    */
   selfHosted: boolean;
+  /**
+   * Set when the process table could not tell the app from a Claude Code
+   * session; `running` is then false for want of proof, not because the app is
+   * absent. Only a partial table (tasklist: no paths, parents or command lines)
+   * can produce this — a full table always has enough evidence to say either
+   * way — and only when there is something to be uncertain about at all: a
+   * `claude.exe` row it cannot attribute. A partial table with no `claude.exe`
+   * anywhere is a certain "not running", because a name is proof enough of
+   * absence even when it proves nothing about identity.
+   */
+  uncertain?: string;
 }
 
 /**
@@ -83,6 +153,12 @@ export function runningStores(list: ProcessLister = readProcesses): string[] {
   const dirs = new Set<string>();
   for (const row of list()) {
     if (row.name.toLowerCase() !== 'claude.exe') continue;
+    // A partial row (tasklist) has no command line at all, so `--user-data-dir`
+    // can never be read out of it — skipped explicitly rather than relying on
+    // the empty string to fail the match below, so a reader added later that
+    // happens to leave `commandLine` non-empty on a partial row cannot silently
+    // start attributing profiles it has no evidence for.
+    if (row.partial) continue;
     const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
     if (match?.[1]) dirs.add(match[1]);
   }
@@ -117,16 +193,26 @@ export function inspectDesktopFor(
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
   const wanted = identity.roots.map(comparableUserDataDir);
+  const allRows = list();
 
-  const rows = list().filter((row) => {
-    // Everything that is not the app stays: the ancestry walk needs those rows to
-    // work out whether foster is running inside the instance.
-    if (row.name.toLowerCase() !== 'claude.exe') return true;
-    const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
-    // A switchless process belongs to the default installation, and only to it.
-    if (!match?.[1]) return identity.isDefault;
-    return wanted.includes(comparableUserDataDir(match[1]));
-  });
+  // A partial table (tasklist) carries no command line, so every claude.exe on
+  // it would fail the --user-data-dir match below and land on the switchless
+  // rule — attributing it to the default installation and turning a profile
+  // store's "cannot tell" into a confident, wrong "not running". Keeping every
+  // row instead of filtering lets inspectDesktop's own partial-table handling
+  // see every claude.exe there is, so the uncertain note it produces reaches
+  // this store too instead of the filter silently deciding the question first.
+  const rows = partialTable(allRows)
+    ? allRows
+    : allRows.filter((row) => {
+        // Everything that is not the app stays: the ancestry walk needs those rows to
+        // work out whether foster is running inside the instance.
+        if (row.name.toLowerCase() !== 'claude.exe') return true;
+        const match = /--user-data-dir="?([^"]+?)"?(?:\s|$)/.exec(row.commandLine);
+        // A switchless process belongs to the default installation, and only to it.
+        if (!match?.[1]) return identity.isDefault;
+        return wanted.includes(comparableUserDataDir(match[1]));
+      });
 
   // Ancestry is already scoped — the rows above are this instance's — so only the
   // environment marker still needs narrowing to this store.
@@ -149,6 +235,12 @@ export function inspectDesktopFor(
  * the file settles it. When no store holds it — deleted mid-session, say — this
  * says nothing and the refusal stands: over-refusing costs a manual restart,
  * while under-refusing kills the caller.
+ *
+ * A partial table (tasklist) makes `runningStores` below name nothing at all —
+ * it has no command lines to read a profile out of — so on a partial table this
+ * can only ever find the environment marker's own store, never "some other
+ * store the marker might belong to". The refusal stands in that case too, for
+ * the same reason: it is the safe side, and unchanged by what caused it.
  */
 function hostedElsewhere(
   identity: StoreIdentity,
@@ -169,9 +261,31 @@ export function inspectDesktop(
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
   const rows = list();
-  const desktop = rows.filter(isDesktopProcess);
+  const desktop = rows.filter((row) => isDesktopProcess(row, rows, env));
 
   if (desktop.length === 0) {
+    // isDesktopProcess demands a readable path, so a partial table (tasklist)
+    // never passes it — every claude.exe on one looks exactly like a stranger.
+    // A claude.exe that could not be attributed is not evidence the app is
+    // absent; it is evidence foster cannot currently tell. The asymmetry below
+    // matters: a partial table with NO claude.exe at all still says "not
+    // running" with no note, because a name is proof enough of absence — it is
+    // only the identity question, "which claude.exe is this", that a partial
+    // table cannot answer.
+    const claudeCount = partialTable(rows)
+      ? rows.filter((row) => row.name.toLowerCase() === 'claude.exe').length
+      : 0;
+    if (claudeCount > 0) {
+      return {
+        running: false,
+        codeSessions: 0,
+        selfHosted: hostedByDesktop(env),
+        uncertain:
+          `${claudeCount} claude.exe process(es) are running, but the process table was read ` +
+          'through tasklist, which reports no paths, parent links or command lines — foster ' +
+          'cannot tell the app from a Claude Code session',
+      };
+    }
     return { running: false, codeSessions: 0, selfHosted: hostedByDesktop(env) };
   }
 
@@ -250,6 +364,40 @@ export function packagedAppId(store: StoreLayout): string | undefined {
   const application = family.split('_')[0];
   if (!application) return undefined;
   return `${family}!${application}`;
+}
+
+/**
+ * The AppUserModelID of the installed Claude Desktop package — independent
+ * of which store a caller happens to be operating on.
+ *
+ * `packagedAppId` derives the family from a store's own root
+ * (`\Packages\<family>`), which works for the installed app's own store but
+ * not for a profile: a second account's userData can sit anywhere at all
+ * (`D:\Claude-Work`, say), with no `\Packages\` segment in it, so
+ * `packagedAppId(profileStore)` is undefined even on a machine where the
+ * package is very much installed. `app login` for a profile still needs to
+ * know that package's identity — the packaged ProgID it hands off to in
+ * `protocolHandler.ts` is the *installed app's*, never the profile's own —
+ * so this looks it up independently: the first `candidateStoreRoots(env)`
+ * entry that is itself a package install (i.e. does resolve through
+ * `packagedAppId`), or, when that scan finds nothing at all (measured only
+ * on a very fresh install with no `claude-code-sessions` folder yet), a
+ * running `Claude.exe` whose own path names the package directly.
+ */
+export function installedAppId(
+  env: NodeJS.ProcessEnv = process.env,
+  list: ProcessLister = readProcesses,
+): string | undefined {
+  for (const root of candidateStoreRoots(env)) {
+    const id = packagedAppId(layoutFor(root));
+    if (id !== undefined) return id;
+  }
+  for (const row of list()) {
+    if (row.name.toLowerCase() !== 'claude.exe') continue;
+    const id = appIdFromWindowsAppsPath(row.path);
+    if (id !== undefined) return id;
+  }
+  return undefined;
 }
 
 export class DesktopControlError extends Error {
@@ -346,6 +494,17 @@ export async function quitDesktop(
   // question would happily quit whichever main process came first.
   const state = inspectDesktopFor(storeIdentity(store.root, env), list, env);
 
+  if (!state.running && state.uncertain) {
+    // Returning 'not-running' here would let a restart flow start a second
+    // instance on top of one that may well be running — the exact failure mode
+    // `selfHosted` guards against below, reached by a different route (a
+    // process table too thin to see the app at all, rather than one that sees
+    // it and finds foster inside it).
+    throw new DesktopControlError(
+      `foster cannot tell whether Claude Desktop is running: ${state.uncertain}.\n` +
+        'Quit it yourself, or see "foster doctor" for why the process table could not be read in full.',
+    );
+  }
   if (!state.running || state.mainPid === undefined) return { outcome: 'not-running' };
   if (state.selfHosted) {
     throw new DesktopControlError(
@@ -440,9 +599,59 @@ export interface StartOptions {
   timeoutMs?: number;
   /** Injectable so tests never launch anything. */
   launch?: (appId: string) => void;
-  /** Injectable: starting a profile takes the executable, not the app identity. */
-  launchProfile?: (executable: string, root: string) => void;
+  /**
+   * Injectable: starting a profile takes the executable, not the app identity.
+   * Receives the environment already scrubbed of `CLAUDE*` — see launchEnv.ts —
+   * so a profile started from inside a hosted Code session does not inherit the
+   * markers that would make the new instance think it, too, is hosted. This is
+   * the fallback used when the identity launch below is not attempted, or fails.
+   */
+  launchProfile?: (executable: string, root: string, env: NodeJS.ProcessEnv) => void;
+  /**
+   * Injectable: launches a profile *with* MSIX package identity, when the
+   * executable found is under `\WindowsApps\` — see the docblock below. Throws
+   * on failure (a missing `Invoke-CommandInDesktopPackage`, a PowerShell that
+   * cannot run); `startDesktop` catches that and falls back to `launchProfile`.
+   */
+  launchProfileWithIdentity?: (
+    appId: string,
+    executable: string,
+    root: string,
+    env: NodeJS.ProcessEnv,
+  ) => void;
   executable?: () => string | undefined;
+  /** The environment to scrub before handing it to a launched profile. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Called once a profile has actually been launched, saying which launcher
+   * won — 'identity' or 'direct'. Never called for the installed app (started
+   * by application id, not by either launcher here).
+   */
+  onProfileLaunch?: (method: 'identity' | 'direct') => void;
+  /** Injectable: the process table, to find the started profile's main pid. */
+  list?: ProcessLister;
+  /**
+   * Injectable: whether a pid's main window is currently visible — see
+   * `mainWindowVisible` in util/processes.ts. `undefined` means this could not
+   * be established.
+   */
+  windowVisible?: (pid: number, env: NodeJS.ProcessEnv) => boolean | undefined;
+  /** How long to give the window to appear before sending the raising relaunch. */
+  windowCheckTimeoutMs?: number;
+  windowCheckStepMs?: number;
+  /**
+   * Called when a profile came up with its window hidden and a second launch
+   * was sent to raise it — see the docblock on `mainWindowVisible`.
+   */
+  onWindowRaised?: () => void;
+  /**
+   * Injectable: whether this store's lockfile is currently held. Real
+   * Electron single-instance locking cannot be reproduced by a plain
+   * `writeFileSync` in a test (renaming an unlocked file to itself always
+   * succeeds), so tests that need `startDesktop` to see a profile as already
+   * running inject this rather than faking the file.
+   */
+  lockfileHeld?: (store: StoreLayout) => boolean;
 }
 
 /**
@@ -454,8 +663,30 @@ export interface StartOptions {
  *
  * The installed app is activated by its application id, which is what Windows
  * does from the Start menu. A profile has no identity of its own — it is the same
- * application pointed at another `userData` — so it is started by running the
- * executable with the switch that relocates it.
+ * application pointed at another `userData`.
+ *
+ * Measured 05/09/2026: which way a profile is *started* matters for signing it
+ * in later. A `claude://` callback launched by the browser is itself a
+ * packaged process, and it only finds an existing profile instance — to
+ * forward its argv to — when that instance's own single-instance lock was
+ * created *with* package identity. A profile started by running `Claude.exe`
+ * directly never sees the callback at all and ends up a second, broken
+ * instance on the same userData. So when the executable found lives under
+ * `\WindowsApps\` (a real MSIX install), starting a profile first tries
+ * `Invoke-CommandInDesktopPackage` — the documented way to run a packaged
+ * executable with identity but pointed at different arguments — and only
+ * falls back to running the executable directly when that cmdlet is missing
+ * or fails. See `engine/protocolHandler.ts` for the sign-in side of this.
+ *
+ * Measured 05/09/2026, separately: a profile closed with `app quit
+ * --terminate` and reopened by a plain launch (no package identity) came back
+ * signed in but with its window hidden (`MainWindowHandle` 0) — the "closed to
+ * tray" state carried across the restart. Waiting longer never raised it; a
+ * *second* launch with the same `--user-data-dir` did, by forwarding to the
+ * instance's own single-instance lock. So once a profile's lockfile is held,
+ * this gives its window up to `windowCheckTimeoutMs` to appear and, if it has
+ * not, launches it once more the same way to raise it — see
+ * `mainWindowVisible` in util/processes.ts.
  */
 export async function startDesktop(
   store: StoreLayout,
@@ -465,23 +696,69 @@ export async function startDesktop(
     timeoutMs = 60_000,
     launch = launchPackagedApp,
     launchProfile = launchProfileApp,
+    launchProfileWithIdentity = launchProfileAppWithIdentity,
     executable = desktopExecutable,
+    env = process.env,
+    onProfileLaunch,
+    list = readProcesses,
+    windowVisible = mainWindowVisible,
+    windowCheckTimeoutMs = 3_000,
+    windowCheckStepMs = 500,
+    onWindowRaised,
+    lockfileHeld: heldCheck = lockfileHeld,
   } = options;
 
   const appId = packagedAppId(store);
-  if (appId) launch(appId);
-  else {
-    const exe = executable();
-    if (!exe) {
-      throw new DesktopControlError(
-        'Could not work out how to start Claude Desktop: this store is a separate profile, and the\n' +
-          'installed app was not found to start it with. Start it yourself; everything else still works.',
-      );
-    }
-    launchProfile(exe, store.root);
+  if (appId) {
+    launch(appId);
+    return waitFor(() => heldCheck(store), timeoutMs, 500);
   }
 
-  return waitFor(() => lockfileHeld(store), timeoutMs, 500);
+  const exe = executable();
+  if (!exe) {
+    throw new DesktopControlError(
+      'Could not work out how to start Claude Desktop: this store is a separate profile, and the\n' +
+        'installed app was not found to start it with. Start it yourself; everything else still works.',
+    );
+  }
+
+  const identityAppId = /[\\/]WindowsApps[\\/]/i.test(exe)
+    ? appIdFromWindowsAppsPath(exe)
+    : undefined;
+  const launchOnce = (): boolean => {
+    if (identityAppId !== undefined) {
+      try {
+        launchProfileWithIdentity(identityAppId, exe, store.root, scrubbedEnv(env));
+        return true;
+      } catch {
+        // Falls through to the direct launch below.
+      }
+    }
+    launchProfile(exe, store.root, scrubbedEnv(env));
+    return false;
+  };
+
+  const usedIdentity = launchOnce();
+  onProfileLaunch?.(usedIdentity ? 'identity' : 'direct');
+
+  const holding = await waitFor(() => heldCheck(store), timeoutMs, 500);
+  if (!holding) return false;
+
+  const desktopState = inspectDesktopFor(storeIdentity(store.root, env), list, env);
+  if (desktopState.mainPid !== undefined) {
+    const mainPid = desktopState.mainPid;
+    const visible = await waitFor(
+      () => windowVisible(mainPid, env) === true,
+      windowCheckTimeoutMs,
+      windowCheckStepMs,
+    );
+    if (!visible) {
+      launchOnce();
+      onWindowRaised?.();
+    }
+  }
+
+  return true;
 }
 
 export interface DeliverOptions {
@@ -525,7 +802,15 @@ export function deliverUrl(store: StoreLayout, url: string, options: DeliverOpti
 }
 
 function launchWithArgs(executable: string, args: string[]): void {
-  const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  // Scrubbed rather than inherited: see launchEnv.ts for why a launch foster
+  // starts must not hand the child the markers of the session foster itself
+  // might be running inside.
+  const child = spawn(executable, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: scrubbedEnv(process.env),
+  });
   child.unref();
 }
 
@@ -537,20 +822,73 @@ function launchPackagedApp(appId: string): void {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
+    env: scrubbedEnv(process.env),
   });
   child.unref();
 }
 
-function launchProfileApp(executable: string, root: string): void {
+function launchProfileApp(executable: string, root: string, env: NodeJS.ProcessEnv): void {
   // Not through explorer: activating the application id would start it on the
   // default userData, which is the installation this profile exists to avoid.
   // Running the executable is allowed even though listing its directory is not.
+  // `env` arrives already scrubbed — see startDesktop.
   const child = spawn(executable, [`--user-data-dir=${root}`], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
+    env,
   });
   child.unref();
+}
+
+/**
+ * `<Name>_<Version>_<Architecture>[_~<ResourceId>]_<PublisherId>`, the full
+ * package name that appears in a `\WindowsApps\` path — to the Package Family
+ * Name (`<Name>_<PublisherId>`) `Invoke-CommandInDesktopPackage` actually
+ * takes. The family name drops the version and architecture, which is the
+ * whole reason it exists: it stays the same across updates, while the full
+ * name in the path does not.
+ */
+function appIdFromWindowsAppsPath(executablePath: string): string | undefined {
+  const match = /[\\/]WindowsApps[\\/]([^\\/]+)/i.exec(executablePath);
+  if (!match) return undefined;
+  const fullName = match[1]!;
+  const parts = fullName.split('_');
+  const name = parts[0];
+  const publisherId = parts.at(-1);
+  if (!name || !publisherId || parts.length < 2) return undefined;
+  return `${name}_${publisherId}!${name}`;
+}
+
+/**
+ * Starts a profile through `Invoke-CommandInDesktopPackage`, so its main
+ * process carries the same package identity the installed app's own does —
+ * see `startDesktop`'s docblock for why that is what makes the sign-in
+ * callback able to find it later. Throws on any failure (cmdlet missing,
+ * PowerShell unavailable, access denied); `startDesktop` falls back to
+ * `launchProfileApp` when it does.
+ */
+function launchProfileAppWithIdentity(
+  appId: string,
+  executable: string,
+  root: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  const [family, application] = appId.split('!');
+  if (!family || !application) {
+    throw new DesktopControlError(`not a valid application id: ${appId}`);
+  }
+  const psExe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
+  const command =
+    `Invoke-CommandInDesktopPackage -PackageFamilyName '${family}' -AppId '${application}' ` +
+    `-Command '${executable}' -Args '--user-data-dir=${root}'`;
+  execFileSync(psExe, ['-NoProfile', '-NonInteractive', '-Command', command], {
+    windowsHide: true,
+    stdio: 'pipe',
+    encoding: 'utf8',
+    env,
+    timeout: 20_000,
+  });
 }
 
 /**
@@ -565,17 +903,19 @@ function launchProfileApp(executable: string, root: string): void {
 export function desktopExecutable(
   read: () => string | undefined = readProtocolCommand,
   list: ProcessLister = readProcesses,
+  env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   const registered = /"([^"]+\.exe)"/i.exec(read() ?? '')?.[1];
   if (registered) return registered;
-  return list().find((row) => isDesktopProcess(row) && row.path !== '')?.path;
+  const rows = list();
+  return rows.find((row) => isDesktopProcess(row, rows, env))?.path;
 }
 
 function readProtocolCommand(): string | undefined {
   if (process.platform !== 'win32') return undefined;
   try {
     const out = execFileSync(
-      'reg',
+      regExePath(),
       ['query', 'HKCU\\Software\\Classes\\claude\\shell\\open\\command', '/ve'],
       { encoding: 'utf8', windowsHide: true, stdio: 'pipe' },
     );

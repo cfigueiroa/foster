@@ -212,7 +212,10 @@ async function pickStore(
     .filter((known) => !samePath(known.root, current.root))
     .map((known) => ({
       value: known.root,
-      label: known.root,
+      // A registered name is the whole reason to register one — the same
+      // `name — root` order `resolveStoreArg`'s own "Known installations" list
+      // uses, so the path is still there for the store nothing has named.
+      label: known.name ? `${known.name} — ${known.root}` : known.root,
       // Which account it holds is the reason to pick one profile over another,
       // and a store with none is one that acting in it will refuse.
       hint: [

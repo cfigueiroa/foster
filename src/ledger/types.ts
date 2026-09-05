@@ -17,7 +17,13 @@ export type LedgerEvent =
   | CardRepointedEvent
   | CardRetitledEvent
   | ConversationPurgedEvent
-  | OperationFailedEvent;
+  | OperationFailedEvent
+  | ProfileRegisteredEvent
+  | ProfileForgottenEvent
+  | ClientRootRegisteredEvent
+  | ClientRootForgottenEvent
+  | HandlerArmedEvent
+  | HandlerRestoredEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -331,6 +337,111 @@ export interface OperationFailedEvent extends BaseEvent {
 }
 
 /**
+ * A name given to a Desktop installation other than the one on the machine's
+ * default path — a profile, in the sense `--store <name>` resolves.
+ *
+ * What it deliberately does not carry is any part of the account inside that
+ * root: no `accountUuid`, no token, no URL. The name and the path are the only
+ * facts that outlive the installation itself — the account a profile holds
+ * changes underneath it, exactly the way the default installation's does, and
+ * recording one here would make this event stale the moment someone signs out.
+ *
+ * Registering a name already in use is not a refusal: it is the rename. The
+ * fold keeps only the latest root for a name, so pointing `work` at a new
+ * directory is indistinguishable from renaming that directory, which is
+ * deliberate — a profile is the name, not the path underneath it.
+ */
+export interface ProfileRegisteredEvent extends BaseEvent {
+  kind: 'profile_registered';
+  name: string;
+  root: string;
+}
+
+/**
+ * A profile name withdrawn.
+ *
+ * Removes the name from the folded state so `--store <name>` stops resolving
+ * it; the registration itself stays in the log, because append-only means
+ * exactly that. Nothing on disk is touched — the installation the name pointed
+ * at is neither opened nor deleted, only forgotten as a name for it.
+ */
+export interface ProfileForgottenEvent extends BaseEvent {
+  kind: 'profile_forgotten';
+  name: string;
+}
+
+/**
+ * A filesystem root registered as a place `foster` looks for CLI client config
+ * directories, beyond the `~/.claude*` siblings it enumerates on its own.
+ *
+ * What it deliberately does not carry is any part of what lives under that
+ * root: no `accountUuid`, no token, no URL — the same restraint as a profile
+ * registration, and for the same reason: the root outlives whatever account
+ * currently sits inside it. `as` distinguishes a container that holds several
+ * client directories from a single client directory registered directly,
+ * because the two are walked differently and the event has to say which one
+ * this root is without re-reading the filesystem every time.
+ */
+export interface ClientRootRegisteredEvent extends BaseEvent {
+  kind: 'client_root_registered';
+  root: string;
+  as: 'client' | 'container';
+}
+
+/**
+ * A registered client root withdrawn — see `ProfileForgottenEvent`. The root
+ * stops being offered for listing and launch; nothing under it is touched.
+ */
+export interface ClientRootForgottenEvent extends BaseEvent {
+  kind: 'client_root_forgotten';
+  root: string;
+}
+
+/**
+ * The `claude://` handler was pointed at one profile for the duration of one
+ * sign-in — see `engine/protocolHandler.ts`.
+ *
+ * Measured 05/09/2026: what actually decides where `claude:` activates is a
+ * packaged ProgID's `Parameters` value, not the classic per-user command key
+ * this event used to describe (`createdFrom`, an optional `previous`) —
+ * foster no longer creates or deletes registry keys, only replaces this one
+ * existing value. `key` is the ProgID's `Shell\open` key `Parameters` lives
+ * under — it varies per install, so it travels with the event rather than
+ * being re-derived every time. `previous` is always set now: the value read
+ * back before this run touched it (normally the bare `"%1"`). `exe` is kept
+ * only for messages — arming never needs it, since `Parameters` never
+ * includes the executable — so it is optional.
+ *
+ * What it deliberately does not carry is any part of the sign-in itself: no
+ * URL, no code, no account. Kept so a run interrupted after this event but
+ * before `handler_restored` still tells the next one what to put back —
+ * without it, an interrupted login leaves the handler routed to a profile
+ * with nothing in the log saying it should be undone.
+ */
+export interface HandlerArmedEvent extends BaseEvent {
+  kind: 'handler_armed';
+  root: string;
+  key: string;
+  previous: string;
+  exe?: string;
+  armed: string;
+}
+
+/**
+ * The `claude://` handler put back, ending the window `handler_armed` opened.
+ *
+ * `restored` says whether the read-back actually matched what was written —
+ * false means the handler was left pointed somewhere, which is the fact
+ * `foster app login --restore` and `doctor` need to warn about a stale route.
+ * Nothing about the sign-in itself is recorded here either.
+ */
+export interface HandlerRestoredEvent extends BaseEvent {
+  kind: 'handler_restored';
+  root: string;
+  restored: boolean;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -351,7 +462,13 @@ export type LedgerEventInput =
   | Draft<CardRepointedEvent>
   | Draft<CardRetitledEvent>
   | Draft<ConversationPurgedEvent>
-  | Draft<OperationFailedEvent>;
+  | Draft<OperationFailedEvent>
+  | Draft<ProfileRegisteredEvent>
+  | Draft<ProfileForgottenEvent>
+  | Draft<ClientRootRegisteredEvent>
+  | Draft<ClientRootForgottenEvent>
+  | Draft<HandlerArmedEvent>
+  | Draft<HandlerRestoredEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
