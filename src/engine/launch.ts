@@ -280,13 +280,15 @@ function knownClientNames(home: string, registered: string[]): string[] {
 }
 
 /**
- * The argument `client open` would accept for this directory: `default` for `~/.claude`,
- * `<slug>` for a `~/.claude-<slug>` sibling — the two names the resolver above accepts
- * without anything registered. Anything else is not nameable that way at all (a bare
- * basename would only resolve once it is registered, which a fresh directory never is
- * yet), so this hands back the directory's own resolved path instead — not a slug, but
- * still exactly what step 1 of the same resolver, the path-like branch, accepts
- * unconditionally.
+ * The slug a directory would be opened by: `default` for `~/.claude`, the rest by
+ * convention (`~/.claude-<slug>` strips the prefix; anything else is its own basename).
+ *
+ * This is a display name, not a promise that `client open <name>` resolves back to
+ * `dir` — a registered, non-sibling directory gets a readable basename here (used for
+ * the `wt` tab title and the "known clients" listing) even though that bare basename
+ * only actually resolves once it has been registered. `seed.ts`'s success message
+ * cares about the stronger guarantee and layers its own check on top instead of
+ * duplicating the convention here — see the comment at its call site.
  *
  * Exported so callers that print "open it with `foster client open <name>`" — `seed.ts`'s
  * success message is the one that exists today — name the argument this same resolver will
@@ -296,8 +298,7 @@ function knownClientNames(home: string, registered: string[]): string[] {
 export function clientNameOf(dir: string, home: string): string {
   if (samePath(dir, path.join(home, '.claude'))) return 'default';
   const base = path.basename(dir);
-  if (base.startsWith('.claude-')) return base.slice('.claude-'.length);
-  return path.resolve(dir);
+  return base.startsWith('.claude-') ? base.slice('.claude-'.length) : base;
 }
 
 function warningsFor(

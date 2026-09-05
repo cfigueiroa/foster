@@ -144,13 +144,31 @@ export function applySeed(plan: SeedPlan): SeedOutcome {
     linked,
     message:
       `${plan.target} is ready, and signed out. ` +
-      // `client open`'s resolver strips a `.claude-` prefix (and special-cases the
-      // home `.claude` directory to `default`) before it will match a bare name —
-      // print the name that resolver actually accepts, not a raw basename that
-      // only agrees with it outside that convention (e.g. `.claude-work` itself
-      // does not resolve; the resolver wants `work`). A target outside that
-      // convention gets its own full path instead of an unregistered basename,
-      // which the resolver's path-like branch accepts unconditionally.
-      `Open it with \`foster client open ${clientNameOf(plan.target, homedir())}\` and sign in there.`,
+      `Open it with \`foster client open ${openableNameFor(plan.target, homedir())}\` and sign in there.`,
   };
+}
+
+/**
+ * The argument `foster client open` actually resolves back to `target`, right now,
+ * with nothing registered.
+ *
+ * `clientNameOf` strips a `.claude-` prefix (and special-cases the home `.claude`
+ * directory to `default`) before it will match a bare name — printing its raw
+ * `path.basename` used to be the bug here: for the `~/.claude-<slug>` sibling
+ * convention `path.basename` is `.claude-work`, not `work`, and the resolver does
+ * not treat a bare `.claude-work` as path-like, so it went looking for
+ * `~/.claude-.claude-work` instead.
+ *
+ * But `clientNameOf`'s own fallback — a directory's bare basename, for anything
+ * outside those two conventions — is a display name, not a promise: it only
+ * resolves once `target` has been registered, which a directory this function
+ * just created never is yet. `clientNameOf(target, home) === path.basename(target)`
+ * is exactly the signal that its fallback branch fired (the other two branches
+ * always change the string), so that case gets `target`'s own resolved path
+ * instead — not a name, but exactly what the resolver's first, path-like check
+ * accepts unconditionally, with nothing to register.
+ */
+function openableNameFor(target: string, home: string): string {
+  const name = clientNameOf(target, home);
+  return name === path.basename(target) ? path.resolve(target) : name;
 }
