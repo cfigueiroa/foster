@@ -16,6 +16,7 @@ import {
   type ProcessRow,
 } from '../util/processes.js';
 import { lockfileHeld } from './lockfile.js';
+import { scrubbedEnv } from './launchEnv.js';
 
 export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
 
@@ -440,9 +441,16 @@ export interface StartOptions {
   timeoutMs?: number;
   /** Injectable so tests never launch anything. */
   launch?: (appId: string) => void;
-  /** Injectable: starting a profile takes the executable, not the app identity. */
-  launchProfile?: (executable: string, root: string) => void;
+  /**
+   * Injectable: starting a profile takes the executable, not the app identity.
+   * Receives the environment already scrubbed of `CLAUDE*` — see launchEnv.ts —
+   * so a profile started from inside a hosted Code session does not inherit the
+   * markers that would make the new instance think it, too, is hosted.
+   */
+  launchProfile?: (executable: string, root: string, env: NodeJS.ProcessEnv) => void;
   executable?: () => string | undefined;
+  /** The environment to scrub before handing it to a launched profile. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -466,6 +474,7 @@ export async function startDesktop(
     launch = launchPackagedApp,
     launchProfile = launchProfileApp,
     executable = desktopExecutable,
+    env = process.env,
   } = options;
 
   const appId = packagedAppId(store);
@@ -478,7 +487,7 @@ export async function startDesktop(
           'installed app was not found to start it with. Start it yourself; everything else still works.',
       );
     }
-    launchProfile(exe, store.root);
+    launchProfile(exe, store.root, scrubbedEnv(env));
   }
 
   return waitFor(() => lockfileHeld(store), timeoutMs, 500);
@@ -525,7 +534,15 @@ export function deliverUrl(store: StoreLayout, url: string, options: DeliverOpti
 }
 
 function launchWithArgs(executable: string, args: string[]): void {
-  const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  // Scrubbed rather than inherited: see launchEnv.ts for why a launch foster
+  // starts must not hand the child the markers of the session foster itself
+  // might be running inside.
+  const child = spawn(executable, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: scrubbedEnv(process.env),
+  });
   child.unref();
 }
 
@@ -537,18 +554,21 @@ function launchPackagedApp(appId: string): void {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
+    env: scrubbedEnv(process.env),
   });
   child.unref();
 }
 
-function launchProfileApp(executable: string, root: string): void {
+function launchProfileApp(executable: string, root: string, env: NodeJS.ProcessEnv): void {
   // Not through explorer: activating the application id would start it on the
   // default userData, which is the installation this profile exists to avoid.
   // Running the executable is allowed even though listing its directory is not.
+  // `env` arrives already scrubbed — see startDesktop.
   const child = spawn(executable, [`--user-data-dir=${root}`], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
+    env,
   });
   child.unref();
 }

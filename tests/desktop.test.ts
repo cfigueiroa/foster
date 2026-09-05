@@ -467,6 +467,25 @@ describe('starting the app', () => {
     expect(started).toEqual([[EXE, store.root]]);
   });
 
+  it('scrubs CLAUDE* out of the environment a profile launch receives', async () => {
+    // Starting a profile from inside a hosted Code session must not hand the
+    // new instance the marker that would make it think it, too, is hosted —
+    // see launchEnv.ts.
+    const store = makeStore();
+    let received: NodeJS.ProcessEnv | undefined;
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (_exe, _root, env) => {
+        received = env;
+      },
+      executable: () => EXE,
+      env: { CLAUDE_CODE_HOST_SESSION_ID: '00000000-0000-4000-8000-00000000000a', PATH: 'kept' },
+    });
+
+    expect(received).toEqual({ PATH: 'kept' });
+  });
+
   it('says so plainly when there is no installed app to start a profile with', async () => {
     await expect(
       startDesktop(makeStore(), { timeoutMs: 1, executable: () => undefined }),
