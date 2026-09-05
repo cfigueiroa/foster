@@ -212,6 +212,44 @@ describe('runSweep', () => {
     expect(neverComes.byReason).toMatchObject({ 'scheduled-task': 1 });
     expect(neverComes.byReason['never-opened']).toBeUndefined();
   });
+
+  it('names what will never come, under the same reason it counted', () => {
+    // The gap that made this necessary: a run said "2 never opened" and neither
+    // title appeared anywhere, so the only way to find out which two was to read
+    // the store by hand.
+    const neverOpened = session({
+      sessionId: '00000000-0000-4000-8000-0000000000d5',
+      title: 'Guard for every versioned plist',
+    });
+    delete neverOpened.lastFocusedAt;
+    writeSession(store, OLD_ACCOUNT, neverOpened);
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000d6',
+        scheduledTaskId: 'task-3',
+        title: 'Nightly watchdog',
+      }),
+    );
+
+    const { neverComes } = sweep();
+
+    expect(neverComes.sessions).toHaveLength(neverComes.total);
+    expect(neverComes.sessions).toContainEqual({
+      title: 'Guard for every versioned plist',
+      reason: 'never-opened',
+    });
+    expect(neverComes.sessions).toContainEqual({
+      title: 'Nightly watchdog',
+      reason: 'scheduled-task',
+    });
+    // The list and the breakdown are the same sessions counted twice, so they
+    // cannot be allowed to disagree.
+    const fromList: Record<string, number> = {};
+    for (const one of neverComes.sessions) fromList[one.reason] = (fromList[one.reason] ?? 0) + 1;
+    expect(fromList).toEqual(neverComes.byReason);
+  });
 });
 
 /**
