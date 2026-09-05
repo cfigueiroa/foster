@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
 
 /**
  * The process table, reduced to what foster needs: parent links, the image
@@ -21,6 +22,23 @@ export interface ProcessRow {
 }
 
 export type ProcessLister = () => ProcessRow[];
+
+/**
+ * The absolute path to `reg.exe`, resolved through `SystemRoot` rather than PATH.
+ *
+ * `execFileSync('reg', ...)` resolves the executable through the calling
+ * process's PATH, and PATH is not the same in every shell: an elevated
+ * PowerShell (or a `runas`, or a shell launched by a scheduled task) can carry
+ * a trimmed one that never includes `System32`, so the spawn throws ENOENT —
+ * while `reg query` typed into an ordinary window succeeds against the exact
+ * same key. Windows always ships `reg.exe` here, and `SystemRoot` is set by
+ * the OS for every process regardless of PATH, so resolving through it
+ * sidesteps the whole problem. `env` is a parameter only so a test could point
+ * it elsewhere; production always calls this with no argument.
+ */
+export function regExePath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe');
+}
 
 const POWERSHELL_QUERY =
   'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,' +

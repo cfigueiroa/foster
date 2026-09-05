@@ -12,6 +12,7 @@ import {
   isCodeCliProcess,
   parseProcessCsv,
   readProcesses,
+  regExePath,
   type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
@@ -650,7 +651,7 @@ function readProtocolCommand(): string | undefined {
   if (process.platform !== 'win32') return undefined;
   try {
     const out = execFileSync(
-      'reg',
+      regExePath(),
       ['query', 'HKCU\\Software\\Classes\\claude\\shell\\open\\command', '/ve'],
       { encoding: 'utf8', windowsHide: true, stdio: 'pipe' },
     );

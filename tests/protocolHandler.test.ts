@@ -24,10 +24,20 @@ const PLAIN_HANDLER = `"${EXE}" "%1"`;
 function fakeIo(initial: string | undefined, log?: string[]): HandlerIo {
   let value = initial;
   return {
-    read: () => value,
+    read: () => ({ value }),
     write: (next: string) => {
       log?.push(`write:${next}`);
       value = next;
+    },
+  };
+}
+
+/** A HandlerIo whose read() always reports a spawn failure, never a value. */
+function brokenIo(error: string): HandlerIo {
+  return {
+    read: () => ({ error }),
+    write: () => {
+      throw new Error('not reached: write is never called once read fails');
     },
   };
 }
@@ -126,6 +136,27 @@ describe('planLogin', () => {
     });
 
     expect(plan.blockers[0]).toContain('is missing or not in the shape');
+  });
+
+  it("refuses with reg's own message when reg itself could not be run", () => {
+    // The reported case: an elevated PowerShell whose PATH does not resolve
+    // `reg`, so the spawn throws before it ever touches the registry. That
+    // must not read as "the key is missing" — start Claude Desktop once would
+    // do nothing for a PATH problem.
+    const store = makeStore();
+    const plan = planLogin(store, {
+      io: brokenIo('spawnSync reg ENOENT'),
+      events: [],
+      env: NO_ENV,
+      list: () => [],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers[0]).toContain(
+      'could not read HKCU\\Software\\Classes\\claude\\shell\\open\\command',
+    );
+    expect(plan.blockers[0]).toContain('spawnSync reg ENOENT');
+    expect(plan.blockers[0]).not.toContain('is missing or not in the shape');
   });
 
   it('refuses when claude:// already routes to a different profile', () => {
@@ -336,7 +367,7 @@ describe('runLogin', () => {
     expect(result.outcome).toBe('signed-in');
     expect(result.accountAfter).toBe(account);
     expect(result.restored).toBe(true);
-    expect(io.read()).toBe(plan.previous);
+    expect(io.read().value).toBe(plan.previous);
     expect(log.filter((l) => l.startsWith('write:'))).toEqual([
       `write:${plan.armed}`,
       `write:${plan.previous}`,
@@ -364,7 +395,7 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('timeout');
     expect(result.restored).toBe(true);
-    expect(io.read()).toBe(plan.previous);
+    expect(io.read().value).toBe(plan.previous);
   });
 
   it('restores when aborted', async () => {
@@ -384,7 +415,7 @@ describe('runLogin', () => {
 
     expect(result.outcome).toBe('aborted');
     expect(result.restored).toBe(true);
-    expect(io.read()).toBe(plan.previous);
+    expect(io.read().value).toBe(plan.previous);
   });
 
   it('stops without writing when the handler is rewritten underneath it', async () => {
@@ -398,7 +429,7 @@ describe('runLogin', () => {
         // The very next read after the arm-write is runLogin's own
         // verification that the write landed; only after that does this
         // fixture pretend the app restarted and rewrote the key.
-        return reads <= 1 ? value : 'rewritten-by-app';
+        return { value: reads <= 1 ? value : 'rewritten-by-app' };
       },
       write: (next) => {
         writes.push(next);
@@ -448,7 +479,7 @@ describe('restoreHandler', () => {
     const result = restoreHandler(project(events), io, (e) => appended.push(e));
 
     expect(result.ok).toBe(true);
-    expect(io.read()).toBe(PLAIN_HANDLER);
+    expect(io.read().value).toBe(PLAIN_HANDLER);
     expect(appended).toEqual([
       { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
     ]);
@@ -463,7 +494,7 @@ describe('restoreHandler', () => {
 
     expect(result.ok).toBe(true);
     expect(result.message).toContain('rebuilt');
-    expect(io.read()).toBe(PLAIN_HANDLER);
+    expect(io.read().value).toBe(PLAIN_HANDLER);
     expect(appended).toEqual([
       { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
     ]);

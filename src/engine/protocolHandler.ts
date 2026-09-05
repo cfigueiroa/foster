@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { comparableUserDataDir, samePath, storeIdentity } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import { desktopExecutable, runningStores, type ProcessLister } from './desktop.js';
-import { readProcesses } from '../util/processes.js';
+import { readProcesses, regExePath } from '../util/processes.js';
 import { readConfig } from '../store/config.js';
 import { lockfileHeld } from './lockfile.js';
 import { project, type LedgerState } from '../ledger/project.js';
@@ -26,10 +26,25 @@ import type { LedgerEvent, LedgerEventInput } from '../ledger/types.js';
  */
 export const HANDLER_KEY = 'HKCU\\Software\\Classes\\claude\\shell\\open\\command';
 
+/**
+ * What reading the key came back with.
+ *
+ * `value` is undefined both when the key is genuinely absent and when it
+ * exists but came back in a shape `read` cannot parse — that case was never
+ * distinguishable from "absent" and still isn't. `error` is a different kind
+ * of failure: `reg` itself never ran (a PATH that does not resolve it, a
+ * missing binary, a policy block), so nothing was learned about the key at
+ * all. Conflating the two used to print "start Claude Desktop once so it
+ * registers itself" for a problem that had nothing to do with the app.
+ */
+export interface HandlerReadResult {
+  value?: string;
+  error?: string;
+}
+
 /** The one registry key foster ever writes, behind a seam so tests never touch the registry. */
 export interface HandlerIo {
-  /** The key's default value, or undefined when absent/unreadable. */
-  read(): string | undefined;
+  read(): HandlerReadResult;
   /** Replace the key's default value (REG_SZ). Throws on failure. */
   write(value: string): void;
 }
@@ -40,22 +55,30 @@ export interface HandlerIo {
  * value name — so the two never disagree about what the key currently holds.
  */
 export const registryHandlerIo: HandlerIo = {
-  read(): string | undefined {
-    if (process.platform !== 'win32') return undefined;
+  read(): HandlerReadResult {
+    if (process.platform !== 'win32') return {};
     try {
-      const out = execFileSync('reg', ['query', HANDLER_KEY, '/ve'], {
+      const out = execFileSync(regExePath(), ['query', HANDLER_KEY, '/ve'], {
         windowsHide: true,
         stdio: 'pipe',
         encoding: 'utf8',
       });
       const marker = out.indexOf('REG_SZ');
-      return marker === -1 ? undefined : out.slice(marker + 'REG_SZ'.length).trim();
-    } catch {
-      return undefined;
+      return { value: marker === -1 ? undefined : out.slice(marker + 'REG_SZ'.length).trim() };
+    } catch (err) {
+      // A spawn failure (reg.exe not found, denied, etc.) sets `code`; reg
+      // running and exiting non-zero — the ordinary "key not found" — does
+      // not. Only the former is worth telling apart: the latter is what
+      // MISSING_KEY_BLOCKER already covers.
+      const spawnFailure = err as NodeJS.ErrnoException & { stderr?: string };
+      if (spawnFailure.code !== undefined) {
+        return { error: spawnFailure.stderr?.trim() || spawnFailure.message };
+      }
+      return {};
     }
   },
   write(value: string): void {
-    execFileSync('reg', ['add', HANDLER_KEY, '/ve', '/t', 'REG_SZ', '/d', value, '/f'], {
+    execFileSync(regExePath(), ['add', HANDLER_KEY, '/ve', '/t', 'REG_SZ', '/d', value, '/f'], {
       windowsHide: true,
       stdio: 'pipe',
       encoding: 'utf8',
@@ -148,6 +171,11 @@ const MISSING_KEY_BLOCKER =
   'HKCU\\...\\command is missing or not in the shape "<exe>" "%1"; start Claude Desktop once so ' +
   'it registers itself, then retry';
 
+/** reg ran and said nothing usable, as opposed to reg never running at all — see MISSING_KEY_BLOCKER. */
+function couldNotReadBlocker(detail: string): string {
+  return `could not read ${HANDLER_KEY}: ${detail}`;
+}
+
 function alreadyRoutedBlocker(dir: string): string {
   return (
     `claude:// links are already routed to ${dir}: another login may be in flight, or a previous ` +
@@ -214,17 +242,23 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     return plan;
   }
 
-  const current = io.read();
+  const read = io.read();
+  const current = read.value;
   if (current !== undefined) plan.previous = current;
-  const parsed = parseHandler(current);
+  const parsed = read.error === undefined ? parseHandler(current) : undefined;
 
-  if (!parsed) {
+  if (read.error !== undefined) {
+    // reg itself never ran, so nothing below has anything to work with — an
+    // absent key and a wrong PATH both surface here as "no parsed handler",
+    // and only this message says which one actually happened.
+    blockers.push(couldNotReadBlocker(read.error));
+  } else if (!parsed) {
     blockers.push(MISSING_KEY_BLOCKER);
     // Nothing parsed out of the registry, but a running instance's own process
     // still names the executable Windows would launch — the same fallback
     // `desktopExecutable` already uses, reading through `io` rather than a
     // fresh registry query of its own.
-    const fallback = desktopExecutable(() => io.read(), list, env);
+    const fallback = desktopExecutable(() => io.read().value, list, env);
     if (fallback !== undefined) plan.exe = fallback;
   } else {
     plan.exe = parsed.exe;
@@ -351,8 +385,9 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
 
   io.write(armed);
   const readBack = io.read();
-  if (readBack !== armed) {
-    throw new Error(`could not arm the handler: read back "${readBack ?? ''}"`);
+  if (readBack.value !== armed) {
+    const detail = readBack.error !== undefined ? `: ${readBack.error}` : '';
+    throw new Error(`could not arm the handler: read back "${readBack.value ?? ''}"${detail}`);
   }
 
   const deadline = now() + timeoutMs;
@@ -375,7 +410,7 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
       break;
     }
 
-    if (io.read() !== armed) {
+    if (io.read().value !== armed) {
       outcome = 'handler-rewritten';
       break;
     }
@@ -390,9 +425,9 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
 
   let restored = false;
   if (outcome !== 'handler-rewritten') {
-    if (io.read() === armed) {
+    if (io.read().value === armed) {
       io.write(previous);
-      restored = io.read() === previous;
+      restored = io.read().value === previous;
     }
   }
 
@@ -413,7 +448,7 @@ export interface HandlerState {
 }
 
 export function inspectHandler(state: LedgerState, io: HandlerIo): HandlerState {
-  const current = parseHandler(io.read());
+  const current = parseHandler(io.read().value);
   return {
     ...(current !== undefined ? { current } : {}),
     ...(state.handlerArmed !== undefined ? { armed: state.handlerArmed } : {}),
@@ -426,7 +461,7 @@ export function restoreHandler(
   io: HandlerIo,
   append: (event: LedgerEventInput) => void,
 ): { ok: boolean; message: string } {
-  const current = parseHandler(io.read());
+  const current = parseHandler(io.read().value);
   if (!current || current.userDataDir === undefined) {
     return { ok: false, message: 'the handler is not routed anywhere; nothing to restore' };
   }
@@ -436,7 +471,7 @@ export function restoreHandler(
   const previous = armed ? armed.previous : `"${current.exe}" "%1"`;
 
   io.write(previous);
-  const ok = io.read() === previous;
+  const ok = io.read().value === previous;
   append({ kind: 'handler_restored', root: armed?.root ?? current.userDataDir, restored: ok });
 
   return {
