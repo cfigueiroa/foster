@@ -173,6 +173,50 @@ export function readTranscriptFacts(file: string, cliSessionId: string): Transcr
   return facts;
 }
 
+/**
+ * What was asked of a conversation, in the words that started it.
+ *
+ * The one thing worth recovering from a conversation that never answered. A
+ * request that died before its first turn has no history to resume; what it has
+ * is the prompt, and that is enough to ask again somewhere healthy.
+ *
+ * Two things in the head are user records without being the prompt, and both
+ * would win by position if this took the first one it saw. The harness injects
+ * `<system-reminder>` blocks as user turns, and a tool result comes back as one
+ * too — structured content with no `text` part, which is why the text is
+ * gathered from the parts rather than read off the record.
+ */
+export function firstPrompt(file: string): string | undefined {
+  for (const record of headRecords(file)) {
+    if (record.type !== 'user') continue;
+    const message = record.message as { content?: unknown } | undefined;
+    const content = message?.content;
+    const text =
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter(
+                (part): part is { type: 'text'; text: string } =>
+                  typeof part === 'object' &&
+                  part !== null &&
+                  (part as { type?: unknown }).type === 'text' &&
+                  typeof (part as { text?: unknown }).text === 'string',
+              )
+              .map((part) => part.text)
+              .join('\n')
+          : '';
+    const trimmed = text.trim();
+    if (trimmed === '') continue;
+    // A reminder is scaffolding the harness wrote, not something anyone asked
+    // for. Skipped rather than stripped: a record that is one is not also the
+    // prompt, and half a reminder read as a request is worse than reading on.
+    if (trimmed.startsWith('<system-reminder>')) continue;
+    return trimmed;
+  }
+  return undefined;
+}
+
 /** How much of a transcript's tail to read when recovering where it last ran. */
 const TAIL_CWD_BYTES = 256 * 1024;
 
