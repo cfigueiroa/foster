@@ -94,6 +94,7 @@ import {
   openResumeTabs,
   resumeCommandFor,
 } from '../engine/rescue.js';
+import { findUnstarted } from '../engine/unstarted.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
 import { bareSessionId } from '../domain/naming.js';
@@ -107,7 +108,12 @@ import {
   type LiveCliSession,
 } from '../store/liveSessions.js';
 import { selectWriters, stopWriters } from '../ops/writers.js';
-import { viewTranscript } from '../store/transcripts.js';
+import {
+  firstPrompt,
+  indexTranscripts,
+  transcriptRoots,
+  viewTranscript,
+} from '../store/transcripts.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, parseSince, selectByIds, type SessionFilter } from '../domain/filter.js';
@@ -2892,6 +2898,104 @@ program
     console.log(pc.dim('`foster live --stop <id>` ends one, so its copy can be opened.'));
     sayIfStale(roots);
   });
+
+program
+  .command('unstarted')
+  .summary('background-task requests whose session died before answering once')
+  .description(
+    'Find requests that never got a turn. A background-task chip is spawned into a\n' +
+      'session of its own; when that session dies before answering — a quota limit, a\n' +
+      'disabled subscription — the card stays in the sidebar and the request inside it\n' +
+      'is gone. There is no conversation to resume, so this is not rescue: what survives\n' +
+      "is the prompt, in the transcript's first user record, and it is printed in full.\n\n" +
+      'Measured on a live store of 9,293 sessions: 1,664 chips, 12 of them dead before\n' +
+      'a first turn, 11 on a quota limit. Invisible without looking — one surfaced only\n' +
+      'because its owner sent a screenshot and asked why a row was missing.\n\n' +
+      'Nothing is re-run. Several of those twelve were weeks old and named work long\n' +
+      'since done another way; relaunching on a timer would spend quota on dead requests.\n' +
+      'The list is the product, and --since cuts the stale ones out of it.',
+  )
+  .option('--since <age>', 'how far back a lost request may have been created', '7d')
+  .option('--archived', 'include cards you archived — closed on purpose, so opt-in')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ since: string; archived?: boolean; json?: boolean }>();
+    const since = parseSince(opts.since);
+    if (since === undefined) {
+      throw new Error(`Could not read --since "${opts.since}". Try 48h, 3d or 2w.`);
+    }
+
+    // The whole store, not the account signed in. A request that died at zero
+    // turns is "never opened" as far as the sweep is concerned, so it is exactly
+    // the kind of session no sweep ever brings across: it stays in the account
+    // it was spawned in, for ever. Scanning the current account is scanning the
+    // one place these are guaranteed not to be — measured, 12 in the store and
+    // 0 in the account in use.
+    const sessions = scanStore(store, copySessionIds(ledger.read()));
+    const index = indexTranscripts(transcriptRoots(process.env));
+    const lost = findUnstarted(
+      sessions,
+      { since, includeArchived: opts.archived ?? false },
+      { transcriptFor: (id) => index.get(id), promptIn: firstPrompt },
+    );
+
+    if (opts.json) {
+      print(lost);
+      return;
+    }
+
+    if (lost.length === 0) {
+      console.log(`No request died before its first turn in the last ${opts.since}.`);
+      if (!opts.archived) console.log(pc.dim('Cards you archived need --archived.'));
+      return;
+    }
+
+    for (const row of lost) {
+      const marks = [row.isArchived ? 'archived' : '', formatLifetime(row.lifetimeMs)]
+        .filter(Boolean)
+        .join(', ');
+      console.log(
+        `\n  ${formatAge(row.createdAt).padStart(8)}  ` +
+          `${row.title ?? pc.dim('(untitled)')}${marks ? pc.dim(`  (${marks})`) : ''}`,
+      );
+      if (row.error) console.log(pc.yellow(`           ${row.error}`));
+      if (row.cwd) console.log(pc.dim(`           ${row.cwd}`));
+      if (row.prompt) {
+        // Printed whole, indented. Truncating it would defeat the command: the
+        // prompt is not a label for the row, it IS the row — the only part of a
+        // request that died at zero turns that can be used again.
+        console.log(pc.dim('           what was asked:'));
+        for (const line of row.prompt.split('\n')) console.log(`             ${line}`);
+      } else {
+        console.log(
+          pc.yellow('           transcript gone — the request itself is not recoverable'),
+        );
+      }
+    }
+
+    const recoverable = lost.filter((row) => row.prompt).length;
+    console.log(
+      pc.bold(
+        `\n${lost.length} request(s) died before answering; ${recoverable} still have their prompt.`,
+      ),
+    );
+    console.log(
+      pc.dim(
+        'Nothing here was re-run. Ask again where it belongs, after checking the work was\n' +
+          'not already done another way — an old request usually has been.',
+      ),
+    );
+  });
+
+/** A lifetime worth naming: these die in seconds, and the number is the tell. */
+function formatLifetime(ms: number | undefined): string {
+  if (ms === undefined) return '';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 90) return `lasted ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  return minutes < 90 ? `lasted ${minutes}m` : `lasted ${Math.round(minutes / 60)}h`;
+}
 
 program
   .command('rescue')

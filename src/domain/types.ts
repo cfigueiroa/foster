@@ -53,6 +53,17 @@ export interface CodeSessionData {
   bridgeSessionIds?: string[];
   /** Present on sessions created by a scheduled task; those are listed elsewhere in the app. */
   scheduledTaskId?: string;
+  /**
+   * Present on sessions the app spawned from a background-task chip, naming the
+   * session that spawned it. What `foster unstarted` reads to tell a request
+   * that was made of the app from a conversation a person opened themselves.
+   */
+  spawnedFrom?: { sessionId?: string; taskId?: string; title?: string };
+  /**
+   * Turns that finished. Zero alongside an `error` is a request that died before
+   * answering once, which leaves nothing to resume and only a prompt to recover.
+   */
+  completedTurns?: number;
   isArchived?: boolean;
   model?: string;
   /** A stale failure from the origin account; rendered as a warning badge. Stripped when fostering. */
