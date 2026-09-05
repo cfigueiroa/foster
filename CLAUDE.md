@@ -112,6 +112,20 @@ user record to its transcript, so the last _message_ can be a click rather than 
 (`divergedFrom`, `src/engine/branches.ts`). Nothing is hidden; `foster consolidate` is the
 optional tidy-up for anyone who wants one row.
 
+Which conversations are branches of each other is decided before any of that, and
+`conversationRoot` — the first record a transcript holds — only answers it when the app copied
+the conversation from its beginning. A fork begun in the middle opens on a middle record,
+rewritten with no parent, and the halves disagree about their root while sharing thousands of
+records. `Lineage.deepen` closes that: a root found _inside_ another conversation is filed as
+that conversation's work. It reads every transcript it is given without parsing them — 6.7 GB in
+about 5 seconds against 118 for a JSON walk — and `forksOf` calls it before grouping, which is
+why a sweep on a large store takes about half a minute rather than nine seconds.
+
+**Pass both prefixes or neither.** A mark is recognised only when the run is told the words it
+was written with, so a sweep with a different `--stale-prefix` than the one that wrote a row
+stacks a second mark in front of the first instead of replacing it. `--branch-prefix` defaults to
+English; the `/fosteia` skill passes both in Portuguese.
+
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
 that line rather than leaving the user to wonder what the gap was.
