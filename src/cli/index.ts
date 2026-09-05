@@ -2915,7 +2915,7 @@ program
     }
     for (const s of sessions) {
       const hosted = hostedStoreFor(s, storeCandidates);
-      const detail = hosted ? hostedByLine(hosted, labels) : (s.cwd ?? '');
+      const detail = hosted ? hostedByLine(hosted, labels) : terminalSessionLine(s);
       console.log(`  ${String(s.pid).padStart(6)}  ${s.sessionId}  ${pc.dim(detail)}`);
     }
     console.log(pc.dim('\nThese conversations have a writer; `foster resume` will refuse them.'));
@@ -3081,6 +3081,22 @@ function hostedByLine(hosted: HostCandidate, labels: Map<string, string>): strin
     ? (labels.get(hosted.accountUuid) ?? shortId(hosted.accountUuid))
     : undefined;
   return `hosted by ${hosted.name ?? hosted.root}` + (label ? ` · last seen as ${label}` : '');
+}
+
+/**
+ * What to print for a session no installation claims — a plain terminal.
+ *
+ * "Client" means the config directory everywhere else this CLI says it
+ * (`clients`, `src/store/clients.ts`), not the process's launch directory, so
+ * that is what gets named here: two `dirname`s above the registry file, since
+ * a session registers itself at `<configDir>/sessions/<pid>.json`. The launch
+ * directory is still worth a line when it differs from the client root.
+ */
+function terminalSessionLine(session: LiveCliSession): string {
+  const clientDir = path.dirname(path.dirname(session.registryFile));
+  return session.cwd && session.cwd !== clientDir
+    ? `${clientDir}  (cwd ${session.cwd})`
+    : clientDir;
 }
 
 /**
@@ -3359,11 +3375,17 @@ function reportDesktop(command: Command): void {
     (session) => hostedStoreFor(session, [candidate]) !== undefined,
   );
 
+  // Computed unconditionally so `--json` carries the same label `live --json`
+  // does for the same concept (`hostedBy.lastSeenAs`) — a JSON consumer should
+  // not see less than the text branch prints below.
+  const labels = project(ledger.read()).labels;
+  const lastSeenAs = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : null;
+
   if (command.opts<{ json?: boolean }>().json) {
     print({
       ...state,
       appId: packagedAppId(store) ?? null,
-      hostedSessions: hosted.map((s) => ({ pid: s.pid, cliSessionId: s.sessionId })),
+      hostedSessions: hosted.map((s) => ({ pid: s.pid, cliSessionId: s.sessionId, lastSeenAs })),
     });
     return;
   }
@@ -3377,9 +3399,7 @@ function reportDesktop(command: Command): void {
   if (state.codeSessions > 0)
     console.log(pc.dim(`  hosting ${state.codeSessions} Claude Code session(s)`));
   if (hosted.length > 0) {
-    const labels = project(ledger.read()).labels;
-    const label = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : undefined;
-    console.log(pc.dim(`  hosted sessions${label ? ` · last seen as ${label}` : ''}:`));
+    console.log(pc.dim(`  hosted sessions${lastSeenAs ? ` · last seen as ${lastSeenAs}` : ''}:`));
     for (const s of hosted) console.log(pc.dim(`    ${s.sessionId}  (pid ${s.pid})`));
   }
   if (state.selfHosted)
