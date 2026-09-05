@@ -73,6 +73,7 @@ import {
 } from '../engine/switch.js';
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
+import { formatLaunchCommand, openTerminalTab, planLaunch } from '../engine/launch.js';
 import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
 import { Ledger } from '../ledger/log.js';
@@ -2868,6 +2869,119 @@ client
 
     ledger.append({ kind: 'client_root_forgotten', root: known });
     console.log(`Forgot ${target}. Nothing under it was touched.`);
+  });
+
+client
+  .command('open')
+  .summary('open a Windows Terminal tab signed in as one client')
+  .description(
+    'Open a terminal tab running `claude` with CLAUDE_CONFIG_DIR pointed at one client — the\n' +
+      'only thing on this machine that knows name -> directory -> identity -> live writers ->\n' +
+      'junction target, and refuses the cases that bite instead of opening into them.\n\n' +
+      '<client> can be an existing path, the slug of a `~/.claude-<slug>` sibling, the name of a\n' +
+      '`client register`ed root (or one of its container children), or `default` for ~/.claude.\n' +
+      'Two registered roots sharing a name are refused rather than guessed at, and a name that\n' +
+      'matches nothing lists the clients this machine actually knows about.\n\n' +
+      'Nothing here logs in or switches an account: a client that is signed out still opens, the\n' +
+      "tab just lands on the CLI's own login — expected for a brand-new client's first sign-in,\n" +
+      'which wants a private browser window. Every launch scrubs CLAUDE* from the spawned\n' +
+      'environment and the shell command repeats the same cleanup, because whether `wt -w 0`\n' +
+      "reuses the target window's own environment was never measured (see CLAUDE.md).\n\n" +
+      'A junction is a pointer, not a client, and opening straight on one is refused — a process\n' +
+      'that opened the link before a repoint keeps writing through it after. --follow-link opens\n' +
+      'on the target instead. --guard records the credential here first, so the vault can put it\n' +
+      'back if something clobbers it; --print shows the exact command and opens nothing.',
+  )
+  .argument('<client>', 'a path, a registered name, a `~/.claude-<slug>` slug, or "default"')
+  .argument('[claudeArgs...]', 'arguments handed to claude, after --')
+  .option('-d <cwd>', 'the directory the tab opens in; defaults to the current directory')
+  .option('--follow-link', "open on a junction's target instead of refusing")
+  .option('--guard', 'record the credential here first, so the vault can put it back')
+  .option('--print', 'print the exact command and open nothing')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command, clientArg: string, claudeArgs: string[]) {
+    const opts = this.opts<{
+      d?: string;
+      followLink?: boolean;
+      guard?: boolean;
+      print?: boolean;
+      json?: boolean;
+    }>();
+    const ledger = ledgerFrom(this);
+    const registeredDirs = registeredClientDirs(project(ledger.read()));
+
+    const plan = planLaunch(clientArg, {
+      clients: registeredDirs,
+      ...(opts.d ? { cwd: opts.d } : {}),
+      followLink: opts.followLink ?? false,
+      claudeArgs,
+      env: process.env,
+    });
+
+    if (plan.blockers.length > 0) {
+      if (opts.json) {
+        print({ ok: false, blockers: plan.blockers });
+      } else {
+        for (const blocker of plan.blockers) console.log(pc.yellow(`  ! ${blocker}`));
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    if (!opts.json) {
+      for (const warning of plan.warnings) console.log(pc.yellow(`  ! ${warning}`));
+    }
+
+    if (opts.guard) {
+      const identity = await identify(plan.configDir!);
+      rememberCurrent(plan.configDir!, identity, vaultRoot());
+    }
+
+    const line = formatLaunchCommand(plan);
+
+    if (opts.print) {
+      if (opts.json)
+        return print({
+          ok: true,
+          configDir: plan.configDir,
+          warnings: plan.warnings,
+          command: line,
+        });
+      console.log(line);
+      return;
+    }
+
+    if (process.platform !== 'win32') {
+      if (opts.json) {
+        return print({
+          ok: false,
+          reason: 'not-windows',
+          configDir: plan.configDir,
+          command: line,
+        });
+      }
+      console.log(pc.yellow('client open drives Windows Terminal; on this machine run:'));
+      console.log(line);
+      return;
+    }
+
+    const outcome = openTerminalTab(plan);
+    if (opts.json) {
+      return print({
+        ok: outcome.outcome === 'opened',
+        outcome: outcome.outcome,
+        configDir: plan.configDir,
+        warnings: plan.warnings,
+        ...(outcome.outcome === 'failed' ? { command: outcome.line } : {}),
+      });
+    }
+    if (outcome.outcome === 'opened') {
+      console.log(`Opened a tab for ${plan.configDir}.`);
+    } else {
+      console.log(pc.yellow('Could not open a terminal tab. Run this instead:'));
+      console.log(outcome.line);
+      process.exitCode = 1;
+    }
   });
 
 const profile = program

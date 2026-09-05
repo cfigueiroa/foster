@@ -123,6 +123,17 @@ describe('applySeed', () => {
     expect(outcome.message).toContain('signed out');
   });
 
+  it('points to `client open` as the next step, not a bare CLAUDE_CONFIG_DIR instruction', () => {
+    // `client open` resolves a name to a directory, scrubs CLAUDE* from the
+    // spawned environment and names any live writer that could clobber a
+    // fresh login — a bare "set CLAUDE_CONFIG_DIR" instruction does none of
+    // that, so the success message points at the safer path instead.
+    const outcome = applySeed(planSeed(path.join(scratch(), 'new'), source()));
+
+    expect(outcome.message).toContain('foster client open');
+    expect(outcome.message.trim().endsWith('and sign in there.')).toBe(true);
+  });
+
   it('writes nothing for a blocked plan', () => {
     const target = scratch();
     writeFileSync(path.join(target, 'notes.md'), 'mine');

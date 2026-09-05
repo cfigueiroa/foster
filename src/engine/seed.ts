@@ -142,6 +142,6 @@ export function applySeed(plan: SeedPlan): SeedOutcome {
     linked,
     message:
       `${plan.target} is ready, and signed out. ` +
-      `Sign in with CLAUDE_CONFIG_DIR set to it, and foster keeps a copy from then on.`,
+      `Open it with \`foster client open ${path.basename(plan.target)}\` and sign in there.`,
   };
 }
