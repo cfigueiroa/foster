@@ -48,11 +48,64 @@ export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
  * killed it and left the real app running to report "still running". Requiring
  * proof costs at most a manual restart when the app's own path is unreadable;
  * the other way round ends someone else's process.
+ *
+ * "Not the CLI" alone is not enough, either. A standalone `claude.exe` — a
+ * `~/.local/bin/claude.exe` run from a terminal, never installed as the app at
+ * all — is not under `\claude-code\` and so passed every check above, which is
+ * exactly the failure this function exists to close: with the app closed, a
+ * machine carrying a dozen such CLIs turned every one of them into an orphaned
+ * `desktop` row, and the tie-break in `inspectDesktop` handed `taskkill /F /T`
+ * whichever was oldest. So absence of proof that a row is the CLI no longer
+ * qualifies it; presence of proof that it is the app does. Two are cheap and
+ * available without spawning anything new: its path sits under a store root
+ * this environment already knows about (`candidateStoreRoots`, or the MSIX
+ * package directory itself — a fresh install without a `claude-code-sessions`
+ * folder yet still lives under `\Packages\Claude...`), or it has at least one
+ * child carrying `--type=`, which only Electron's own helpers ever do. Without
+ * either, the row is a stranger and stays out of `DesktopState` — same rule
+ * `util/processes.ts` already argues in prose for the CLI side of this line.
  */
-function isDesktopProcess(row: ProcessRow): boolean {
+function isDesktopProcess(row: ProcessRow, rows: ProcessRow[], env: NodeJS.ProcessEnv): boolean {
   if (row.name.toLowerCase() !== 'claude.exe') return false;
   if (row.path === '') return false;
-  return !isCodeCliProcess(row);
+  if (isCodeCliProcess(row)) return false;
+  return hasProofOfBeingTheApp(row, rows, env);
+}
+
+/** A path under a store root this environment already knows about. */
+function underKnownStoreRoot(candidatePath: string, env: NodeJS.ProcessEnv): boolean {
+  const candidate = comparableUserDataDir(candidatePath);
+  return candidateStoreRoots(env).some((root) => {
+    const known = comparableUserDataDir(root);
+    return candidate === known || candidate.startsWith(`${known}\\`);
+  });
+}
+
+/** A path under the MSIX package directory, whoever's family folder it is. */
+function underAppPackageDirectory(candidatePath: string): boolean {
+  return /[\\/]Packages[\\/]Claude/i.test(candidatePath);
+}
+
+/** Whether some other row is a child of this one and carries an Electron `--type=`. */
+function hasTypedHelperChild(row: ProcessRow, rows: ProcessRow[]): boolean {
+  return rows.some(
+    (other) =>
+      other.parentPid === row.pid &&
+      other.name.toLowerCase() === 'claude.exe' &&
+      /--type=/.test(other.commandLine),
+  );
+}
+
+function hasProofOfBeingTheApp(
+  row: ProcessRow,
+  rows: ProcessRow[],
+  env: NodeJS.ProcessEnv,
+): boolean {
+  return (
+    underKnownStoreRoot(row.path, env) ||
+    underAppPackageDirectory(row.path) ||
+    hasTypedHelperChild(row, rows)
+  );
 }
 
 export interface DesktopState {
@@ -169,7 +222,7 @@ export function inspectDesktop(
   env: NodeJS.ProcessEnv = process.env,
 ): DesktopState {
   const rows = list();
-  const desktop = rows.filter(isDesktopProcess);
+  const desktop = rows.filter((row) => isDesktopProcess(row, rows, env));
 
   if (desktop.length === 0) {
     return { running: false, codeSessions: 0, selfHosted: hostedByDesktop(env) };
@@ -565,10 +618,12 @@ function launchProfileApp(executable: string, root: string): void {
 export function desktopExecutable(
   read: () => string | undefined = readProtocolCommand,
   list: ProcessLister = readProcesses,
+  env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   const registered = /"([^"]+\.exe)"/i.exec(read() ?? '')?.[1];
   if (registered) return registered;
-  return list().find((row) => isDesktopProcess(row) && row.path !== '')?.path;
+  const rows = list();
+  return rows.find((row) => isDesktopProcess(row, rows, env))?.path;
 }
 
 function readProtocolCommand(): string | undefined {
