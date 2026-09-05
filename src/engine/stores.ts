@@ -4,13 +4,21 @@ import {
   directoryKey,
   layoutFor,
   resolveStore,
+  samePath,
+  storeIdentity,
   storeRootOfCopy,
 } from '../domain/paths.js';
 import type { StoreLayout } from '../domain/types.js';
 import { uniquePrefix } from '../domain/prefix.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { project, type LedgerState } from '../ledger/project.js';
-import { readProcesses, runningStores, type ProcessLister } from './desktop.js';
+import {
+  desktopExecutable,
+  inspectDesktopFor,
+  readProcesses,
+  runningStores,
+  type ProcessLister,
+} from './desktop.js';
 import { lockfileHeld } from './lockfile.js';
 import { readConfig } from '../store/config.js';
 
@@ -62,6 +70,14 @@ export interface KnownStore {
    * which is why fostering into it refuses.
    */
   accountUuid?: string;
+  /**
+   * Whether this store's config.json carries an OAuth token cache entry —
+   * presence only, from `readConfig`. This is a stronger signal than
+   * `accountUuid`: a hint can point at an account nobody is signed into any
+   * more, while this says a credential was cached here at some point. Neither
+   * one reads the token itself, so neither proves who is signed in *now*.
+   */
+  hasTokenCache?: boolean;
 }
 
 /** Just the read: this takes the ledger's events, not the object holding them. */
@@ -104,20 +120,29 @@ export function knownStores(
       return;
     }
 
-    const accountUuid = readConfig(store).lastKnownAccountUuid;
+    const config = readConfig(store);
     const found: KnownStore = {
       root: store.root,
       hint,
       running: lockfileHeld(store),
       exists: true,
       ...(name !== undefined ? { name } : {}),
-      ...(accountUuid ? { accountUuid } : {}),
+      ...(config.lastKnownAccountUuid ? { accountUuid: config.lastKnownAccountUuid } : {}),
+      ...(config.hasTokenCache ? { hasTokenCache: true } : {}),
     };
     seen.set(key, found);
     stores.push(found);
   };
 
-  for (const dir of candidateStoreRoots(env)) offer(dir, 'installed app');
+  for (const dir of candidateStoreRoots(env)) {
+    // `CLAUDE_USER_DATA_DIR` relocates userData the same way `--user-data-dir`
+    // does — it is how a second profile is started at all — so a root that came
+    // from it is a profile even though `candidateStoreRoots` lists it first. Only
+    // the roots after it are the installed app's own conventional locations.
+    const fromEnvProfile =
+      env.CLAUDE_USER_DATA_DIR !== undefined && samePath(dir, env.CLAUDE_USER_DATA_DIR);
+    offer(dir, fromEnvProfile ? 'profile' : 'installed app');
+  }
   for (const dir of runningStores(list)) offer(dir, 'profile');
   for (const event of events) {
     if (event.kind === 'fostered') offer(storeRootOfCopy(event.copyPath), 'used before');
@@ -127,6 +152,50 @@ export function knownStores(
   for (const [name, root] of project(events).profiles) offer(root, 'registered', name);
 
   return stores;
+}
+
+/** What `storeExecutable` reports about one installation. */
+export interface StoreExecutableInfo {
+  executable?: string;
+  /** Parsed out of the MSIX package folder name in `executable` — see below. */
+  version?: string;
+}
+
+/** `Claude_0.13.15.0_x64__8wekyb3d8bbwe` — the version sits between two underscores. */
+const PACKAGE_VERSION = /claude_([\d.]+)_/i;
+
+/**
+ * The executable that would run one particular store, and the version folded
+ * into its own path.
+ *
+ * A running instance is proof: `inspectDesktopFor` already works out which
+ * process is *this* store's own — two profiles up means two mains, and only the
+ * ancestry walk tells them apart — so its live path beats anything guessed.
+ * `updaterLastSeenVersion` in config.json is not used here on purpose: it is
+ * the release the updater last *saw*, which after a staged update runs ahead of
+ * the build actually on disk (see `store/config.ts`), while a running process's
+ * own path names the file that is actually executing.
+ *
+ * A stopped store has no live process to ask, but every profile launches
+ * through the one binary Windows knows how to start on this machine — the
+ * `claude://` handler names it — so the registered command is the best
+ * available answer, not a guess specific to this store.
+ */
+export function storeExecutable(
+  root: string,
+  list: ProcessLister = readProcesses,
+  env: NodeJS.ProcessEnv = process.env,
+  read?: () => string | undefined,
+): StoreExecutableInfo {
+  const state = inspectDesktopFor(storeIdentity(root, env), list, env);
+  const runningPath =
+    state.running && state.mainPid !== undefined
+      ? list().find((row) => row.pid === state.mainPid)?.path
+      : undefined;
+  const executable = runningPath || desktopExecutable(read, list, env);
+  if (!executable) return {};
+  const version = PACKAGE_VERSION.exec(executable)?.[1];
+  return { executable, ...(version ? { version } : {}) };
 }
 
 /**

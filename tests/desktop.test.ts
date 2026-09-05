@@ -14,6 +14,7 @@ import {
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { appHolds, heldInMemory, inspectApp } from '../src/engine/safety.js';
+import { storeExecutable } from '../src/engine/stores.js';
 import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -571,6 +572,77 @@ describe('desktopExecutable', () => {
         () => [],
       ),
     ).toBeUndefined();
+  });
+});
+
+describe('storeExecutable (engine/stores.ts)', () => {
+  /**
+   * With two profiles up there are two mains, same as `inspectDesktopFor`
+   * above — and here it matters what each one's own path actually is, because
+   * a staged update can leave a running instance ahead of what the registry
+   * still names.
+   */
+  const ONE = 'C:\\one';
+  const TWO = 'C:\\two';
+  const exeOne =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_1.2.3.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+  const exeTwo =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_9.9.9.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+
+  it('reports the executable of each running instance', () => {
+    const table = rows(
+      {
+        pid: 500,
+        parentPid: 9,
+        path: exeOne,
+        commandLine: `"Claude.exe" --user-data-dir="${ONE}"`,
+      },
+      {
+        pid: 700,
+        parentPid: 9,
+        path: exeTwo,
+        commandLine: `"Claude.exe" --user-data-dir="${TWO}"`,
+      },
+    );
+    const list = () => table;
+
+    expect(storeExecutable(ONE, list, {}, () => undefined)).toEqual({
+      executable: exeOne,
+      version: '1.2.3.0',
+    });
+    expect(storeExecutable(TWO, list, {}, () => undefined)).toEqual({
+      executable: exeTwo,
+      version: '9.9.9.0',
+    });
+  });
+
+  it('falls back to the registered command for a store that is not running', () => {
+    // No live process to ask, but every profile launches through the one binary
+    // the claude:// handler names, so that is the best available answer.
+    const registered = `"${exeOne}" "%1"`;
+
+    expect(
+      storeExecutable(
+        ONE,
+        () => [],
+        {},
+        () => registered,
+      ),
+    ).toEqual({
+      executable: exeOne,
+      version: '1.2.3.0',
+    });
+  });
+
+  it('has no answer when nothing is running and nothing is registered', () => {
+    expect(
+      storeExecutable(
+        ONE,
+        () => [],
+        {},
+        () => undefined,
+      ),
+    ).toEqual({});
   });
 });
 

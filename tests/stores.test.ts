@@ -140,7 +140,7 @@ describe('knownStores', () => {
   });
 
   it('names one directory once, however many ways lead to it', () => {
-    // The installed store, reached again through the ledger. Listing it twice
+    // The env-var profile, reached again through the ledger. Listing it twice
     // would read as a second installation.
     const store = makeStore();
 
@@ -151,7 +151,7 @@ describe('knownStores', () => {
     );
 
     expect(found).toHaveLength(1);
-    expect(found[0]!.hint).toBe('installed app');
+    expect(found[0]!.hint).toBe('profile');
   });
 
   it('offers a registered profile that has neither run nor been fostered into', () => {
@@ -183,7 +183,7 @@ describe('knownStores', () => {
     ]);
   });
 
-  it('attaches a registered name to the installed app instead of duplicating it', () => {
+  it('attaches a registered name to an env-var profile instead of duplicating it', () => {
     const store = makeStore();
 
     const found = knownStores(
@@ -193,7 +193,7 @@ describe('knownStores', () => {
     );
 
     expect(found).toHaveLength(1);
-    expect(found[0]).toMatchObject({ hint: 'installed app', name: 'main', exists: true });
+    expect(found[0]).toMatchObject({ hint: 'profile', name: 'main', exists: true });
   });
 
   it('attaches a registered name to a running profile instead of duplicating it', () => {
@@ -203,6 +203,28 @@ describe('knownStores', () => {
 
     expect(found).toHaveLength(1);
     expect(found[0]).toMatchObject({ hint: 'profile', name: 'work', exists: true });
+  });
+
+  it('reports presence of a cached login without reading the blob', () => {
+    // Presence only, from either the current key or the one it replaced — never
+    // the value, which is why the fixture below is a string that must never
+    // reach the result, in any form.
+    const store = makeStore();
+    const opaque = 'SHOULD-NEVER-BE-READ-fdd93c2b8a1e';
+    writeFileSync(store.configFile, JSON.stringify({ 'oauth:tokenCacheV2': opaque }), 'utf8');
+
+    const found = knownStores([], { CLAUDE_USER_DATA_DIR: store.root }, () => []);
+
+    expect(found.find((known) => known.root === store.root)?.hasTokenCache).toBe(true);
+    expect(JSON.stringify(found)).not.toContain(opaque);
+  });
+
+  it('says nothing about presence when neither cache key is there', () => {
+    const store = signedInto(NEW_ACCOUNT.accountUuid);
+
+    const found = knownStores([], { CLAUDE_USER_DATA_DIR: store.root }, () => []);
+
+    expect(found.find((known) => known.root === store.root)?.hasTokenCache).toBeUndefined();
   });
 });
 
