@@ -536,7 +536,9 @@ requires SSO will still refuse — that is the account's policy, not this mechan
 
 `foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
 for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
-directories of every running instance so you know what to pass to `--store`.
+directories of every running instance so you know what to pass to `--store` — or give it a name
+once with `foster profile new|register` so you never have to retype the path (see `foster stores`
+under [Usage](#usage)).
 
 It can also start one. `foster --store <profile> app start` runs the installed executable — the one
 Windows records when it registers the `claude://` handler — with the switch that points it at that
@@ -577,9 +579,11 @@ credits, of its own.
 
 The identity is read from the client's own `.claude.json` — the profile the CLI cached for itself,
 the same at-rest category as the session files — and the credential beside it is not read, here or
-anywhere: its presence is what "signed in" means. The rest of foster already treats clients as
-first-class sources: `restore`, `purge` and `live` search all of them, which is how a machine with
-two clients gets the whole answer rather than the default's half.
+anywhere: its presence is what "signed in" means. `restore`, `purge` and `live` already search
+every `~/.claude*` sibling this way, which is how a machine with two such clients gets the whole
+answer rather than the default's half — but a root added with `foster client register`, below,
+does not join that search: it feeds `clients` and launch only, and `--config-dir` is still how
+`restore`, `purge` and `live` reach it, on purpose (see the `foster stores` section above).
 
 Launching stays in the shell, where an interactive program belongs. A function that sets the
 variable, hands every argument through, and puts the environment back whatever happens is all it
@@ -604,8 +608,18 @@ function claude-as {
 }
 ```
 
-`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — the list
-of clients is the directories that exist, so there is nothing to register anywhere.
+`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — a
+`~/.claude*` sibling needs no registration, `foster clients` finds it on its own. A directory
+that does not live there — `~\.claude-contas\<name>`, or a whole folder of them — does:
+`foster client register <path>` names one directory, `--container` names a directory that holds
+one client per immediate child, and `foster client forget <path>` withdraws either without
+touching anything underneath it. Both are dry runs unless you pass `--yes`, in the shape below.
+
+```bash
+foster client register ~\.claude-contas --container            # dry run
+foster client register ~\.claude-contas --container --yes      # list its children in `clients`
+foster client forget ~\.claude-contas --yes                     # stop listing them
+```
 
 `foster client new` makes a better one than `mkdir` does. A bare directory plus a login
 authenticates, but sessions run there quietly have fewer capabilities than sessions run anywhere
@@ -793,6 +807,8 @@ foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
 foster point     # repoint a directory link at another client
 foster client new  # seed a config directory that is a working client
+foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
+foster profile   # name a Desktop profile — new|register|forget|list — for --store
 foster sweep     # the whole job: every account, archived and deleted included
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
@@ -1018,15 +1034,47 @@ against the installations below — `--store work` finds `D:\Claude-Work`. A pie
 them is reported rather than guessed at, and one that matches nothing and is not a directory is an
 error rather than an empty store.
 
-`foster stores` lists the installations it can name without being told — the installed app, whatever
-is running, and the profiles the ledger has been used in — with the account each one holds, which is
-the question a second profile exists to answer. The menu offers the same list, so a profile you have
-worked in once never has to be typed again.
+`foster stores` lists the installations it can name without being told, from **four** sources: the
+installed app; whatever is running right now; the profiles the ledger has already been fostered
+into; and — new — the ones registered on purpose, `foster profile new` or `profile register`,
+for a profile that has neither run nor been fostered into yet. Each line carries the account it
+holds, which is the question a second profile exists to answer, and the menu offers the same
+list, so a profile you have worked in once never has to be typed again.
 
 ```
-* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) 9866b1e8
-  D:\Claude-Work                           (profile, running) not signed in
+* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) last seen as 9866b1e8
+  D:\Claude-Work                           (profile, running) last seen as not signed in
+  work                                     (registered, gone) last seen as not signed in
 ```
+
+A registered name is the one row that survives its own directory disappearing — `(registered,
+gone)` above — because a name is the one thing foster remembers on purpose past that; `foster
+profile forget` is how you stop hearing about it. `--json` adds `signedIn`: whether that
+installation's config carries a cached OAuth token entry at all, presence only, the same
+existence check `doctor` reports and never the token itself — reading that stays `usage`'s job
+alone (see [Safety model](#safety-model)).
+
+`--store` resolves an argument against exactly this list, trying each in turn: a path that
+exists is always taken as a path; failing that, a registered name, exact, tried before a path
+piece that happens to match too; failing that, an account — a label, an e-mail, or a unique uuid
+prefix, the same three `foster clients` already prints; and last, a distinctive piece of a path,
+because a profile's is long and nobody remembers it exactly. A piece matching more than one
+installation is reported rather than guessed at, the same as an ambiguous session identifier,
+because with `--store` the guess decides which installation gets written to.
+
+**What `--store <name>` means for the verbs that already existed: they now act on that profile
+instead of the installed app, by design.** `foster --store work sweep` scans **that** profile's
+other accounts and writes the copies inside it — each profile keeps its own
+`claude-code-sessions`, so two profiles mean two independent sweeps, and neither ever sees the
+other's cards — and `sweep --restart` already restarts the instance that was actually named.
+`foster --store work rescue` lists that profile's stranded cards; the transcripts it reads for
+them still come from `transcriptRoots`, which is CLI-side and shared, so one transcript can
+legitimately show up under two profiles. `foster --store work consolidate` and
+`foster --store work return` still require **that** profile's own app closed, with the
+refuse-to-close-the-one-you-are-running-inside rule intact. None of these verbs learns a new
+**client** directory from a profile — that stays `client register`'s job, a separate registry on
+purpose (see [More than one client at once](#more-than-one-client-at-once)); what changes here is
+only which store they read and write.
 
 `foster clients` is the same list for the CLI: its config directories — one per account — with who
 is signed into each, read from each client's own cached profile; the credential contributes only its
@@ -1159,6 +1207,16 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   show for it.
 - **The originals are never modified.** Fostering only ever _adds_ a file to the current account's
   folder. There is no move, and no rewrite of anything under the old account.
+- **Naming a profile or a client root is a write; opening one is not.** The ledger's four newest
+  event kinds — `profile_registered`, `profile_forgotten`, `client_root_registered`,
+  `client_root_forgotten` — are append-only records of what foster calls something, never of an
+  account or a credential; folding them (`LedgerState.profiles`, `LedgerState.clientRoots`) is
+  what lets `--store <name>` and `foster clients` still find a root days after the command that
+  named it. `profile new`, `profile register`, `profile forget`, `client register` and
+  `client forget` all follow `client new`'s shape: blockers first, a dry run by default, `--yes`
+  to apply, the ledger entry only after a finished write. Starting an instance or handing it a
+  link is not a write at all — `app start`, `app restart` and `app link` never touch the ledger,
+  because launching a profile that already exists changes nothing foster remembers about it.
 - **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
   already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
   It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,
@@ -1289,6 +1347,13 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
   `accounts`, or the agent. The reader lives in one file, `store/credential.ts`.
 
+  `foster stores` and `foster doctor` come closer than any of those and still stop short on
+  purpose: `signedIn` in `--json` (and "gone"/"not signed in" in the text) says only whether a
+  config carries a cached OAuth token entry at all — checked directly against the parsed JSON's
+  own keys, the value itself never assigned anywhere — which is presence, not proof, and a
+  different question from what the token is worth. Listing installations never doubles as reading
+  one of them.
+
   **What copies the CLI's:** `switch` and `guard`. Both go through `store/cliCredential.ts` and
   `engine/vault.ts`, and what they do is _copy bytes_: foster never mints a credential, never
   refreshes one, never removes one, and never signs anyone in. OAuth is interactive and stays yours.
@@ -1316,8 +1381,13 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   **The agent is fenced off from all of it**, on the same footing as `purge`: `switch`, `point`,
   `client new` and `vault` are not among its tools and it is told not to reach for them through the
   shell. Changing who you are signed in as is not a step on the way to something else, and a
-  credential is not a file for a model to move. The read-only half — `clients`, `accounts`, `usage`,
-  `renewals`, `identify` — answers "which account has quota" without any of it.
+  credential is not a file for a model to move. The same fence covers naming an installation and
+  opening one: `profile new|register|forget`, `client register|forget`, `profile open` and
+  `client open` start interactive programs or change what foster remembers about accounts, so
+  none of them is a tool either — the system prompt names all four families and tells the model to
+  say which account needs an app or a terminal open and let the user do it, rather than reach for
+  the shell. The read-only half — `clients`, `accounts`, `usage`, `renewals`, `identify` — answers
+  "which account has quota" without any of it.
 
   **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
   read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
@@ -1389,8 +1459,10 @@ if realistic account identifiers or personal filesystem paths appear in tracked 
 
 ### Releasing
 
-The version lives in three files — `package.json`, `src/version.ts` (stamped into every copy foster
-writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
+The version lives in four files — `package.json`, `package-lock.json` (which restates it twice, and
+which `npm install` alone would leave reporting a version the release never had), `src/version.ts`
+(stamped into every copy foster writes) and `install.ps1` (which pins the release it downloads).
+`npm run version:set X.Y.Z` (`scripts/version.mjs`) bumps all four together, then tag:
 
 ```bash
 npm run version:set 0.11.1
@@ -1398,7 +1470,7 @@ git commit -am "chore: release 0.11.1" && git tag -a v0.11.1 -m "foster v0.11.1"
 git push && git push origin v0.11.1
 ```
 
-Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree
+Pushing the tag runs the release workflow, which refuses to publish unless the four versions agree
 with each other and with the tag. It then builds the bundle, smoke-tests that it actually starts,
 generates the SHA256 the installer verifies, and creates the release with both assets. Run the
 workflow manually from the Actions tab to exercise all of that without publishing anything.

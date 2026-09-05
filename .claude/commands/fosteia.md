@@ -66,3 +66,7 @@ on rather than re-deriving it:
 - **`foster live --stop`.** It is `taskkill /F /T`, so whatever that session had not written is
   lost. If `sweep` reports a live writer, pass it on — finishing there is the user's call, not a
   step for you to take.
+- **Never open a profile or a terminal.** `foster profile new|register|forget`,
+  `foster client register|forget`, `app start` and opening a terminal in another client are not
+  part of this command either. The account signed into right now is the whole target; naming or
+  launching another one is a decision for the user to make, not this sweep.
