@@ -506,7 +506,7 @@ the browser's OAuth callback always lands on package activation, which starts an
 whichever `userData` the packaged registration currently names — normally the default installation.
 The profile never receives its own callback and sits on the sign-in screen forever.
 
-**Measured on 05/09/2026 (Claude Desktop 1.46388.2, foster 0.39.0): two Claude Desktop windows
+**Measured on 05/09/2026 (Claude Desktop 1.46388.2, foster 0.40.0): two Claude Desktop windows
 signed into two accounts, the second through the ordinary Google flow.** Three facts made it work:
 
 - What actually decides the destination is a **packaged ProgID** —
