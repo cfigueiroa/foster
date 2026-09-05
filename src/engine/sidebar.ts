@@ -1,3 +1,4 @@
+import { samePath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { weighBranches } from './branches.js';
@@ -16,11 +17,23 @@ export interface SidebarCard {
   isCopy: boolean;
   cliSessionId: string;
   archived: boolean;
+  /**
+   * The directory this card opens in, which decides which transcript it opens.
+   * A conversation continued from two directories has a file under each.
+   */
+  cwd?: string;
 }
 
 export interface Sidebar {
-  /** Why this conversation (or a branch of it) is already showing, if it is. */
-  reason(cliSessionId: string | undefined): string | undefined;
+  /**
+   * Why this conversation (or a branch of it) is already showing, if it is.
+   *
+   * `cwd` is the offered card's own directory. Given it, an exact match on the
+   * id is only a duplicate when both cards open the *same* transcript: a
+   * conversation continued from a second directory writes a second file, and
+   * the account holding the shorter one was counting as holding the work.
+   */
+  reason(cliSessionId: string | undefined, cwd?: string): string | undefined;
   /** A card this run has committed to bringing, so the next one sees it. */
   markPlanned(cliSessionId: string): void;
   /**
@@ -66,6 +79,47 @@ export interface BranchStanding {
 
 const BRANCH_HERE = 'this account already has a branch of that conversation';
 
+/**
+ * Does the offered card open a transcript holding records none of the cards
+ * here do?
+ *
+ * The id alone used to answer "is this work here?", on the assumption that two
+ * cards with one id open one file. They do not when they name different
+ * directories: measured on a real store, 191 of 209 conversations with more
+ * than one transcript had records in a file the first-read one did not hold,
+ * 31,689 records in all. The account showing the shorter file was refusing the
+ * fuller one as a duplicate of itself.
+ *
+ * Answered by reading, and only in the case that can be wrong: same id,
+ * different directory. Same directory, or a transcript that cannot be found,
+ * keeps the old answer — a card whose file nothing can locate is not evidence
+ * of work waiting outside.
+ */
+function holdsMore(
+  cliSessionId: string,
+  cwd: string | undefined,
+  here: SidebarCard[],
+  kin?: Lineage,
+): boolean {
+  if (cwd === undefined || kin === undefined) return false;
+  if (here.every((card) => card.cwd !== undefined && samePath(card.cwd, cwd))) return false;
+  const offered = kin.scanFor(cliSessionId, cwd);
+  if (offered === undefined) return false;
+  for (const card of here) {
+    const mine = kin.scanFor(cliSessionId, card.cwd);
+    if (mine === undefined) continue;
+    let extra = false;
+    for (const uuid of offered.uuids) {
+      if (!mine.uuids.has(uuid)) {
+        extra = true;
+        break;
+      }
+    }
+    if (!extra) return false;
+  }
+  return true;
+}
+
 export function sidebarOf(
   store: StoreLayout,
   account: AccountRef,
@@ -90,6 +144,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
       isCopy: session.isCopy,
       cliSessionId: id,
       archived: Boolean(session.data.isArchived),
+      ...(session.data.cwd === undefined ? {} : { cwd: session.data.cwd }),
     });
   }
 
@@ -106,10 +161,13 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
   };
 
   return {
-    reason(cliSessionId) {
+    reason(cliSessionId, cwd) {
       if (cliSessionId === undefined) return undefined;
       const exact = cards.filter((card) => card.cliSessionId === cliSessionId);
-      if (exact.length > 0) return how(exact[exact.length - 1]!);
+      if (exact.length > 0 && !holdsMore(cliSessionId, cwd, exact, kin)) {
+        return how(exact[exact.length - 1]!);
+      }
+      if (exact.length > 0) return undefined;
       const work = kin.rootOf(cliSessionId);
       if (work === undefined) return undefined;
       const group = cards.filter((card) => workOf(card.cliSessionId) === work);

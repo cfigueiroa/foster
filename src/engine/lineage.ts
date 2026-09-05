@@ -1,7 +1,9 @@
+import { samePath } from '../domain/paths.js';
 import {
   conversationRoot,
   idsMentionedIn,
   indexAllTranscripts,
+  lastRecordedCwd,
   scanConversation,
   transcriptRoots,
   type ConversationScan,
@@ -47,6 +49,18 @@ export interface Lineage {
    * six times over. Undefined when there is no transcript to read.
    */
   scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
+  /**
+   * The transcript this card opens, which is not always the conversation's only
+   * one.
+   *
+   * A conversation is written under the directory it ran in, so one
+   * `cliSessionId` continued from two working directories has two files with
+   * different contents — `scanOf` reads whichever sorted first. Given the `cwd`
+   * a card carries, this answers which of them that card actually opens.
+   * Undefined when nothing matches, which is the honest answer for a card whose
+   * directory never wrote a transcript.
+   */
+  scanFor(cliSessionId: string | undefined, cwd: string | undefined): ConversationScan | undefined;
   /**
    * Resolve roots that only look unrelated, for these conversations.
    *
@@ -140,6 +154,19 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     }
   };
 
+  const byFile = new Map<string, ConversationScan | undefined>();
+  const scanAt = (file: string): ConversationScan | undefined => {
+    if (byFile.has(file)) return byFile.get(file);
+    let scan: ConversationScan | undefined;
+    try {
+      scan = scanConversation(file);
+    } catch {
+      scan = undefined;
+    }
+    byFile.set(file, scan);
+    return scan;
+  };
+
   const rootOf = (cliSessionId: string | undefined): string | undefined => {
     if (cliSessionId === undefined || cliSessionId === '') return undefined;
     const head = headOf(cliSessionId);
@@ -192,6 +219,18 @@ export function lineageAt(projectsDirs: string[]): Lineage {
           alias.set(found, head);
         }
       }
+    },
+
+    scanFor(cliSessionId, cwd) {
+      if (cliSessionId === undefined || cliSessionId === '' || cwd === undefined) return undefined;
+      const files = transcripts().get(cliSessionId) ?? [];
+      // One file is the ordinary case and needs no matching: it is the one the
+      // card opens whatever directory the card names.
+      if (files.length < 2) return files[0] === undefined ? undefined : scanAt(files[0]);
+      for (const file of files) {
+        if (samePath(lastRecordedCwd(file) ?? '', cwd)) return scanAt(file);
+      }
+      return undefined;
     },
 
     transcripts,

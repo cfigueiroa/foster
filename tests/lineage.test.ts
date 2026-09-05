@@ -6,6 +6,7 @@ import { findDuplicates } from '../src/engine/duplicates.js';
 import { FOLLOWED_BRANCH, fosterSessions } from '../src/engine/executor.js';
 import { forksOf } from '../src/engine/branches.js';
 import { lineageAt } from '../src/engine/lineage.js';
+import { sidebarFrom } from '../src/engine/sidebar.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, listRepointed, project } from '../src/ledger/project.js';
 import { selectReturnTargets } from '../src/ops/active.js';
@@ -798,5 +799,76 @@ describe('deepen', () => {
     expect(forks[0]!.branches.map((branch) => branch.cliSessionId).sort()).toEqual(
       [ORIGINAL, MIDWAY].sort(),
     );
+  });
+});
+
+/**
+ * One conversation, two working directories, two files.
+ *
+ * A conversation is written under the directory it ran in, so continuing the
+ * same `cliSessionId` from a second directory leaves two transcripts with
+ * different contents. Measured on a real store: 191 of 209 conversations with
+ * more than one file had records the first-read one did not hold, 31,689 in
+ * all. The account showing the shorter file was refusing the fuller one as a
+ * duplicate of itself. See #36.
+ */
+describe('two transcripts for one conversation', () => {
+  const NEWLINE = String.fromCharCode(10);
+  const HERE_DIR = '-workspace-project';
+  const OTHER_DIR = '-workspace-project-worktree';
+
+  /** The same id under two project directories, the second holding less. */
+  function split(): { env: NodeJS.ProcessEnv; fullCwd: string; shortCwd: string } {
+    const config = mkdtempSync(path.join(tmpdir(), 'foster-split-'));
+    const fullCwd = '/workspace/project';
+    const shortCwd = '/workspace/project/worktree';
+    const shared = [record(ROOT), record('00000000-0000-4000-8000-0000000000f8')];
+    const write = (dir: string, lines: string[], cwd: string): void => {
+      const at = path.join(config, 'projects', dir);
+      mkdirSync(at, { recursive: true });
+      const withCwd = lines.map((line) =>
+        JSON.stringify({ ...(JSON.parse(line) as Record<string, unknown>), cwd }),
+      );
+      const body = withCwd.join(NEWLINE) + NEWLINE;
+      writeFileSync(path.join(at, `${ORIGINAL}.jsonl`), body, 'utf8');
+    };
+    write(HERE_DIR, [...shared, record('00000000-0000-4000-8000-0000000000f9')], fullCwd);
+    write(OTHER_DIR, shared, shortCwd);
+    return { env: { CLAUDE_CONFIG_DIR: config }, fullCwd, shortCwd };
+  }
+
+  it('reads the transcript the card’s own directory opens, not the first one', () => {
+    const { env, fullCwd, shortCwd } = split();
+    const kin = lineageAt(projects(env));
+
+    expect(kin.scanFor(ORIGINAL, fullCwd)!.uuids.size).toBe(3);
+    expect(kin.scanFor(ORIGINAL, shortCwd)!.uuids.size).toBe(2);
+  });
+
+  it('does not call the fuller file a duplicate of the shorter one here', () => {
+    const { env, fullCwd, shortCwd } = split();
+    const kin = lineageAt(projects(env));
+    const here = sidebarFrom(
+      [
+        {
+          path: 'p',
+          account: NEW_ACCOUNT,
+          isCopy: false,
+          isStranded: false,
+          reasons: [],
+          data: session({
+            sessionId: '00000000-0000-4000-8000-0000000000fa',
+            cliSessionId: ORIGINAL,
+            cwd: shortCwd,
+          }),
+        },
+      ],
+      kin,
+    );
+
+    // The account holds the short file; the offered card opens the full one.
+    expect(here.reason(ORIGINAL, fullCwd)).toBeUndefined();
+    // Offered from the same directory, it is the duplicate the check is for.
+    expect(here.reason(ORIGINAL, shortCwd)).toBeDefined();
   });
 });

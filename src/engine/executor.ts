@@ -225,7 +225,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // the destination rather than about anything foster has done: a conversation
     // already showing here would gain a second row for the same work.
     const cliSessionId = session.data.cliSessionId;
-    const shownHere = here.reason(cliSessionId);
+    // The directory goes with the id: two cards sharing an id open one
+    // transcript only when they open it from the same place.
+    const shownHere = here.reason(cliSessionId, session.data.cwd);
     // A branch pass lifts only the branch answer. An exact copy stays refused:
     // two cards opening one transcript is the duplicate this check exists for.
     const branchAccepted =
