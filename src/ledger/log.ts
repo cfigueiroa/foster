@@ -16,6 +16,10 @@ const EVENT_KINDS = new Set<string>([
   'card_retitled',
   'conversation_purged',
   'failed',
+  'profile_registered',
+  'profile_forgotten',
+  'client_root_registered',
+  'client_root_forgotten',
 ]);
 
 /**

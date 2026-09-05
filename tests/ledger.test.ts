@@ -354,3 +354,100 @@ describe('card_retitled', () => {
     });
   });
 });
+
+/**
+ * A name given to a Desktop installation other than the default. The fold
+ * keeps only the latest root for a name — re-registering is the rename — and
+ * forgetting removes the name from state without touching the log line that
+ * created it.
+ */
+describe('profile_registered / profile_forgotten', () => {
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'profile_registered',
+      name: 'work',
+      root: 'D:\\Claude-Work',
+    });
+  });
+
+  it('folds to a name naming a root', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+
+    expect(project(ledger.read()).profiles.get('work')).toBe('D:\\Claude-Work');
+  });
+
+  it('treats re-registering a name with a new root as the rename', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work-2' });
+
+    const profiles = project(ledger.read()).profiles;
+    expect(profiles.get('work')).toBe('D:\\Claude-Work-2');
+    expect(profiles.size).toBe(1);
+  });
+
+  it('forgets a name without erasing the registration from the log', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+    ledger.append({ kind: 'profile_forgotten', name: 'work' });
+
+    expect(project(ledger.read()).profiles.has('work')).toBe(false);
+    expect(ledger.read().map((e) => e.kind)).toEqual(['profile_registered', 'profile_forgotten']);
+  });
+});
+
+/**
+ * A filesystem root registered as somewhere `foster` looks for CLI client
+ * config directories — a single client, or a container of several.
+ */
+describe('client_root_registered / client_root_forgotten', () => {
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+  });
+
+  it('folds to a root naming what kind it is', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+
+    expect(project(ledger.read()).clientRoots.get('C:\\home\\.claude-contas')).toBe('container');
+  });
+
+  it('re-registering the same root with a different kind replaces it', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'container' });
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'client' });
+
+    expect(project(ledger.read()).clientRoots.get('C:\\home\\work')).toBe('client');
+  });
+
+  it('forgets a root without erasing the registration from the log', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'client' });
+    ledger.append({ kind: 'client_root_forgotten', root: 'C:\\home\\work' });
+
+    expect(project(ledger.read()).clientRoots.has('C:\\home\\work')).toBe(false);
+    expect(ledger.read().map((e) => e.kind)).toEqual([
+      'client_root_registered',
+      'client_root_forgotten',
+    ]);
+  });
+});
