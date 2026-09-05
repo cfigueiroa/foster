@@ -639,7 +639,9 @@ answer rather than the default's half — but a root added with `foster client r
 does not join that search: it feeds `clients` and launch only, and `--config-dir` is still how
 `restore`, `purge` and `live` reach it, on purpose (see the `foster stores` section above).
 
-Launching stays in the shell, where an interactive program belongs. A function that sets the
+Launching can stay in the shell, or go through `foster client open <client>`, which alone knows
+name -> directory -> identity -> live writers -> junction target, and refuses the cases that bite
+instead of opening into them. Staying in the shell is the portable option: a function that sets the
 variable, hands every argument through, and puts the environment back whatever happens is all it
 takes — the two halves the obvious one-liner gets wrong are the `finally` and the `@args`:
 
@@ -693,6 +695,29 @@ else's identity.
 foster client new ~\.claude-work            # dry run
 foster client new ~\.claude-work --yes      # make it, signed out
 ```
+
+#### One entry per client in the Windows Terminal menu
+
+`foster clients --fragment` prints a Windows Terminal fragment (JSON) with one profile per client
+this machine lists — registered roots included, a junction resolved to its target — so every client
+gets its own entry in the `wt` menu without hand-editing `settings.json`. Run these two commands in
+this order: the `Fragments` folder does not exist until something creates it, and PowerShell's `>`
+does not create one on the way.
+
+```powershell
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster" | Out-Null
+foster clients --fragment > "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster\clients.json"
+```
+
+Three things worth knowing before you rely on it. The Terminal writes a stub of the profile into
+your own `settings.json` the first time it loads the fragment, so this is not without side effects
+on a file that is yours. `wt -p <name>` with a name that does not match opens the **default**
+profile silently (microsoft/terminal#6086) — on a machine where `~/.claude` is the default, that is
+a tab on the wrong account with no error at all, so prefer `foster client open` when being certain
+matters more than a menu entry. And the fragment has to stay UTF-8: PowerShell 7's `>` writes it
+that way, but Windows PowerShell 5.1's writes UTF-16 and breaks the file.
+
+Restart Windows Terminal if the entry does not appear.
 
 ### Switching a client's account
 
@@ -856,12 +881,14 @@ foster usage     # the signed-in account's live 5-hour and weekly limits, from t
 foster renewals  # usage resets and billing dates across every account, in one place
 foster whoami    # the signed-in account's name, email and plan, from the app's own cache
 foster clients   # the CLI's config directories, and who is signed into each
+foster clients --fragment # print a Windows Terminal fragment (JSON), one profile per client
 foster switch    # sign a client in as another account, without a logout
 foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
 foster point     # repoint a directory link at another client
 foster client new  # seed a config directory that is a working client
 foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
+foster client open # a Windows Terminal tab signed in as one client (--print shows the command)
 foster profile   # name a Desktop profile — new|register|forget|list — for --store
 foster sweep     # the whole job: every account, archived and deleted included
 foster foster    # create the copies
@@ -1288,9 +1315,10 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   what lets `--store <name>` and `foster clients` still find a root days after the command that
   named it. `profile new`, `profile register`, `profile forget`, `client register` and
   `client forget` all follow `client new`'s shape: blockers first, a dry run by default, `--yes`
-  to apply, the ledger entry only after a finished write. Starting an instance or handing it a
-  link is not a write at all — `app start`, `app restart` and `app link` never touch the ledger,
-  because launching a profile that already exists changes nothing foster remembers about it.
+  to apply, the ledger entry only after a finished write. Starting an instance, opening a terminal,
+  or handing it a link is not a write at all — `app start`, `app restart`, `app link` and
+  `client open` never touch the ledger, because launching a profile or a client that already exists
+  changes nothing foster remembers about it.
 - **One system setting is ever touched, and only for the length of one sign-in.** The `Parameters`
   value under the packaged ProgID's `Shell\open` key (`HKCU\Software\Classes\AppX<hash>\Shell\open`)
   is the only registry value, or setting of any kind outside `~/.foster`, that `foster` ever writes —
@@ -1441,9 +1469,11 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   different question from what the token is worth. Listing installations never doubles as reading
   one of them.
 
-  **What copies the CLI's:** `switch` and `guard`. Both go through `store/cliCredential.ts` and
-  `engine/vault.ts`, and what they do is _copy bytes_: foster never mints a credential, never
-  refreshes one, never removes one, and never signs anyone in. OAuth is interactive and stays yours.
+  **What copies the CLI's:** `switch`, `guard`, and `client open --guard`, which runs the same
+  read-then-remember pair `guard` does before opening the tab. All of them go through
+  `store/cliCredential.ts` and `engine/vault.ts`, and what they do is _copy bytes_: foster never
+  mints a credential, never refreshes one, never removes one, and never signs anyone in. OAuth is
+  interactive and stays yours.
   The bytes are copied verbatim rather than re-serialised, because a field this version does not know
   about is a field a rewrite would drop — and a dropped field in a credential produces a file that
   parses, looks right and does not authenticate.
