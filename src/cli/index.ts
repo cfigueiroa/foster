@@ -56,6 +56,7 @@ import {
   type KnownStore,
 } from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
+import { applyUnclaim, planUnclaim, undoUnclaim } from '../engine/unclaim.js';
 import {
   containerBlocker,
   inspectHandler,
@@ -80,6 +81,7 @@ import {
   copySessionIds,
   listActive,
   listRepointed,
+  listWorktreeReleased,
   project,
   selectByTarget,
   whereCopiesAre,
@@ -150,6 +152,7 @@ import {
   runSweep,
   type BranchesPhase,
   type SweepReport,
+  type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
 import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
@@ -172,6 +175,8 @@ import {
   sessionLine,
   shortId,
   sweepSummary,
+  unclaimOutcomeLine,
+  unclaimPlanLine,
   updateLine,
 } from './render.js';
 
@@ -1056,6 +1061,7 @@ program
     printPhase('Fostering, archived included', report.fostered.outcomes);
     printBranches(report.branches);
     printPhase('Restoring what the app deleted', report.restored.outcomes);
+    printWorktreeClaims(report.worktreeClaims, dryRun);
 
     console.log('');
     for (const line of sweepSummary(report)) console.log(line);
@@ -1089,6 +1095,19 @@ function printBranches(phase: BranchesPhase): void {
     return;
   }
   for (const fork of phase.forks) for (const line of forkLines(fork)) console.log(line);
+}
+
+function printWorktreeClaims(phase: WorktreeClaimsPhase, dryRun: boolean): void {
+  console.log(pc.bold('\nWorktree claims on copies'));
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  if (dryRun) {
+    for (const item of phase.items) console.log(unclaimPlanLine(item));
+    return;
+  }
+  for (const outcome of phase.outcomes) console.log(unclaimOutcomeLine(outcome));
 }
 
 function sweepJson(report: SweepReport): Record<string, unknown> {
@@ -1134,6 +1153,11 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
       })),
     },
     restored: phase(report.restored),
+    worktreeClaims: {
+      counts: report.worktreeClaims.counts,
+      items: report.worktreeClaims.items,
+      outcomes: report.worktreeClaims.outcomes,
+    },
     archived: report.archived,
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,
@@ -1906,6 +1930,113 @@ async function finish(store: StoreLayout, restart: boolean): Promise<void> {
   // Named outright rather than as a flag to add here: --terminate belongs to
   // "foster app restart", and the writing commands have no such option.
   await restartDesktop(store, false, 'Run "foster app restart --terminate"');
+}
+
+const UNCLAIM_PREVIEW_LIMIT = 12;
+
+program
+  .command('unclaim')
+  .description(
+    'release the worktree claim a copy already on disk inherited from its original (issue #26)',
+  )
+  .option('--undo', 'put a released claim back, where nothing has moved on since')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ undo?: boolean; json?: boolean; yes?: boolean; dryRun?: boolean }>();
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (opts.undo) {
+      undoUnclaimCommand(store, ledger, opts, dryRun);
+      return;
+    }
+
+    const plan = planUnclaim(store, project(ledger.read()));
+
+    if (opts.json) {
+      print(plan);
+      return;
+    }
+
+    if (plan.items.length === 0) {
+      console.log('No copy here still claims a worktree.');
+      return;
+    }
+
+    const count = plan.items.length;
+    console.log(
+      pc.bold(
+        `${count} cop${count === 1 ? 'y' : 'ies'} still claim${count === 1 ? 's' : ''} a worktree; ` +
+          'releasing them opens each in its repository instead.',
+      ),
+    );
+    const shown = plan.items.slice(0, UNCLAIM_PREVIEW_LIMIT);
+    for (const item of shown) console.log(unclaimPlanLine(item));
+    if (plan.items.length > shown.length) {
+      console.log(pc.dim(`  … and ${plan.items.length - shown.length} more`));
+    }
+
+    if (dryRun) {
+      console.log(pc.dim('\nRe-run with --yes to release them.'));
+      return;
+    }
+
+    const outcomes = applyUnclaim(plan.items, { store, ledger });
+    console.log('');
+    for (const outcome of outcomes) console.log(unclaimOutcomeLine(outcome));
+
+    const released = outcomes.filter((o) => o.status === 'released').length;
+    const skipped = outcomes.filter((o) => o.status === 'skipped').length;
+    const failed = outcomes.filter((o) => o.status === 'failed').length;
+    console.log(pc.bold(`\n${released} released, ${skipped} skipped, ${failed} failed.`));
+    console.log(
+      pc.dim(
+        'The change is invisible until the app re-reads its directory — restart Claude Desktop, ' +
+          'or run "foster app restart".',
+      ),
+    );
+    console.log(pc.dim('Undo with: foster unclaim --undo --yes'));
+  });
+
+function undoUnclaimCommand(
+  store: StoreLayout,
+  ledger: Ledger,
+  opts: { json?: boolean },
+  dryRun: boolean,
+): void {
+  const pending = listWorktreeReleased(project(ledger.read()));
+
+  if (opts.json) {
+    print(pending);
+    return;
+  }
+
+  if (pending.length === 0) {
+    console.log('No worktree claim has been released — there is nothing to put back.');
+    return;
+  }
+
+  const outcomes = undoUnclaim({ store, ledger, dryRun });
+  for (const outcome of outcomes) {
+    const mark =
+      outcome.status === 'undone'
+        ? pc.green('+')
+        : outcome.status === 'failed'
+          ? pc.red('x')
+          : pc.dim('·');
+    const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+    console.log(`  ${mark} ${shortId(outcome.sessionId)}${detail}`);
+  }
+
+  const back = outcomes.filter((outcome) => outcome.status === 'undone').length;
+  if (dryRun) {
+    console.log(pc.bold(`\nDry run: ${back} would be put back.`));
+    console.log(pc.dim('Re-run with --yes to write.'));
+    return;
+  }
+  console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
 }
 
 program

@@ -355,6 +355,47 @@ describe('card_retitled', () => {
   });
 });
 
+describe('worktree_released / worktree_release_undone', () => {
+  const released = {
+    kind: 'worktree_released' as const,
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_card-1.json',
+    sessionId: 'local_card-1',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    worktreeName: 'wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+  };
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    expect(ledger.read()[0]).toMatchObject({ kind: 'worktree_released', path: released.path });
+  });
+
+  it('folds to the copy, keyed by path', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    const card = project(ledger.read()).worktreeReleased.get(released.path);
+    expect(card).toMatchObject({
+      sessionId: 'local_card-1',
+      worktreePath: released.worktreePath,
+      worktreeName: released.worktreeName,
+      cwdFrom: released.cwdFrom,
+      cwdTo: released.cwdTo,
+    });
+  });
+
+  it('drops the card once the release is undone', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+    ledger.append({ kind: 'worktree_release_undone', path: released.path });
+
+    expect(project(ledger.read()).worktreeReleased.size).toBe(0);
+  });
+});
+
 /**
  * A name given to a Desktop installation other than the default. The fold
  * keeps only the latest root for a name — re-registering is the rename — and

@@ -114,6 +114,11 @@ unmentioned reads as having brought everything. One of the three has a way out �
 [scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
 under a flat "never".
 
+A fourth pass releases the worktree claim a copy already on disk inherited from its original,
+before fostering learned not to hand one out — see
+[Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
+whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
+
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
 with a row per branch nothing is hidden, so collapsing a fork to one row is a tidy-up for whoever
@@ -127,6 +132,39 @@ on a store of eleven accounts, half a minute of the run was spent reading what i
 Code session started from the app's sidebar is a child process of the app, so restarting from
 inside one would kill the caller part-way through; the sweep asks first and ends with the command
 to run from a terminal outside the app instead of failing after writing everything.
+
+## Copies that still claim a worktree
+
+A card names the worktree it holds in `worktreePath` / `worktreeName`, but the lease itself lives
+in the app's own store of worktrees, keyed by the session id that took it out. A copy used to
+carry the claim without the lease — a fresh id naming a directory it cannot hold — so when the app
+reached the second card on that branch it refused with `fatal: 'claude/<branch>' is already used
+by worktree at '<path>'` and dropped the session into the main repository, uncommitted work and
+all. Fostering has not made that mistake since 0.38.0: a fresh copy drops the claim and opens in
+the repository the worktree was cut from instead.
+
+What that fix could not reach is what was already on disk. `foster unclaim` is the repair:
+
+```bash
+foster unclaim          # what it would release, writing nothing
+foster unclaim --yes    # release it
+```
+
+Only **copies** are ever touched — the candidates are the active fosterings foster's own ledger
+already tracks, never a card discovered by scanning the store, so a native card carrying the same
+stale claim is left exactly as it is. The write removes the three claim fields and moves `cwd` to
+the repository the worktree was cut from, the same relocation `buildFosterCopy` makes for a copy
+being minted fresh, and carries every other key on the card through untouched.
+
+The release is recorded, so it can be put back: `foster unclaim --undo --yes` restores the claim
+and the directory, refusing a card that has since moved on — repointed, retitled into a different
+`cwd`, or handed a fresh worktree by the app — rather than overwriting it. Like a repoint, the
+change is invisible until the app re-reads its directory, so it takes a restart to show.
+
+`foster sweep` runs this as its fourth pass, on the destination store, after the other three have
+written — so "bring everything here" also stops a freshly arrived copy from fighting its original
+over a branch. Two follow-ups from the original issue (#26) stay open: the `branch` a stale, archived
+row still claims, and the cosmetic `keptDirtyWorktree` a copy cannot really have.
 
 ## Undoing a deletion
 

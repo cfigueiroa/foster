@@ -1,6 +1,12 @@
 import { fosteringKey } from '../domain/fostering.js';
 import type { KnownIdentity } from '../domain/identity.js';
-import type { ActiveFostering, LedgerEvent, RepointedCard, RetitledCard } from './types.js';
+import type {
+  ActiveFostering,
+  LedgerEvent,
+  RepointedCard,
+  RetitledCard,
+  WorktreeReleasedCard,
+} from './types.js';
 
 export type { KnownIdentity };
 
@@ -14,6 +20,11 @@ export interface LedgerState {
   repointed: Map<string, RepointedCard>;
   /** Cards wearing a title, or an archived flag, the app did not give them, keyed by session id. */
   retitled: Map<string, RetitledCard>;
+  /**
+   * Copies whose worktree claim was released and not yet put back, keyed by
+   * path — see `WorktreeReleasedEvent`.
+   */
+  worktreeReleased: Map<string, WorktreeReleasedCard>;
   /**
    * Named Desktop installations, keyed by name. Re-registering a name points it
    * at a new root — the fold keeps only the latest, which is the rename.
@@ -49,6 +60,7 @@ export function project(events: LedgerEvent[]): LedgerState {
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
   const retitled = new Map<string, RetitledCard>();
+  const worktreeReleased = new Map<string, WorktreeReleasedCard>();
   const profiles = new Map<string, string>();
   const clientRoots = new Map<string, 'client' | 'container'>();
   let handlerArmed: LedgerState['handlerArmed'];
@@ -209,6 +221,23 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      case 'worktree_released':
+        worktreeReleased.set(event.path, {
+          path: event.path,
+          sessionId: event.sessionId,
+          ...(event.worktreePath !== undefined ? { worktreePath: event.worktreePath } : {}),
+          ...(event.worktreeName !== undefined ? { worktreeName: event.worktreeName } : {}),
+          ...(event.worktreeLazy !== undefined ? { worktreeLazy: event.worktreeLazy } : {}),
+          ...(event.cwdFrom !== undefined ? { cwdFrom: event.cwdFrom } : {}),
+          ...(event.cwdTo !== undefined ? { cwdTo: event.cwdTo } : {}),
+          releasedAt: event.ts,
+        });
+        break;
+
+      case 'worktree_release_undone':
+        worktreeReleased.delete(event.path);
+        break;
+
       // Re-registering a known name is the rename: `set` replaces the root a
       // name pointed at rather than refusing, because a profile is the name,
       // not the path underneath it.
@@ -256,6 +285,7 @@ export function project(events: LedgerEvent[]): LedgerState {
     identities,
     repointed,
     retitled,
+    worktreeReleased,
     profiles,
     clientRoots,
     ...(handlerArmed ? { handlerArmed } : {}),
@@ -270,6 +300,11 @@ export function listRepointed(state: LedgerState): RepointedCard[] {
 /** Cards wearing a title or flag the app did not give them, oldest write first. */
 export function listRetitled(state: LedgerState): RetitledCard[] {
   return [...state.retitled.values()].sort((a, b) => a.retitledAt - b.retitledAt);
+}
+
+/** Copies whose worktree claim is released and not yet put back, oldest first. */
+export function listWorktreeReleased(state: LedgerState): WorktreeReleasedCard[] {
+  return [...state.worktreeReleased.values()].sort((a, b) => a.releasedAt - b.releasedAt);
 }
 
 /**

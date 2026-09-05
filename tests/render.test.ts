@@ -191,6 +191,7 @@ describe('sweepSummary', () => {
       divergedTemplate: '(other branch, went on {when}) ',
     },
     restored: { outcomes: [], counts },
+    worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
     archived: 0,
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },

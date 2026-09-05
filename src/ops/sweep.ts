@@ -21,6 +21,12 @@ import {
 import { lineage, lineageAt, type Lineage } from '../engine/lineage.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import { sidebarFrom } from '../engine/sidebar.js';
+import {
+  applyUnclaim,
+  planUnclaim,
+  type UnclaimItem,
+  type UnclaimOutcome,
+} from '../engine/unclaim.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
 import { findRestorable } from '../store/restore.js';
@@ -46,12 +52,22 @@ import { fosterableFrom, liveConversationIds } from './foster.js';
  *  2. give every branch of a forked conversation a row of its own: the branch
  *     that carried on keeps its title, the rest are marked stale and filed in
  *     the archived view — see `branchCards.ts`;
- *  3. bring back conversations the app deleted that nothing still points at.
+ *  3. bring back conversations the app deleted that nothing still points at;
+ *  4. release the worktree claim a copy already on disk inherited from its
+ *     original, before `buildFosterCopy` learned not to hand one out (0.38.0,
+ *     #27) — see `engine/unclaim.ts`. A copy fighting the original over a
+ *     branch is a copy the app drops into the main repository, uncommitted
+ *     work and all, which is not a session the user can use.
  *
  * Order matters. A conversation a fresh copy now points at is not lost any more,
  * so restoring after fostering asks the third question against the answer to
  * the first rather than against the state before it; and a fork's members are
  * kept out of the first pass so each row is written once, with its final title.
+ * The worktree pass runs last, after the ledger holds every fostering the run
+ * itself just wrote — not that a fresh copy would ever need it, since
+ * `buildFosterCopy` already drops the claim at the point of copying, but so
+ * the pass sees the same, settled state of this account's own directory the
+ * final report describes.
  *
  * What is deliberately *not* here: `purge`, which destroys transcripts and is
  * part of no sweep. `consolidate` is not either, but for the opposite reason —
@@ -96,6 +112,18 @@ export interface SweepOptions {
 export interface SweepPhase {
   outcomes: Outcome[];
   counts: Record<OutcomeStatus, number>;
+}
+
+/**
+ * The worktree-claim pass: what a copy already on disk is still holding.
+ *
+ * `outcomes` is empty on a dry run — nothing was written, so there is nothing
+ * to report beyond the plan itself, the same convention `SweepPhase` keeps.
+ */
+export interface WorktreeClaimsPhase {
+  items: UnclaimItem[];
+  outcomes: UnclaimOutcome[];
+  counts: { released: number; skipped: number; failed: number };
 }
 
 /** The branch pass: what it brought, what it marked, per fork. */
@@ -157,6 +185,8 @@ export interface SweepConfirmation {
   /** Rows a second branch pass would still add or mark. */
   branches: number;
   restorable: number;
+  /** Copies a second worktree-claim pass would still find. */
+  worktreeClaims: number;
   exhausted: boolean;
 }
 
@@ -167,6 +197,8 @@ export interface SweepReport {
   fostered: SweepPhase;
   branches: BranchesPhase;
   restored: SweepPhase;
+  /** The worktree-claim pass — see `WorktreeClaimsPhase`. */
+  worktreeClaims: WorktreeClaimsPhase;
   /**
    * Rows that end up in the destination's archived view rather than in Recents:
    * copies of archived sessions, and the branches that stopped.
@@ -261,6 +293,11 @@ export function runSweep(options: SweepOptions): SweepReport {
 
   const passes = runPasses(run, fromAccounts(scanned, [target]), dryRun);
 
+  // Last, and reading the ledger fresh: the three passes above may just have
+  // appended fosterings of their own, and this plans against whatever the
+  // ledger now says rather than the reading taken before any of them ran.
+  const worktreeClaims = runWorktreeClaims(store, ledger, dryRun);
+
   const report: SweepReport = {
     store: store.root,
     target,
@@ -273,6 +310,7 @@ export function runSweep(options: SweepOptions): SweepReport {
       divergedTemplate,
     },
     restored: phase(passes.restored),
+    worktreeClaims,
     archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
     liveWriters: [...passes.fostered, ...passes.branches.outcomes, ...passes.restored]
       .map((outcome) => outcome.live)
@@ -371,17 +409,47 @@ function confirm(run: SweepRun): SweepConfirmation {
     summariseOutcomes(again.branches.outcomes).fostered +
     again.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
   const restorable = summariseOutcomes(again.restored).fostered;
+  const worktreeClaims = planUnclaim(store, project(ledger.read())).items.length;
 
   return {
     fosterable,
     branches,
     restorable,
-    exhausted: fosterable === 0 && branches === 0 && restorable === 0,
+    worktreeClaims,
+    exhausted: fosterable === 0 && branches === 0 && restorable === 0 && worktreeClaims === 0,
   };
 }
 
 function phase(outcomes: Outcome[]): SweepPhase {
   return { outcomes, counts: summariseOutcomes(outcomes) };
+}
+
+/**
+ * The worktree-claim pass, dry or not.
+ *
+ * The plan alone is what a dry run reports; `--yes` applies it against the
+ * store the rest of the sweep just wrote into. Idempotent by construction —
+ * `planUnclaim` reads the file on disk, and a released copy no longer carries
+ * a claim for the next plan to find.
+ */
+function runWorktreeClaims(
+  store: StoreLayout,
+  ledger: Ledger,
+  dryRun: boolean,
+): WorktreeClaimsPhase {
+  const plan = planUnclaim(store, project(ledger.read()));
+  const outcomes = dryRun ? [] : applyUnclaim(plan.items, { store, ledger });
+  return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
+}
+
+function countUnclaim(outcomes: UnclaimOutcome[]): {
+  released: number;
+  skipped: number;
+  failed: number;
+} {
+  const counts = { released: 0, skipped: 0, failed: 0 };
+  for (const outcome of outcomes) counts[outcome.status] += 1;
+  return counts;
 }
 
 function countNeverComes(sessions: DiscoveredSession[]): NeverComes {
