@@ -1,5 +1,6 @@
 import { fosteringKey } from '../domain/fostering.js';
 import type { KnownIdentity } from '../domain/identity.js';
+import { comparablePath } from '../domain/paths.js';
 import type {
   ActiveFostering,
   LedgerEvent,
@@ -222,7 +223,11 @@ export function project(events: LedgerEvent[]): LedgerState {
       }
 
       case 'worktree_released':
-        worktreeReleased.set(event.path, {
+        // Keyed the same way `storeRootOfCopy` comparisons are everywhere else in
+        // this fold: two spellings of one file must not become two open releases,
+        // one of them invisible to `--undo` because it was written under the path
+        // the other case happened to use.
+        worktreeReleased.set(comparablePath(event.path), {
           path: event.path,
           sessionId: event.sessionId,
           ...(event.worktreePath !== undefined ? { worktreePath: event.worktreePath } : {}),
@@ -235,7 +240,7 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
 
       case 'worktree_release_undone':
-        worktreeReleased.delete(event.path);
+        worktreeReleased.delete(comparablePath(event.path));
         break;
 
       // Re-registering a known name is the rename: `set` replaces the root a

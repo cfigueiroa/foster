@@ -158,8 +158,15 @@ being minted fresh, and carries every other key on the card through untouched.
 
 The release is recorded, so it can be put back: `foster unclaim --undo --yes` restores the claim
 and the directory, refusing a card that has since moved on — repointed, retitled into a different
-`cwd`, or handed a fresh worktree by the app — rather than overwriting it. Like a repoint, the
-change is invisible until the app re-reads its directory, so it takes a restart to show.
+`cwd`, or handed a fresh worktree by the app — rather than overwriting it.
+
+Releasing a claim takes no write guard, unlike a repoint — it is allowed with Claude Desktop open,
+the same as [a retitle](#when-one-conversation-becomes-two). The app reads the session directory once,
+at startup, and only ever rewrites a card it is holding in memory, whole, the next time something
+about it changes. A release that write overwrites is not lost: `planUnclaim` re-derives the claim
+from whatever is on disk, so a card the app hands the fields back to is simply one the next plan
+finds again, and the next `foster unclaim` — or the next sweep — releases it a second time. The
+change becomes visible at the app's next restart either way, exactly like a retitle.
 
 `foster sweep` runs this as its fourth pass, on the destination store, after the other three have
 written — so "bring everything here" also stops a freshly arrived copy from fighting its original

@@ -3,23 +3,23 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { applyUnclaim, planUnclaim, undoUnclaim } from '../src/engine/unclaim.js';
-import { assertCardsWritable, type WritableCard } from '../src/engine/safety.js';
+import { AppRunningError, assertCardsWritable, type WritableCard } from '../src/engine/safety.js';
 import type * as Desktop from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
 import { project } from '../src/ledger/project.js';
-import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
+import type { CodeSessionData } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
-// The real guard reads a real lockfile and a real process table, neither of
-// which this suite controls — only what a "running app" answers has to be
-// fixed so the one test that drives the real guard (below) is deterministic.
+// A running app, fixed for the whole suite. This is not something `applyUnclaim`
+// or `undoUnclaim` ever read any more — the point of most of what follows is
+// that they do not need to — but it is what the contrast tests below use to
+// prove `assertCardsWritable` itself would have refused, had anything here
+// still been calling it.
 vi.mock('../src/engine/lockfile.js', () => ({ lockfileHeld: () => true }));
 vi.mock('../src/engine/desktop.js', async (importOriginal) => {
   const actual = await importOriginal<typeof Desktop>();
   return {
     ...actual,
-    // Running since the beginning of time, so any fostering timestamp this
-    // suite produces reads as "written after the app started".
     inspectDesktopFor: () => ({ running: true, startedAt: 0, codeSessions: 0, selfHosted: false }),
   };
 });
@@ -28,11 +28,13 @@ vi.mock('../src/engine/desktop.js', async (importOriginal) => {
  * Releasing the claim a copy already on disk inherited from its original —
  * issue #26's second half, alongside the fix `fostering.test.ts` covers for a
  * copy being minted fresh.
+ *
+ * Neither `applyUnclaim` nor `undoUnclaim` takes a process guard: releasing a
+ * claim is an idempotent repair, like `retitle`, not a move like `repoint` — see
+ * the doc comment on `src/engine/unclaim.ts`. Several tests below run with the
+ * app mocked as running for exactly that reason: the release has to go through
+ * regardless.
  */
-
-// Everything writable: these tests drive a synthetic store, and whether a real
-// app on this machine happens to be running must not decide whether they pass.
-const noGuard = (_store: StoreLayout, cards: WritableCard[]) => ({ writable: cards, held: [] });
 
 function ledgerIn(): Ledger {
   return new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-unclaim-')), 'l.jsonl'));
@@ -168,10 +170,44 @@ describe('planUnclaim', () => {
     foster(ledger, file, 'local_00000000-0000-4000-8000-0000000000c6', 'local_origin-6');
 
     const first = planUnclaim(store, project(ledger.read()));
-    applyUnclaim(first.items, { store, ledger, guard: noGuard });
+    applyUnclaim(first.items, { ledger });
 
     const second = planUnclaim(store, project(ledger.read()));
     expect(second.items).toEqual([]);
+  });
+
+  it('finds the claim again once the app hands it back, and releases it a second time', () => {
+    // The whole reason neither write here takes a guard: a card the app is
+    // holding may be rewritten from memory at any point, claim and all. This
+    // simulates exactly that — the app saving the same card back with its
+    // original worktree fields — and proves the repair is not a one-shot: the
+    // next plan finds the claim again, and releasing it again is unremarkable,
+    // not an error.
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({ sessionId: '00000000-0000-4000-8000-0000000000c7', ...HELD });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+    foster(ledger, file, before.sessionId, 'local_origin-c7');
+
+    const first = planUnclaim(store, project(ledger.read()));
+    const [firstOutcome] = applyUnclaim(first.items, { ledger });
+    expect(firstOutcome!.status).toBe('released');
+    expect(read(file).worktreePath).toBeUndefined();
+
+    // The app rewrites the card from memory, claim and all — the hazard the
+    // module doc comment names, made concrete.
+    writeFileSync(file, JSON.stringify(before), 'utf8');
+
+    const second = planUnclaim(store, project(ledger.read()));
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]!.sessionId).toBe(before.sessionId);
+
+    const [secondOutcome] = applyUnclaim(second.items, { ledger });
+    expect(secondOutcome!.status).toBe('released');
+    expect(read(file).worktreePath).toBeUndefined();
+
+    const events = ledger.read().filter((event) => event.kind === 'worktree_released');
+    expect(events).toHaveLength(2);
   });
 });
 
@@ -189,7 +225,7 @@ describe('applyUnclaim', () => {
     foster(ledger, file, before.sessionId, 'local_origin-d1');
 
     const plan = planUnclaim(store, project(ledger.read()));
-    const [outcome] = applyUnclaim(plan.items, { store, ledger, guard: noGuard });
+    const [outcome] = applyUnclaim(plan.items, { ledger });
 
     expect(outcome!.status).toBe('released');
     const after = read(file);
@@ -214,7 +250,7 @@ describe('applyUnclaim', () => {
     foster(ledger, file, before.sessionId, 'local_origin-d2');
 
     const plan = planUnclaim(store, project(ledger.read()));
-    applyUnclaim(plan.items, { store, ledger, guard: noGuard });
+    applyUnclaim(plan.items, { ledger });
 
     expect(read(file).worktreeLazy).toBeUndefined();
   });
@@ -227,7 +263,7 @@ describe('applyUnclaim', () => {
     foster(ledger, file, before.sessionId, 'local_origin-d3');
 
     const plan = planUnclaim(store, project(ledger.read()));
-    applyUnclaim(plan.items, { store, ledger, guard: noGuard });
+    applyUnclaim(plan.items, { ledger });
 
     const events = ledger.read().filter((event) => event.kind === 'worktree_released');
     expect(events).toHaveLength(1);
@@ -252,8 +288,31 @@ describe('applyUnclaim', () => {
     const plan = planUnclaim(store, project(ledger.read()));
     unlinkSync(file);
 
-    const outcomes = applyUnclaim(plan.items, { store, ledger, guard: noGuard });
+    const outcomes = applyUnclaim(plan.items, { ledger });
     expect(outcomes[0]!.status).toBe('failed');
+  });
+
+  it('releases even though the real guard would refuse this exact card', () => {
+    // The design decision this pins: releasing a claim is an idempotent repair
+    // like `retitle`, not a move like `repoint`, so it takes no write guard at
+    // all — not even the app-open one `retitle` itself has none of either. A
+    // native card is always "held" as far as `assertCardsWritable` is
+    // concerned while the app is up, so proving that call throws for this
+    // exact path is proof the release below could not have gone through it.
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({ sessionId: '00000000-0000-4000-8000-0000000000d5', ...HELD });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+
+    const asNative: WritableCard[] = [{ path: file, native: true }];
+    expect(() => assertCardsWritable(store, asNative)).toThrow(AppRunningError);
+
+    foster(ledger, file, before.sessionId, 'local_origin-d5');
+    const plan = planUnclaim(store, project(ledger.read()));
+    const [outcome] = applyUnclaim(plan.items, { ledger });
+
+    expect(outcome!.status).toBe('released');
+    expect(read(file).worktreePath).toBeUndefined();
   });
 });
 
@@ -264,13 +323,9 @@ describe('undoUnclaim', () => {
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e1', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e1');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
-    const outcomes = undoUnclaim({ store, ledger, guard: noGuard });
+    const outcomes = undoUnclaim({ ledger });
     expect(outcomes[0]!.status).toBe('undone');
     expect(read(file)).toEqual(before);
   });
@@ -281,18 +336,14 @@ describe('undoUnclaim', () => {
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e2', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e2');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
     // The app (or another command) has since sent this card somewhere else.
     const moved = read(file);
     moved.cwd = 'C:\\home\\elsewhere';
     writeFileSync(file, JSON.stringify(moved), 'utf8');
 
-    const outcomes = undoUnclaim({ store, ledger, guard: noGuard });
+    const outcomes = undoUnclaim({ ledger });
     expect(outcomes[0]!.status).toBe('skipped');
     expect(outcomes[0]!.detail).toMatch(/moved on/);
     // Left exactly as the caller found it.
@@ -305,18 +356,14 @@ describe('undoUnclaim', () => {
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e3', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e3');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
     const rewritten = read(file);
     rewritten.worktreePath = 'C:\\home\\repo\\.claude\\worktrees\\wt-fresh';
     rewritten.worktreeName = 'wt-fresh';
     writeFileSync(file, JSON.stringify(rewritten), 'utf8');
 
-    const outcomes = undoUnclaim({ store, ledger, guard: noGuard });
+    const outcomes = undoUnclaim({ ledger });
     expect(outcomes[0]!.status).toBe('skipped');
   });
 
@@ -326,14 +373,10 @@ describe('undoUnclaim', () => {
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e4', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e4');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
     unlinkSync(file);
-    const outcomes = undoUnclaim({ store, ledger, guard: noGuard });
+    const outcomes = undoUnclaim({ ledger });
     expect(outcomes[0]!.status).toBe('failed');
   });
 
@@ -343,36 +386,28 @@ describe('undoUnclaim', () => {
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e5', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e5');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
-    undoUnclaim({ store, ledger, guard: noGuard });
-    expect(undoUnclaim({ store, ledger, guard: noGuard })).toEqual([]);
+    undoUnclaim({ ledger });
+    expect(undoUnclaim({ ledger })).toEqual([]);
   });
 
-  it('does not refuse the real guard for a copy fostered after the app started', () => {
-    // Regression for the omission in the fix: `undoUnclaim` used to build its
-    // write-guard cards without `fosteredAt`, which `appHolds` (safety.ts)
-    // treats as "assume the worst" — every pending release looked held the
-    // instant Claude Desktop was running, whatever it actually loaded. The
-    // mocks above put the app "running" since time zero, so this fostering's
-    // real timestamp is necessarily after that: the real guard must let it
-    // through rather than throwing `AppRunningError`.
+  it('undoes even though the real guard would refuse this exact card', () => {
+    // Same contrast as the `applyUnclaim` test above, in the other direction:
+    // `undoUnclaim` takes no guard either, so the fact `assertCardsWritable`
+    // would refuse this card while the app is "running" changes nothing about
+    // whether the undo goes through.
     const store = makeStore();
     const ledger = ledgerIn();
     const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e6', ...HELD });
     const file = writeSession(store, NEW_ACCOUNT, before);
     foster(ledger, file, before.sessionId, 'local_origin-e6');
-    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
-      store,
-      ledger,
-      guard: noGuard,
-    });
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, { ledger });
 
-    const outcomes = undoUnclaim({ store, ledger, guard: assertCardsWritable });
+    const asNative: WritableCard[] = [{ path: file, native: true }];
+    expect(() => assertCardsWritable(store, asNative)).toThrow(AppRunningError);
+
+    const outcomes = undoUnclaim({ ledger });
     expect(outcomes[0]!.status).toBe('undone');
     expect(read(file)).toEqual(before);
   });

@@ -1949,7 +1949,7 @@ program
     const dryRun = opts.dryRun || !opts.yes;
 
     if (opts.undo) {
-      undoUnclaimCommand(store, ledger, opts, dryRun);
+      undoUnclaimCommand(ledger, opts, dryRun);
       return;
     }
 
@@ -1963,7 +1963,7 @@ program
       if (dryRun) {
         print(plan);
       } else {
-        const outcomes = applyUnclaim(plan.items, { store, ledger });
+        const outcomes = applyUnclaim(plan.items, { ledger });
         print({ plan, outcomes });
       }
       return;
@@ -1992,7 +1992,7 @@ program
       return;
     }
 
-    const outcomes = applyUnclaim(plan.items, { store, ledger });
+    const outcomes = applyUnclaim(plan.items, { ledger });
     console.log('');
     for (const outcome of outcomes) console.log(unclaimOutcomeLine(outcome));
 
@@ -2002,19 +2002,16 @@ program
     console.log(pc.bold(`\n${released} released, ${skipped} skipped, ${failed} failed.`));
     console.log(
       pc.dim(
-        'The change is invisible until the app re-reads its directory — restart Claude Desktop, ' +
-          'or run "foster app restart".',
+        "Like a retitle, this shows only at the app's next restart — restart Claude Desktop, " +
+          'or run "foster app restart". A card the app rewrites in the meantime keeps (or ' +
+          'regains) its claim on disk, and the next "foster unclaim" or sweep finds and ' +
+          'releases it again.',
       ),
     );
     console.log(pc.dim('Undo with: foster unclaim --undo --yes'));
   });
 
-function undoUnclaimCommand(
-  store: StoreLayout,
-  ledger: Ledger,
-  opts: { json?: boolean },
-  dryRun: boolean,
-): void {
+function undoUnclaimCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: boolean): void {
   const pending = listWorktreeReleased(project(ledger.read()));
 
   if (opts.json && dryRun) {
@@ -2030,7 +2027,7 @@ function undoUnclaimCommand(
   // Same order as `sweep`: the write happens before `--json` is checked, so
   // `--undo --yes --json` reports what was actually put back rather than the
   // bare pending list a dry run would show.
-  const outcomes = undoUnclaim({ store, ledger, dryRun });
+  const outcomes = undoUnclaim({ ledger, dryRun });
 
   if (opts.json) {
     print(outcomes);

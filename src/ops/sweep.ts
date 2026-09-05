@@ -438,7 +438,7 @@ function runWorktreeClaims(
   dryRun: boolean,
 ): WorktreeClaimsPhase {
   const plan = planUnclaim(store, project(ledger.read()));
-  const outcomes = dryRun ? [] : applyUnclaim(plan.items, { store, ledger });
+  const outcomes = dryRun ? [] : applyUnclaim(plan.items, { ledger });
   return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
 }
 

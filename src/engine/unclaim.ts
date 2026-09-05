@@ -8,7 +8,6 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
-import { assertCardsWritable, type WritableCard, type WriteGuard } from './safety.js';
 
 /**
  * Releasing the worktree claim a copy inherited when it was written, before
@@ -28,6 +27,20 @@ import { assertCardsWritable, type WritableCard, type WriteGuard } from './safet
  * decides instead: a candidate is one of the active fosterings it already
  * tracks, never a card discovered by scanning the store. A native card keeping
  * a stale claim is #26's first left-open follow-up, not this one's to touch.
+ *
+ * Neither write here takes a process guard — an idempotent repair, exactly like
+ * `retitleCards`. The app reads the session directory once, at startup, and
+ * holds everything it found in memory from then on; a card it is holding is one
+ * it may write back, in full, the next time something about it changes. A
+ * release that write overwrites is not lost: `planUnclaim` re-derives the claim
+ * from whatever is on disk, so a copy the app hands the fields back to is simply
+ * a copy the next plan finds again, and the next pass — or the next sweep —
+ * releases it a second time. The change becomes visible at the app's next
+ * restart either way, the same as a retitle. `repoint.ts` keeps the guard
+ * because a pointer move racing the app's own write is a move that can be
+ * silently lost with nothing left recording that it should happen again — the
+ * ledger there says "moved", not "keep moving until it holds"; a claim release
+ * has nothing of that kind to race.
  */
 
 export interface UnclaimItem {
@@ -133,9 +146,7 @@ export interface UnclaimOutcome {
 }
 
 export interface ApplyUnclaimOptions {
-  store: StoreLayout;
   ledger: Ledger;
-  guard?: WriteGuard;
 }
 
 function describeItem(
@@ -161,43 +172,19 @@ function describeItem(
  *
  * Same order as `repointCards`: the write happens first, and only a completed
  * write is recorded, so a crash between the two never leaves the ledger
- * claiming a release that the file does not show. Guarded the same way too —
- * `assertCardsWritable` refuses only when *none* of the batch can be written,
- * and otherwise reports what the app is holding beside what moved, because a
- * copy fostered after the app's last start was never read by it and can be
- * rewritten safely; the change is simply invisible until a restart, the way
- * `retitleCards` explains for its own writes.
+ * claiming a release that the file does not show.
+ *
+ * No process guard stands in front of it — see the module doc comment. A card
+ * the app is holding gets the same write everything else here gets; if the app
+ * later saves that card from memory and puts the claim back, the file on disk
+ * is once again one `planUnclaim` finds, so nothing here needs the app to be
+ * closed to make progress, only another pass to finish it.
  */
 export function applyUnclaim(items: UnclaimItem[], options: ApplyUnclaimOptions): UnclaimOutcome[] {
-  const { store, ledger, guard = assertCardsWritable } = options;
+  const { ledger } = options;
   const outcomes: UnclaimOutcome[] = [];
-  const holding = new Set<string>();
-
-  if (items.length > 0) {
-    const fosteredAt = new Map<string, number>();
-    for (const fostering of listActive(project(ledger.read()))) {
-      fosteredAt.set(comparablePath(fostering.copyPath), fostering.fosteredAt);
-    }
-    const cards: WritableCard[] = items.map((item) => {
-      const at = fosteredAt.get(comparablePath(item.path));
-      return { path: item.path, native: false, ...(at === undefined ? {} : { fosteredAt: at }) };
-    });
-    const { held } = guard(store, cards);
-    for (const card of held) holding.add(comparablePath(card.path));
-  }
 
   for (const item of items) {
-    if (holding.has(comparablePath(item.path))) {
-      outcomes.push(
-        describeItem(
-          item,
-          'skipped',
-          'Claude Desktop has this card loaded — close it and run this again',
-        ),
-      );
-      continue;
-    }
-
     const data = readSessionFile(item.path);
     if (!data) {
       outcomes.push(describeItem(item, 'failed', 'the card could not be read'));
@@ -241,10 +228,8 @@ export interface UndoUnclaimOutcome {
 }
 
 export interface UndoUnclaimOptions {
-  store: StoreLayout;
   ledger: Ledger;
   dryRun?: boolean;
-  guard?: WriteGuard;
 }
 
 /**
@@ -257,37 +242,18 @@ export interface UndoUnclaimOptions {
  * and reported rather than overwritten — the same restraint `undoRequests`
  * takes for granted because a repoint's `from`/`to` are a single field, where
  * this has four to get right or none at all.
+ *
+ * No process guard here either, for the reason the module doc comment gives:
+ * this is the same idempotent write in the other direction, and the
+ * "moved on" check above is what actually protects a card the app has since
+ * touched — a guard would only add a wait for a hazard this already refuses.
  */
 export function undoUnclaim(options: UndoUnclaimOptions): UndoUnclaimOutcome[] {
-  const { store, ledger, dryRun = false, guard = assertCardsWritable } = options;
+  const { ledger, dryRun = false } = options;
   const pending = listWorktreeReleased(project(ledger.read()));
   const outcomes: UndoUnclaimOutcome[] = [];
 
-  const holding = new Set<string>();
-  if (!dryRun && pending.length > 0) {
-    const fosteredAt = new Map<string, number>();
-    for (const fostering of listActive(project(ledger.read()))) {
-      fosteredAt.set(comparablePath(fostering.copyPath), fostering.fosteredAt);
-    }
-    const cards: WritableCard[] = pending.map((card) => {
-      const at = fosteredAt.get(comparablePath(card.path));
-      return { path: card.path, native: false, ...(at === undefined ? {} : { fosteredAt: at }) };
-    });
-    const { held } = guard(store, cards);
-    for (const card of held) holding.add(comparablePath(card.path));
-  }
-
   for (const card of pending) {
-    if (holding.has(comparablePath(card.path))) {
-      outcomes.push({
-        path: card.path,
-        sessionId: card.sessionId,
-        status: 'skipped',
-        detail: 'Claude Desktop has this card loaded — close it and run this again',
-      });
-      continue;
-    }
-
     const data = readSessionFile(card.path);
     if (!data) {
       outcomes.push({

@@ -142,6 +142,11 @@ before 0.38.0 taught fostering not to hand one out (`foster unclaim`, issue #26'
 It only ever touches copies — the ledger's own active fosterings decide that, never a scan — and
 is folded into the same "nothing is left" check.
 
+Releasing a claim takes no write guard, like `retitle`: it is allowed with Claude Desktop open,
+never refused for it. A card the app rewrites in the meantime simply keeps (or regains) its claim
+on disk, which the next `foster unclaim` or sweep pass finds and releases again — the change itself
+only becomes visible at the app's next restart, the same as a retitle.
+
 ## You cannot restart the app from a session the app started
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the

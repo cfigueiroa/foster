@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
 import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -377,7 +378,9 @@ describe('worktree_released / worktree_release_undone', () => {
     const ledger = makeLedger();
     ledger.append(released);
 
-    const card = project(ledger.read()).worktreeReleased.get(released.path);
+    // Keyed by `comparablePath`, the same normalisation every other lookup in
+    // this fold uses — two spellings of one file must land on one entry.
+    const card = project(ledger.read()).worktreeReleased.get(comparablePath(released.path));
     expect(card).toMatchObject({
       sessionId: 'local_card-1',
       worktreePath: released.worktreePath,
