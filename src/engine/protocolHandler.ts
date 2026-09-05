@@ -303,6 +303,10 @@ const CLASS_MISSING_BLOCKER =
 const NO_RUNNING_APP_BLOCKER =
   'no running Claude Desktop to read the executable from; start the app or the profile first';
 
+const NOTHING_TO_ARM_BLOCKER =
+  'foster could not work out what to arm the handler with (no executable or no command); ' +
+  'nothing was changed';
+
 const UNPARSEABLE_COMMAND_BLOCKER =
   `${HANDLER_KEY} exists but is not in the shape "<exe>" "%1"; foster will not guess what to ` +
   'put back, so nothing is armed';
@@ -417,8 +421,12 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
       // directory listing cannot reach, so a running process is the only
       // source left for the executable to arm with.
       const fallback = desktopExecutable(() => undefined, list, env);
-      if (fallback !== undefined) plan.exe = fallback;
-      else blockers.push(NO_RUNNING_APP_BLOCKER);
+      if (fallback !== undefined) {
+        plan.exe = fallback;
+        plan.armed = armedCommand(fallback, spelling);
+      } else {
+        blockers.push(NO_RUNNING_APP_BLOCKER);
+      }
     } else if (!parsed) {
       plan.previous = { kind: 'command', value: current! };
       blockers.push(UNPARSEABLE_COMMAND_BLOCKER);
@@ -466,7 +474,29 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     warnings.push(notRunningWarning(name ?? store.root));
   }
 
+  // Every branch above that reaches this point without a blocker is supposed
+  // to have set both `exe` and `armed` — this is the guard against a branch
+  // that quietly does not, so the CLI refuses before printing a single
+  // instruction line rather than failing partway through `runLogin` after the
+  // user has already started signing in (measured 2026-09-05: the absent-
+  // command branch used to do exactly this).
+  if (blockers.length === 0 && armingIncomplete(plan)) {
+    blockers.push(NOTHING_TO_ARM_BLOCKER);
+  }
+
   return plan;
+}
+
+/**
+ * True when a plan has nothing left blocking it yet still lacks what
+ * `runLogin` needs to arm the handler — the executable, or the command line
+ * built from it. Kept as its own function so the guard above is exercisable
+ * directly in tests, since every branch reachable through `planLogin` itself
+ * now keeps the two in lock-step (this is a defense against a *future*
+ * branch that does not, not a case any of today's branches can reach).
+ */
+export function armingIncomplete(plan: Pick<LoginPlan, 'exe' | 'armed'>): boolean {
+  return plan.exe === undefined || plan.armed === undefined;
 }
 
 export type LoginOutcome = 'signed-in' | 'timeout' | 'aborted' | 'handler-rewritten';

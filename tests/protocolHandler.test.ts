@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   armedCommand,
+  armingIncomplete,
   containerBlocker,
   inspectHandler,
   levelPath,
@@ -264,33 +265,53 @@ describe('planLogin', () => {
     );
   });
 
-  it('records createdFrom "open" when shell exists but shell\\open does not', () => {
+  it('records createdFrom "open" when shell exists but shell\\open does not, and arms from the process table', () => {
     const store = makeStore();
+    const row: ProcessRow = {
+      pid: 700,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: EXE,
+      commandLine: `"${EXE}"`,
+    };
     const plan = planLogin(store, {
       io: fakeTree({ shell: true, open: false, command: false }),
       events: [],
       env: NO_ENV,
-      list: () => [],
+      list: () => [row],
       platform: 'win32',
     });
 
     expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'open' });
+    expect(plan.blockers).toEqual([]);
+    expect(plan.exe).toBe(EXE);
+    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
   });
 
-  it('records createdFrom "command" when shell\\open exists but the command does not', () => {
+  it('records createdFrom "command" when shell\\open exists but the command does not, and arms from the process table', () => {
     const store = makeStore();
+    const row: ProcessRow = {
+      pid: 700,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: EXE,
+      commandLine: `"${EXE}"`,
+    };
     const plan = planLogin(store, {
       io: fakeTree({ shell: true, open: true, command: false }),
       events: [],
       env: NO_ENV,
-      list: () => [],
+      list: () => [row],
       platform: 'win32',
     });
 
     expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'command' });
+    expect(plan.blockers).toEqual([]);
+    expect(plan.exe).toBe(EXE);
+    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
   });
 
-  it('takes the exe from a running instance under \\Packages\\Claude when no command exists', () => {
+  it('takes the exe from a running instance under \\Packages\\Claude when no command exists, and arms the handler with it', () => {
     const store = makeStore();
     const row: ProcessRow = {
       pid: 700,
@@ -309,6 +330,46 @@ describe('planLogin', () => {
 
     expect(plan.exe).toBe(EXE);
     expect(plan.blockers).toEqual([]);
+    // The regression measured 2026-09-05: this branch used to set `exe` but
+    // never `armed`, so the CLI printed its instructions and only then blew
+    // up inside runLogin, after the user had already started signing in.
+    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
+  });
+
+  it('flags an exe with nothing armed as incomplete, the guard against the regression above', () => {
+    // Every branch planLogin can reach today keeps `exe` and `armed` in
+    // lock-step (see the tests above) — this is the belt-and-suspenders check
+    // for a *future* branch that does not, so the CLI refuses before printing
+    // anything rather than surfacing as runLogin's last-resort throw after
+    // instructions are already on screen (measured 2026-09-05: exactly that,
+    // from the absent-command branch before this fix).
+    expect(armingIncomplete({ exe: EXE, armed: undefined })).toBe(true);
+    expect(armingIncomplete({ exe: undefined, armed: undefined })).toBe(true);
+    expect(armingIncomplete({ exe: undefined, armed: `"${EXE}" "%1"` })).toBe(true);
+    expect(armingIncomplete({ exe: EXE, armed: `"${EXE}" "%1"` })).toBe(false);
+  });
+
+  it('every no-blocker plan produced above has both exe and armed set', () => {
+    // Cross-check against the real thing, not just the pure predicate: none
+    // of planLogin's actual no-blocker outcomes trip armingIncomplete.
+    const store = makeStore();
+    const row: ProcessRow = {
+      pid: 700,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: EXE,
+      commandLine: `"${EXE}"`,
+    };
+    const plan = planLogin(store, {
+      io: fakeIo(undefined),
+      events: [],
+      env: NO_ENV,
+      list: () => [row],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(armingIncomplete(plan)).toBe(false);
   });
 
   it('refuses when the command exists but is unparseable', () => {
@@ -678,6 +739,49 @@ describe('runLogin', () => {
 
     expect(result.restored).toBe(true);
     expect(io.levels()).toEqual({ class: true, shell: true, open: true, command: false });
+  });
+
+  it('runs end to end from a planLogin-produced plan in the absent case, not a hand-built one', async () => {
+    // The regression this whole package guards against was in planLogin's
+    // output, not in runLogin — a hand-built basePlan always had `armed` set,
+    // so it could never have caught it. This drives runLogin off the real
+    // plan(), the same object the CLI itself passes through.
+    const store = makeStore();
+    const log: string[] = [];
+    const io = fakeTree({ shell: false, open: false, command: false }, undefined, log);
+    const row: ProcessRow = {
+      pid: 700,
+      parentPid: 1,
+      name: 'claude.exe',
+      path: EXE,
+      commandLine: `"${EXE}"`,
+    };
+    const plan = planLogin(store, {
+      io,
+      events: [],
+      env: NO_ENV,
+      list: () => [row],
+      platform: 'win32',
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.previous).toEqual({ kind: 'absent', createdFrom: 'shell' });
+    expect(plan.armed).toBe(armedCommand(EXE, plan.spelling));
+
+    const result = await runLogin(plan, {
+      io,
+      append: fakeAppend(log),
+      readState: () => ({ hasTokenCache: true, accountUuid: account }),
+      now: () => 0,
+      sleep: async () => {},
+    });
+
+    expect(result.outcome).toBe('signed-in');
+    expect(result.restored).toBe(true);
+    expect(log.filter((l) => l.startsWith('write:'))).toEqual([`write:${plan.armed}`]);
+    expect(log).toContain('remove:shell');
+    // Removing what it created leaves the tree exactly as it found it.
+    expect(io.levels()).toEqual({ class: true, shell: false, open: false, command: false });
   });
 });
 
