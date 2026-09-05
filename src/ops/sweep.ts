@@ -107,10 +107,32 @@ export interface BranchesPhase extends BranchesResult {
  * of 154 sessions reads as having brought everything, and the 13 only surface if
  * somebody thinks to ask `list --all --json`.
  */
+/** One session the sweep leaves behind, named so the gap is not silent. */
+export interface NeverComeSession {
+  title: string | undefined;
+  /** The one reason counted for it, chosen the way `byReason` chooses. */
+  reason: Unfosterable;
+}
+
 export interface NeverComes {
   /** Sessions blocked by at least one of the reasons below. */
   total: number;
   byReason: Partial<Record<Unfosterable, number>>;
+  /**
+   * The same sessions, named.
+   *
+   * A count on its own is a silent gap. A sweep that ended "Nothing is left to
+   * sweep" and, one line down, "10 sessions this sweep does not bring (8
+   * scheduled task, 2 never opened)" was both true and unusable: the two that
+   * had no way in were never named anywhere, and one of them was a session its
+   * owner had asked by name not to lose. It surfaced only because someone
+   * compared a screenshot of the sidebar against the store by hand.
+   *
+   * Carried for every blocked session, in discovery order. Which of them the
+   * line prints is the renderer's call: scheduled tasks have `--include-scheduled`
+   * said right there, so naming those adds length without adding an answer.
+   */
+  sessions: NeverComeSession[];
 }
 
 /**
@@ -351,6 +373,7 @@ function phase(outcomes: Outcome[]): SweepPhase {
 
 function countNeverComes(sessions: DiscoveredSession[]): NeverComes {
   const byReason: Partial<Record<Unfosterable, number>> = {};
+  const named: NeverComeSession[] = [];
   let total = 0;
 
   for (const session of sessions) {
@@ -367,9 +390,12 @@ function countNeverComes(sessions: DiscoveredSession[]): NeverComes {
     // breakdown that does not add up to its own total reads as a miscount, and
     // the second reason changes nothing about what to do with the session.
     byReason[hopeless[0]!] = (byReason[hopeless[0]!] ?? 0) + 1;
+    // Named under the same reason the count used, so the list and the breakdown
+    // can never tell different stories about the same session.
+    named.push({ title: session.data.title, reason: hopeless[0]! });
   }
 
-  return { total, byReason };
+  return { total, byReason, sessions: named };
 }
 
 /**

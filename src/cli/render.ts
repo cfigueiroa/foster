@@ -680,7 +680,39 @@ export function neverComesLine(never: NeverComes): string {
   // id is an ordinary row — and leaving the count under a flat "never" sent
   // people looking for a gap that a flag closes.
   const scheduled = never.byReason['scheduled-task'] ?? 0;
-  return scheduled > 0
-    ? `${line}\nThe scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`
-    : line;
+  const withEscape =
+    scheduled > 0
+      ? `${line}\nThe scheduled ${scheduled === 1 ? 'one is' : 'ones are'} reachable as ordinary conversations: foster --include-scheduled.`
+      : line;
+
+  const stranded = strandedNames(never);
+  return stranded ? `${withEscape}\n${stranded}` : withEscape;
+}
+
+/** At most this many named before the line turns into a wall of titles. */
+const NAMED_LIMIT = 10;
+
+/**
+ * The ones with no way in, by name.
+ *
+ * Only those: a scheduled task is named by `--include-scheduled` one line up, so
+ * repeating its title lengthens the report without telling the reader anything
+ * they can act on. What is left has no flag and no follow-up command, and a bare
+ * count of it is the gap this exists to close — a sweep once reported "2 never
+ * opened" and neither title appeared anywhere, which is indistinguishable from
+ * having brought everything.
+ *
+ * Empty when everything blocked was a scheduled task, so a clean run stays quiet.
+ */
+function strandedNames(never: NeverComes): string {
+  const stranded = never.sessions.filter((session) => session.reason !== 'scheduled-task');
+  if (stranded.length === 0) return '';
+  const shown = stranded.slice(0, NAMED_LIMIT);
+  const rest = stranded.length - shown.length;
+  const titles = shown.map((session) => `  ${session.title ?? '(untitled)'}`);
+  // Said before the list, because the reader has to know these are the ones a
+  // second run will not fix either.
+  const head = `The ${stranded.length === 1 ? 'one' : `${stranded.length}`} with no way in:`;
+  const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
+  return `${head}\n${titles.join('\n')}${tail}`;
 }
