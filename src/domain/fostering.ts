@@ -256,7 +256,7 @@ export function buildFosterCopy(
     delete copy.worktreePath;
     delete copy.worktreeName;
     delete copy.worktreeLazy;
-    if (typeof copy.originCwd === 'string' && copy.originCwd !== '') copy.cwd = copy.originCwd;
+    if (claim.cwdTo !== undefined) copy.cwd = claim.cwdTo;
   }
 
   // What made the original invisible outside its own account, dropped so the copy

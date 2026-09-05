@@ -1,13 +1,28 @@
 import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { applyUnclaim, planUnclaim, undoUnclaim } from '../src/engine/unclaim.js';
-import type { WritableCard } from '../src/engine/safety.js';
+import { assertCardsWritable, type WritableCard } from '../src/engine/safety.js';
+import type * as Desktop from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
 import { project } from '../src/ledger/project.js';
 import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
+
+// The real guard reads a real lockfile and a real process table, neither of
+// which this suite controls — only what a "running app" answers has to be
+// fixed so the one test that drives the real guard (below) is deterministic.
+vi.mock('../src/engine/lockfile.js', () => ({ lockfileHeld: () => true }));
+vi.mock('../src/engine/desktop.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof Desktop>();
+  return {
+    ...actual,
+    // Running since the beginning of time, so any fostering timestamp this
+    // suite produces reads as "written after the app started".
+    inspectDesktopFor: () => ({ running: true, startedAt: 0, codeSessions: 0, selfHosted: false }),
+  };
+});
 
 /**
  * Releasing the claim a copy already on disk inherited from its original —
@@ -336,5 +351,29 @@ describe('undoUnclaim', () => {
 
     undoUnclaim({ store, ledger, guard: noGuard });
     expect(undoUnclaim({ store, ledger, guard: noGuard })).toEqual([]);
+  });
+
+  it('does not refuse the real guard for a copy fostered after the app started', () => {
+    // Regression for the omission in the fix: `undoUnclaim` used to build its
+    // write-guard cards without `fosteredAt`, which `appHolds` (safety.ts)
+    // treats as "assume the worst" — every pending release looked held the
+    // instant Claude Desktop was running, whatever it actually loaded. The
+    // mocks above put the app "running" since time zero, so this fostering's
+    // real timestamp is necessarily after that: the real guard must let it
+    // through rather than throwing `AppRunningError`.
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e6', ...HELD });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+    foster(ledger, file, before.sessionId, 'local_origin-e6');
+    applyUnclaim(planUnclaim(store, project(ledger.read())).items, {
+      store,
+      ledger,
+      guard: noGuard,
+    });
+
+    const outcomes = undoUnclaim({ store, ledger, guard: assertCardsWritable });
+    expect(outcomes[0]!.status).toBe('undone');
+    expect(read(file)).toEqual(before);
   });
 });

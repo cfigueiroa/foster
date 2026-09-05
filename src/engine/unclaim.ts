@@ -265,7 +265,14 @@ export function undoUnclaim(options: UndoUnclaimOptions): UndoUnclaimOutcome[] {
 
   const holding = new Set<string>();
   if (!dryRun && pending.length > 0) {
-    const cards: WritableCard[] = pending.map((card) => ({ path: card.path, native: false }));
+    const fosteredAt = new Map<string, number>();
+    for (const fostering of listActive(project(ledger.read()))) {
+      fosteredAt.set(comparablePath(fostering.copyPath), fostering.fosteredAt);
+    }
+    const cards: WritableCard[] = pending.map((card) => {
+      const at = fosteredAt.get(comparablePath(card.path));
+      return { path: card.path, native: false, ...(at === undefined ? {} : { fosteredAt: at }) };
+    });
     const { held } = guard(store, cards);
     for (const card of held) holding.add(comparablePath(card.path));
   }

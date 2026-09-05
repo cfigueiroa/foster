@@ -1956,7 +1956,16 @@ program
     const plan = planUnclaim(store, project(ledger.read()));
 
     if (opts.json) {
-      print(plan);
+      // Same order as `sweep`: the write (if any) happens before the JSON is
+      // shaped, so `--yes --json` reports what was actually done rather than
+      // degrading to a dry-run preview a scripted caller would mistake for
+      // the real thing.
+      if (dryRun) {
+        print(plan);
+      } else {
+        const outcomes = applyUnclaim(plan.items, { store, ledger });
+        print({ plan, outcomes });
+      }
       return;
     }
 
@@ -2008,17 +2017,26 @@ function undoUnclaimCommand(
 ): void {
   const pending = listWorktreeReleased(project(ledger.read()));
 
-  if (opts.json) {
+  if (opts.json && dryRun) {
     print(pending);
     return;
   }
 
-  if (pending.length === 0) {
+  if (pending.length === 0 && !opts.json) {
     console.log('No worktree claim has been released — there is nothing to put back.');
     return;
   }
 
+  // Same order as `sweep`: the write happens before `--json` is checked, so
+  // `--undo --yes --json` reports what was actually put back rather than the
+  // bare pending list a dry run would show.
   const outcomes = undoUnclaim({ store, ledger, dryRun });
+
+  if (opts.json) {
+    print(outcomes);
+    return;
+  }
+
   for (const outcome of outcomes) {
     const mark =
       outcome.status === 'undone'
