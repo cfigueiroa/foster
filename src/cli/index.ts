@@ -49,7 +49,12 @@ import {
   type ConsolidationEntry,
 } from '../engine/consolidate.js';
 import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
-import { knownStores, resolveStoreArg } from '../engine/stores.js';
+import {
+  knownStores,
+  resolveStoreArg,
+  storeExecutable,
+  type KnownStore,
+} from '../engine/stores.js';
 import { inspectApp } from '../engine/safety.js';
 import {
   applySwitch,
@@ -364,10 +369,27 @@ program
     console.log(pc.bold('Store'));
     console.log(`  ${store.root}`);
     if (process.env.CLAUDE_USER_DATA_DIR) {
-      // Worth saying out loud: with this set, the app and foster are both looking
-      // at a profile rather than the default install, and someone debugging "my
-      // sessions are missing" should know which one they are being shown.
-      console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
+      const envDir = process.env.CLAUDE_USER_DATA_DIR;
+      if (roots.some((dir) => samePath(dir, envDir))) {
+        // Worth saying out loud: with this set, the app and foster are both
+        // looking at a profile rather than the default install, and someone
+        // debugging "my sessions are missing" should know which one they are
+        // being shown — and which hint it carries in the Profiles list below.
+        console.log(pc.dim('  from CLAUDE_USER_DATA_DIR — a separate profile, not the default'));
+        console.log(pc.dim('  listed below with hint: profile, never installed app'));
+      } else {
+        // candidateStoreRoots drops a root with no claude-code-sessions yet —
+        // silently, because most callers have no business asking why a
+        // candidate was not offered (domain/paths.ts). Here it would be: the
+        // store above is some other installation, not the profile this
+        // variable names.
+        console.log(
+          pc.yellow(
+            `  CLAUDE_USER_DATA_DIR is set to ${envDir}, but it has no claude-code-sessions yet — ` +
+              'ignored until the app has started once with this profile.',
+          ),
+        );
+      }
     }
     // Counted as directories, not as paths: the packaged store answers to two
     // names, and "2 candidates found" for one directory reads as a second
@@ -403,6 +425,19 @@ program
       console.log(pc.dim('  pass one to --store to work on that profile'));
     }
 
+    // The same rows `foster stores` prints, so a first run answers "which
+    // store, which account" without a second command — CLAUDE.md says to start
+    // here for exactly that reason.
+    console.log(pc.bold('Profiles'));
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    const profiles = knownStores(ledger.read());
+    const labels = project(ledger.read()).labels;
+    if (profiles.length === 0) {
+      console.log(pc.dim('  none known — foster stores lists them once one exists'));
+    } else {
+      for (const profile of profiles) console.log(`  ${storeLine(profile, labels, store)}`);
+    }
+
     console.log(pc.bold('State'));
     if (app.running) {
       console.log(pc.yellow(`  Claude Desktop is running (${app.evidence.join('; ')})`));
@@ -417,6 +452,40 @@ program
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
   .action(describeStores);
+
+/**
+ * How a `KnownStore`'s hint, existence and run state read on one line —
+ * `installed app`, `profile`, `used before` or `registered`, `, gone` only for
+ * a registered name whose directory has since vanished (every other hint
+ * requires the directory to exist to be offered at all), `, running` when the
+ * lockfile is held.
+ */
+function storeState(known: KnownStore): string {
+  return `${known.hint}${known.exists ? '' : ', gone'}${known.running ? ', running' : ''}`;
+}
+
+/**
+ * The account column every store line ends with. Read from config.json's
+ * `lastKnownAccountUuid`, which the app itself never consults to decide who is
+ * signed in — so this is a hint about which directory the sidebar was on last,
+ * not proof of who is signed in now. See README's "What about switching
+ * accounts?" section.
+ */
+function lastSeenAs(known: KnownStore, labels: Map<string, string>): string {
+  if (!known.accountUuid) return 'not signed in';
+  return labels.get(known.accountUuid) ?? shortId(known.accountUuid);
+}
+
+/** One line of `foster stores`, shared with the doctor "Profiles" block. */
+function storeLine(
+  known: KnownStore,
+  labels: Map<string, string>,
+  current: StoreLayout | undefined,
+): string {
+  const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
+  const label = known.name ?? known.root;
+  return `${marker} ${label} ${pc.dim(`(${storeState(known)}) last seen as ${lastSeenAs(known, labels)}`)}`;
+}
 
 /** Shared with `profile list`, which is this command under another name. */
 function describeStores(this: Command): void {
@@ -433,14 +502,25 @@ function describeStores(this: Command): void {
 
   if (opts.json) {
     print(
-      stores.map((known) => ({
-        root: known.root,
-        knownBy: known.hint,
-        running: known.running,
-        account: known.accountUuid ?? null,
-        label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
-        isCurrent: current ? samePath(known.root, current.root) : false,
-      })),
+      stores.map((known) => {
+        const { executable, version } = storeExecutable(known.root);
+        return {
+          root: known.root,
+          name: known.name ?? null,
+          knownBy: known.hint,
+          exists: known.exists,
+          running: known.running,
+          account: known.accountUuid ?? null,
+          label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
+          // Presence only — see `StoreConfig.hasTokenCache`. A stronger signal
+          // than `account` above, which is a hint the app itself never reads
+          // back, not proof anything is actually cached.
+          signedIn: known.hasTokenCache ?? false,
+          executable: executable ?? null,
+          version: version ?? null,
+          isCurrent: current ? samePath(known.root, current.root) : false,
+        };
+      }),
     );
     return;
   }
@@ -451,19 +531,14 @@ function describeStores(this: Command): void {
     return;
   }
 
-  for (const known of stores) {
-    const marker = current && samePath(known.root, current.root) ? pc.green('*') : ' ';
-    const state = known.running ? `${known.hint}, running` : known.hint;
-    // Which account an installation holds is the question a second profile
-    // exists to answer, and a store with none is one that fostering into will
-    // refuse — better said here than discovered there.
-    const who = known.accountUuid
-      ? (labels.get(known.accountUuid) ?? shortId(known.accountUuid))
-      : 'not signed in';
-    console.log(`${marker} ${known.root} ${pc.dim(`(${state}) ${who}`)}`);
-  }
+  for (const known of stores) console.log(storeLine(known, labels, current));
   const marked = current && stores.some((known) => samePath(known.root, current.root));
-  console.log(pc.dim(`\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store.`));
+  console.log(
+    pc.dim(
+      `\n${marked ? '* is the one in use. ' : ''}Pass any of these to --store. ` +
+        '"last seen as" comes from each installation\'s own config, a hint and not proof of who is signed in now.',
+    ),
+  );
 }
 
 /** The store a bare command would use, or nothing when there is not one. */
