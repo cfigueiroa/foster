@@ -20,6 +20,8 @@ const EVENT_KINDS = new Set<string>([
   'profile_forgotten',
   'client_root_registered',
   'client_root_forgotten',
+  'handler_armed',
+  'handler_restored',
 ]);
 
 /**

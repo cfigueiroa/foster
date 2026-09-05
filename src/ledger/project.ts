@@ -25,6 +25,12 @@ export interface LedgerState {
    * `ClientRootRegisteredEvent`.
    */
   clientRoots: Map<string, 'client' | 'container'>;
+  /**
+   * The `claude://` handler's previous value, while a login is in flight —
+   * see `HandlerArmedEvent`. Cleared by `handler_restored`, so its presence
+   * alone says a login was interrupted before it could put the handler back.
+   */
+  handlerArmed?: { root: string; previous: string; at: number };
 }
 
 /**
@@ -39,6 +45,7 @@ export function project(events: LedgerEvent[]): LedgerState {
   const retitled = new Map<string, RetitledCard>();
   const profiles = new Map<string, string>();
   const clientRoots = new Map<string, 'client' | 'container'>();
+  let handlerArmed: LedgerState['handlerArmed'];
   // Which fostering a copy belongs to, so a repoint can find it. The fold is
   // keyed on the origin session, and a repoint knows only the card it rewrote.
   const fosteringOfCopy = new Map<string, string>();
@@ -200,6 +207,14 @@ export function project(events: LedgerEvent[]): LedgerState {
         clientRoots.delete(event.root);
         break;
 
+      case 'handler_armed':
+        handlerArmed = { root: event.root, previous: event.previous, at: event.ts };
+        break;
+
+      case 'handler_restored':
+        handlerArmed = undefined;
+        break;
+
       case 'account_switched':
       case 'conversation_purged':
       case 'failed':
@@ -209,7 +224,16 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels, identities, repointed, retitled, profiles, clientRoots };
+  return {
+    active,
+    labels,
+    identities,
+    repointed,
+    retitled,
+    profiles,
+    clientRoots,
+    ...(handlerArmed ? { handlerArmed } : {}),
+  };
 }
 
 /** Cards currently pointed somewhere the app did not point them, oldest move first. */
