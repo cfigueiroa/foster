@@ -114,7 +114,7 @@ jobs:
           ## Safety
 
           - The originals are never modified; fostering only adds files to the current account's folder.
-          - \`foster\`, \`restore\`, \`return\`, \`purge\`, \`switch\`, \`point\` and \`client new\` are dry runs unless you pass \`--yes\`.
+          - \`foster\`, \`restore\`, \`return\`, \`purge\`, \`switch\`, \`point\`, \`client new\`, \`client register\`, \`client forget\`, \`profile new\`, \`profile register\` and \`profile forget\` are dry runs unless you pass \`--yes\`.
           - Adding copies works while Claude Desktop is open. Removing them refuses for copies a running app has already loaded, since deleting one it holds in memory only makes it write the file back.
           - \`purge\` destroys conversations on disk and cannot be undone. It takes \`--confirm <count>\` as well as \`--yes\`, and only ever considers conversations whose session the app has already deleted and that nothing still points at.
           - The Claude Desktop app's OAuth token cache is read by one command, \`usage\`, and only to ask the API about your own limits. Cookie stores are never read, and the app's account cannot be switched by anything on your disk.
