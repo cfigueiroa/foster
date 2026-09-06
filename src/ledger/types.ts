@@ -298,8 +298,11 @@ export interface CardRetitledEvent extends BaseEvent {
   toArchived?: boolean;
   /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
   native: boolean;
-  /** Why: marked as the branch that stopped, or restored to the branch that carried on. */
-  as: 'stale' | 'tip' | 'diverged';
+  /**
+   * Why: marked as the branch that stopped, restored to the branch that carried
+   * on, or brought back into step with the title its original wears now.
+   */
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
 }
 
 /**

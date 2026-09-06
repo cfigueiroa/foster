@@ -616,19 +616,42 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  // Same reasoning as the worktree line above: a title brought back into step is
+  // a copy repaired, not a row brought.
+  const titles = report.titleSync;
+  if (titles && titles.items.length > 0) {
+    const one = titles.items.length === 1;
+    lines.push(
+      report.dryRun
+        ? `${titles.items.length} title${one ? '' : 's'} to bring into step with ${one ? 'its' : 'their'} original.`
+        : `${titles.counts.synced} title${titles.counts.synced === 1 ? '' : 's'} brought into step` +
+            (titles.counts.skipped + titles.counts.failed > 0
+              ? ` (${titles.counts.skipped} skipped, ${titles.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+
   const confirmation = report.confirmation;
   if (confirmation) {
     lines.push(
       confirmation.exhausted
         ? pc.green(
             'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
-              'restore 0, and release 0 worktree claims.',
+              'restore 0, and release 0 worktree claims' +
+              (confirmation.titlesOutOfStep === undefined
+                ? '.'
+                : ', and bring 0 titles into step.'),
           )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
               `${confirmation.branches} row(s) still to add or mark for branches, ` +
               `${confirmation.restorable} still to restore, ` +
-              `${confirmation.worktreeClaims} worktree claim(s) still to release. Run it again.`,
+              `${confirmation.worktreeClaims} worktree claim(s) still to release` +
+              (confirmation.titlesOutOfStep
+                ? `, ${confirmation.titlesOutOfStep} title(s) still out of step`
+                : '') +
+              '. Run it again.',
           ),
     );
   }
