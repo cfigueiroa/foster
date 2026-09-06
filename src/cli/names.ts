@@ -30,7 +30,32 @@ export function nameEverything(store: StoreLayout): void {
   ]);
 }
 
+/**
+ * The name each account goes by, for anything that prints one.
+ *
+ * Two sources, and the order between them is the whole point. A label is
+ * something a person sat down and chose, so it wins. Failing that, the e-mail
+ * the API answered with is a far better name than eight hex digits — it was
+ * already in the ledger, and every screen was throwing it away and printing the
+ * uuid instead.
+ */
 export function labelsOf(ledger: Ledger): Map<string, string> {
+  const state = project(ledger.read());
+  const names = new Map<string, string>();
+  for (const [accountUuid, identity] of state.identities) {
+    const seen = identity.email ?? identity.name;
+    if (seen) names.set(accountUuid, seen);
+  }
+  for (const [accountUuid, label] of state.labels) names.set(accountUuid, label);
+  return names;
+}
+
+/**
+ * Only the labels a person gave, for the two places where that distinction is
+ * the subject: the prompt that offers to change one, and the `label` field in
+ * JSON output, which promises what was named rather than what is known.
+ */
+export function manualLabelsOf(ledger: Ledger): Map<string, string> {
   return project(ledger.read()).labels;
 }
 
