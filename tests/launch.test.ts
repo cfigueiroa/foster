@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { samePath } from '../src/domain/paths.js';
 import {
   formatLaunchCommand,
   openTerminalTab,
@@ -154,7 +155,18 @@ describe('planLaunch: junctions', () => {
     const plan = planLaunch('linked', baseOpts({ home: h, followLink: true }));
 
     expect(plan.blockers).toEqual([]);
-    expect(plan.configDir).toBe(path.resolve(target));
+    // Not `.toBe(path.resolve(target))`: a junction's target comes back from
+    // `readlinkSync`, and on a real filesystem that can differ from the
+    // fixture's own spelling of the same directory — a trailing separator a
+    // reparse point carries and a hand-typed path never would, or (on some
+    // Windows hosts, notably CI runners with a short-named profile directory)
+    // an 8.3 short name where the fixture used the long one. `samePath` is
+    // what the rest of this module already treats as "the same directory";
+    // `realpathSync` on both sides settles anything `samePath`'s own
+    // `path.resolve` does not (short-name vs long-name spelling), so this
+    // asserts what actually matters — they name one directory — rather than
+    // one exact, fragile string.
+    expect(samePath(realpathSync.native(plan.configDir!), realpathSync.native(target))).toBe(true);
   });
 
   it("warns, but does not refuse, when the resolved client is another link's live target", () => {
@@ -322,9 +334,17 @@ describe('openTerminalTab', () => {
     const plan = planLaunch('work', baseOpts({ home: h }));
 
     let called: LaunchPlan | undefined;
-    const outcome = openTerminalTab(plan, (p) => {
-      called = p;
-    });
+    // `wt` only exists on win32, and this exercises the opened path — so the
+    // platform is pinned here rather than left to default to whatever OS runs
+    // the suite (CI's ubuntu-latest and macos-latest runners would otherwise
+    // see `not-windows` instead of the injected opener ever being called).
+    const outcome = openTerminalTab(
+      plan,
+      (p) => {
+        called = p;
+      },
+      'win32',
+    );
 
     expect(outcome).toEqual({ outcome: 'opened' });
     expect(called).toBe(plan);
@@ -335,9 +355,15 @@ describe('openTerminalTab', () => {
     mkdirSync(path.join(h, '.claude-work'), { recursive: true });
     const plan = planLaunch('work', baseOpts({ home: h }));
 
-    const outcome = openTerminalTab(plan, () => {
-      throw new Error('ENOENT: wt is not on PATH');
-    });
+    // Pinned to win32 for the same reason as the test above: this is about
+    // what happens when the opener throws, not about which OS ran the test.
+    const outcome = openTerminalTab(
+      plan,
+      () => {
+        throw new Error('ENOENT: wt is not on PATH');
+      },
+      'win32',
+    );
 
     expect(outcome.outcome).toBe('failed');
     expect(outcome.outcome === 'failed' && outcome.line.startsWith('wt ')).toBe(true);

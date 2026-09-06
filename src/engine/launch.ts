@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { samePath } from '../domain/paths.js';
+import { comparablePath, samePath } from '../domain/paths.js';
 import { hasCredential } from '../store/cliCredential.js';
 import { readClientIdentity } from '../store/clients.js';
 import { configDirCandidates, looksLikeClient } from '../store/configDirs.js';
@@ -172,7 +172,14 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
       blockers.push(`${configDir} is a junction with no readable target`);
       return { blockers, warnings: [], configDir };
     }
-    effectiveConfigDir = pointer.target;
+    // `readlinkSync` hands back the reparse point's own bytes, and a junction's
+    // target commonly carries a trailing separator that a directory typed by
+    // hand never would (`C:\...\target\` rather than `C:\...\target`) —
+    // `path.resolve` is what the rest of this module (and `samePath`) already
+    // treats as "the" spelling of a path, so this is where the junction's raw
+    // answer joins it, once, before comparison, display, or the `-Command`
+    // string built at the bottom of this function ever see it.
+    effectiveConfigDir = path.resolve(pointer.target);
     if (!isDirectory(effectiveConfigDir)) {
       blockers.push(`${configDir} points at ${effectiveConfigDir}, which does not exist`);
       return { blockers, warnings: [], configDir: effectiveConfigDir };
@@ -348,8 +355,13 @@ function warningsFor(
   const known = [...configDirCandidates(env, [], home), ...opts.clients];
   const seen = new Set<string>();
   for (const dir of known) {
-    if (samePath(dir, configDir) || seen.has(comparableFor(dir))) continue;
-    seen.add(comparableFor(dir));
+    // `comparablePath` (not a local reimplementation) so a dedup key agrees
+    // with the `samePath` check right above it about what counts as "the same
+    // directory" — a relative segment or a trailing separator in one of these
+    // two lists must not make a directory get inspected, and possibly warned
+    // about, twice.
+    if (samePath(dir, configDir) || seen.has(comparablePath(dir))) continue;
+    seen.add(comparablePath(dir));
     const pointer = inspectPointer(dir);
     if (pointer.kind === 'junction' && pointer.target && samePath(pointer.target, configDir)) {
       warnings.push(
@@ -364,10 +376,6 @@ function warningsFor(
   );
 
   return warnings;
-}
-
-function comparableFor(dir: string): string {
-  return process.platform === 'win32' ? dir.toLowerCase() : dir;
 }
 
 /**
