@@ -25,13 +25,21 @@ One command, one tool call. What runs before the sweep is not decoration: those 
 the name this conversation gets at the end, measured rather than remembered.
 
 ```
-"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
 names only one marks the other in English on a sidebar read in Portuguese — worse, a later run
 with a different wording stacks a second mark in front of the first instead of replacing it,
 because a mark is only recognised when the run is told the words it was written with.
+
+`--sync-titles` is what keeps a row findable by name. A copy carries the title of the instant
+it was made, and every later sweep sees it as already fostered and walks past — so a
+conversation renamed where it came from keeps the old name here for ever, and the sidebar
+reads as if the work were missing when only its name is. That is the exact confusion this
+command exists to end, and it is why the flag is on here even though the CLI leaves it off:
+only a copy still wearing the last title foster itself wrote is rewritten, so a row **you**
+renamed is never touched, and the mark a branch wears is put back in front of the new title.
 
 That is the whole sweep. It copies every fosterable session from the other accounts —
 **archived included**, which is where the volume is — gives every branch of a forked
@@ -86,6 +94,8 @@ on rather than re-deriving it:
   ramo, seguiu DD/MM HH:MM)" and stays in the sidebar — that last one is where the most recent
   work is, so say it plainly. If a row they had pinned was archived as stale, the current row
   needs pinning again;
+- how many titles were brought back into step with their original, when the run names any, and
+  that a copy renamed by hand is left alone on purpose;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
   command again and say why;
 - the "can never come" line, when there is one: scheduled tasks, sessions never opened, files
