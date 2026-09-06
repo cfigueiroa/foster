@@ -63,7 +63,7 @@ describe('fosterSessions', () => {
     const second = fosterSessions(sessions, opts());
 
     expect(second[0]!.status).toBe('skipped');
-    expect(second[0]!.detail).toBe('already fostered');
+    expect(second[0]!.detail).toBe('already in this account');
     expect(listActive(project(ledger.read()))).toHaveLength(1);
     expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
   });
