@@ -143,6 +143,49 @@ export function buildRestoredSession(facts: {
   };
 }
 
+/**
+ * What releasing a worktree claim would change, or nothing when the card holds
+ * no claim at all.
+ *
+ * Pulled out of `buildFosterCopy` so the same test drives a repair over a copy
+ * already on disk (`engine/unclaim.ts`), not just a copy being written for the
+ * first time. `cwdTo` is set only when there is somewhere to move `cwd` to and
+ * it is not already there — a card whose `cwd` already reads as its `originCwd`
+ * needs the fields removed and nothing relocated.
+ */
+export interface WorktreeClaim {
+  worktreePath?: string;
+  worktreeName?: string;
+  worktreeLazy?: unknown;
+  cwdTo?: string;
+}
+
+export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined {
+  const inWorktree =
+    card.worktreePath !== undefined ||
+    card.worktreeName !== undefined ||
+    card.worktreeLazy !== undefined ||
+    (typeof card.cwd === 'string' &&
+      typeof card.originCwd === 'string' &&
+      card.originCwd !== '' &&
+      !samePath(card.cwd, card.originCwd));
+  if (!inWorktree) return undefined;
+
+  const cwdTo =
+    typeof card.originCwd === 'string' &&
+    card.originCwd !== '' &&
+    (typeof card.cwd !== 'string' || !samePath(card.cwd, card.originCwd))
+      ? card.originCwd
+      : undefined;
+
+  return {
+    ...(card.worktreePath !== undefined ? { worktreePath: card.worktreePath } : {}),
+    ...(card.worktreeName !== undefined ? { worktreeName: card.worktreeName } : {}),
+    ...(card.worktreeLazy !== undefined ? { worktreeLazy: card.worktreeLazy } : {}),
+    ...(cwdTo !== undefined ? { cwdTo } : {}),
+  };
+}
+
 export interface BuildCopyOptions {
   origin: AccountRef;
   /**
@@ -208,19 +251,12 @@ export function buildFosterCopy(
   // `originCwd` is the repository the worktree came from, and the copy opens
   // there instead. A source without one keeps the directory it had — there is
   // nowhere else to send it.
-  const inWorktree =
-    copy.worktreePath !== undefined ||
-    copy.worktreeName !== undefined ||
-    copy.worktreeLazy !== undefined ||
-    (typeof copy.cwd === 'string' &&
-      typeof copy.originCwd === 'string' &&
-      copy.originCwd !== '' &&
-      !samePath(copy.cwd, copy.originCwd));
-  if (inWorktree) {
+  const claim = worktreeClaim(copy);
+  if (claim) {
     delete copy.worktreePath;
     delete copy.worktreeName;
     delete copy.worktreeLazy;
-    if (typeof copy.originCwd === 'string' && copy.originCwd !== '') copy.cwd = copy.originCwd;
+    if (claim.cwdTo !== undefined) copy.cwd = claim.cwdTo;
   }
 
   // What made the original invisible outside its own account, dropped so the copy

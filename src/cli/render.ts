@@ -3,6 +3,7 @@ import { bareSessionId } from '../domain/naming.js';
 import type { ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
+import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
@@ -588,6 +589,22 @@ export function sweepSummary(report: SweepReport): string[] {
         ),
   );
 
+  // Separate from the count above: these are copies already on this disk, not
+  // rows the sweep just wrote, so folding them into "N fostered" would credit
+  // the sweep with bringing something it merely repaired.
+  const claims = report.worktreeClaims;
+  if (claims.items.length > 0) {
+    lines.push(
+      report.dryRun
+        ? `${claims.items.length} cop${claims.items.length === 1 ? 'y' : 'ies'} to release from worktree claims.`
+        : `released ${claims.counts.released} from worktree claims` +
+            (claims.counts.skipped + claims.counts.failed > 0
+              ? ` (${claims.counts.skipped} skipped, ${claims.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+
   // Said whenever any row lands there, because the archived view is where they
   // land and Recents is where people look. A run that brought a hundred
   // sessions and appears to have brought none is this sentence going unsaid.
@@ -604,12 +621,14 @@ export function sweepSummary(report: SweepReport): string[] {
     lines.push(
       confirmation.exhausted
         ? pc.green(
-            'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, and restore 0.',
+            'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
+              'restore 0, and release 0 worktree claims.',
           )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
               `${confirmation.branches} row(s) still to add or mark for branches, ` +
-              `${confirmation.restorable} still to restore. Run it again.`,
+              `${confirmation.restorable} still to restore, ` +
+              `${confirmation.worktreeClaims} worktree claim(s) still to release. Run it again.`,
           ),
     );
   }
@@ -715,4 +734,28 @@ function strandedNames(never: NeverComes): string {
   const head = `The ${stranded.length === 1 ? 'one' : `${stranded.length}`} with no way in:`;
   const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
   return `${head}\n${titles.join('\n')}${tail}`;
+}
+
+/** The name a worktree claim shows, whichever field the card carried. */
+function claimName(item: { worktreeName?: string; worktreePath?: string }): string {
+  return item.worktreeName ?? item.worktreePath ?? '(worktree)';
+}
+
+/** One line of a plan: what a copy still names, and where a release sends it. */
+export function unclaimPlanLine(item: UnclaimItem): string {
+  const to = item.cwdTo ?? item.cwdFrom ?? '';
+  return `  ${item.title}  ${pc.dim(claimName(item))} ${pc.dim('→')} ${to}`;
+}
+
+/** The same line, marked with what actually happened to it. */
+export function unclaimOutcomeLine(outcome: UnclaimOutcome): string {
+  const mark =
+    outcome.status === 'released'
+      ? pc.green('-')
+      : outcome.status === 'failed'
+        ? pc.red('x')
+        : pc.dim('·');
+  const to = outcome.cwdTo ?? outcome.cwdFrom ?? '';
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${outcome.title}  ${pc.dim(claimName(outcome))} ${pc.dim('→')} ${to}${detail}`;
 }

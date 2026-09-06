@@ -6,6 +6,7 @@ import {
   fosteringKey,
   mintSessionId,
   unfosterableReasons,
+  worktreeClaim,
 } from '../src/domain/fostering.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT, session } from './helpers/store.js';
 
@@ -174,6 +175,71 @@ describe('buildFosterCopy', () => {
     const snapshot = structuredClone(original);
     buildFosterCopy(original, { origin: OLD_ACCOUNT });
     expect(original).toEqual(snapshot);
+  });
+});
+
+describe('worktreeClaim', () => {
+  it('is undefined for a card sitting in no worktree at all', () => {
+    expect(worktreeClaim(session())).toBeUndefined();
+  });
+
+  it('names what a release would remove, and where cwd would move to', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      originCwd: 'C:\\home\\repo',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+      cwdTo: 'C:\\home\\repo',
+    });
+  });
+
+  it('leaves cwd out when it already reads as the repository', () => {
+    // The claim fields alone are enough to call this a claim, even though the
+    // directory itself is already the repository — nothing left to relocate.
+    const held = session({
+      cwd: 'C:\\home\\repo',
+      originCwd: 'C:\\home\\repo',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+  });
+
+  it('recognises a worktree the card never named, by the directory alone', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      originCwd: 'C:\\home\\repo',
+    });
+    expect(worktreeClaim(held)).toEqual({ cwdTo: 'C:\\home\\repo' });
+  });
+
+  it('treats a lazy worktree promise as a claim too', () => {
+    const promised = session({
+      worktreeLazy: { path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a' },
+    });
+    expect(worktreeClaim(promised)).toEqual({
+      worktreeLazy: { path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a' },
+    });
+  });
+
+  it('has nowhere to send cwd when the card names no repository', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    delete held.originCwd;
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
   });
 });
 

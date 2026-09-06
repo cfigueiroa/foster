@@ -145,6 +145,7 @@ describe('runSweep', () => {
       fosterable: 0,
       branches: 0,
       restorable: 0,
+      worktreeClaims: 0,
       exhausted: true,
     });
   });
@@ -525,6 +526,7 @@ describe('one row per branch', () => {
       fosterable: 0,
       branches: 0,
       restorable: 0,
+      worktreeClaims: 0,
       exhausted: true,
     });
 
@@ -659,6 +661,69 @@ describe('one row per branch', () => {
     sweep(false, { staleTemplate: '(defasada, parou {when}) ' });
 
     expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
+  });
+});
+
+/**
+ * A copy already on disk from before 0.38.0 (#27) can still hold a worktree
+ * claim its fresh id has no lease for — issue #26's second half. The sweep's
+ * fourth pass is the repair, folded into "bring everything here".
+ */
+describe('worktree claims on copies', () => {
+  const HELD = {
+    cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    originCwd: 'C:\\home\\repo',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    worktreeName: 'wt-a',
+  };
+
+  function fosterCopy(sessionId: string, originSessionId: string): string {
+    const file = writeSession(store, NEW_ACCOUNT, session({ sessionId, ...HELD }));
+    ledger.append({
+      kind: 'fostered',
+      originSessionId,
+      origin: OLD_ACCOUNT,
+      target: NEW_ACCOUNT,
+      copySessionId: `local_${sessionId}`,
+      copyPath: file,
+      prefix: '',
+    });
+    return file;
+  }
+
+  it('reports what a release would do, on a dry run, and writes nothing', () => {
+    const file = fosterCopy('00000000-0000-4000-8000-0000000000f1', 'local_origin-f1');
+
+    const report = sweep(true);
+
+    expect(report.worktreeClaims.items).toHaveLength(1);
+    expect(report.worktreeClaims.outcomes).toEqual([]);
+    expect(
+      scanAccount(store, NEW_ACCOUNT).find((entry) => entry.path === file)?.data.worktreePath,
+    ).toBe(HELD.worktreePath);
+  });
+
+  it('releases the claim on a --yes run, and is exhausted afterwards', () => {
+    const file = fosterCopy('00000000-0000-4000-8000-0000000000f2', 'local_origin-f2');
+
+    const report = sweep(false);
+
+    expect(report.worktreeClaims.counts).toEqual({ released: 1, skipped: 0, failed: 0 });
+    const written = scanAccount(store, NEW_ACCOUNT).find((entry) => entry.path === file)!.data;
+    expect(written.worktreePath).toBeUndefined();
+    expect(written.cwd).toBe('C:\\home\\repo');
+    expect(report.confirmation!.worktreeClaims).toBe(0);
+    expect(report.confirmation!.exhausted).toBe(true);
+  });
+
+  it('reports zero on a second run — the pass is idempotent', () => {
+    fosterCopy('00000000-0000-4000-8000-0000000000f3', 'local_origin-f3');
+
+    sweep(false);
+    const again = sweep(false);
+
+    expect(again.worktreeClaims.items).toEqual([]);
+    expect(again.worktreeClaims.counts).toEqual({ released: 0, skipped: 0, failed: 0 });
   });
 });
 

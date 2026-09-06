@@ -23,7 +23,9 @@ export type LedgerEvent =
   | ClientRootRegisteredEvent
   | ClientRootForgottenEvent
   | HandlerArmedEvent
-  | HandlerRestoredEvent;
+  | HandlerRestoredEvent
+  | WorktreeReleasedEvent
+  | WorktreeReleaseUndoneEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -442,6 +444,48 @@ export interface HandlerRestoredEvent extends BaseEvent {
 }
 
 /**
+ * A copy's claim on a worktree, released — see `engine/unclaim.ts`.
+ *
+ * The copy no longer carries `worktreePath`/`worktreeName`/`worktreeLazy`, so it
+ * stops contesting the branch its original still holds; `cwdFrom` and `cwdTo`
+ * say what happened to `cwd`, the same fields `buildFosterCopy` decides with
+ * for a copy being minted fresh (`worktreeClaim` in `domain/fostering.ts`).
+ * Reversible without reading anything but the log: `path` is where to find the
+ * card, and the three claim fields plus `cwdFrom` are everything `undoUnclaim`
+ * needs to put back.
+ *
+ * What it deliberately never touches is a native card. Only a fostering the
+ * ledger already tracks is a candidate, so a card the app wrote for itself is
+ * never a source of this event — see `planUnclaim`.
+ */
+export interface WorktreeReleasedEvent extends BaseEvent {
+  kind: 'worktree_released';
+  path: string;
+  /** The card's own session id, which the release does not change. */
+  sessionId: string;
+  worktreePath?: string;
+  worktreeName?: string;
+  /** The lazy worktree promise the card carried, whatever shape the app gave it. */
+  worktreeLazy?: unknown;
+  /** The `cwd` the card wore before the release. */
+  cwdFrom?: string;
+  /** Where `cwd` moved to, when the release moved it. */
+  cwdTo?: string;
+}
+
+/**
+ * A worktree release put back, ending the window `worktree_released` opened.
+ *
+ * Thin on purpose: `path` is the only fact `undoUnclaim` needs from this event
+ * itself, since what to restore is read back out of the `worktree_released` it
+ * is undoing rather than carried twice.
+ */
+export interface WorktreeReleaseUndoneEvent extends BaseEvent {
+  kind: 'worktree_release_undone';
+  path: string;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -468,7 +512,9 @@ export type LedgerEventInput =
   | Draft<ClientRootRegisteredEvent>
   | Draft<ClientRootForgottenEvent>
   | Draft<HandlerArmedEvent>
-  | Draft<HandlerRestoredEvent>;
+  | Draft<HandlerRestoredEvent>
+  | Draft<WorktreeReleasedEvent>
+  | Draft<WorktreeReleaseUndoneEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
@@ -514,6 +560,22 @@ export interface RepointedCard {
   fromActivityAt?: number;
   native: boolean;
   repointedAt: number;
+}
+
+/**
+ * A copy currently missing the worktree claim it once carried, keyed by path
+ * rather than session id — the fold that matters here is per-file, and a card
+ * that fails to read leaves nothing else to key it by.
+ */
+export interface WorktreeReleasedCard {
+  path: string;
+  sessionId: string;
+  worktreePath?: string;
+  worktreeName?: string;
+  worktreeLazy?: unknown;
+  cwdFrom?: string;
+  cwdTo?: string;
+  releasedAt: number;
 }
 
 /** A fostering that is currently in place, derived by folding the log. */

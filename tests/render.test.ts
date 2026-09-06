@@ -7,8 +7,11 @@ import {
   groupByAccount,
   neverComesLine,
   sweepSummary,
+  unclaimOutcomeLine,
+  unclaimPlanLine,
 } from '../src/cli/render.js';
 import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
+import type { UnclaimItem, UnclaimOutcome } from '../src/engine/unclaim.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -191,6 +194,7 @@ describe('sweepSummary', () => {
       divergedTemplate: '(other branch, went on {when}) ',
     },
     restored: { outcomes: [], counts },
+    worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
     archived: 0,
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },
@@ -232,6 +236,62 @@ describe('sweepSummary', () => {
 
   it('says nothing about forks when there are none', () => {
     expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/fork/);
+  });
+});
+
+describe('unclaimPlanLine', () => {
+  const item = (overrides: Partial<UnclaimItem> = {}): UnclaimItem => ({
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_a.json',
+    sessionId: 'local_a',
+    title: 'Refactor parser',
+    worktreeName: 'wt-a',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+    ...overrides,
+  });
+
+  it('names the title, the worktree, and where the release would send cwd', () => {
+    const line = plain(unclaimPlanLine(item()));
+    expect(line).toContain('Refactor parser');
+    expect(line).toContain('wt-a');
+    expect(line).toContain('C:\\home\\repo');
+  });
+
+  it('falls back to the worktree path when there is no name', () => {
+    const line = plain(unclaimPlanLine(item({ worktreeName: undefined })));
+    expect(line).toContain('C:\\home\\repo\\.claude\\worktrees\\wt-a');
+  });
+
+  it('shows the cwd the card already wears when the release would not move it', () => {
+    const line = plain(unclaimPlanLine(item({ cwdTo: undefined })));
+    expect(line).toContain(item().cwdFrom);
+  });
+});
+
+describe('unclaimOutcomeLine', () => {
+  const outcome = (overrides: Partial<UnclaimOutcome> = {}): UnclaimOutcome => ({
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_a.json',
+    sessionId: 'local_a',
+    title: 'Refactor parser',
+    status: 'released',
+    worktreeName: 'wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+    ...overrides,
+  });
+
+  it('marks a release, a skip and a failure differently', () => {
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'released' })))).toContain('-');
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'skipped' })))).toContain('·');
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'failed' })))).toContain('x');
+  });
+
+  it('carries the detail along for a skip or a failure', () => {
+    const line = plain(
+      unclaimOutcomeLine(outcome({ status: 'failed', detail: 'the card could not be read' })),
+    );
+    expect(line).toContain('the card could not be read');
   });
 });
 
