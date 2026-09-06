@@ -163,6 +163,36 @@ that conversation's work. It reads every transcript it is given without parsing 
 about 5 seconds against 118 for a JSON walk — and `forksOf` calls it before grouping, which is
 why a sweep on a large store takes about half a minute rather than nine seconds.
 
+## One conversation can be two files, and the row can open the shorter one
+
+A `cliSessionId` names a conversation; it does not name a file. The app opens the transcript
+under the project directory for that card's **working directory**, so continuing one
+conversation from a repository and from a worktree cut out of it leaves two files under one id —
+not copies of each other, each holding what was written while its own card was in use. Measured
+on this store, over the roots foster scans: 41 conversations hold more than one file, 24 have
+records the first file does not, 6070 records were invisible, worst single case 1362.
+
+Everything that measures a conversation now reads **every** file it occupies (`scanOf` unions the
+record sets, `rootOf` takes every file's head and files the extras as aliases, `deepen` reads them
+all), so `only`, `total` and the moment a stale row is stamped with describe the conversation
+rather than whichever file the directory walk offered first.
+
+The second half is about what a row can open, which is not the same question. An account can show
+a conversation and still be unable to reach most of it — 90 cards here open a partial file, 19,398
+records out of reach — so the refusal "this account already has that conversation" is lifted when
+the offered card opens records **no** row here can (`Sidebar.unreached`, `Lineage.reachOf`). The
+result is a second row for that conversation, one per working directory, and the line says why:
+`(a second file of a conversation already here: N record(s) no row here could open)`. It is asked
+of the directory the **copy** will open in (`copyCwd`), because a card cut from a worktree is
+rewritten to open in the repository it came from. The sweep needs it in two places: a fork held in
+two files went to the branch pass, which decides on the id alone, and was retitled rather than
+completed.
+
+Two things this does not do. It never repoints or rewrites a card the account already has — the
+existing row keeps opening what it opened. And it cannot reach past `already fostered`: a
+conversation the ledger has vouched for is skipped before the question is asked, so a store swept
+before this change keeps whatever short copies it already made.
+
 **Pass both prefixes or neither.** A mark is recognised only when the run is told the words it
 was written with, so a sweep with a different `--stale-prefix` than the one that wrote a row
 stacks a second mark in front of the first instead of replacing it. `--branch-prefix` defaults to
