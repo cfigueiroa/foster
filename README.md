@@ -119,6 +119,26 @@ before fostering learned not to hand one out — see
 [Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
 whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
 
+A fifth pass, `--sync-titles`, brings a copy's title back into step with the original's. A copy
+carries the name of the instant it was made, and every later sweep sees it as already fostered and
+walks past — so a conversation renamed where it came from keeps the old name in every other account
+for ever, and the sidebar reads as if the work were missing when only its name is.
+
+Whose name wins is decided from the ledger, never from reading the strings: only a copy still
+wearing the last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch
+pass has marked the card since, and the fostering's `originalTitle` otherwise. On the store this was
+measured against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed
+by hand was exactly the row that must not be trampled.
+
+Marks survive it and never travel. The mark a branch wears is not part of its name, so it is put
+back in front of the new title; a mark the _original_ happens to wear is dropped, or the two would
+stack. Both are derived by subtracting the title from the record that carries it, which is what
+keeps this clear of the [prefix problem](#when-one-conversation-becomes-two) — a run does not have to
+be told the words a mark was written with to recognise one. When a card has been marked twice and the
+mark can no longer be told from the title beneath it, the copy is left alone rather than rewritten
+with a guess. It is off by default because the first run on a store fostered into for weeks rewrites
+in bulk, and only shows at the next restart.
+
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
 with a row per branch nothing is hidden, so collapsing a fork to one row is a tidy-up for whoever
@@ -925,6 +945,7 @@ foster clients --fragment # print a Windows Terminal fragment (JSON), one profil
 
 # Bringing conversations in
 foster sweep     # the whole job: every account, archived and deleted included
+foster sweep --sync-titles # also re-title copies whose original has been renamed since
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster foster    # create the copies

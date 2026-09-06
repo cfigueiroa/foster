@@ -159,6 +159,7 @@ import {
   runSweep,
   type BranchesPhase,
   type SweepReport,
+  type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
 import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
@@ -839,6 +840,10 @@ program
     'what a row for a branch that went on after the tip wears; it is not filed away',
     DEFAULT_DIVERGED_TEMPLATE,
   )
+  .option(
+    '--sync-titles',
+    'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -852,6 +857,7 @@ program
       prefix: string;
       stalePrefix: string;
       branchPrefix: string;
+      syncTitles?: boolean;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
@@ -867,6 +873,7 @@ program
       prefix: opts.prefix,
       staleTemplate: opts.stalePrefix,
       divergedTemplate: opts.branchPrefix,
+      syncTitles: Boolean(opts.syncTitles),
       dryRun,
       configDirs: opts.configDir ?? [],
     });
@@ -888,6 +895,7 @@ program
     printBranches(report.branches);
     printPhase('Restoring what the app deleted', report.restored.outcomes);
     printWorktreeClaims(report.worktreeClaims, dryRun);
+    if (report.titleSync) printTitleSync(report.titleSync, dryRun);
 
     console.log('');
     for (const line of sweepSummary(report)) console.log(line);
@@ -934,6 +942,40 @@ function printWorktreeClaims(phase: WorktreeClaimsPhase, dryRun: boolean): void 
     return;
   }
   for (const outcome of phase.outcomes) console.log(unclaimOutcomeLine(outcome));
+}
+
+/**
+ * The title pass, one line per copy: what it said, and what its original says.
+ *
+ * The copies it left alone are counted rather than listed — "renamed here" is
+ * the answer for a row somebody named on purpose, and there is nothing for the
+ * reader to do about it.
+ */
+function printTitleSync(phase: TitleSyncPhase, dryRun: boolean): void {
+  console.log(pc.bold('\nTitles their originals have moved on from'));
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else if (dryRun) {
+    for (const item of phase.items) console.log(titleSyncLine(item.from, item.to));
+  } else {
+    for (const outcome of phase.outcomes) {
+      console.log(
+        outcome.status === 'retitled'
+          ? titleSyncLine(outcome.from, outcome.to)
+          : `  ${pc.red('!')} ${outcome.to}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+      );
+    }
+  }
+  const renamed = phase.skipped.filter((skip) => skip.reason === 'renamed-here').length;
+  if (renamed > 0) {
+    console.log(
+      pc.dim(`  ${renamed} left alone: renamed here, so the name was somebody's choice.`),
+    );
+  }
+}
+
+function titleSyncLine(from: string, to: string): string {
+  return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
 }
 
 function sweepJson(report: SweepReport): Record<string, unknown> {
@@ -984,6 +1026,16 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
       items: report.worktreeClaims.items,
       outcomes: report.worktreeClaims.outcomes,
     },
+    ...(report.titleSync
+      ? {
+          titleSync: {
+            counts: report.titleSync.counts,
+            items: report.titleSync.items,
+            skipped: report.titleSync.skipped,
+            outcomes: report.titleSync.outcomes,
+          },
+        }
+      : {}),
     archived: report.archived,
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,

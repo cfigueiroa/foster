@@ -39,8 +39,11 @@ export interface RetitleRequest {
   title: string;
   /** The archived flag it should carry; left out to leave the flag alone. */
   archived?: boolean;
-  /** Why: marked as the branch that stopped, or restored as the one that carried on. */
-  as: 'stale' | 'tip' | 'diverged';
+  /**
+   * Why: marked as the branch that stopped, restored as the one that carried on,
+   * or brought back into step with its original — see `titleSync.ts`.
+   */
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
 }
 
 export interface RetitleOutcome {
@@ -54,7 +57,7 @@ export interface RetitleOutcome {
   archived?: { from: boolean; to: boolean };
   status: 'retitled' | 'skipped' | 'failed';
   detail?: string;
-  as: 'stale' | 'tip' | 'diverged';
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
 }
 
 export interface RetitleOptions {
