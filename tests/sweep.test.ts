@@ -82,8 +82,12 @@ function tombstone(ids: string[], at = 1_700_000_500_000): void {
   }
 }
 
-function transcript(cliSessionId: string, records: Record<string, unknown>[]): void {
-  const dir = path.join(configDir, 'projects', 'C--work-project');
+function transcript(
+  cliSessionId: string,
+  records: Record<string, unknown>[],
+  project = 'C--work-project',
+): void {
+  const dir = path.join(configDir, 'projects', project);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
     path.join(dir, `${cliSessionId}.jsonl`),
@@ -1040,5 +1044,144 @@ describe('a branch with nothing of its own', () => {
 
     expect(card(CONTAINED_CARD).title).toMatch(/^\(stale, stopped .*\) Macs$/);
     expect(card(CONTAINED_CARD).isArchived).toBe(true);
+  });
+});
+
+/**
+ * A fork whose branch is also held in a second file.
+ *
+ * The split inside the sweep sends forked conversations to the branch pass,
+ * which decides from `here.shows` — a question about the id. When one
+ * `cliSessionId` names two files that answer is beside the point: the account
+ * holds a row, so the branch is kept and retitled, while the file holding the
+ * rest of the work is never brought. Measured on a real store: of the four
+ * conversations whose fuller file another account could open, three were forks,
+ * and the sweep passed all three over.
+ */
+describe('a branch whose conversation is held in two files', () => {
+  const TREE_ONLY = '00000000-0000-4000-8000-0000000000be';
+  const REPO_ONLY = [
+    '00000000-0000-4000-8000-0000000000bf',
+    '00000000-0000-4000-8000-0000000000c3',
+  ];
+  /** The last answer on the trunk, which only the repository's file holds. */
+  const SPLIT_LAST_ANSWER = '2026-09-02T09:30:00.000Z';
+  const REPO = 'C:\\work\\project';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+
+  /**
+   * The trunk is written twice: the worktree's file, which the card here opens,
+   * and the repository's, which holds two records the first one never got.
+   */
+  function splitTrunk(): void {
+    const meta = { type: 'custom-title', customTitle: 'Macs' };
+    transcript(
+      TRUNK,
+      [
+        meta,
+        rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+        rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+        rec(TREE_ONLY, 'assistant', LAST_ANSWER),
+      ],
+      'C--work-project--claude-worktrees-w',
+    );
+    transcript(TRUNK, [
+      meta,
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+      rec(REPO_ONLY[0]!, 'assistant', '2026-09-02T09:00:00.000Z'),
+      rec(REPO_ONLY[1]!, 'assistant', '2026-09-02T09:30:00.000Z'),
+    ]);
+    transcript(TIP, [
+      meta,
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+      rec(TIP_ONLY[0]!, 'user', '2026-09-02T10:00:00.000Z'),
+      rec(TIP_ONLY[1]!, 'assistant', '2026-09-02T10:05:00.000Z'),
+      rec(TIP_ONLY[2]!, 'assistant', '2026-09-02T11:14:00.000Z'),
+    ]);
+  }
+
+  it('brings the file the row here cannot open, forked or not', () => {
+    splitTrunk();
+    // The row here opens the worktree's file; the card waiting elsewhere opens
+    // the repository's, which holds two records nothing here can reach.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: TRUNK_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs',
+        cwd: TREE,
+        originCwd: TREE,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: SECOND_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs',
+        cwd: REPO,
+        originCwd: REPO,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    // The ordinary pass takes it, which is the exception the branch pass cannot
+    // make: it refuses on the id alone, and the id is already here.
+    const brought = report.fostered.outcomes.find((outcome) => outcome.beyond !== undefined);
+    expect(brought).toMatchObject({ status: 'fostered', beyond: 2 });
+    // The branch pass still does its own job on the same conversation — and the
+    // moment it stamps is the conversation's last answer, which lives in the
+    // file the row here cannot open. Reading one file stamped it 15 hours early.
+    expect(report.branches.forks).toHaveLength(1);
+    expect(card(TRUNK_CARD).title).toBe(
+      `(stale, stopped ${formatStamp(Date.parse(SPLIT_LAST_ANSWER))}) Macs`,
+    );
+  });
+
+  it('does not bring a card that opens the file the row here already opens', () => {
+    splitTrunk();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: TRUNK_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs',
+        cwd: REPO,
+        originCwd: REPO,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: SECOND_CARD,
+        cliSessionId: TRUNK,
+        title: 'Macs',
+        cwd: REPO,
+        originCwd: REPO,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    expect(report.fostered.outcomes.some((outcome) => outcome.beyond !== undefined)).toBe(false);
+    expect(report.fostered.counts.fostered).toBe(0);
   });
 });

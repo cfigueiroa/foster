@@ -113,6 +113,48 @@ export function indexAllTranscripts(projectsDirs: string | string[]): Map<string
 }
 
 /**
+ * The project directory a working directory's transcripts live under.
+ *
+ * The app stores a conversation at `projects/<this>/<cliSessionId>.jsonl`, so
+ * this is what decides which of a conversation's files a given card opens — the
+ * question `scanConversationFiles` explains the need for. Every separator and
+ * every `.`, `:` and `_` becomes a dash, which is why the mapping only runs this
+ * way: two different directories can encode to one name, and the reverse cannot
+ * be recovered at all. Measured on this store: the encoded `cwd` names a project
+ * directory the conversation actually occupies for 6805 of 7597 cards, and every
+ * one of the 792 misses is a card in a worktree whose conversation was never
+ * written there.
+ *
+ * A caller that cannot find the answer here must treat it as "cannot tell"
+ * rather than as "no records": a miss is far more often a card pointing
+ * somewhere empty than proof about what it reaches.
+ */
+export function projectDirName(cwd: string): string {
+  let name = '';
+  for (const ch of cwd) {
+    name += ch === '\\' || ch === '/' || ch === ':' || ch === '.' || ch === '_' ? '-' : ch;
+  }
+  return name;
+}
+
+/**
+ * The one file a card opens, out of everything its conversation occupies.
+ *
+ * Undefined when that cannot be told: no working directory, no file under the
+ * name it encodes to, or — because the encoding is lossy — more than one. The
+ * refusal is deliberate; see `projectDirName`.
+ */
+export function fileOpenedFrom(
+  files: readonly string[],
+  cwd: string | undefined,
+): string | undefined {
+  if (cwd === undefined || cwd === '') return undefined;
+  const wanted = projectDirName(cwd).toLowerCase();
+  const hits = files.filter((file) => path.basename(path.dirname(file)).toLowerCase() === wanted);
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/**
  * What a conversation keeps when the app branches it.
  *
  * A branch is not a new conversation: the app copies the history into a new file

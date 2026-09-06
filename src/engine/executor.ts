@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
+import { buildFosterCopy, copyCwd, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
@@ -122,6 +122,11 @@ export interface Outcome {
    */
   standing?: BranchStanding;
   /**
+   * Records this copy opens that no row in the destination could reach — the
+   * reason a card was brought for a conversation the account already shows.
+   */
+  beyond?: number;
+  /**
    * The title the copy was written with, when one was. `title` is the origin's;
    * the two differ by the prefix, and a branch pass names the stale rows by it.
    */
@@ -232,7 +237,24 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       options.acceptBranches === true &&
       shownHere !== undefined &&
       shownHere.startsWith(BRANCH_HERE);
-    if (shownHere !== undefined && !explicit && !branchAccepted) {
+    /**
+     * Records this copy would open that nothing here can.
+     *
+     * The refusal above rests on two cards opening one transcript, which is what
+     * makes the second one worthless. That is not always true: one
+     * `cliSessionId` can name several files, the app opens the one under the
+     * project directory for the card's working directory, and an account can
+     * therefore show a row for a conversation while being unable to reach most
+     * of it. Measured on this store: 47 (account, conversation) pairs where
+     * another account held the card that opens the fuller file, 8159 records
+     * between them, and the refusal was the only thing standing in the way.
+     *
+     * Asked of the working directory the *copy* will have, not the source's:
+     * a card in a worktree is rewritten to open in the repository it was cut
+     * from, so asking the source would promise records the copy does not open.
+     */
+    const beyond = here.unreached(cliSessionId, copyCwd(session.data));
+    if (shownHere !== undefined && !explicit && !branchAccepted && beyond === 0) {
       // Only a branch is worth weighing. Two cards for the *same* conversation
       // open the same transcript, so there is no half to be on the wrong side of.
       const standing = shownHere.startsWith(BRANCH_HERE) ? here.standing(cliSessionId) : undefined;
@@ -259,6 +281,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // and what a live writer changes is only what the caller should be told.
     const liveFlag =
       cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
+    // Only worth saying when the row was already here: everywhere else the whole
+    // conversation is new and "records nothing here reaches" is every record.
+    const beyondFlag = shownHere !== undefined && beyond > 0 ? { beyond } : {};
 
     /**
      * What this batch has committed to bringing, whether or not bytes are being
@@ -272,7 +297,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // both hold a card for one conversation would otherwise pass this check
       // twice and produce the pair itself, in a single run.
       if (copy.cliSessionId) {
-        here.markPlanned(copy.cliSessionId);
+        here.markPlanned(copy.cliSessionId, copy.cwd);
       }
     };
 
@@ -284,6 +309,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         copyPath,
         copyTitle: copy.title,
         ...liveFlag,
+        ...beyondFlag,
       });
       // A dry run has to make the same marks a real one does, or it stops
       // describing the real one. Both of these are batch state, and leaving them
@@ -334,6 +360,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         copyPath,
         copyTitle: copy.title,
         ...liveFlag,
+        ...beyondFlag,
       });
     } catch (error) {
       const reason = errorMessage(error);

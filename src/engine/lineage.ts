@@ -1,7 +1,9 @@
 import {
   conversationRoot,
+  fileOpenedFrom,
   idsMentionedIn,
   indexAllTranscripts,
+  scanConversation,
   scanConversationFiles,
   transcriptRoots,
   type ConversationScan,
@@ -47,6 +49,22 @@ export interface Lineage {
    * six times over. Undefined when there is no transcript to read.
    */
   scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
+  /**
+   * The records one card can open, which is not the whole conversation.
+   *
+   * `scanOf` answers what the work holds; this answers what a row reaches. They
+   * differ exactly when a conversation occupies more than one file, because the
+   * app opens the one under the project directory for that card's working
+   * directory — so an account holding the shorter file holds a row that cannot
+   * reach the rest, and a card offered from elsewhere may be the only way to
+   * open it.
+   *
+   * Undefined when it cannot be told rather than guessed at: a conversation on
+   * one file needs no such question, and a working directory naming no file of
+   * this conversation says nothing about what the card reaches. Callers treat
+   * that as "no answer", which leaves the behaviour they had before asking.
+   */
+  reachOf(cliSessionId: string | undefined, cwd: string | undefined): ConversationScan | undefined;
   /**
    * Resolve roots that only look unrelated, for these conversations.
    *
@@ -94,6 +112,8 @@ export function lineageAt(projectsDirs: string[]): Lineage {
   let index: Map<string, string[]> | undefined;
   const roots = new Map<string, string | undefined>();
   const scans = new Map<string, ConversationScan | undefined>();
+  /** One file's records, memoised by path — several cards can open the same file. */
+  const perFile = new Map<string, ConversationScan>();
   /** A root that turned out to be a record of another conversation, and whose. */
   const alias = new Map<string, string>();
   const deepened = new Set<string>();
@@ -186,6 +206,20 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       const files = filesOf(cliSessionId);
       const scan = files.length === 0 ? undefined : scanConversationFiles(files);
       scans.set(cliSessionId, scan);
+      return scan;
+    },
+
+    reachOf(cliSessionId, cwd) {
+      const files = filesOf(cliSessionId);
+      // One file is the whole conversation, and `scanOf` already answers for it.
+      if (files.length < 2) return undefined;
+      const file = fileOpenedFrom(files, cwd);
+      if (file === undefined) return undefined;
+      let scan = perFile.get(file);
+      if (scan === undefined) {
+        scan = scanConversation(file);
+        perFile.set(file, scan);
+      }
       return scan;
     },
 

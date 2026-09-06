@@ -6,6 +6,7 @@ import { findDuplicates } from '../src/engine/duplicates.js';
 import { FOLLOWED_BRANCH, fosterSessions } from '../src/engine/executor.js';
 import { forksOf } from '../src/engine/branches.js';
 import { lineageAt } from '../src/engine/lineage.js';
+import { sidebarFrom } from '../src/engine/sidebar.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, listRepointed, project } from '../src/ledger/project.js';
 import { selectReturnTargets } from '../src/ops/active.js';
@@ -943,5 +944,159 @@ describe('a conversation held in more than one file', () => {
 
     kin.deepen([ORIGINAL, MIDWAY]);
     expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+});
+
+/**
+ * Two files of one conversation, and the row that can only open one of them.
+ *
+ * The refusal to add a second card for a conversation the account already shows
+ * rests on both cards opening the same transcript. That is not always true: the
+ * app opens the file under the project directory for the card's working
+ * directory, so an account can show a conversation and still be unable to reach
+ * most of it. Measured on this store: 90 cards open a partial file, putting
+ * 19,398 records out of reach, and for 47 (account, conversation) pairs another
+ * account held the card that opens the fuller one.
+ */
+describe('bringing the file the account cannot open', () => {
+  const REPO = '/workspace/project';
+  const TREE = '/workspace/project/.claude/worktrees/w';
+  const SHORT_ONLY = '00000000-0000-4000-8000-0000000000d1';
+  const FULL_ONLY = '00000000-0000-4000-8000-0000000000d2';
+  const HERE_CARD = '00000000-0000-4000-8000-0000000000d3';
+  const THERE_CARD = '00000000-0000-4000-8000-0000000000d4';
+
+  /** The conversation written into the repository's directory and the worktree's. */
+  function split(): string[] {
+    const config = mkdtempSync(path.join(tmpdir(), 'foster-split-'));
+    const write = (project: string, records: string[]): void => {
+      const dir = path.join(config, 'projects', project);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, `${ORIGINAL}.jsonl`), `${records.join('\n')}\n`, 'utf8');
+    };
+    write('-workspace-project', [
+      META,
+      record(ROOT),
+      record(FULL_ONLY),
+      record('00000000-0000-4000-8000-0000000000d5'),
+    ]);
+    write('-workspace-project--claude-worktrees-w', [META, record(ROOT), record(SHORT_ONLY)]);
+    return [path.join(config, 'projects')];
+  }
+
+  /** The destination shows the worktree's file; the repository's waits elsewhere. */
+  function stores() {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: TREE, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: THERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+    return store;
+  }
+
+  it('knows which file a card opens, and which it cannot', () => {
+    const kin = lineageAt(split());
+
+    expect(kin.reachOf(ORIGINAL, TREE)!.uuids.has(SHORT_ONLY)).toBe(true);
+    expect(kin.reachOf(ORIGINAL, TREE)!.uuids.has(FULL_ONLY)).toBe(false);
+    expect(kin.reachOf(ORIGINAL, REPO)!.uuids.has(FULL_ONLY)).toBe(true);
+    // The whole conversation is still the union of both.
+    expect(kin.scanOf(ORIGINAL)!.uuids.size).toBe(4);
+  });
+
+  it('says nothing when the working directory names none of its files', () => {
+    const kin = lineageAt(split());
+    expect(kin.reachOf(ORIGINAL, '/somewhere/else')).toBe(undefined);
+    expect(kin.reachOf(ORIGINAL, undefined)).toBe(undefined);
+  });
+
+  it('counts what the offered card opens that the row here cannot', () => {
+    const store = stores();
+    const kin = lineageAt(split());
+    const here = sidebarFrom(scanAccount(store, NEW_ACCOUNT), kin);
+
+    expect(here.shows(ORIGINAL)).toBe(true);
+    expect(here.reason(ORIGINAL)).toContain('already has that conversation');
+    expect(here.unreached(ORIGINAL, REPO)).toBe(2);
+    // The file it already opens brings nothing, which is the ordinary case.
+    expect(here.unreached(ORIGINAL, TREE)).toBe(0);
+  });
+
+  it('brings the fuller file instead of refusing it as a duplicate', () => {
+    const store = stores();
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ status: 'fostered', beyond: 2 });
+  });
+
+  it('still refuses a card that opens the same file the row here opens', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: THERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes[0]).toMatchObject({ status: 'skipped' });
+    expect(outcomes[0]!.detail).toContain('already has that conversation');
+  });
+
+  it('asks about the directory the copy will open in, not the source card’s', () => {
+    // The source sits in the worktree, so its copy is rewritten to open in the
+    // repository — and it is the repository's file that holds the extra records.
+    // Asking the source's own directory would have found nothing to bring.
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: TREE, originCwd: TREE }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: THERE_CARD,
+        cliSessionId: ORIGINAL,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes[0]).toMatchObject({ status: 'fostered', beyond: 2 });
   });
 });
