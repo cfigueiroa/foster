@@ -1,6 +1,6 @@
 ---
 description: Bring every session from every other account into the one signed in now — archived, deleted and forked included — and restart the app.
-allowed-tools: PowerShell, Bash(node:*)
+allowed-tools: PowerShell, Bash(node:*), mcp__ccd_session_mgmt__set_session_title
 ---
 
 Run the full sweep into the account Claude Desktop is signed into right now. This is the
@@ -21,10 +21,11 @@ in a checkout is usually older; do not reach for it, and do not build from sourc
 
 ## Run it
 
-One command, one tool call:
+One command, one tool call. The timestamp in front is not decoration: it is the name this
+conversation gets at the end, so print it in the same call rather than guessing the hour later.
 
 ```
-foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
@@ -45,6 +46,26 @@ fails loudly on its own and confirms itself.
 a child of the app, foster will not restart it — that would kill this session part-way through —
 and the output ends with the command to run in a terminal outside the app. Hand that line to the
 user and say plainly that it is the last step.
+
+## Name this conversation
+
+Every run used to leave a row called just "Fosteia", so a sidebar holding several sweeps could
+not tell them apart — and the sweep is exactly the command someone runs again and again. Give
+this session a name of its own, with `set_session_title` on `session_id: "self"`:
+
+```
+Fosteia DD/MM HH:MM - <account>
+```
+
+Both halves come from the call you already made: `DD/MM HH:MM` is the `[fosteia]` line printed
+before the sweep, and `<account>` is whatever follows **"Sweeping into"** in the sweep's own
+first line — the label when that account has one, else the first block of its uuid. Do not go
+looking it up with `whoami` or `labels`: on an account the app has no cached profile for, both
+come back empty and the sweep's line is still right.
+
+Rename as soon as the sweep returns, before writing the report. If `set_session_title` is not
+among your tools — this command run outside Claude Desktop — skip the rename silently; it is a
+label on a sidebar row, never a reason to stop or to reach for another way.
 
 ## Report
 
