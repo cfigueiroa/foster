@@ -1,11 +1,28 @@
 import { UNTITLED } from '../domain/fostering.js';
-import { staleMark, stripMarks } from '../domain/stale.js';
+import {
+  looksMarked,
+  staleMark,
+  staleMatcher,
+  stampWithin,
+  stripMarks,
+  templatesSeen,
+} from '../domain/stale.js';
 import type { DiscoveredSession } from '../domain/types.js';
+import type { LedgerEvent } from '../ledger/types.js';
 import type { LedgerState } from '../ledger/project.js';
 import { divergedFrom, type BranchWeight, type Forks } from './branches.js';
 import { fosterSessions, type FosterOptions, type Outcome } from './executor.js';
 import { retitleCards, type RetitleOutcome, type RetitleRequest } from './retitle.js';
 import type { Sidebar } from './sidebar.js';
+
+/**
+ * What a row is left wearing when foster cannot account for its mark.
+ *
+ * Shared with `cli/render.ts`, which counts and names these rows in the sweep
+ * summary, and with the tests that pin the shape down — a string typed once
+ * cannot drift between the place that writes it and the place that reads it.
+ */
+export const UNKNOWN_MARK_DETAIL = 'wears a mark foster cannot account for — left as it is';
 
 /**
  * One row per branch, and the rows say which one carried on.
@@ -68,6 +85,12 @@ export interface BringRequest {
   /** A card in a source account, or a conversation the app deleted the card for. */
   origin: 'source' | 'deleted';
   tip: boolean;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — absent for
+   * the tip, which carries no mark. Recorded on the `fostered` event so a later
+   * run recognises this mark whatever words it is itself given.
+   */
+  template?: string;
 }
 
 export interface ForkPlan {
@@ -98,12 +121,21 @@ export interface BranchPlanInput {
   /** Conversations a live `claude` is writing, lower-cased. */
   live: ReadonlySet<string>;
   state: LedgerState;
+  /**
+   * The ledger's raw events, for `templatesSeen` — a row marked by an earlier
+   * run, in different words than this one was given, is still recognised from
+   * what the log says it was written with (#35).
+   */
+  events: readonly LedgerEvent[];
 }
 
 export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
-  const { forks, here, hereCards, candidates, orphans, prefix, live, state } = input;
+  const { forks, here, hereCards, candidates, orphans, prefix, live, state, events } = input;
   const { staleTemplate, divergedTemplate } = input;
-  const templates = [staleTemplate, divergedTemplate];
+  // The words this run was told, plus every word the ledger proves an earlier
+  // run wrote — so a row marked stale in Portuguese last week is still
+  // recognised by a bare `foster sweep` today (#35).
+  const templates = [...new Set([staleTemplate, divergedTemplate, ...templatesSeen(events)])];
 
   // Cards foster itself filed away, by session id. Only those are lifted back
   // out when their branch turns out to be the one that carried on: a flag the
@@ -150,8 +182,23 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
       if (held.length > 0) {
         row.action = 'keep';
         for (const card of held) {
-          const request = retitleFor(card, { kind, mark, templates, archivedByFoster });
-          if (!request) continue;
+          const decision = retitleFor(card, {
+            kind,
+            mark,
+            templates,
+            archivedByFoster,
+            staleTemplate,
+            divergedTemplate,
+          });
+          if (decision.kind === 'none') continue;
+          if (decision.kind === 'unknown-mark') {
+            plan.skipped.push({
+              sessionId: card.data.sessionId,
+              title: card.data.title ?? UNTITLED,
+              detail: UNKNOWN_MARK_DETAIL,
+            });
+            continue;
+          }
           if (live.has(id.toLowerCase())) {
             plan.skipped.push({
               sessionId: card.data.sessionId,
@@ -160,7 +207,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
             });
             continue;
           }
-          plan.retitle.push(request);
+          plan.retitle.push(decision.request);
           row.action = 'retitle';
         }
       } else if (kind === 'stale' && branch.only === 0) {
@@ -176,14 +223,26 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
         const fromSource = candidates.find((session) => sameId(session.data.cliSessionId, id));
         const pick = fromSource ?? orphans.find((session) => sameId(session.data.cliSessionId, id));
         if (pick) {
-          plan.bring.push({
-            session: withTitle(pick, stripMarks(pick.data.title ?? '', templates)),
-            prefix: `${mark}${prefix}`,
-            archive: kind === 'stale',
-            origin: fromSource ? 'source' : 'deleted',
-            tip: isTip,
-          });
-          row.action = 'bring';
+          const cleanSource = stripMarks(pick.data.title ?? '', templates);
+          if (looksMarked(cleanSource)) {
+            plan.skipped.push({
+              sessionId: pick.data.sessionId,
+              title: pick.data.title ?? UNTITLED,
+              detail: UNKNOWN_MARK_DETAIL,
+            });
+          } else {
+            plan.bring.push({
+              session: withTitle(pick, cleanSource),
+              prefix: `${mark}${prefix}`,
+              archive: kind === 'stale',
+              origin: fromSource ? 'source' : 'deleted',
+              tip: isTip,
+              ...(kind === 'tip'
+                ? {}
+                : { template: kind === 'diverged' ? divergedTemplate : staleTemplate }),
+            });
+            row.action = 'bring';
+          }
         }
       }
 
@@ -209,6 +268,14 @@ function sameId(a: string | undefined, b: string): boolean {
   return a !== undefined && a.toLowerCase() === b.toLowerCase();
 }
 
+/**
+ * What to do about one card of one branch — write a mark, leave it because
+ * there is nothing to change, or leave it because it is already wearing a
+ * mark this run cannot account for.
+ */
+type RetitleDecision =
+  { kind: 'write'; request: RetitleRequest } | { kind: 'unknown-mark' } | { kind: 'none' };
+
 function retitleFor(
   card: DiscoveredSession,
   context: {
@@ -216,12 +283,40 @@ function retitleFor(
     mark: string;
     templates: readonly string[];
     archivedByFoster: Set<string>;
+    staleTemplate: string;
+    divergedTemplate: string;
   },
-): RetitleRequest | undefined {
-  const { kind, mark, templates, archivedByFoster } = context;
+): RetitleDecision {
+  const { kind, mark, templates, archivedByFoster, staleTemplate, divergedTemplate } = context;
   const current = card.data.title ?? '';
   const clean = stripMarks(current, templates);
-  const title = kind === 'tip' ? clean : `${mark}${clean.trim() ? clean : UNTITLED}`;
+
+  // Every template this run knows about is already off. A title that still
+  // looks marked wears one from a foster this run cannot explain, or a hand
+  // edit shaped like one — either way, guessing at it is how a mark this run
+  // does not recognise gets a second mark stacked in front of it.
+  if (looksMarked(clean)) return { kind: 'unknown-mark' };
+
+  const freshTitle = kind === 'tip' ? clean : `${mark}${clean.trim() ? clean : UNTITLED}`;
+
+  // What the card already wears, with the recognised mark taken off — the
+  // stripped-away prefix rather than the clean title left behind.
+  const existingMark = current.slice(0, current.length - clean.length);
+
+  // Recognising an old mark is only half of #35's fix. The other half: a row
+  // already wearing a mark for the very moment this run would stamp it with
+  // is left exactly as it is, whatever words that mark used — only a
+  // genuinely different moment (the branch's situation actually changed) or a
+  // kind that no longer wants a mark at all earns a rewrite. Comparing the
+  // moment rather than the string is what keeps a `--stale-prefix` chosen
+  // today from turning into a rewrite of every row an earlier run marked in
+  // different words.
+  const alreadyCurrent =
+    kind !== 'tip' &&
+    existingMark !== '' &&
+    stampWithin(existingMark) !== undefined &&
+    stampWithin(existingMark) === stampWithin(mark);
+  const title = alreadyCurrent ? current : freshTitle;
 
   // Only a branch that stopped is filed away. A branch that went on comes back
   // out of the archived view when foster is the one that put it there — an
@@ -234,15 +329,44 @@ function retitleFor(
     archived = false;
   }
 
-  if (title === current && archived === undefined) return undefined;
+  if (title === current && archived === undefined) return { kind: 'none' };
+
+  // Stale and diverged write the template they were just given, unless the
+  // row's existing words are being kept as they are — then it is whichever
+  // known template those words came from. A tip strips a mark rather than
+  // adding one, so what it records is whichever known template explains the
+  // mark it just took off — undefined when none does.
+  const template =
+    kind === 'tip'
+      ? templateResponsibleFor(current, templates)
+      : alreadyCurrent
+        ? templateResponsibleFor(current, templates)
+        : kind === 'stale'
+          ? staleTemplate
+          : divergedTemplate;
+
   return {
-    path: card.path,
-    target: card.account,
-    native: !card.isCopy,
-    title,
-    ...(archived === undefined ? {} : { archived }),
-    as: kind,
+    kind: 'write',
+    request: {
+      path: card.path,
+      target: card.account,
+      native: !card.isCopy,
+      title,
+      ...(archived === undefined ? {} : { archived }),
+      as: kind,
+      ...(template ? { template } : {}),
+    },
   };
+}
+
+/**
+ * Which known template explains the mark at the front of `title`, when one
+ * does — the first that matches, since a mark this run is about to remove was
+ * itself written by exactly one of them (or by none, if the title carries no
+ * mark at all).
+ */
+function templateResponsibleFor(title: string, templates: readonly string[]): string | undefined {
+  return templates.find((template) => template !== '' && staleMatcher(template).test(title));
 }
 
 function withTitle(session: DiscoveredSession, title: string): DiscoveredSession {
@@ -292,6 +416,7 @@ export function applyBranchCards(plans: ForkPlan[], options: FosterOptions): Bra
         acceptBranches: true,
         includeArchived: true,
         ...(request.archive ? { archive: true } : {}),
+        ...(request.template ? { template: request.template } : {}),
       });
       for (const outcome of made) {
         if (outcome.status === 'fostered' && (request.archive || request.session.data.isArchived)) {

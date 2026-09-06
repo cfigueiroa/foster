@@ -163,10 +163,18 @@ that conversation's work. It reads every transcript it is given without parsing 
 about 5 seconds against 118 for a JSON walk — and `forksOf` calls it before grouping, which is
 why a sweep on a large store takes about half a minute rather than nine seconds.
 
-**Pass both prefixes or neither.** A mark is recognised only when the run is told the words it
-was written with, so a sweep with a different `--stale-prefix` than the one that wrote a row
-stacks a second mark in front of the first instead of replacing it. `--branch-prefix` defaults to
-English; the `/fosteia` skill passes both in Portuguese.
+**A mark written by an earlier run is recognised from the ledger, whatever words it used** (#35).
+`CardRetitledEvent`/`FosteredEvent` now carry the `template` a mark was made from, and
+`templatesSeen` (`src/domain/stale.ts`) falls back to deriving it from old entries that predate the
+field — so a bare `foster sweep` recognises a row the `/fosteia` skill marked `(defasada, parou
+{when}) `, and a Portuguese sweep recognises one the English default marked. Measured on a real
+store: 10 rows would have been rewritten that way by one bare `foster sweep --yes` on 05/09/2026 —
+before the fix. `--stale-prefix` and `--branch-prefix` still choose the words a _new_ mark is
+written with; `--branch-prefix` defaults to English, and the `/fosteia` skill passes both in
+Portuguese so a fresh mark reads in the language the sidebar is read in, not because passing only
+one would stack any more. A row wearing a mark no known template can explain — a hand edit, or a
+write from before this shipped — is skipped rather than guessed at, and named in the sweep's
+summary so the words can be fixed by hand or the run repeated with the matching prefix.
 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report

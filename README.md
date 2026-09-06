@@ -104,9 +104,20 @@ nothing is hidden: the stale rows still open, they just no longer look like the 
 The one branch that gets no row of its own is one holding nothing of its own — every record of it
 already in the branch that carried on — because a row for it would open nothing the clean row does
 not.
-`--stale-prefix` changes the words; `{when}` is where the moment goes. Measured on the store that
-prompted this: the row the user had pinned held 328 records while the branches in two other accounts
-held 3157 and 2564, and every previous sweep had reported that nothing was left to do.
+`--stale-prefix` changes the words a fresh mark is written with, and `--branch-prefix` does the same
+for a branch that went on rather than stopped; `{when}` is where the moment goes in either. Measured
+on the store that prompted this: the row the user had pinned held 328 records while the branches in
+two other accounts held 3157 and 2564, and every previous sweep had reported that nothing was left to
+do.
+
+Recognising a mark an _earlier_ run wrote never depends on being told those same words again. The
+ledger already says what a row was actually marked with, so a bare `foster sweep` — the English
+defaults — still recognises a row the `/fosteia` skill marked in Portuguese last week, and leaves it
+exactly as it is rather than stacking a second mark in front of the first: `--stale-prefix` and
+`--branch-prefix` only ever choose the words a _new_ mark is written with (#35). Measured on a real
+store: 10 rows would have been rewritten that way by one bare `foster sweep --yes` on 05/09/2026. A row
+wearing a mark no known template can explain — a hand edit, or a foster too old to have recorded one —
+is left alone and named in the sweep's summary, rather than guessed at.
 
 It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
 the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them

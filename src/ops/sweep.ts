@@ -403,6 +403,7 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
     { ...shared, prefix },
   );
 
+  const ledgerEvents = ledger.read();
   const plans = planBranchCards({
     forks,
     here,
@@ -413,7 +414,8 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
     staleTemplate,
     divergedTemplate,
     live,
-    state: project(ledger.read()),
+    state: project(ledgerEvents),
+    events: ledgerEvents,
   });
   const branches = applyBranchCards(plans, { ...shared, prefix });
 
