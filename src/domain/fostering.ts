@@ -186,6 +186,21 @@ export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined 
   };
 }
 
+/**
+ * The working directory a copy of this card would open in.
+ *
+ * Which matters beyond the copy itself: a `cliSessionId` can name more than one
+ * transcript, and the app finds the one to open under the project directory for
+ * the card's `cwd` — so this is what decides which records the copy would
+ * actually reach. Anything weighing a copy before making it has to ask this
+ * rather than the source's own `cwd`, or it promises records the copy will not
+ * open. Reads the claim rather than restating it, so it cannot drift from what
+ * `buildFosterCopy` does. See `transcripts.ts`.
+ */
+export function copyCwd(card: CodeSessionData): string | undefined {
+  return worktreeClaim(card)?.cwdTo ?? card.cwd;
+}
+
 export interface BuildCopyOptions {
   origin: AccountRef;
   /**

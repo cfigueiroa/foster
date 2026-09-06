@@ -1,4 +1,4 @@
-import { DEFAULT_PREFIX } from '../domain/fostering.js';
+import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
 import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
@@ -398,8 +398,26 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
 
   const shared = { store, ledger, target, dryRun, live, env, kin, here, includeArchived: true };
 
+  /**
+   * A card that opens records no row here can reach.
+   *
+   * The split below sends forked conversations to the branch pass, which asks
+   * `here.shows` — a question about the id. That is the wrong question when one
+   * `cliSessionId` names more than one file: the account holds a row, so the
+   * branch pass keeps it and retitles it, while the file holding the rest of the
+   * work is never brought. Measured here: of the four conversations on this
+   * store whose fuller file another account could open, three were forks, and
+   * the sweep passed all three over while `foster foster` brought them.
+   *
+   * Sent to the ordinary pass instead, which weighs exactly this and refuses
+   * when there is nothing beyond. It cannot double up: the branch pass only
+   * brings a card when the account shows no row for that branch at all.
+   */
+  const opensMore = (session: DiscoveredSession): boolean =>
+    here.unreached(session.data.cliSessionId, copyCwd(session.data)) > 0;
+
   const fostered = fosterSessions(
-    candidates.filter((session) => !inFork(session)),
+    candidates.filter((session) => !inFork(session) || opensMore(session)),
     { ...shared, prefix },
   );
 
