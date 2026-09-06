@@ -29,9 +29,7 @@ the name this conversation gets at the end, measured rather than remembered.
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
-names only one marks the other in English on a sidebar read in Portuguese — worse, a later run
-with a different wording stacks a second mark in front of the first instead of replacing it,
-because a mark is only recognised when the run is told the words it was written with.
+names only one marks the other in English on a sidebar read in Portuguese.
 
 `--sync-titles` is what keeps a row findable by name. A copy carries the title of the instant
 it was made, and every later sweep sees it as already fostered and walks past — so a

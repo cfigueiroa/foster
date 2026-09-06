@@ -44,6 +44,13 @@ export interface RetitleRequest {
    * or brought back into step with its original — see `titleSync.ts`.
    */
   as: 'stale' | 'tip' | 'diverged' | 'synced';
+  /**
+   * The template the mark was made from, or — for `as: 'tip'` — the template
+   * the write is taking off, when `branchCards.ts` could tell which one it was.
+   * Recorded on the event so a later run recognises this mark whatever words
+   * it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 export interface RetitleOutcome {
@@ -140,6 +147,7 @@ export function retitleCards(
         ...(archived ? { fromArchived: archived.from, toArchived: archived.to } : {}),
         native: request.native,
         as: request.as,
+        ...(request.template ? { template: request.template } : {}),
       });
       outcomes.push({
         path: request.path,

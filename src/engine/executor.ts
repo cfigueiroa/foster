@@ -90,6 +90,13 @@ export interface FosterOptions {
    * was foster's decision. The branch that stopped goes to the archived view.
    */
   archive?: boolean;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — set by the
+   * branch pass when it brings a copy in with a mark already in front of its
+   * title. Recorded on the `fostered` event so a later run recognises the mark
+   * whatever words it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
@@ -332,6 +339,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
           : {}),
         prefix,
         ...(options.archive ? { archived: true } : {}),
+        ...(options.template ? { template: options.template } : {}),
       });
       recordPlanned();
       outcomes.push({

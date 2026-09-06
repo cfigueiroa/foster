@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
-import type { ForkOutcome } from '../engine/branchCards.js';
+import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
@@ -676,6 +676,9 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  const unknownMark = unknownMarkNames(branches.forks);
+  if (unknownMark) lines.push(pc.yellow(unknownMark));
+
   if (report.liveWriters.length > 0) {
     const one = report.liveWriters.length === 1;
     lines.push(
@@ -757,6 +760,35 @@ function strandedNames(never: NeverComes): string {
   const head = `The ${stranded.length === 1 ? 'one' : `${stranded.length}`} with no way in:`;
   const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
   return `${head}\n${titles.join('\n')}${tail}`;
+}
+
+/**
+ * Rows the branch pass left alone because they already wear a mark it cannot
+ * account for — named the way `strandedNames` names a session with no way in,
+ * so the user can fix the words by hand or run with the prefix that matches.
+ *
+ * Counted separately from every other skip: it is a decision left to the
+ * user, not work the sweep failed to finish, so it never counts against
+ * "nothing is left to sweep" — see `sweepSummary`'s confirmation line, which
+ * this plays no part in.
+ *
+ * Empty when nothing wears an unexplained mark, so a clean run stays quiet.
+ */
+function unknownMarkNames(forks: ForkOutcome[]): string {
+  const rows = forks
+    .flatMap((fork) => fork.skipped)
+    .filter((row) => row.detail === UNKNOWN_MARK_DETAIL);
+  if (rows.length === 0) return '';
+  const shown = rows.slice(0, NAMED_LIMIT);
+  const rest = rows.length - shown.length;
+  const titles = shown.map((row) => `  ${row.title}`);
+  const one = rows.length === 1;
+  const head = `${rows.length} row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark foster cannot account for, left as ${one ? 'it is' : 'they are'}:`;
+  const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
+  return (
+    `${head}\n${titles.join('\n')}${tail}\n` +
+    'Fix the words by hand, or run with the --stale-prefix/--branch-prefix that matches them.'
+  );
 }
 
 /** The name a worktree claim shows, whichever field the card carried. */

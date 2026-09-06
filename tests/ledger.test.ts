@@ -38,6 +38,24 @@ describe('Ledger', () => {
     expect(makeLedger().read()).toEqual([]);
   });
 
+  it('round-trips the optional template field on a fostered event, old entries folding without it', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      ...fostered,
+      prefix: '(stale, stopped 01/09 18:10) ',
+      template: '(stale, stopped {when}) ',
+    });
+    ledger.append({
+      ...fostered,
+      originSessionId: 'local_origin-2',
+      copySessionId: 'local_copy-2',
+    });
+
+    const events = ledger.read();
+    expect(events[0]).toMatchObject({ template: '(stale, stopped {when}) ' });
+    expect((events[1] as { template?: string }).template).toBeUndefined();
+  });
+
   it('survives a torn final line instead of losing the whole log', () => {
     const ledger = makeLedger();
     ledger.append(fostered);
@@ -353,6 +371,37 @@ describe('card_retitled', () => {
       to: 'Work',
       toArchived: true,
     });
+  });
+
+  /**
+   * #35's own field: the template a mark was made from, so a later run
+   * recognises it whatever words that run was itself given. Optional so an
+   * old log — written before this existed — still folds.
+   */
+  it('round-trips the optional template field', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      ...marked,
+      from: 'Work',
+      to: STALE,
+      fromArchived: false,
+      toArchived: true,
+      template: '(stale, stopped {when}) ',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'card_retitled',
+      template: '(stale, stopped {when}) ',
+    });
+  });
+
+  it('still folds an old event that carries no template at all', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+
+    const events = ledger.read();
+    expect((events[0] as { template?: string }).template).toBeUndefined();
+    expect(project(events).retitled.get('local_card-1')).toMatchObject({ from: 'Work', to: STALE });
   });
 });
 
