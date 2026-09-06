@@ -1028,9 +1028,25 @@ asked about. That match is the safety: a token belonging to someone else is disc
 against the account that was asked. The sighting lands in the ledger the same way a sign-in's would,
 so the dashboard, `accounts` and the menu pick it up. `foster identify <account>` names one,
 `foster identify --all` sweeps every account that has no identity yet, and the menu offers "Identify
-it" on an unnamed account when a key to ask with is on hand. Like `usage`, it goes to the network
-only when you run it — never on its own — and when foster holds no live credential for an account it
-says so rather than guessing.
+it" on an unnamed account when a key to ask with is on hand. When foster holds no live credential for
+an account it says so rather than guessing.
+
+It also asks on its own, ahead of the commands that print an account by name — `accounts`, `labels`,
+`stores`, `live`, `status`, `sweep`, `scan`, `clients`, `doctor`, `whoami`. What makes that
+affordable is asking per _credential_ rather than per account: a token answers with its own
+`account.uuid`, so a single round names everyone it can reach, where asking per account would be one
+request per pair. A credential whose owner is already on disk — the app's own config hint, a client's
+cached profile, a vault entry the API has answered for before — is skipped once that owner has an
+identity, so on the ordinary machine, after the first time, the run asks nothing at all. Failures are
+silent: a name is a courtesy, and the command you actually asked for runs regardless. `purge`,
+`return`, `switch` and the rest never trigger it — they act on ids and paths, and a run that only
+means to move files should not be waiting on the network.
+
+And a name, once known, is used. Every screen used to print eight hex digits for an account whose
+e-mail was already sitting in the ledger, because it read the labels map and nothing else. The order
+now is the label first — someone sat down and chose it — then the e-mail the API answered with, then
+the abbreviation. Only the `label` field in JSON still means strictly what a person named, because
+that is what it promises.
 
 **Two servers, and why only one of them answers.** This is worth understanding, because it is the
 line between what `identify` and `accounts` can tell you and what they cannot. Anthropic runs the
@@ -1091,6 +1107,13 @@ that produced it, and a later reading can only correct a field by finding a diff
 which it cannot do once the app has compacted the profile away. `foster label <accountUuid> --forget`
 discards what is remembered about an account and leaves the name you chose alone; the sighting stays
 in the log, and the next real reading starts the record over.
+
+`--clear` is the opposite half: it drops the name **you** gave and leaves the sighting, so the
+account goes back to being called by its e-mail. That only became worth having once an unlabelled
+account is named by its e-mail rather than by eight hex digits — clearing a label is now a choice to
+be called what the API calls you, not a choice to be anonymous. The log is append-only, so taking a
+name back is a line saying so (`account_labelled` with an empty label) rather than a line removed;
+`label` itself refuses an empty name, so `--clear` is the only thing that ever writes one.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer

@@ -13,8 +13,13 @@ import {
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
-import { currentAccount, requireCurrentAccount } from '../engine/account.js';
-import { canIdentify, identifyAccount, signedInAccount } from '../engine/identify.js';
+import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
+import {
+  canIdentify,
+  identifyAccount,
+  identifyHeldAccounts,
+  signedInAccount,
+} from '../engine/identify.js';
 import { uniquePrefix } from '../domain/prefix.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -158,7 +163,7 @@ import {
 } from '../ops/sweep.js';
 import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
-import { labelsOf } from './names.js';
+import { labelsOf, manualLabelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
@@ -216,6 +221,42 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
 }
+
+/**
+ * The commands that print an account by name, and so are worth a question to the
+ * API when some account still has none.
+ *
+ * Deliberately not every command: `purge`, `return`, `switch` and the rest act
+ * on ids and paths, and a run that only means to move files should not be
+ * waiting on the network. `identifyHeldAccounts` is cheap after the first time
+ * anyway — it asks nothing once every credential's owner is known.
+ */
+const NAMES_ACCOUNTS = new Set([
+  'accounts',
+  'clients',
+  'doctor',
+  'installations',
+  'labels',
+  'live',
+  'scan',
+  'status',
+  'stores',
+  'sweep',
+  'whoami',
+]);
+
+// Before the command, never during it: a name that arrives late would land in
+// the middle of the output it was meant to be part of.
+program.hook('preAction', async (_program, command) => {
+  if (!NAMES_ACCOUNTS.has(command.name())) return;
+  try {
+    const { store, ledger } = context(command);
+    await identifyHeldAccounts(store, ledger);
+  } catch {
+    // Every failure here is silent by design — see identifyHeldAccounts. The
+    // command the user actually asked for still runs, unnamed accounts and all.
+  }
+});
 
 /**
  * The ledger alone, for commands that have no store to resolve — a profile is
@@ -486,7 +527,7 @@ program
     console.log(pc.bold('Profiles'));
     const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     const profiles = knownStores(ledger.read());
-    const labels = project(ledger.read()).labels;
+    const labels = labelsOf(ledger);
     if (profiles.length === 0) {
       console.log(pc.dim('  none known — foster stores lists them once one exists'));
     } else {
@@ -596,7 +637,8 @@ function describeStores(this: Command): void {
   // resolves: refusing to list the installations because it could not pick one
   // of them would be exactly backwards.
   const current = resolveQuietly(opts.store, () => ledger.read());
-  const labels = project(ledger.read()).labels;
+  const labels = labelsOf(ledger);
+  const manual = manualLabelsOf(ledger);
 
   if (opts.json) {
     print(
@@ -609,7 +651,7 @@ function describeStores(this: Command): void {
           exists: known.exists,
           running: known.running,
           account: known.accountUuid ?? null,
-          label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
+          label: known.accountUuid ? (manual.get(known.accountUuid) ?? null) : null,
           // Presence only — see `StoreConfig.hasTokenCache`. A stronger signal
           // than `account` above, which is a hint the app itself never reads
           // back, not proof anything is actually cached.
@@ -771,14 +813,15 @@ program
     const { store, ledger } = context(this);
     const config = readConfig(store);
     const accounts = summarise(store, config.lastKnownAccountUuid, copySessionIds(ledger.read()));
-    const labels = project(ledger.read()).labels;
+    const labels = labelsOf(ledger);
+    const manual = manualLabelsOf(ledger);
 
     if (this.opts<{ json?: boolean }>().json) {
       print(
         accounts.map((row) => ({
           accountUuid: row.account.accountUuid,
           organizationUuid: row.account.organizationUuid,
-          label: labels.get(row.account.accountUuid) ?? null,
+          label: manual.get(row.account.accountUuid) ?? null,
           isCurrent: row.isCurrent,
           sessions: row.nativeCount,
           fostered: row.copyCount,
@@ -2123,7 +2166,7 @@ program
     // and finding out which account they were in meant piping the JSON through
     // a script. The per-copy list is still here, one flag away.
     if (!opts.all) {
-      const labels = project(ledger.read()).labels;
+      const labels = labelsOf(ledger);
       for (const line of whereCopiesAre(active).split('\n')) {
         const uuid = line.trim().split(/\s+/)[0]!;
         const name = labels.get(uuid);
@@ -2170,11 +2213,57 @@ program
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
   .option('--from-cache', 'name the signed-in account with its cached name and email')
+  .option('--clear', 'drop the name you gave an account, leaving its e-mail to name it')
   .option('--forget', "discard what foster remembers about an account's identity")
   .action(function (this: Command, first?: string, second?: string) {
     const { store, ledger } = context(this);
     const accounts = listAccountDirs(store);
     const currentAccountUuid = readConfig(store).lastKnownAccountUuid;
+
+    // The other direction from --forget below: the name goes, the sighting
+    // stays. It only became worth having once an account with no label is named
+    // by its e-mail rather than by eight hex digits — clearing one is a choice
+    // to be called what the API calls you, not a choice to be anonymous.
+    if (this.opts<{ clear?: boolean }>().clear) {
+      if (this.opts<{ forget?: boolean }>().forget) {
+        throw new Error(
+          '--clear drops the name you gave; --forget drops the identity foster read.\n' +
+            'They are opposite halves — pass one.',
+        );
+      }
+      if (second !== undefined) throw new Error('--clear drops a name; it does not take one.');
+      // A prefix is what people have in front of them — every screen prints the
+      // abbreviation, so asking for the whole uuid here would mean copying one
+      // out of a listing to undo what a listing showed.
+      const accountUuid = first
+        ? resolveAccountPrefix(
+            first,
+            accounts.map((ref) => ref.accountUuid),
+          )
+        : currentAccountUuid;
+      if (!accountUuid) {
+        throw new Error(
+          'No account is recorded as signed in, so there is nothing to clear.\n' +
+            'Name the account outright: foster label <accountUuid> --clear.',
+        );
+      }
+      const had = project(ledger.read()).labels.get(accountUuid);
+      if (had === undefined) {
+        console.log(`${shortId(accountUuid)} has no name of its own to clear.`);
+        return;
+      }
+      ledger.append({ kind: 'account_labelled', accountUuid, label: '' });
+      const now = labelsOf(ledger).get(accountUuid);
+      console.log(`Cleared ${pc.bold(had)} from ${shortId(accountUuid)}.`);
+      console.log(
+        pc.dim(
+          now
+            ? `It goes by ${now} now.`
+            : 'Nothing else names it, so it goes by its uuid until identify finds an e-mail.',
+        ),
+      );
+      return;
+    }
 
     // The way out of a wrong sighting. `whoami` reads a volatile source and
     // writes down what it found, so a misread survives the cache that produced
@@ -3283,15 +3372,25 @@ profile
 
 program
   .command('labels')
-  .description('list the names given to accounts')
+  .description('the name each account goes by — a label you gave, or the e-mail it answered with')
   .action(function (this: Command) {
     const { ledger } = context(this);
-    const labels = project(ledger.read()).labels;
-    if (labels.size === 0) {
-      console.log('No accounts have been named.');
+    const names = labelsOf(ledger);
+    const manual = manualLabelsOf(ledger);
+    if (names.size === 0) {
+      console.log('No account has a name yet.');
+      console.log(
+        pc.dim(
+          'foster identify --all asks the API for the e-mails; foster label names one by hand.',
+        ),
+      );
       return;
     }
-    for (const [accountUuid, name] of labels) console.log(`  ${shortId(accountUuid)}  ${name}`);
+    // The e-mail is dimmed, the chosen label is not: both name the account, but
+    // only one of them was somebody's decision.
+    for (const [accountUuid, name] of names) {
+      console.log(`  ${shortId(accountUuid)}  ${manual.has(accountUuid) ? name : pc.dim(name)}`);
+    }
   });
 
 program
@@ -4199,7 +4298,7 @@ function reportDesktop(command: Command): void {
   // Computed unconditionally so `--json` carries the same label `live --json`
   // does for the same concept (`hostedBy.lastSeenAs`) — a JSON consumer should
   // not see less than the text branch prints below.
-  const labels = project(ledger.read()).labels;
+  const labels = labelsOf(ledger);
   const lastSeenAs = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : null;
 
   if (command.opts<{ json?: boolean }>().json) {
