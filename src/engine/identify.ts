@@ -43,6 +43,12 @@ export interface IdentifyOutcome {
 interface Candidate {
   auth: OAuthToken;
   expired: boolean;
+  /**
+   * Whose it is, when that is already on disk — the app's own config hint, a
+   * client's cached profile, a vault entry the API has answered for before.
+   * Never a guess: absent means unknown, and only the API settles it.
+   */
+  owner?: string;
 }
 
 /**
@@ -54,27 +60,31 @@ interface Candidate {
 function candidates(store: StoreLayout, now: number): Candidate[] {
   const found: Candidate[] = [];
   const seen = new Set<string>();
-  const add = (auth: OAuthToken | undefined) => {
+  const add = (auth: OAuthToken | undefined, owner?: string) => {
     if (!auth?.token || seen.has(auth.token)) return;
     seen.add(auth.token);
-    found.push({ auth, expired: auth.expiresAt !== undefined && auth.expiresAt * 1000 <= now });
+    found.push({
+      auth,
+      expired: auth.expiresAt !== undefined && auth.expiresAt * 1000 <= now,
+      ...(owner ? { owner } : {}),
+    });
   };
 
   // The Desktop OAuth cache: the account signed into the app right now.
-  add(readAccessToken(store));
+  add(readAccessToken(store), signedInAccount(store));
 
   // Every CLI client that has a credential on disk.
   for (const client of listClients()) {
     if (!client.signedIn) continue;
     const credential = readCliCredential(client.configDir);
-    if (credential) add(asOAuthToken(credential));
+    if (credential) add(asOAuthToken(credential), client.identity?.profile?.accountUuid);
   }
 
   // The vault: every credential foster has ever been handed.
   const root = vaultRoot();
   for (const entry of listAll(root)) {
     const held = currentCredential(root, entry.surface, entry.email);
-    if (held) add(asOAuthToken(held.credential));
+    if (held) add(asOAuthToken(held.credential), entry.accountUuid);
   }
 
   return found;
@@ -113,6 +123,56 @@ export async function identifyAccount(
   // A live credential answered, just never as this account; versus every
   // candidate being expired, which the CLI fixes on its next run.
   return { accountUuid, reason: sawLiveCredential ? 'no-answer' : 'expired-only' };
+}
+
+/**
+ * Name every account a held credential can speak for and the ledger has no
+ * identity for yet — the automatic half of this file.
+ *
+ * Two things keep it from being a network call on every run. Each credential is
+ * asked *once* per run rather than once per account: a token answers with its
+ * own `accountUuid`, so a single round names everyone it can, where asking per
+ * account would be one request per pair. And a credential whose owner is already
+ * on disk — the app's config hint, a client's cached profile, a vault entry the
+ * API has answered for before — is skipped once that owner has an identity, so
+ * the run after the first goes nowhere near the network.
+ *
+ * The two rules above still hold: a token only ever answers for itself, and the
+ * answer names its own account, so nothing is recorded against an account that
+ * was merely asked about. Every failure is silent — this runs ahead of commands
+ * that only mean to print something, and a name is never worth an error.
+ */
+export async function identifyHeldAccounts(
+  store: StoreLayout,
+  ledger: Ledger,
+  now: number = Date.now(),
+): Promise<string[]> {
+  const known = project(ledger.read()).identities;
+  const named: string[] = [];
+
+  for (const candidate of candidates(store, now)) {
+    if (candidate.expired) continue;
+    if (candidate.owner && known.has(candidate.owner)) continue;
+
+    const profile = await fetchLiveProfile(candidate.auth, now);
+    const accountUuid = profile?.accountUuid;
+    if (!profile || !accountUuid || known.has(accountUuid)) continue;
+
+    recordSighting(ledger, accountUuid, profile);
+    backfillVault(vaultRoot(), profile, now);
+    // Folded in as we go: a later credential is skipped outright when it
+    // carries this account as its owner, and never recorded twice when it
+    // does not — a credential whose owner is unknown still costs the one
+    // question it takes to find out.
+    known.set(accountUuid, {
+      seenAt: now,
+      ...(profile.email ? { email: profile.email } : {}),
+      ...(profile.name ? { name: profile.name } : {}),
+    });
+    named.push(accountUuid);
+  }
+
+  return named;
 }
 
 /** True when foster holds no fresh credential that could name this account. */

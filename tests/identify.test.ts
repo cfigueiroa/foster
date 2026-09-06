@@ -22,12 +22,17 @@ vi.mock('../src/engine/vault.js', () => ({
   rememberCredential: vi.fn(),
 }));
 vi.mock('../src/engine/anthropicApi.js', () => ({ fetchLiveProfile: vi.fn() }));
+// The app's own hint about whose the Desktop credential is — the cheap half of
+// what keeps the second run off the network.
+vi.mock('../src/store/config.js', () => ({ readConfig: vi.fn(() => ({})) }));
 
 const { readAccessToken } = await import('../src/store/credential.js');
 const { fetchLiveProfile } = await import('../src/engine/anthropicApi.js');
 const { listClients } = await import('../src/store/clients.js');
 const { readCliCredential } = await import('../src/store/cliCredential.js');
-const { identifyAccount, canIdentify } = await import('../src/engine/identify.js');
+const { readConfig } = await import('../src/store/config.js');
+const { identifyAccount, canIdentify, identifyHeldAccounts } =
+  await import('../src/engine/identify.js');
 
 const WANTED = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
@@ -92,6 +97,68 @@ describe('identifyAccount', () => {
     const outcome = await identifyAccount(store, log, WANTED, 1000);
 
     expect(outcome.reason).toBe('no-credential');
+  });
+});
+
+/**
+ * The automatic half. What matters is not that it names accounts — identifyAccount
+ * already did — but that the second run is silent: a machine whose credentials all
+ * have known owners must not go to the network again just because something printed
+ * an account.
+ */
+describe('identifyHeldAccounts', () => {
+  it('names every account its credentials reach, one question per credential', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted' });
+    vi.mocked(listClients).mockReturnValueOnce([
+      {
+        configDir: 'C:\\clients\\other',
+        isDefault: false,
+        inUse: false,
+        signedIn: true,
+        conversations: 0,
+        live: 0,
+      },
+    ] as ReturnType<typeof listClients>);
+    vi.mocked(readCliCredential).mockReturnValueOnce({
+      raw: '{}',
+      accessToken: 'key-other',
+      oauth: { accessToken: 'key-other' },
+    } as unknown as ReturnType<typeof readCliCredential>);
+    const log = ledger();
+
+    const named = await identifyHeldAccounts(store, log, 1000);
+
+    expect(named).toEqual([WANTED, OTHER]);
+    expect(vi.mocked(fetchLiveProfile)).toHaveBeenCalledTimes(2);
+    expect(project(log.read()).identities.get(OTHER)?.email).toBe('him@x.test');
+  });
+
+  it('asks nothing when every credential belongs to an account already known', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted' });
+    vi.mocked(readConfig).mockReturnValue({ lastKnownAccountUuid: WANTED } as ReturnType<
+      typeof readConfig
+    >);
+    const log = ledger();
+
+    // The first run pays for the answer...
+    await identifyHeldAccounts(store, log, 1000);
+    expect(vi.mocked(fetchLiveProfile)).toHaveBeenCalledTimes(1);
+
+    // ...and the second knows the app's own account without asking, because the
+    // config hint says whose that credential is and the ledger now holds it.
+    vi.mocked(fetchLiveProfile).mockClear();
+    const again = await identifyHeldAccounts(store, log, 2000);
+
+    expect(again).toEqual([]);
+    expect(vi.mocked(fetchLiveProfile)).not.toHaveBeenCalled();
+  });
+
+  it('does not ask with a credential that has lapsed', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted', expiresAt: 1 });
+    const log = ledger();
+
+    expect(await identifyHeldAccounts(store, log, 10_000)).toEqual([]);
+    expect(vi.mocked(fetchLiveProfile)).not.toHaveBeenCalled();
   });
 });
 
