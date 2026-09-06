@@ -2213,11 +2213,49 @@ program
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
   .option('--from-cache', 'name the signed-in account with its cached name and email')
+  .option('--clear', 'drop the name you gave an account, leaving its e-mail to name it')
   .option('--forget', "discard what foster remembers about an account's identity")
   .action(function (this: Command, first?: string, second?: string) {
     const { store, ledger } = context(this);
     const accounts = listAccountDirs(store);
     const currentAccountUuid = readConfig(store).lastKnownAccountUuid;
+
+    // The other direction from --forget below: the name goes, the sighting
+    // stays. It only became worth having once an account with no label is named
+    // by its e-mail rather than by eight hex digits — clearing one is a choice
+    // to be called what the API calls you, not a choice to be anonymous.
+    if (this.opts<{ clear?: boolean }>().clear) {
+      if (this.opts<{ forget?: boolean }>().forget) {
+        throw new Error(
+          '--clear drops the name you gave; --forget drops the identity foster read.\n' +
+            'They are opposite halves — pass one.',
+        );
+      }
+      if (second !== undefined) throw new Error('--clear drops a name; it does not take one.');
+      const accountUuid = first ?? currentAccountUuid;
+      if (!accountUuid) {
+        throw new Error(
+          'No account is recorded as signed in, so there is nothing to clear.\n' +
+            'Name the account outright: foster label <accountUuid> --clear.',
+        );
+      }
+      const had = project(ledger.read()).labels.get(accountUuid);
+      if (had === undefined) {
+        console.log(`${shortId(accountUuid)} has no name of its own to clear.`);
+        return;
+      }
+      ledger.append({ kind: 'account_labelled', accountUuid, label: '' });
+      const now = labelsOf(ledger).get(accountUuid);
+      console.log(`Cleared ${pc.bold(had)} from ${shortId(accountUuid)}.`);
+      console.log(
+        pc.dim(
+          now
+            ? `It goes by ${now} now.`
+            : 'Nothing else names it, so it goes by its uuid until identify finds an e-mail.',
+        ),
+      );
+      return;
+    }
 
     // The way out of a wrong sighting. `whoami` reads a volatile source and
     // writes down what it found, so a misread survives the cache that produced

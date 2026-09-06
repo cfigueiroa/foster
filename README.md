@@ -1108,6 +1108,13 @@ which it cannot do once the app has compacted the profile away. `foster label <a
 discards what is remembered about an account and leaves the name you chose alone; the sighting stays
 in the log, and the next real reading starts the record over.
 
+`--clear` is the opposite half: it drops the name **you** gave and leaves the sighting, so the
+account goes back to being called by its e-mail. That only became worth having once an unlabelled
+account is named by its e-mail rather than by eight hex digits — clearing a label is now a choice to
+be called what the API calls you, not a choice to be anonymous. The log is append-only, so taking a
+name back is a line saying so (`account_labelled` with an empty label) rather than a line removed;
+`label` itself refuses an empty name, so `--clear` is the only thing that ever writes one.
+
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer
 anyone can read. `status --all` prints the full list, `status --to <accountUuid>` narrows to one
