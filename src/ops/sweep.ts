@@ -22,6 +22,12 @@ import { lineage, lineageAt, type Lineage } from '../engine/lineage.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import { sidebarFrom } from '../engine/sidebar.js';
 import {
+  applyTitleSync,
+  planTitleSync,
+  type TitleSyncItem,
+  type TitleSyncSkipped,
+} from '../engine/titleSync.js';
+import {
   applyUnclaim,
   planUnclaim,
   type UnclaimItem,
@@ -95,6 +101,13 @@ export interface SweepOptions {
    * branch is not stale and is not filed away; see `domain/stale.ts`.
    */
   divergedTemplate?: string;
+  /**
+   * Bring every copy's title back into step with the original's — the fifth
+   * pass, off by default. See `engine/titleSync.ts`; the flag exists because
+   * the first run on a store that has been fostered into for weeks rewrites in
+   * bulk, and a pass that changes a thousand sidebar rows should be asked for.
+   */
+  syncTitles?: boolean;
   /** When true, plan everything and write nothing. */
   dryRun?: boolean;
   /** Extra Claude config directories to search for deleted conversations. */
@@ -124,6 +137,19 @@ export interface WorktreeClaimsPhase {
   items: UnclaimItem[];
   outcomes: UnclaimOutcome[];
   counts: { released: number; skipped: number; failed: number };
+}
+
+/**
+ * The title pass: copies whose original is called something else now.
+ *
+ * `outcomes` is empty on a dry run, the convention every other phase keeps, and
+ * the whole phase is absent from a run that did not ask for it.
+ */
+export interface TitleSyncPhase {
+  items: TitleSyncItem[];
+  skipped: TitleSyncSkipped[];
+  outcomes: RetitleOutcome[];
+  counts: { synced: number; skipped: number; failed: number };
 }
 
 /** The branch pass: what it brought, what it marked, per fork. */
@@ -187,6 +213,12 @@ export interface SweepConfirmation {
   restorable: number;
   /** Copies a second worktree-claim pass would still find. */
   worktreeClaims: number;
+  /**
+   * Copies a second title pass would still bring into step. Counted only on a
+   * run that asked for the pass: a sweep that was never told to sync titles is
+   * not unfinished for having left them alone.
+   */
+  titlesOutOfStep?: number;
   exhausted: boolean;
 }
 
@@ -199,6 +231,8 @@ export interface SweepReport {
   restored: SweepPhase;
   /** The worktree-claim pass — see `WorktreeClaimsPhase`. */
   worktreeClaims: WorktreeClaimsPhase;
+  /** The title pass, only on a run that asked for it — see `TitleSyncPhase`. */
+  titleSync?: TitleSyncPhase;
   /**
    * Rows that end up in the destination's archived view rather than in Recents:
    * copies of archived sessions, and the branches that stopped.
@@ -258,6 +292,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   const staleTemplate = options.staleTemplate ?? DEFAULT_STALE_TEMPLATE;
   const divergedTemplate = options.divergedTemplate ?? DEFAULT_DIVERGED_TEMPLATE;
   const configDirs = options.configDirs ?? [];
+  const syncTitles = options.syncTitles ?? false;
   const accounts = listAccountDirs(store);
   const target = options.target ?? requireCurrentAccount(store, accounts);
   const live = options.live ?? liveConversationIds(env);
@@ -298,6 +333,10 @@ export function runSweep(options: SweepOptions): SweepReport {
   // ledger now says rather than the reading taken before any of them ran.
   const worktreeClaims = runWorktreeClaims(store, ledger, dryRun);
 
+  // After the worktree pass, and reading the ledger fresh again: the branch pass
+  // may have marked a card this one now has to preserve the mark of.
+  const titleSync = syncTitles ? runTitleSync(store, ledger, target, dryRun) : undefined;
+
   const report: SweepReport = {
     store: store.root,
     target,
@@ -311,6 +350,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     },
     restored: phase(passes.restored),
     worktreeClaims,
+    ...(titleSync ? { titleSync } : {}),
     archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
     liveWriters: [...passes.fostered, ...passes.branches.outcomes, ...passes.restored]
       .map((outcome) => outcome.live)
@@ -323,7 +363,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   // claim about a run that never happened.
   if (dryRun) return report;
 
-  return { ...report, confirmation: confirm(run) };
+  return { ...report, confirmation: confirm(run, syncTitles) };
 }
 
 /**
@@ -381,6 +421,7 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
     { ...shared, prefix },
   );
 
+  const ledgerEvents = ledger.read();
   const plans = planBranchCards({
     forks,
     here,
@@ -391,7 +432,8 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
     staleTemplate,
     divergedTemplate,
     live,
-    state: project(ledger.read()),
+    state: project(ledgerEvents),
+    events: ledgerEvents,
   });
   const branches = applyBranchCards(plans, { ...shared, prefix });
 
@@ -417,7 +459,7 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
  * the transcripts are what they were; what changed is the one directory the
  * sweep wrote into.
  */
-function confirm(run: SweepRun): SweepConfirmation {
+function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
   const { store, ledger, target } = run;
   const hereCards = scanAccount(store, target, copySessionIds(ledger.read()));
   const again = runPasses(run, hereCards, true);
@@ -428,13 +470,22 @@ function confirm(run: SweepRun): SweepConfirmation {
     again.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
   const restorable = summariseOutcomes(again.restored).fostered;
   const worktreeClaims = planUnclaim(store, project(ledger.read())).items.length;
+  const titlesOutOfStep = syncTitles
+    ? planTitleSync(store, ledger, target).items.length
+    : undefined;
 
   return {
     fosterable,
     branches,
     restorable,
     worktreeClaims,
-    exhausted: fosterable === 0 && branches === 0 && restorable === 0 && worktreeClaims === 0,
+    ...(titlesOutOfStep === undefined ? {} : { titlesOutOfStep }),
+    exhausted:
+      fosterable === 0 &&
+      branches === 0 &&
+      restorable === 0 &&
+      worktreeClaims === 0 &&
+      (titlesOutOfStep ?? 0) === 0,
   };
 }
 
@@ -458,6 +509,22 @@ function runWorktreeClaims(
   const plan = planUnclaim(store, project(ledger.read()));
   const outcomes = dryRun ? [] : applyUnclaim(plan.items, { ledger });
   return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
+}
+
+function runTitleSync(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  dryRun: boolean,
+): TitleSyncPhase {
+  const plan = planTitleSync(store, ledger, target);
+  const outcomes = dryRun ? [] : applyTitleSync(plan.items, { ledger });
+  const counts = { synced: 0, skipped: 0, failed: 0 };
+  for (const outcome of outcomes) {
+    if (outcome.status === 'retitled') counts.synced += 1;
+    else counts[outcome.status] += 1;
+  }
+  return { items: plan.items, skipped: plan.skipped, outcomes, counts };
 }
 
 function countUnclaim(outcomes: UnclaimOutcome[]): {

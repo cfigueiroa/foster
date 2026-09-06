@@ -13,7 +13,7 @@ import { readConfig } from '../store/config.js';
  * is not present on this machine — an old one, or another machine's — which is
  * the `foster label 00000000 "…"` case, and there is nothing to resolve it to.
  */
-function resolveAccountPrefix(id: string, accountUuids: string[]): string {
+export function resolveAccountPrefix(id: string, accountUuids: string[]): string {
   const result = uniquePrefix(accountUuids, id, (uuid) => uuid);
   if (result.kind === 'ambiguous') {
     throw new Error(

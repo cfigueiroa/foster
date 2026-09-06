@@ -13,8 +13,13 @@ import {
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
-import { currentAccount, requireCurrentAccount } from '../engine/account.js';
-import { canIdentify, identifyAccount, signedInAccount } from '../engine/identify.js';
+import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
+import {
+  canIdentify,
+  identifyAccount,
+  identifyHeldAccounts,
+  signedInAccount,
+} from '../engine/identify.js';
 import { uniquePrefix } from '../domain/prefix.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -154,11 +159,12 @@ import {
   runSweep,
   type BranchesPhase,
   type SweepReport,
+  type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
 import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
-import { labelsOf } from './names.js';
+import { labelsOf, manualLabelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
 // separate chunk, and the release ships (and checksums) a single file.
 import { runInteractive } from './interactive.js';
@@ -216,6 +222,42 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
 }
+
+/**
+ * The commands that print an account by name, and so are worth a question to the
+ * API when some account still has none.
+ *
+ * Deliberately not every command: `purge`, `return`, `switch` and the rest act
+ * on ids and paths, and a run that only means to move files should not be
+ * waiting on the network. `identifyHeldAccounts` is cheap after the first time
+ * anyway — it asks nothing once every credential's owner is known.
+ */
+const NAMES_ACCOUNTS = new Set([
+  'accounts',
+  'clients',
+  'doctor',
+  'installations',
+  'labels',
+  'live',
+  'scan',
+  'status',
+  'stores',
+  'sweep',
+  'whoami',
+]);
+
+// Before the command, never during it: a name that arrives late would land in
+// the middle of the output it was meant to be part of.
+program.hook('preAction', async (_program, command) => {
+  if (!NAMES_ACCOUNTS.has(command.name())) return;
+  try {
+    const { store, ledger } = context(command);
+    await identifyHeldAccounts(store, ledger);
+  } catch {
+    // Every failure here is silent by design — see identifyHeldAccounts. The
+    // command the user actually asked for still runs, unnamed accounts and all.
+  }
+});
 
 /**
  * The ledger alone, for commands that have no store to resolve — a profile is
@@ -383,6 +425,7 @@ function describeProcessTable(provenance: ProcessTableProvenance): string {
 
 program
   .command('doctor')
+  .helpGroup('Start here:')
   .description('check the environment before doing anything else')
   .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
@@ -486,7 +529,7 @@ program
     console.log(pc.bold('Profiles'));
     const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     const profiles = knownStores(ledger.read());
-    const labels = project(ledger.read()).labels;
+    const labels = labelsOf(ledger);
     if (profiles.length === 0) {
       console.log(pc.dim('  none known — foster stores lists them once one exists'));
     } else {
@@ -547,6 +590,7 @@ program
 
 program
   .command('stores')
+  .helpGroup('Start here:')
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
   .action(describeStores);
@@ -596,7 +640,8 @@ function describeStores(this: Command): void {
   // resolves: refusing to list the installations because it could not pick one
   // of them would be exactly backwards.
   const current = resolveQuietly(opts.store, () => ledger.read());
-  const labels = project(ledger.read()).labels;
+  const labels = labelsOf(ledger);
+  const manual = manualLabelsOf(ledger);
 
   if (opts.json) {
     print(
@@ -609,7 +654,7 @@ function describeStores(this: Command): void {
           exists: known.exists,
           running: known.running,
           account: known.accountUuid ?? null,
-          label: known.accountUuid ? (labels.get(known.accountUuid) ?? null) : null,
+          label: known.accountUuid ? (manual.get(known.accountUuid) ?? null) : null,
           // Presence only — see `StoreConfig.hasTokenCache`. A stronger signal
           // than `account` above, which is a hint the app itself never reads
           // back, not proof anything is actually cached.
@@ -653,6 +698,7 @@ function resolveQuietly(
 
 program
   .command('clients')
+  .helpGroup('Start here:')
   .summary('the Claude Code clients on this machine, and who is signed into each')
   .description(
     'The Claude Code clients on this machine — one config directory per account.\n\n' +
@@ -764,21 +810,358 @@ function clientIdentityLine(client: ClaudeClient): string {
 }
 
 program
+  .command('sweep')
+  .helpGroup('Bringing conversations in:')
+  .summary('bring everything into this account — archived and deleted included')
+  .description(
+    // Wrapped short on purpose: commander re-wraps to the terminal width and
+    // keeps these newlines as well, so a long line comes out ragged.
+    'Copy every fosterable session from the other accounts into the account\n' +
+      'signed in now, archived included; give every branch of a forked\n' +
+      'conversation a row of its own; bring back conversations the app deleted\n' +
+      'that nothing points at — and confirm all three are exhausted.\n\n' +
+      'Archived copies stay archived: they arrive in the archived view rather\n' +
+      'than in Recents. So do the branches that stopped: the branch that carried\n' +
+      'on keeps its title, the others are marked stale and filed away. Nothing\n' +
+      'is hidden and nothing is merged.\n\n' +
+      'purge is deliberately not part of this: it destroys transcripts.',
+  )
+  .option('--to <accountUuid>', 'write the copies into this account instead')
+  .option('--to-org <organizationUuid>', 'write the copies into this organization')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
+  .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
+  .option(
+    '--stale-prefix <template>',
+    'what a row for a branch that stopped wears in front of its title; {when} is its last answer',
+    DEFAULT_STALE_TEMPLATE,
+  )
+  .option(
+    '--branch-prefix <template>',
+    'what a row for a branch that went on after the tip wears; it is not filed away',
+    DEFAULT_DIVERGED_TEMPLATE,
+  )
+  .option(
+    '--sync-titles',
+    'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
+  )
+  .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      to?: string;
+      toOrg?: string;
+      configDir?: string[];
+      prefix: string;
+      stalePrefix: string;
+      branchPrefix: string;
+      syncTitles?: boolean;
+      restart?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const dryRun = opts.dryRun || !opts.yes;
+    const report = runSweep({
+      store,
+      ledger,
+      target,
+      prefix: opts.prefix,
+      staleTemplate: opts.stalePrefix,
+      divergedTemplate: opts.branchPrefix,
+      syncTitles: Boolean(opts.syncTitles),
+      dryRun,
+      configDirs: opts.configDir ?? [],
+    });
+
+    if (opts.json) {
+      // The one output that has to wait: it is a single object, so the restart
+      // has to have happened before any of it can be written.
+      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
+      print({ ...sweepJson(report), restart });
+      return;
+    }
+
+    const labels = labelsOf(ledger);
+    console.log(
+      pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
+    );
+
+    printPhase('Fostering, archived included', report.fostered.outcomes);
+    printBranches(report.branches);
+    printPhase('Restoring what the app deleted', report.restored.outcomes);
+    printWorktreeClaims(report.worktreeClaims, dryRun);
+    if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+
+    console.log('');
+    for (const line of sweepSummary(report)) console.log(line);
+
+    if (dryRun) {
+      console.log(pc.dim('\nRe-run with --yes to write.'));
+      return;
+    }
+
+    // Last, and only now. Restarting waits up to half a minute for the app to
+    // close and a minute more for it to take the store again, and doing that
+    // before the report meant a sweep that had already written a few hundred
+    // files sat silent for the whole of it — with nothing on screen naming them
+    // if the wait was mistaken for a hang and interrupted.
+    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
+  });
+
+function printPhase(heading: string, outcomes: Outcome[]): void {
+  console.log(pc.bold(`\n${heading}`));
+  if (outcomes.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  for (const outcome of outcomes) console.log(outcomeLine(outcome));
+}
+
+function printBranches(phase: BranchesPhase): void {
+  console.log(pc.bold('\nForked conversations, one row per branch'));
+  if (phase.forks.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  for (const fork of phase.forks) for (const line of forkLines(fork)) console.log(line);
+}
+
+function printWorktreeClaims(phase: WorktreeClaimsPhase, dryRun: boolean): void {
+  console.log(pc.bold('\nWorktree claims on copies'));
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  if (dryRun) {
+    for (const item of phase.items) console.log(unclaimPlanLine(item));
+    return;
+  }
+  for (const outcome of phase.outcomes) console.log(unclaimOutcomeLine(outcome));
+}
+
+/**
+ * The title pass, one line per copy: what it said, and what its original says.
+ *
+ * The copies it left alone are counted rather than listed — "renamed here" is
+ * the answer for a row somebody named on purpose, and there is nothing for the
+ * reader to do about it.
+ */
+function printTitleSync(phase: TitleSyncPhase, dryRun: boolean): void {
+  console.log(pc.bold('\nTitles their originals have moved on from'));
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else if (dryRun) {
+    for (const item of phase.items) console.log(titleSyncLine(item.from, item.to));
+  } else {
+    for (const outcome of phase.outcomes) {
+      console.log(
+        outcome.status === 'retitled'
+          ? titleSyncLine(outcome.from, outcome.to)
+          : `  ${pc.red('!')} ${outcome.to}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+      );
+    }
+  }
+  const renamed = phase.skipped.filter((skip) => skip.reason === 'renamed-here').length;
+  if (renamed > 0) {
+    console.log(
+      pc.dim(`  ${renamed} left alone: renamed here, so the name was somebody's choice.`),
+    );
+  }
+  // A conflict is the one skip worth reading line by line: both names were
+  // chosen by a person, so no rule settles it and the choice is the user's.
+  const both = phase.skipped.filter((skip) => skip.reason === 'renamed-both');
+  if (both.length > 0) {
+    console.log(
+      pc.dim(`  ${both.length} named on both sides, left alone — rename the one you want to keep:`),
+    );
+    for (const skip of both) {
+      console.log(pc.dim(`      here: ${skip.here}`));
+      console.log(pc.dim(`     there: ${skip.there}`));
+    }
+  }
+}
+
+function titleSyncLine(from: string, to: string): string {
+  return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
+}
+
+function sweepJson(report: SweepReport): Record<string, unknown> {
+  const outcomeJson = (outcome: Outcome) => ({
+    originSessionId: outcome.originSessionId,
+    title: outcome.title,
+    status: outcome.status,
+    ...(outcome.detail ? { detail: outcome.detail } : {}),
+    ...(outcome.copyPath ? { copyPath: outcome.copyPath } : {}),
+    ...(outcome.copyTitle ? { copyTitle: outcome.copyTitle } : {}),
+  });
+  const phase = (entry: SweepReport['fostered']) => ({
+    counts: entry.counts,
+    outcomes: entry.outcomes.map(outcomeJson),
+  });
+
+  return {
+    store: report.store,
+    target: report.target,
+    dryRun: report.dryRun,
+    fostered: phase(report.fostered),
+    branches: {
+      counts: report.branches.counts,
+      archived: report.branches.archived,
+      staleTemplate: report.branches.staleTemplate,
+      divergedTemplate: report.branches.divergedTemplate,
+      forks: report.branches.forks.map((fork) => ({
+        root: fork.root,
+        tip: fork.tip,
+        rows: fork.rows,
+        brought: fork.brought.map(outcomeJson),
+        retitled: fork.retitled.map((outcome) => ({
+          sessionId: outcome.sessionId,
+          path: outcome.path,
+          from: outcome.from,
+          to: outcome.to,
+          ...(outcome.archived ? { archived: outcome.archived } : {}),
+          status: outcome.status,
+          ...(outcome.detail ? { detail: outcome.detail } : {}),
+          as: outcome.as,
+        })),
+        skipped: fork.skipped,
+      })),
+    },
+    restored: phase(report.restored),
+    worktreeClaims: {
+      counts: report.worktreeClaims.counts,
+      items: report.worktreeClaims.items,
+      outcomes: report.worktreeClaims.outcomes,
+    },
+    ...(report.titleSync
+      ? {
+          titleSync: {
+            counts: report.titleSync.counts,
+            items: report.titleSync.items,
+            skipped: report.titleSync.skipped,
+            outcomes: report.titleSync.outcomes,
+          },
+        }
+      : {}),
+    archived: report.archived,
+    liveWriters: report.liveWriters,
+    neverComes: report.neverComes,
+    ...(report.confirmation ? { confirmation: report.confirmation } : {}),
+  };
+}
+
+/**
+ * What the sweep did about the restart, as data rather than as printing.
+ *
+ * One routine for both outputs, so `--json` cannot report a restart the text
+ * output would have refused. The refusal that matters is the app hosting this
+ * very session: `quitDesktop` throws on it, and a sweep that ended in a thrown
+ * error after writing everything would read as a failed run. Asked first, it ends
+ * with the line to paste into a terminal outside the app instead.
+ */
+interface SweepRestart {
+  requested: boolean;
+  done: boolean;
+  reason?: string;
+  command: string;
+}
+
+async function sweepRestart(store: StoreLayout, requested: boolean): Promise<SweepRestart> {
+  // Asked for only when it matters: working out whether foster is inside the app
+  // means reading the process table, which is a second of PowerShell that a run
+  // nobody asked to restart has no use for.
+  if (!requested) return { requested: false, done: false, command: RESTART_COMMAND };
+
+  const plan = restartPlan(store);
+  if (!plan.possible) {
+    return {
+      requested: true,
+      done: false,
+      reason: `${plan.reason}\nRun it from a terminal outside the app:`,
+      command: plan.command,
+    };
+  }
+
+  try {
+    if (plan.running) {
+      const quit = await quitDesktop(store);
+      if (quit.outcome === 'needs-terminate') {
+        return {
+          requested: true,
+          done: false,
+          reason: trayNote('Finish it with'),
+          command: 'foster app restart --terminate',
+        };
+      }
+      if (quit.outcome !== 'quit' && quit.outcome !== 'not-running') {
+        return {
+          requested: true,
+          done: false,
+          reason: 'Claude Desktop is still running. Quit it from the tray icon.',
+          command: plan.command,
+        };
+      }
+    }
+    const started = await startDesktop(store);
+    return started
+      ? { requested: true, done: true, command: plan.command }
+      : {
+          requested: true,
+          done: false,
+          reason: 'Started it; it has not taken the store yet.',
+          command: plan.command,
+        };
+  } catch (error) {
+    return {
+      requested: true,
+      done: false,
+      reason: error instanceof Error ? error.message : String(error),
+      command: plan.command,
+    };
+  }
+}
+
+function reportSweepRestart(restart: SweepRestart): void {
+  if (restart.done) {
+    console.log(pc.bold('\nClaude Desktop is up, with the sidebar rebuilt.'));
+    return;
+  }
+  if (restart.reason) {
+    console.log(pc.yellow(`\n${restart.reason}`));
+    console.log(`  ${restart.command}`);
+    return;
+  }
+  console.log(
+    pc.dim(
+      `\nThe copies are invisible until the app re-reads its directory: ${restart.command}` +
+        ' — or re-run with --restart.',
+    ),
+  );
+}
+
+program
   .command('scan')
+  .helpGroup('Bringing conversations in:')
   .description('read-only inventory of accounts and sessions')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
     const { store, ledger } = context(this);
     const config = readConfig(store);
     const accounts = summarise(store, config.lastKnownAccountUuid, copySessionIds(ledger.read()));
-    const labels = project(ledger.read()).labels;
+    const labels = labelsOf(ledger);
+    const manual = manualLabelsOf(ledger);
 
     if (this.opts<{ json?: boolean }>().json) {
       print(
         accounts.map((row) => ({
           accountUuid: row.account.accountUuid,
           organizationUuid: row.account.organizationUuid,
-          label: labels.get(row.account.accountUuid) ?? null,
+          label: manual.get(row.account.accountUuid) ?? null,
           isCurrent: row.isCurrent,
           sessions: row.nativeCount,
           fostered: row.copyCount,
@@ -796,7 +1179,12 @@ program
   });
 
 sourceOptions(
-  filterOptions(program.command('list').description('list sessions available to foster')),
+  filterOptions(
+    program
+      .command('list')
+      .helpGroup('Bringing conversations in:')
+      .description('list sessions available to foster'),
+  ),
 )
   .option('--all', 'also show sessions that could never appear in the sidebar')
   .option('--json', 'machine-readable output')
@@ -854,6 +1242,7 @@ sourceOptions(
   filterOptions(
     program
       .command('foster')
+      .helpGroup('Bringing conversations in:')
       .description('copy sessions from another account into the current one')
       .option('--session <id...>', 'only these sessions, by id or unique prefix')
       .option('--to <accountUuid>', 'write the copies into this account instead')
@@ -1005,278 +1394,8 @@ sourceOptions(
  * sweep is finished, and a count of what will never come at all.
  */
 program
-  .command('sweep')
-  .summary('bring everything into this account — archived and deleted included')
-  .description(
-    // Wrapped short on purpose: commander re-wraps to the terminal width and
-    // keeps these newlines as well, so a long line comes out ragged.
-    'Copy every fosterable session from the other accounts into the account\n' +
-      'signed in now, archived included; give every branch of a forked\n' +
-      'conversation a row of its own; bring back conversations the app deleted\n' +
-      'that nothing points at — and confirm all three are exhausted.\n\n' +
-      'Archived copies stay archived: they arrive in the archived view rather\n' +
-      'than in Recents. So do the branches that stopped: the branch that carried\n' +
-      'on keeps its title, the others are marked stale and filed away. Nothing\n' +
-      'is hidden and nothing is merged.\n\n' +
-      'purge is deliberately not part of this: it destroys transcripts.',
-  )
-  .option('--to <accountUuid>', 'write the copies into this account instead')
-  .option('--to-org <organizationUuid>', 'write the copies into this organization')
-  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
-  .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
-  .option(
-    '--stale-prefix <template>',
-    'what a row for a branch that stopped wears in front of its title; {when} is its last answer',
-    DEFAULT_STALE_TEMPLATE,
-  )
-  .option(
-    '--branch-prefix <template>',
-    'what a row for a branch that went on after the tip wears; it is not filed away',
-    DEFAULT_DIVERGED_TEMPLATE,
-  )
-  .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
-  .option('--json', 'machine-readable output')
-  .option('--yes', 'actually write; without it nothing is written')
-  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
-  .action(async function (this: Command) {
-    const { store, ledger } = context(this);
-    const opts = this.opts<{
-      to?: string;
-      toOrg?: string;
-      configDir?: string[];
-      prefix: string;
-      stalePrefix: string;
-      branchPrefix: string;
-      restart?: boolean;
-      json?: boolean;
-      yes?: boolean;
-      dryRun?: boolean;
-    }>();
-
-    const target = resolveDestination(store, listAccountDirs(store), opts);
-    const dryRun = opts.dryRun || !opts.yes;
-    const report = runSweep({
-      store,
-      ledger,
-      target,
-      prefix: opts.prefix,
-      staleTemplate: opts.stalePrefix,
-      divergedTemplate: opts.branchPrefix,
-      dryRun,
-      configDirs: opts.configDir ?? [],
-    });
-
-    if (opts.json) {
-      // The one output that has to wait: it is a single object, so the restart
-      // has to have happened before any of it can be written.
-      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
-      print({ ...sweepJson(report), restart });
-      return;
-    }
-
-    const labels = labelsOf(ledger);
-    console.log(
-      pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
-    );
-
-    printPhase('Fostering, archived included', report.fostered.outcomes);
-    printBranches(report.branches);
-    printPhase('Restoring what the app deleted', report.restored.outcomes);
-    printWorktreeClaims(report.worktreeClaims, dryRun);
-
-    console.log('');
-    for (const line of sweepSummary(report)) console.log(line);
-
-    if (dryRun) {
-      console.log(pc.dim('\nRe-run with --yes to write.'));
-      return;
-    }
-
-    // Last, and only now. Restarting waits up to half a minute for the app to
-    // close and a minute more for it to take the store again, and doing that
-    // before the report meant a sweep that had already written a few hundred
-    // files sat silent for the whole of it — with nothing on screen naming them
-    // if the wait was mistaken for a hang and interrupted.
-    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
-  });
-
-function printPhase(heading: string, outcomes: Outcome[]): void {
-  console.log(pc.bold(`\n${heading}`));
-  if (outcomes.length === 0) {
-    console.log(pc.dim('  nothing to do'));
-    return;
-  }
-  for (const outcome of outcomes) console.log(outcomeLine(outcome));
-}
-
-function printBranches(phase: BranchesPhase): void {
-  console.log(pc.bold('\nForked conversations, one row per branch'));
-  if (phase.forks.length === 0) {
-    console.log(pc.dim('  nothing to do'));
-    return;
-  }
-  for (const fork of phase.forks) for (const line of forkLines(fork)) console.log(line);
-}
-
-function printWorktreeClaims(phase: WorktreeClaimsPhase, dryRun: boolean): void {
-  console.log(pc.bold('\nWorktree claims on copies'));
-  if (phase.items.length === 0) {
-    console.log(pc.dim('  nothing to do'));
-    return;
-  }
-  if (dryRun) {
-    for (const item of phase.items) console.log(unclaimPlanLine(item));
-    return;
-  }
-  for (const outcome of phase.outcomes) console.log(unclaimOutcomeLine(outcome));
-}
-
-function sweepJson(report: SweepReport): Record<string, unknown> {
-  const outcomeJson = (outcome: Outcome) => ({
-    originSessionId: outcome.originSessionId,
-    title: outcome.title,
-    status: outcome.status,
-    ...(outcome.detail ? { detail: outcome.detail } : {}),
-    ...(outcome.copyPath ? { copyPath: outcome.copyPath } : {}),
-    ...(outcome.copyTitle ? { copyTitle: outcome.copyTitle } : {}),
-  });
-  const phase = (entry: SweepReport['fostered']) => ({
-    counts: entry.counts,
-    outcomes: entry.outcomes.map(outcomeJson),
-  });
-
-  return {
-    store: report.store,
-    target: report.target,
-    dryRun: report.dryRun,
-    fostered: phase(report.fostered),
-    branches: {
-      counts: report.branches.counts,
-      archived: report.branches.archived,
-      staleTemplate: report.branches.staleTemplate,
-      divergedTemplate: report.branches.divergedTemplate,
-      forks: report.branches.forks.map((fork) => ({
-        root: fork.root,
-        tip: fork.tip,
-        rows: fork.rows,
-        brought: fork.brought.map(outcomeJson),
-        retitled: fork.retitled.map((outcome) => ({
-          sessionId: outcome.sessionId,
-          path: outcome.path,
-          from: outcome.from,
-          to: outcome.to,
-          ...(outcome.archived ? { archived: outcome.archived } : {}),
-          status: outcome.status,
-          ...(outcome.detail ? { detail: outcome.detail } : {}),
-          as: outcome.as,
-        })),
-        skipped: fork.skipped,
-      })),
-    },
-    restored: phase(report.restored),
-    worktreeClaims: {
-      counts: report.worktreeClaims.counts,
-      items: report.worktreeClaims.items,
-      outcomes: report.worktreeClaims.outcomes,
-    },
-    archived: report.archived,
-    liveWriters: report.liveWriters,
-    neverComes: report.neverComes,
-    ...(report.confirmation ? { confirmation: report.confirmation } : {}),
-  };
-}
-
-/**
- * What the sweep did about the restart, as data rather than as printing.
- *
- * One routine for both outputs, so `--json` cannot report a restart the text
- * output would have refused. The refusal that matters is the app hosting this
- * very session: `quitDesktop` throws on it, and a sweep that ended in a thrown
- * error after writing everything would read as a failed run. Asked first, it ends
- * with the line to paste into a terminal outside the app instead.
- */
-interface SweepRestart {
-  requested: boolean;
-  done: boolean;
-  reason?: string;
-  command: string;
-}
-
-async function sweepRestart(store: StoreLayout, requested: boolean): Promise<SweepRestart> {
-  // Asked for only when it matters: working out whether foster is inside the app
-  // means reading the process table, which is a second of PowerShell that a run
-  // nobody asked to restart has no use for.
-  if (!requested) return { requested: false, done: false, command: RESTART_COMMAND };
-
-  const plan = restartPlan(store);
-  if (!plan.possible) {
-    return {
-      requested: true,
-      done: false,
-      reason: `${plan.reason}\nRun it from a terminal outside the app:`,
-      command: plan.command,
-    };
-  }
-
-  try {
-    if (plan.running) {
-      const quit = await quitDesktop(store);
-      if (quit.outcome === 'needs-terminate') {
-        return {
-          requested: true,
-          done: false,
-          reason: trayNote('Finish it with'),
-          command: 'foster app restart --terminate',
-        };
-      }
-      if (quit.outcome !== 'quit' && quit.outcome !== 'not-running') {
-        return {
-          requested: true,
-          done: false,
-          reason: 'Claude Desktop is still running. Quit it from the tray icon.',
-          command: plan.command,
-        };
-      }
-    }
-    const started = await startDesktop(store);
-    return started
-      ? { requested: true, done: true, command: plan.command }
-      : {
-          requested: true,
-          done: false,
-          reason: 'Started it; it has not taken the store yet.',
-          command: plan.command,
-        };
-  } catch (error) {
-    return {
-      requested: true,
-      done: false,
-      reason: error instanceof Error ? error.message : String(error),
-      command: plan.command,
-    };
-  }
-}
-
-function reportSweepRestart(restart: SweepRestart): void {
-  if (restart.done) {
-    console.log(pc.bold('\nClaude Desktop is up, with the sidebar rebuilt.'));
-    return;
-  }
-  if (restart.reason) {
-    console.log(pc.yellow(`\n${restart.reason}`));
-    console.log(`  ${restart.command}`);
-    return;
-  }
-  console.log(
-    pc.dim(
-      `\nThe copies are invisible until the app re-reads its directory: ${restart.command}` +
-        ' — or re-run with --restart.',
-    ),
-  );
-}
-
-program
   .command('restore')
+  .helpGroup('Bringing conversations in:')
   .description('bring back sessions deleted in the app, from the conversations they left behind')
   .option('--title <text>', 'only conversations whose title contains this text')
   .option('--session <id...>', 'only these conversations, by id or unique prefix')
@@ -1361,148 +1480,8 @@ program
   });
 
 program
-  .command('purge')
-  .description('destroy the conversations behind deleted sessions — permanently, with no undo')
-  .option('--title <text>', 'only conversations whose title contains this text')
-  .option('--session <id...>', 'only these conversations, by id or unique prefix')
-  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
-  .option('--this-store-only', 'judge "still referenced" from this installation alone')
-  .option('--json', 'machine-readable list of what would be destroyed')
-  .option('--yes', 'actually destroy; requires --confirm as well')
-  .option('--confirm <count>', 'the number this run destroys, as printed by the dry run')
-  .addOption(new Option('--dry-run', 'show what would happen and destroy nothing').conflicts('yes'))
-  .action(function (this: Command) {
-    const { store, ledger } = context(this);
-    const opts = this.opts<{
-      title?: string;
-      session?: string[];
-      configDir?: string[];
-      thisStoreOnly?: boolean;
-      json?: boolean;
-      yes?: boolean;
-      confirm?: string;
-      dryRun?: boolean;
-    }>();
-
-    // Every installation gets a say in whether a conversation is still in use,
-    // because a card in a profile foster is not pointed at right now is still a
-    // card, and the session it opens is still there after a restart. Narrowing
-    // that to one store is available, and is a worse question to ask. The store
-    // in use is not in this list because findPurgeable always counts it.
-    const referenceStores = opts.thisStoreOnly
-      ? []
-      : knownStores(ledger.read()).map((known) => layoutFor(known.root));
-
-    let candidates = findPurgeable({
-      store,
-      referenceStores,
-      env: process.env,
-      configDirs: opts.configDir ?? [],
-    });
-
-    if (opts.title) {
-      const needle = opts.title.toLowerCase();
-      candidates = candidates.filter((item) =>
-        (item.facts.title ?? '').toLowerCase().includes(needle),
-      );
-    }
-    if (opts.session?.length) {
-      const wanted = opts.session.map((id) => bareSessionId(id).toLowerCase());
-      const matches = (item: (typeof candidates)[number], id: string) =>
-        item.cliSessionId.toLowerCase().startsWith(id);
-      // Refused rather than quietly narrowed, as every other identifier flag in
-      // foster is. A typo that filtered to nothing fell through to "no deleted
-      // session still has its conversation on disk", which reads as "you have
-      // nothing left to clean up" and is not what happened.
-      const unmatched = wanted.filter((id) => !candidates.some((item) => matches(item, id)));
-      if (unmatched.length > 0) {
-        throw new Error(
-          `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
-            'Run "foster purge" with no --yes to see what is available.',
-        );
-      }
-      candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
-    }
-
-    const held = new Set(
-      liveSessions(sessionRegistryRoots(process.env, opts.configDir ?? [])).map((session) =>
-        session.sessionId.toLowerCase(),
-      ),
-    );
-    // Settled before anything is printed, so the number the user is asked to
-    // confirm is the number that will actually be destroyed — a conversation
-    // held open by a live process is skipped, and confirming a total that
-    // included it would be confirming something that never happens.
-    const doomed = candidates.filter((item) => !held.has(item.cliSessionId.toLowerCase()));
-
-    if (opts.json) {
-      // The doomed set, not every candidate: this flag says it lists what would
-      // be destroyed, and a script that feeds its length to --confirm has to get
-      // the same answer the command reached. Held conversations go to stderr so
-      // they are not lost, and stdout stays parseable.
-      print(
-        doomed.map((item) => ({
-          cliSessionId: item.cliSessionId,
-          title: item.facts.title ?? null,
-          cwd: item.facts.cwd ?? null,
-          lastActivityAt: item.facts.lastActivityAt ?? null,
-          deletedAt: item.deletedAt ?? null,
-          files: item.files,
-          bytes: item.bytes,
-        })),
-      );
-      const heldHere = candidates.length - doomed.length;
-      if (heldHere > 0) {
-        console.error(
-          pc.dim(
-            `${heldHere} more held open by a live claude process, and not listed: they cannot be purged now.`,
-          ),
-        );
-      }
-      return;
-    }
-
-    if (candidates.length === 0) {
-      console.log('Nothing to purge: no deleted session still has its conversation on disk.');
-      return;
-    }
-
-    const dryRun = opts.dryRun || !opts.yes;
-
-    if (!dryRun) assertPurgeConfirmed(opts.confirm, doomed.length);
-
-    const outcomes = purgeConversations(candidates, { ledger, dryRun, held });
-    for (const outcome of outcomes) console.log(purgeLine(outcome, dryRun));
-
-    const counts = summarisePurge(outcomes);
-    if (dryRun) {
-      console.log(
-        pc.bold(
-          `\nDry run: ${counts.purged} conversation(s) would be destroyed, ` +
-            `${formatBytes(counts.bytes)} in total.`,
-        ),
-      );
-      console.log(
-        pc.red('This cannot be undone, and foster keeps no copy. Read the list before confirming.'),
-      );
-      console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
-      return;
-    }
-
-    console.log(
-      pc.bold(
-        `\n${counts.purged} destroyed (${formatBytes(counts.bytes)}), ` +
-          `${counts.skipped} skipped, ${counts.failed} failed.`,
-      ),
-    );
-    // No restart offer, and nothing to see afterwards: these conversations had no
-    // card in any sidebar — that is what made them purgeable — so the app's view
-    // is exactly as it was.
-    console.log(pc.dim("The app's deletion markers were left where they are."));
-  });
-
-program
   .command('return')
+  .helpGroup('After the sweep:')
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
   .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
@@ -1577,6 +1556,7 @@ ${continuedNote(continued.length)}`),
 
 program
   .command('consolidate')
+  .helpGroup('After the sweep:')
   .description('one row per piece of work, on the branch that carried on')
   .option('--to <accountUuid>', 'only cards in this account')
   .option('--session <id...>', 'only forks involving these conversations or cards')
@@ -1957,6 +1937,7 @@ const UNCLAIM_PREVIEW_LIMIT = 12;
 
 program
   .command('unclaim')
+  .helpGroup('After the sweep:')
   .description(
     'release the worktree claim a copy already on disk inherited from its original (issue #26)',
   )
@@ -2077,6 +2058,7 @@ function undoUnclaimCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bo
 
 program
   .command('status')
+  .helpGroup('After the sweep:')
   .description('what is currently fostered')
   .option('--all', 'list every copy instead of summarising by account')
   .option('--to <accountUuid>', 'only copies written into this account')
@@ -2123,7 +2105,7 @@ program
     // and finding out which account they were in meant piping the JSON through
     // a script. The per-copy list is still here, one flag away.
     if (!opts.all) {
-      const labels = project(ledger.read()).labels;
+      const labels = labelsOf(ledger);
       for (const line of whereCopiesAre(active).split('\n')) {
         const uuid = line.trim().split(/\s+/)[0]!;
         const name = labels.get(uuid);
@@ -2166,15 +2148,62 @@ program
 
 program
   .command('label')
+  .helpGroup('Accounts:')
   .description('give an account a human name — the one in use, or any you name')
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
   .option('--from-cache', 'name the signed-in account with its cached name and email')
+  .option('--clear', 'drop the name you gave an account, leaving its e-mail to name it')
   .option('--forget', "discard what foster remembers about an account's identity")
   .action(function (this: Command, first?: string, second?: string) {
     const { store, ledger } = context(this);
     const accounts = listAccountDirs(store);
     const currentAccountUuid = readConfig(store).lastKnownAccountUuid;
+
+    // The other direction from --forget below: the name goes, the sighting
+    // stays. It only became worth having once an account with no label is named
+    // by its e-mail rather than by eight hex digits — clearing one is a choice
+    // to be called what the API calls you, not a choice to be anonymous.
+    if (this.opts<{ clear?: boolean }>().clear) {
+      if (this.opts<{ forget?: boolean }>().forget) {
+        throw new Error(
+          '--clear drops the name you gave; --forget drops the identity foster read.\n' +
+            'They are opposite halves — pass one.',
+        );
+      }
+      if (second !== undefined) throw new Error('--clear drops a name; it does not take one.');
+      // A prefix is what people have in front of them — every screen prints the
+      // abbreviation, so asking for the whole uuid here would mean copying one
+      // out of a listing to undo what a listing showed.
+      const accountUuid = first
+        ? resolveAccountPrefix(
+            first,
+            accounts.map((ref) => ref.accountUuid),
+          )
+        : currentAccountUuid;
+      if (!accountUuid) {
+        throw new Error(
+          'No account is recorded as signed in, so there is nothing to clear.\n' +
+            'Name the account outright: foster label <accountUuid> --clear.',
+        );
+      }
+      const had = project(ledger.read()).labels.get(accountUuid);
+      if (had === undefined) {
+        console.log(`${shortId(accountUuid)} has no name of its own to clear.`);
+        return;
+      }
+      ledger.append({ kind: 'account_labelled', accountUuid, label: '' });
+      const now = labelsOf(ledger).get(accountUuid);
+      console.log(`Cleared ${pc.bold(had)} from ${shortId(accountUuid)}.`);
+      console.log(
+        pc.dim(
+          now
+            ? `It goes by ${now} now.`
+            : 'Nothing else names it, so it goes by its uuid until identify finds an e-mail.',
+        ),
+      );
+      return;
+    }
 
     // The way out of a wrong sighting. `whoami` reads a volatile source and
     // writes down what it found, so a misread survives the cache that produced
@@ -2256,6 +2285,7 @@ program
 
 program
   .command('whoami')
+  .helpGroup('Accounts:')
   .description("the signed-in account's name, email and plan, read from the app's own cache")
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -2339,6 +2369,7 @@ program
 
 program
   .command('accounts')
+  .helpGroup('Accounts:')
   .description('every account on this machine: who, which plan, and whether it is still paid for')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -2406,6 +2437,7 @@ program
 
 program
   .command('identify')
+  .helpGroup('Accounts:')
   .description('name accounts by asking the API, using a credential foster already holds')
   .argument('[accountUuid]', 'the account to identify; omit for --all')
   .option('--all', 'identify every account that has no identity yet')
@@ -2512,6 +2544,7 @@ function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {
 
 program
   .command('usage')
+  .helpGroup('Accounts:')
   .description(
     "the signed-in account's live usage — the 5-hour and weekly limits, read from the API",
   )
@@ -2562,6 +2595,7 @@ program
 
 program
   .command('renewals')
+  .helpGroup('Accounts:')
   .description('when each account resets and renews — usage windows and billing dates in one place')
   .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
@@ -2618,6 +2652,7 @@ function describeIdentity(identity: Identity): string {
 
 program
   .command('switch')
+  .helpGroup('Credentials and clients:')
   .summary('sign a config directory in as another account, without a logout')
   .description(
     'Change which account a Claude Code config directory is signed in as.\n\n' +
@@ -2754,6 +2789,7 @@ program
 
 program
   .command('vault')
+  .helpGroup('Credentials and clients:')
   .summary('the credentials foster is holding, and whose they are')
   .description(
     'Every credential foster has kept, grouped by the client it belongs to and read from\n' +
@@ -2819,6 +2855,7 @@ program
 
 program
   .command('guard')
+  .helpGroup('Credentials and clients:')
   .summary('record whoever is signed into a client, so the vault can put them back')
   .description(
     'Add the credential a client currently holds to its history, if it is not already the\n' +
@@ -2863,6 +2900,7 @@ program
 
 program
   .command('point')
+  .helpGroup('Credentials and clients:')
   .summary('repoint a directory link at another client')
   .description(
     'Flip a junction so that whatever runs with CLAUDE_CONFIG_DIR set to it follows a\n' +
@@ -2902,6 +2940,7 @@ program
 
 const client = program
   .command('client')
+  .helpGroup('Credentials and clients:')
   .description('make a config directory that is a working client');
 
 client
@@ -3150,6 +3189,7 @@ client
 
 const profile = program
   .command('profile')
+  .helpGroup('Credentials and clients:')
   .description('name a Claude Desktop profile — a second userData root — for --store');
 
 profile
@@ -3283,19 +3323,31 @@ profile
 
 program
   .command('labels')
-  .description('list the names given to accounts')
+  .helpGroup('Accounts:')
+  .description('the name each account goes by — a label you gave, or the e-mail it answered with')
   .action(function (this: Command) {
     const { ledger } = context(this);
-    const labels = project(ledger.read()).labels;
-    if (labels.size === 0) {
-      console.log('No accounts have been named.');
+    const names = labelsOf(ledger);
+    const manual = manualLabelsOf(ledger);
+    if (names.size === 0) {
+      console.log('No account has a name yet.');
+      console.log(
+        pc.dim(
+          'foster identify --all asks the API for the e-mails; foster label names one by hand.',
+        ),
+      );
       return;
     }
-    for (const [accountUuid, name] of labels) console.log(`  ${shortId(accountUuid)}  ${name}`);
+    // The e-mail is dimmed, the chosen label is not: both name the account, but
+    // only one of them was somebody's decision.
+    for (const [accountUuid, name] of names) {
+      console.log(`  ${shortId(accountUuid)}  ${manual.has(accountUuid) ? name : pc.dim(name)}`);
+    }
   });
 
 program
   .command('pin')
+  .helpGroup('After the sweep:')
   .summary('pin sessions in the sidebar, or see what is pinned')
   .description(
     'Pin or unpin sessions in the Claude Desktop sidebar.\n\n' +
@@ -3478,7 +3530,150 @@ function selectPinnedIds(
 }
 
 program
+  .command('purge')
+  .helpGroup('After the sweep:')
+  .description('destroy the conversations behind deleted sessions — permanently, with no undo')
+  .option('--title <text>', 'only conversations whose title contains this text')
+  .option('--session <id...>', 'only these conversations, by id or unique prefix')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
+  .option('--this-store-only', 'judge "still referenced" from this installation alone')
+  .option('--json', 'machine-readable list of what would be destroyed')
+  .option('--yes', 'actually destroy; requires --confirm as well')
+  .option('--confirm <count>', 'the number this run destroys, as printed by the dry run')
+  .addOption(new Option('--dry-run', 'show what would happen and destroy nothing').conflicts('yes'))
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      title?: string;
+      session?: string[];
+      configDir?: string[];
+      thisStoreOnly?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      confirm?: string;
+      dryRun?: boolean;
+    }>();
+
+    // Every installation gets a say in whether a conversation is still in use,
+    // because a card in a profile foster is not pointed at right now is still a
+    // card, and the session it opens is still there after a restart. Narrowing
+    // that to one store is available, and is a worse question to ask. The store
+    // in use is not in this list because findPurgeable always counts it.
+    const referenceStores = opts.thisStoreOnly
+      ? []
+      : knownStores(ledger.read()).map((known) => layoutFor(known.root));
+
+    let candidates = findPurgeable({
+      store,
+      referenceStores,
+      env: process.env,
+      configDirs: opts.configDir ?? [],
+    });
+
+    if (opts.title) {
+      const needle = opts.title.toLowerCase();
+      candidates = candidates.filter((item) =>
+        (item.facts.title ?? '').toLowerCase().includes(needle),
+      );
+    }
+    if (opts.session?.length) {
+      const wanted = opts.session.map((id) => bareSessionId(id).toLowerCase());
+      const matches = (item: (typeof candidates)[number], id: string) =>
+        item.cliSessionId.toLowerCase().startsWith(id);
+      // Refused rather than quietly narrowed, as every other identifier flag in
+      // foster is. A typo that filtered to nothing fell through to "no deleted
+      // session still has its conversation on disk", which reads as "you have
+      // nothing left to clean up" and is not what happened.
+      const unmatched = wanted.filter((id) => !candidates.some((item) => matches(item, id)));
+      if (unmatched.length > 0) {
+        throw new Error(
+          `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
+            'Run "foster purge" with no --yes to see what is available.',
+        );
+      }
+      candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
+    }
+
+    const held = new Set(
+      liveSessions(sessionRegistryRoots(process.env, opts.configDir ?? [])).map((session) =>
+        session.sessionId.toLowerCase(),
+      ),
+    );
+    // Settled before anything is printed, so the number the user is asked to
+    // confirm is the number that will actually be destroyed — a conversation
+    // held open by a live process is skipped, and confirming a total that
+    // included it would be confirming something that never happens.
+    const doomed = candidates.filter((item) => !held.has(item.cliSessionId.toLowerCase()));
+
+    if (opts.json) {
+      // The doomed set, not every candidate: this flag says it lists what would
+      // be destroyed, and a script that feeds its length to --confirm has to get
+      // the same answer the command reached. Held conversations go to stderr so
+      // they are not lost, and stdout stays parseable.
+      print(
+        doomed.map((item) => ({
+          cliSessionId: item.cliSessionId,
+          title: item.facts.title ?? null,
+          cwd: item.facts.cwd ?? null,
+          lastActivityAt: item.facts.lastActivityAt ?? null,
+          deletedAt: item.deletedAt ?? null,
+          files: item.files,
+          bytes: item.bytes,
+        })),
+      );
+      const heldHere = candidates.length - doomed.length;
+      if (heldHere > 0) {
+        console.error(
+          pc.dim(
+            `${heldHere} more held open by a live claude process, and not listed: they cannot be purged now.`,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.log('Nothing to purge: no deleted session still has its conversation on disk.');
+      return;
+    }
+
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (!dryRun) assertPurgeConfirmed(opts.confirm, doomed.length);
+
+    const outcomes = purgeConversations(candidates, { ledger, dryRun, held });
+    for (const outcome of outcomes) console.log(purgeLine(outcome, dryRun));
+
+    const counts = summarisePurge(outcomes);
+    if (dryRun) {
+      console.log(
+        pc.bold(
+          `\nDry run: ${counts.purged} conversation(s) would be destroyed, ` +
+            `${formatBytes(counts.bytes)} in total.`,
+        ),
+      );
+      console.log(
+        pc.red('This cannot be undone, and foster keeps no copy. Read the list before confirming.'),
+      );
+      console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
+      return;
+    }
+
+    console.log(
+      pc.bold(
+        `\n${counts.purged} destroyed (${formatBytes(counts.bytes)}), ` +
+          `${counts.skipped} skipped, ${counts.failed} failed.`,
+      ),
+    );
+    // No restart offer, and nothing to see afterwards: these conversations had no
+    // card in any sidebar — that is what made them purgeable — so the app's view
+    // is exactly as it was.
+    console.log(pc.dim("The app's deletion markers were left where they are."));
+  });
+
+program
   .command('transcript')
+  .helpGroup('Live sessions:')
   .summary("read a conversation's transcript")
   .description(
     "Read part of a conversation's transcript — the JSONL under ~/.claude*/projects.\n" +
@@ -3519,6 +3714,7 @@ program
 
 program
   .command('resume')
+  .helpGroup('Live sessions:')
   .summary('send one prompt to an existing conversation, headlessly')
   .description(
     'Send one prompt to an existing conversation via `claude -p --resume` and print the answer.\n\n' +
@@ -3549,6 +3745,7 @@ program
 
 program
   .command('live')
+  .helpGroup('Live sessions:')
   .description('conversations a claude process is holding open right now')
   .option('--json', 'machine-readable output')
   .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
@@ -3629,6 +3826,7 @@ program
 
 program
   .command('unstarted')
+  .helpGroup('Live sessions:')
   .summary('background-task requests whose session died before answering once')
   .description(
     'Find requests that never got a turn. A background-task chip is spawned into a\n' +
@@ -3737,6 +3935,7 @@ const SUGGESTED_RESCUE_WINDOW = '7d';
 
 program
   .command('rescue')
+  .helpGroup('Live sessions:')
   .summary('conversations stranded by a crash, and the resumes that bring them back')
   .description(
     'Find conversations whose sidebar card can only say "cannot reach your computer":\n' +
@@ -4094,6 +4293,7 @@ function indented(text: string): string {
 
 program
   .command('agent')
+  .helpGroup('The app:')
   .summary("run a Claude agent with foster's operations as its tools")
   .description(
     "Run a Claude agent with foster's operations as its tools.\n\n" +
@@ -4167,6 +4367,7 @@ program
 
 const app = program
   .command('app')
+  .helpGroup('The app:')
   .description('inspect or restart Claude Desktop')
   .action(function (this: Command) {
     reportDesktop(this);
@@ -4199,7 +4400,7 @@ function reportDesktop(command: Command): void {
   // Computed unconditionally so `--json` carries the same label `live --json`
   // does for the same concept (`hostedBy.lastSeenAs`) — a JSON consumer should
   // not see less than the text branch prints below.
-  const labels = project(ledger.read()).labels;
+  const labels = labelsOf(ledger);
   const lastSeenAs = accountUuid ? (labels.get(accountUuid) ?? shortId(accountUuid)) : null;
 
   if (command.opts<{ json?: boolean }>().json) {

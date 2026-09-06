@@ -755,7 +755,7 @@ describe('an origin card the app branched', () => {
       projectsDirs,
     });
 
-    expect(again[0]).toMatchObject({ status: 'skipped', detail: 'already fostered' });
+    expect(again[0]).toMatchObject({ status: 'skipped', detail: 'already in this account' });
   });
 });
 

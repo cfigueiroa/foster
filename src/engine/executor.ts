@@ -90,16 +90,30 @@ export interface FosterOptions {
    * was foster's decision. The branch that stopped goes to the archived view.
    */
   archive?: boolean;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — set by the
+   * branch pass when it brings a copy in with a mark already in front of its
+   * title. Recorded on the `fostered` event so a later run recognises the mark
+   * whatever words it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
 
 /**
+ * "Fostered" is foster's word for the act, not for the state, and on a row the
+ * account already holds it was read as "did not bring it" — twice in one session,
+ * on conversations that were sitting in the sidebar the whole time. The report
+ * says where the row is, not what the run did to it.
+ */
+export const ALREADY_HERE = 'already in this account';
+
+/**
  * Said out loud because it looks like nothing happened and something did: the
  * copy this account already has is the one that carried on.
  */
-export const FOLLOWED_BRANCH =
-  'already fostered; the app branched it and the copy here follows the branch';
+export const FOLLOWED_BRANCH = `${ALREADY_HERE}; the app branched it and the copy here follows the branch`;
 
 export interface Outcome {
   originSessionId: string;
@@ -204,7 +218,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         originSessionId: originId,
         title,
         status: 'skipped',
-        detail: 'already fostered',
+        detail: ALREADY_HERE,
       });
       continue;
     }
@@ -351,6 +365,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
           : {}),
         prefix,
         ...(options.archive ? { archived: true } : {}),
+        ...(options.template ? { template: options.template } : {}),
       });
       recordPlanned();
       outcomes.push({
@@ -391,7 +406,7 @@ function resolveExisting(
   const state = inspectCopy(active);
 
   if (state.kind === 'present') {
-    return { status: 'skipped', detail: 'already fostered', copyPath: active.copyPath };
+    return { status: 'skipped', detail: ALREADY_HERE, copyPath: active.copyPath };
   }
 
   if (state.kind === 'unreachable') {
@@ -399,7 +414,7 @@ function resolveExisting(
     // gone would put a second copy there the moment the drive came back.
     return {
       status: 'skipped',
-      detail: 'already fostered, into an installation that is not reachable to check',
+      detail: `${ALREADY_HERE}, in an installation that is not reachable to check`,
       copyPath: active.copyPath,
     };
   }

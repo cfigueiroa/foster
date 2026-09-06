@@ -104,9 +104,20 @@ nothing is hidden: the stale rows still open, they just no longer look like the 
 The one branch that gets no row of its own is one holding nothing of its own — every record of it
 already in the branch that carried on — because a row for it would open nothing the clean row does
 not.
-`--stale-prefix` changes the words; `{when}` is where the moment goes. Measured on the store that
-prompted this: the row the user had pinned held 328 records while the branches in two other accounts
-held 3157 and 2564, and every previous sweep had reported that nothing was left to do.
+`--stale-prefix` changes the words a fresh mark is written with, and `--branch-prefix` does the same
+for a branch that went on rather than stopped; `{when}` is where the moment goes in either. Measured
+on the store that prompted this: the row the user had pinned held 328 records while the branches in
+two other accounts held 3157 and 2564, and every previous sweep had reported that nothing was left to
+do.
+
+Recognising a mark an _earlier_ run wrote never depends on being told those same words again. The
+ledger already says what a row was actually marked with, so a bare `foster sweep` — the English
+defaults — still recognises a row the `/fosteia` skill marked in Portuguese last week, and leaves it
+exactly as it is rather than stacking a second mark in front of the first: `--stale-prefix` and
+`--branch-prefix` only ever choose the words a _new_ mark is written with (#35). Measured on a real
+store: 10 rows would have been rewritten that way by one bare `foster sweep --yes` on 05/09/2026. A row
+wearing a mark no known template can explain — a hand edit, or a foster too old to have recorded one —
+is left alone and named in the sweep's summary, rather than guessed at.
 
 It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
 the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
@@ -118,6 +129,37 @@ A fourth pass releases the worktree claim a copy already on disk inherited from 
 before fostering learned not to hand one out — see
 [Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
 whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
+
+A fifth pass, `--sync-titles`, brings a copy's title back into step with the original's. A copy
+carries the name of the instant it was made, and every later sweep sees it as already fostered and
+walks past — so a conversation renamed where it came from keeps the old name in every other account
+for ever, and the sidebar reads as if the work were missing when only its name is.
+
+Whose name wins is decided from the ledger, never from reading the strings: a copy still wearing the
+last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch pass has
+marked the card since, and the fostering's `originalTitle` otherwise. On the store this was measured
+against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed by hand
+was exactly the row that must not be trampled.
+
+That test alone was too narrow. Open a copy in this account and the app generates a title for it,
+which matches no baseline — so a conversation renamed where it came from stayed out of step for
+ever, and the run reported it as "renamed here" when nobody had renamed anything. The card records
+who named it: `titleSource` is `auto` when the app generated the name, `user` when somebody renamed
+the row in the sidebar, `tool` when `set_session_title` wrote it, and absent on copies older than
+the field. So a second rule follows the first — **a name a person chose beats a name the app
+generated**, whichever side each is on, and a name chosen on both sides is a conflict the run prints
+with both names rather than settling. Authorship is the only question that can be answered here:
+nothing records _when_ a title changed (there is no `titleUpdatedAt`, and `lastActivityAt` moves when
+a conversation is merely opened), so "the newer rename wins" is not available at all.
+
+Marks survive it and never travel. The mark a branch wears is not part of its name, so it is put
+back in front of the new title; a mark the _original_ happens to wear is dropped, or the two would
+stack. Both are derived by subtracting the title from the record that carries it, which is what
+keeps this clear of the [prefix problem](#when-one-conversation-becomes-two) — a run does not have to
+be told the words a mark was written with to recognise one. When a card has been marked twice and the
+mark can no longer be told from the title beneath it, the copy is left alone rather than rewritten
+with a guess. It is off by default because the first run on a store fostered into for weeks rewrites
+in bulk, and only shows at the next restart.
 
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
@@ -913,20 +955,42 @@ came from, because two installations can hold the same account identifier.
 different profile — everything after it reads and writes there — so a second
 account is not a reason to quit and relaunch.
 
-The same operations are available as one-shot commands, for scripting:
+The same operations are available as one-shot commands, for scripting. `--help` files them under
+these same headings, so the list below and the one the program prints are the same shape:
 
 ```bash
+# Start here
 foster doctor    # environment check: store location, app state, whether it is running
-foster scan      # read-only inventory of accounts, organizations and sessions
-foster list      # sessions from other accounts that are available to foster
-foster label     # give an account a human name
-foster labels    # list the names given so far
-foster accounts  # every account here: who, which plan, whether it is still paid for
-foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
-foster renewals  # usage resets and billing dates across every account, in one place
-foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster stores    # installations foster knows about, and what to pass to --store
 foster clients   # the CLI's config directories, and who is signed into each
 foster clients --fragment # print a Windows Terminal fragment (JSON), one profile per client
+
+# Bringing conversations in
+foster sweep     # the whole job: every account, archived and deleted included
+foster sweep --sync-titles # also re-title copies whose original has been renamed since
+foster scan      # read-only inventory of accounts, organizations and sessions
+foster list      # sessions from other accounts that are available to foster
+foster foster    # create the copies
+foster restore   # bring back sessions deleted in the app
+
+# After the sweep
+foster return    # remove fostered copies, restoring the previous state
+foster consolidate # one row per piece of work, on the branch that carried on
+foster unclaim   # release the worktree claim a copy inherited from its original
+foster status    # what is currently fostered
+foster pin       # pin sessions in the sidebar, or see what is pinned
+foster purge     # destroy the conversations behind deleted sessions, permanently
+
+# Accounts
+foster accounts  # every account here: who, which plan, whether it is still paid for
+foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster identify  # name an account by asking the API with a credential already on the machine
+foster label     # give an account a human name (--clear takes it back, --forget drops the sighting)
+foster labels    # the name each account goes by — a label you gave, or its e-mail
+foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
+foster renewals  # usage resets and billing dates across every account, in one place
+
+# Credentials and clients
 foster switch    # sign a client in as another account, without a logout
 foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
@@ -935,23 +999,20 @@ foster client new  # seed a config directory that is a working client
 foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
 foster client open # a Windows Terminal tab signed in as one client (--print shows the command)
 foster profile   # name a Desktop profile — new|register|forget|list — for --store
-foster sweep     # the whole job: every account, archived and deleted included
-foster foster    # create the copies
-foster restore   # bring back sessions deleted in the app
-foster purge     # destroy the conversations behind deleted sessions, permanently
-foster return    # remove fostered copies, restoring the previous state
-foster consolidate # one row per piece of work, on the branch that carried on
-foster status    # what is currently fostered
-foster pin       # pin sessions in the sidebar, or see what is pinned
-foster app       # status | quit | start | restart — drive Claude Desktop itself
-foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
-                 #   an interrupted run)
-foster transcript  # read a conversation's transcript, by cliSessionId
-foster resume    # send one prompt to an existing conversation, headlessly
+
+# Live sessions
 foster live      # conversations a claude process is holding open right now (--stop ends one,
                  #   --prune clears registry entries whose process is gone)
 foster rescue    # conversations stranded by a crash, and the resumes that bring them back
                  #   (--open puts each one in its own Windows Terminal tab)
+foster unstarted # background-task requests whose session died before answering once
+foster transcript  # read a conversation's transcript, by cliSessionId
+foster resume    # send one prompt to an existing conversation, headlessly
+
+# The app
+foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
+                 #   an interrupted run)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
@@ -1028,9 +1089,25 @@ asked about. That match is the safety: a token belonging to someone else is disc
 against the account that was asked. The sighting lands in the ledger the same way a sign-in's would,
 so the dashboard, `accounts` and the menu pick it up. `foster identify <account>` names one,
 `foster identify --all` sweeps every account that has no identity yet, and the menu offers "Identify
-it" on an unnamed account when a key to ask with is on hand. Like `usage`, it goes to the network
-only when you run it — never on its own — and when foster holds no live credential for an account it
-says so rather than guessing.
+it" on an unnamed account when a key to ask with is on hand. When foster holds no live credential for
+an account it says so rather than guessing.
+
+It also asks on its own, ahead of the commands that print an account by name — `accounts`, `labels`,
+`stores`, `live`, `status`, `sweep`, `scan`, `clients`, `doctor`, `whoami`. What makes that
+affordable is asking per _credential_ rather than per account: a token answers with its own
+`account.uuid`, so a single round names everyone it can reach, where asking per account would be one
+request per pair. A credential whose owner is already on disk — the app's own config hint, a client's
+cached profile, a vault entry the API has answered for before — is skipped once that owner has an
+identity, so on the ordinary machine, after the first time, the run asks nothing at all. Failures are
+silent: a name is a courtesy, and the command you actually asked for runs regardless. `purge`,
+`return`, `switch` and the rest never trigger it — they act on ids and paths, and a run that only
+means to move files should not be waiting on the network.
+
+And a name, once known, is used. Every screen used to print eight hex digits for an account whose
+e-mail was already sitting in the ledger, because it read the labels map and nothing else. The order
+now is the label first — someone sat down and chose it — then the e-mail the API answered with, then
+the abbreviation. Only the `label` field in JSON still means strictly what a person named, because
+that is what it promises.
 
 **Two servers, and why only one of them answers.** This is worth understanding, because it is the
 line between what `identify` and `accounts` can tell you and what they cannot. Anthropic runs the
@@ -1091,6 +1168,13 @@ that produced it, and a later reading can only correct a field by finding a diff
 which it cannot do once the app has compacted the profile away. `foster label <accountUuid> --forget`
 discards what is remembered about an account and leaves the name you chose alone; the sighting stays
 in the log, and the next real reading starts the record over.
+
+`--clear` is the opposite half: it drops the name **you** gave and leaves the sighting, so the
+account goes back to being called by its e-mail. That only became worth having once an unlabelled
+account is named by its e-mail rather than by eight hex digits — clearing a label is now a choice to
+be called what the API calls you, not a choice to be anonymous. The log is append-only, so taking a
+name back is a line saying so (`account_labelled` with an empty label) rather than a line removed;
+`label` itself refuses an empty name, so `--clear` is the only thing that ever writes one.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer

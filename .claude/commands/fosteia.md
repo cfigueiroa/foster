@@ -1,6 +1,6 @@
 ---
 description: Bring every session from every other account into the one signed in now — archived, deleted and forked included — and restart the app.
-allowed-tools: PowerShell, Bash(node:*)
+allowed-tools: PowerShell, Bash(node:*), mcp__ccd_session_mgmt__set_session_title
 ---
 
 Run the full sweep into the account Claude Desktop is signed into right now. This is the
@@ -21,16 +21,23 @@ in a checkout is usually older; do not reach for it, and do not build from sourc
 
 ## Run it
 
-One command, one tool call:
+One command, one tool call. What runs before the sweep is not decoration: those two lines are
+the name this conversation gets at the end, measured rather than remembered.
 
 ```
-foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
-names only one marks the other in English on a sidebar read in Portuguese — worse, a later run
-with a different wording stacks a second mark in front of the first instead of replacing it,
-because a mark is only recognised when the run is told the words it was written with.
+names only one marks the other in English on a sidebar read in Portuguese.
+
+`--sync-titles` is what keeps a row findable by name. A copy carries the title of the instant
+it was made, and every later sweep sees it as already fostered and walks past — so a
+conversation renamed where it came from keeps the old name here for ever, and the sidebar
+reads as if the work were missing when only its name is. That is the exact confusion this
+command exists to end, and it is why the flag is on here even though the CLI leaves it off:
+only a copy still wearing the last title foster itself wrote is rewritten, so a row **you**
+renamed is never touched, and the mark a branch wears is put back in front of the new title.
 
 That is the whole sweep. It copies every fosterable session from the other accounts —
 **archived included**, which is where the volume is — gives every branch of a forked
@@ -45,6 +52,30 @@ fails loudly on its own and confirms itself.
 a child of the app, foster will not restart it — that would kill this session part-way through —
 and the output ends with the command to run in a terminal outside the app. Hand that line to the
 user and say plainly that it is the last step.
+
+## Name this conversation
+
+Every run used to leave a row called just "Fosteia", so a sidebar holding several sweeps could
+not tell them apart — and the sweep is exactly the command someone runs again and again. Give
+this session a name of its own, with `set_session_title` on `session_id: "self"`:
+
+```
+Fosteia DD/MM HH:MM - <the account's e-mail>
+```
+
+Both halves are already printed by the call you made: the `[fosteia]` line is the timestamp and
+the `[conta]` line is the account. Copy them; do not re-derive either.
+
+Why the account takes two commands rather than one: `foster whoami` reads the app's own cache,
+and on an account the app has not written a profile for yet it answers with a null e-mail — the
+case measured here, on the account in use. `foster identify <uuid>` asks the API with a
+credential foster already holds, returns the e-mail as `name`, and fills that cache, so every
+later run gets it from `whoami` directly. If both come back empty the line falls back to the
+first block of the uuid, and the sweep's own **"Sweeping into"** line is still there to read.
+
+Rename as soon as the sweep returns, before writing the report. If `set_session_title` is not
+among your tools — this command run outside Claude Desktop — skip the rename silently; it is a
+label on a sidebar row, never a reason to stop or to reach for another way.
 
 ## Report
 
@@ -61,6 +92,8 @@ on rather than re-deriving it:
   ramo, seguiu DD/MM HH:MM)" and stays in the sidebar — that last one is where the most recent
   work is, so say it plainly. If a row they had pinned was archived as stale, the current row
   needs pinning again;
+- how many titles were brought back into step with their original, when the run names any, and
+  that a copy renamed by hand is left alone on purpose;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
   command again and say why;
 - the "can never come" line, when there is one: scheduled tasks, sessions never opened, files

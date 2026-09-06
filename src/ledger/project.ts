@@ -71,8 +71,13 @@ export function project(events: LedgerEvent[]): LedgerState {
 
   for (const event of events) {
     switch (event.kind) {
+      // An empty label is how a name is taken back: the log is append-only, so
+      // "no longer called that" has to be something written down rather than a
+      // line removed. `applyLabel` refuses to write one, so the only source is
+      // `label --clear`, and the account falls back to whatever else names it.
       case 'account_labelled':
-        labels.set(event.accountUuid, event.label);
+        if (event.label) labels.set(event.accountUuid, event.label);
+        else labels.delete(event.accountUuid);
         break;
 
       case 'account_identity_seen': {

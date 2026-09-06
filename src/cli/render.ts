@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
-import type { ForkOutcome } from '../engine/branchCards.js';
+import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
@@ -625,19 +625,42 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  // Same reasoning as the worktree line above: a title brought back into step is
+  // a copy repaired, not a row brought.
+  const titles = report.titleSync;
+  if (titles && titles.items.length > 0) {
+    const one = titles.items.length === 1;
+    lines.push(
+      report.dryRun
+        ? `${titles.items.length} title${one ? '' : 's'} to bring into step with ${one ? 'its' : 'their'} original.`
+        : `${titles.counts.synced} title${titles.counts.synced === 1 ? '' : 's'} brought into step` +
+            (titles.counts.skipped + titles.counts.failed > 0
+              ? ` (${titles.counts.skipped} skipped, ${titles.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+
   const confirmation = report.confirmation;
   if (confirmation) {
     lines.push(
       confirmation.exhausted
         ? pc.green(
             'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
-              'restore 0, and release 0 worktree claims.',
+              'restore 0, and release 0 worktree claims' +
+              (confirmation.titlesOutOfStep === undefined
+                ? '.'
+                : ', and bring 0 titles into step.'),
           )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
               `${confirmation.branches} row(s) still to add or mark for branches, ` +
               `${confirmation.restorable} still to restore, ` +
-              `${confirmation.worktreeClaims} worktree claim(s) still to release. Run it again.`,
+              `${confirmation.worktreeClaims} worktree claim(s) still to release` +
+              (confirmation.titlesOutOfStep
+                ? `, ${confirmation.titlesOutOfStep} title(s) still out of step`
+                : '') +
+              '. Run it again.',
           ),
     );
   }
@@ -661,6 +684,9 @@ export function sweepSummary(report: SweepReport): string[] {
         'Nothing is hidden — foster consolidate collapses a fork to one row if you want that.',
     );
   }
+
+  const unknownMark = unknownMarkNames(branches.forks);
+  if (unknownMark) lines.push(pc.yellow(unknownMark));
 
   if (report.liveWriters.length > 0) {
     const one = report.liveWriters.length === 1;
@@ -743,6 +769,35 @@ function strandedNames(never: NeverComes): string {
   const head = `The ${stranded.length === 1 ? 'one' : `${stranded.length}`} with no way in:`;
   const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
   return `${head}\n${titles.join('\n')}${tail}`;
+}
+
+/**
+ * Rows the branch pass left alone because they already wear a mark it cannot
+ * account for — named the way `strandedNames` names a session with no way in,
+ * so the user can fix the words by hand or run with the prefix that matches.
+ *
+ * Counted separately from every other skip: it is a decision left to the
+ * user, not work the sweep failed to finish, so it never counts against
+ * "nothing is left to sweep" — see `sweepSummary`'s confirmation line, which
+ * this plays no part in.
+ *
+ * Empty when nothing wears an unexplained mark, so a clean run stays quiet.
+ */
+function unknownMarkNames(forks: ForkOutcome[]): string {
+  const rows = forks
+    .flatMap((fork) => fork.skipped)
+    .filter((row) => row.detail === UNKNOWN_MARK_DETAIL);
+  if (rows.length === 0) return '';
+  const shown = rows.slice(0, NAMED_LIMIT);
+  const rest = rows.length - shown.length;
+  const titles = shown.map((row) => `  ${row.title}`);
+  const one = rows.length === 1;
+  const head = `${rows.length} row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark foster cannot account for, left as ${one ? 'it is' : 'they are'}:`;
+  const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
+  return (
+    `${head}\n${titles.join('\n')}${tail}\n` +
+    'Fix the words by hand, or run with the --stale-prefix/--branch-prefix that matches them.'
+  );
 }
 
 /** The name a worktree claim shows, whichever field the card carried. */

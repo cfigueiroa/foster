@@ -39,8 +39,18 @@ export interface RetitleRequest {
   title: string;
   /** The archived flag it should carry; left out to leave the flag alone. */
   archived?: boolean;
-  /** Why: marked as the branch that stopped, or restored as the one that carried on. */
-  as: 'stale' | 'tip' | 'diverged';
+  /**
+   * Why: marked as the branch that stopped, restored as the one that carried on,
+   * or brought back into step with its original — see `titleSync.ts`.
+   */
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
+  /**
+   * The template the mark was made from, or — for `as: 'tip'` — the template
+   * the write is taking off, when `branchCards.ts` could tell which one it was.
+   * Recorded on the event so a later run recognises this mark whatever words
+   * it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 export interface RetitleOutcome {
@@ -54,7 +64,7 @@ export interface RetitleOutcome {
   archived?: { from: boolean; to: boolean };
   status: 'retitled' | 'skipped' | 'failed';
   detail?: string;
-  as: 'stale' | 'tip' | 'diverged';
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
 }
 
 export interface RetitleOptions {
@@ -137,6 +147,7 @@ export function retitleCards(
         ...(archived ? { fromArchived: archived.from, toArchived: archived.to } : {}),
         native: request.native,
         as: request.as,
+        ...(request.template ? { template: request.template } : {}),
       });
       outcomes.push({
         path: request.path,

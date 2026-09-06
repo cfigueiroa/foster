@@ -417,7 +417,7 @@ describe('a copy the app repointed at another conversation', () => {
     });
 
     expect(again[0]!.status).toBe('skipped');
-    expect(again[0]!.detail).toBe('already fostered');
+    expect(again[0]!.detail).toBe('already in this account');
   });
 });
 

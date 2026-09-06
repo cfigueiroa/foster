@@ -168,6 +168,14 @@ export interface FosteredEvent extends BaseEvent {
    * this is what says the flag was foster's to lift, not the user's.
    */
   archived?: true;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — set when the
+   * branch pass brings a copy in with a mark already in front of its title (see
+   * `BringRequest.prefix`). Absent in entries written before this was kept and
+   * for a copy brought with no mark at all; `templatesSeen` in `domain/stale.ts`
+   * derives a fallback from `prefix` itself for the entries that lack it.
+   */
+  template?: string;
 }
 
 export interface ReturnedEvent extends BaseEvent {
@@ -298,8 +306,19 @@ export interface CardRetitledEvent extends BaseEvent {
   toArchived?: boolean;
   /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
   native: boolean;
-  /** Why: marked as the branch that stopped, or restored to the branch that carried on. */
-  as: 'stale' | 'tip' | 'diverged';
+  /**
+   * Why: marked as the branch that stopped, restored to the branch that carried
+   * on, or brought back into step with the title its original wears now.
+   */
+  as: 'stale' | 'tip' | 'diverged' | 'synced';
+  /**
+   * The template the mark was made from, `{when}` unfilled — set for `as: 'stale'`
+   * and `as: 'diverged'`, and for `as: 'tip'` the template that was REMOVED, when
+   * it could be told. Absent in entries written before this was kept and for
+   * `as: 'synced'`, which never carries a mark of its own; `templatesSeen` derives
+   * a fallback for those from `from`/`to` themselves — see `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 /**

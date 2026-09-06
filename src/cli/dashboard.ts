@@ -34,10 +34,12 @@ export function buildDashboard(
     accountUuid: row.accountUuid,
     shortId: shortId(row.accountUuid),
     ...(row.label ? { label: row.label } : {}),
-    // The identity's own name, so an account foster has seen signed in never
-    // shows as a bare uuid just because nobody gave it a label yet.
-    ...(row.identity?.name || row.identity?.email
-      ? { identityName: row.identity.name ?? row.identity.email }
+    // The identity itself, so an account foster has seen signed in never shows
+    // as a bare uuid just because nobody gave it a label yet. The e-mail comes
+    // first, as everywhere else: two accounts can answer to the same display
+    // name — this machine has two called "Caio" — and none can share an address.
+    ...(row.identity?.email || row.identity?.name
+      ? { identityName: row.identity.email ?? row.identity.name }
       : {}),
     // Offer the API path only where it could help: no identity yet, and foster
     // holds a live credential to ask with.
