@@ -21,11 +21,11 @@ in a checkout is usually older; do not reach for it, and do not build from sourc
 
 ## Run it
 
-One command, one tool call. The timestamp in front is not decoration: it is the name this
-conversation gets at the end, so print it in the same call rather than guessing the hour later.
+One command, one tool call. What runs before the sweep is not decoration: those two lines are
+the name this conversation gets at the end, measured rather than remembered.
 
 ```
-"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
@@ -54,14 +54,18 @@ not tell them apart — and the sweep is exactly the command someone runs again 
 this session a name of its own, with `set_session_title` on `session_id: "self"`:
 
 ```
-Fosteia DD/MM HH:MM - <account>
+Fosteia DD/MM HH:MM - <the account's e-mail>
 ```
 
-Both halves come from the call you already made: `DD/MM HH:MM` is the `[fosteia]` line printed
-before the sweep, and `<account>` is whatever follows **"Sweeping into"** in the sweep's own
-first line — the label when that account has one, else the first block of its uuid. Do not go
-looking it up with `whoami` or `labels`: on an account the app has no cached profile for, both
-come back empty and the sweep's line is still right.
+Both halves are already printed by the call you made: the `[fosteia]` line is the timestamp and
+the `[conta]` line is the account. Copy them; do not re-derive either.
+
+Why the account takes two commands rather than one: `foster whoami` reads the app's own cache,
+and on an account the app has not written a profile for yet it answers with a null e-mail — the
+case measured here, on the account in use. `foster identify <uuid>` asks the API with a
+credential foster already holds, returns the e-mail as `name`, and fills that cache, so every
+later run gets it from `whoami` directly. If both come back empty the line falls back to the
+first block of the uuid, and the sweep's own **"Sweeping into"** line is still there to read.
 
 Rename as soon as the sweep returns, before writing the report. If `set_session_title` is not
 among your tools — this command run outside Claude Desktop — skip the rename silently; it is a
