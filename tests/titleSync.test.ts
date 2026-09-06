@@ -30,8 +30,14 @@ interface Fixture {
   copyPath: string;
 }
 
+/** Who the cards say named them: 'auto' the app, 'user'/'tool' a person, absent unknown. */
+interface Sources {
+  origin?: string;
+  copy?: string;
+}
+
 /** A store with one card in the origin account and its copy in this one. */
-function fixture(originTitle: string, copyTitle: string): Fixture {
+function fixture(originTitle: string, copyTitle: string, sources: Sources = {}): Fixture {
   const root = mkdtempSync(path.join(tmpdir(), 'foster-sync-'));
   const store = layoutFor(root);
   const dir = (ref: AccountRef) =>
@@ -41,8 +47,22 @@ function fixture(originTitle: string, copyTitle: string): Fixture {
 
   const originPath = path.join(dir(ORIGIN), 'local_origin.json');
   const copyPath = path.join(dir(HERE), 'local_copy.json');
-  writeFileSync(originPath, JSON.stringify({ sessionId: 'local_origin', title: originTitle }));
-  writeFileSync(copyPath, JSON.stringify({ sessionId: 'local_copy', title: copyTitle }));
+  writeFileSync(
+    originPath,
+    JSON.stringify({
+      sessionId: 'local_origin',
+      title: originTitle,
+      ...(sources.origin ? { titleSource: sources.origin } : {}),
+    }),
+  );
+  writeFileSync(
+    copyPath,
+    JSON.stringify({
+      sessionId: 'local_copy',
+      title: copyTitle,
+      ...(sources.copy ? { titleSource: sources.copy } : {}),
+    }),
+  );
 
   const ledger = new Ledger(path.join(root, 'ledger.jsonl'));
   return { store, ledger, originPath, copyPath };
@@ -96,6 +116,85 @@ describe('planTitleSync', () => {
 
     expect(plan.items).toEqual([]);
     expect(plan.skipped).toEqual([{ copySessionId: 'local_copy', reason: 'renamed-here' }]);
+  });
+
+  it('rewrites a copy the app named here, over a name a person chose at the origin', () => {
+    // The reported case: renamed in the account it came from, then opened here,
+    // where the app generated a title of its own. No baseline matches, and yet
+    // nobody chose the name this row wears.
+    const f = fixture('🚚 frota: repositório e release', 'Localização do comando frota', {
+      origin: 'tool',
+      copy: 'auto',
+    });
+    fostered(f, 'frota');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('🚚 frota: repositório e release');
+    expect(plan.items[0]?.because).toBe('app-named-here');
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('reports a conflict, and settles nothing, when a person named each side', () => {
+    const f = fixture('What they call it there', 'What I decided to call it', {
+      origin: 'user',
+      copy: 'user',
+    });
+    fostered(f, 'The name it had then');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([
+      {
+        copySessionId: 'local_copy',
+        reason: 'renamed-both',
+        here: 'What I decided to call it',
+        there: 'What they call it there',
+      },
+    ]);
+  });
+
+  it('says nothing about a copy that already agrees with its original', () => {
+    // Both sides renamed to the same string, neither matching what foster wrote.
+    // Measured on a real store: this was being printed as a conflict, and rows
+    // like it were inflating the "renamed here" tally.
+    const f = fixture('⭐ Orquestrador rioprev', '⭐ Orquestrador rioprev', {
+      origin: 'user',
+      copy: 'user',
+    });
+    fostered(f, 'Orquestrador de sessões e issues');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('will not trade one app-generated name for another', () => {
+    const f = fixture('What the app called it there', 'What the app called it here', {
+      origin: 'auto',
+      copy: 'auto',
+    });
+    fostered(f, 'The name it had then');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([{ copySessionId: 'local_copy', reason: 'renamed-here' }]);
+  });
+
+  it('puts the branch mark back when the app wrote over it', () => {
+    const f = fixture('The name it has now', 'What the app called it', {
+      origin: 'user',
+      copy: 'auto',
+    });
+    fostered(f, 'The name it had then');
+    marked(f, 'local_copy', 'The name it had then', '(stale, stopped 01/09) The name it had then');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('(stale, stopped 01/09) The name it has now');
   });
 
   it('keeps the mark the branch pass put on the copy, in front of the new title', () => {
