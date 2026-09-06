@@ -972,6 +972,18 @@ function printTitleSync(phase: TitleSyncPhase, dryRun: boolean): void {
       pc.dim(`  ${renamed} left alone: renamed here, so the name was somebody's choice.`),
     );
   }
+  // A conflict is the one skip worth reading line by line: both names were
+  // chosen by a person, so no rule settles it and the choice is the user's.
+  const both = phase.skipped.filter((skip) => skip.reason === 'renamed-both');
+  if (both.length > 0) {
+    console.log(
+      pc.dim(`  ${both.length} named on both sides, left alone — rename the one you want to keep:`),
+    );
+    for (const skip of both) {
+      console.log(pc.dim(`      here: ${skip.here}`));
+      console.log(pc.dim(`     there: ${skip.there}`));
+    }
+  }
 }
 
 function titleSyncLine(from: string, to: string): string {
