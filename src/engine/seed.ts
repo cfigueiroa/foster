@@ -1,7 +1,9 @@
 import { cpSync, mkdirSync, symlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { hasCredential } from '../store/cliCredential.js';
 import { fileExists, isDirectory, safeReaddir } from '../util/fs.js';
+import { clientNameOf } from './launch.js';
 
 /**
  * Making a config directory that is a working client rather than an empty one.
@@ -142,6 +144,31 @@ export function applySeed(plan: SeedPlan): SeedOutcome {
     linked,
     message:
       `${plan.target} is ready, and signed out. ` +
-      `Sign in with CLAUDE_CONFIG_DIR set to it, and foster keeps a copy from then on.`,
+      `Open it with \`foster client open ${openableNameFor(plan.target, homedir())}\` and sign in there.`,
   };
+}
+
+/**
+ * The argument `foster client open` actually resolves back to `target`, right now,
+ * with nothing registered.
+ *
+ * `clientNameOf` strips a `.claude-` prefix (and special-cases the home `.claude`
+ * directory to `default`) before it will match a bare name — printing its raw
+ * `path.basename` used to be the bug here: for the `~/.claude-<slug>` sibling
+ * convention `path.basename` is `.claude-work`, not `work`, and the resolver does
+ * not treat a bare `.claude-work` as path-like, so it went looking for
+ * `~/.claude-.claude-work` instead.
+ *
+ * But `clientNameOf`'s own fallback — a directory's bare basename, for anything
+ * outside those two conventions — is a display name, not a promise: it only
+ * resolves once `target` has been registered, which a directory this function
+ * just created never is yet. `clientNameOf(target, home) === path.basename(target)`
+ * is exactly the signal that its fallback branch fired (the other two branches
+ * always change the string), so that case gets `target`'s own resolved path
+ * instead — not a name, but exactly what the resolver's first, path-like check
+ * accepts unconditionally, with nothing to register.
+ */
+function openableNameFor(target: string, home: string): string {
+  const name = clientNameOf(target, home);
+  return name === path.basename(target) ? path.resolve(target) : name;
 }

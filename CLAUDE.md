@@ -68,6 +68,48 @@ folded into `configDirCandidates`, so nothing it names reaches `purge`, `restore
 <path>` is still the only door onto a registered root for any of those, on purpose
 (`tests/clients.test.ts` guards the shape).
 
+## Opening a terminal as an account
+
+`foster client open <client> [-d <cwd>] [--follow-link] [--guard] [--print]` opens a Windows
+Terminal tab with `CLAUDE_CONFIG_DIR` set for that tab alone — the one thing on this machine that
+resolves name -> directory -> identity -> live writers -> junction target before it opens anything,
+and refuses the cases that bite instead of opening into them. Nothing here signs in or switches an
+account — a client that is signed out still opens, onto the CLI's own login — and nothing is
+written to the ledger; `--guard` is the one opt-in exception, reaching the vault the same
+read-then-remember way `foster guard` does.
+
+A junction is a pointer, not a client (see "Fleet directories" above): opening straight on one is
+refused, because a tab that started on the link keeps writing through it after the next `foster
+point`. `--follow-link` opens on the target instead, and the warning that follows still names any
+other junction currently pointed at that same target — a terminal opened directly there spends
+that rotation's quota too.
+
+Two measurements this rests on were never made, so the code assumes the more dangerous answer to
+both. Not measured as of 05/09/2026:
+
+- **P7** — whether `wt -w 0 new-tab` inherits the _target_ window's own environment rather than the
+  one this process hands the new one. If it does, a `CLAUDE_CONFIG_DIR` already set there would leak
+  into the new tab's shell before the `-Command` ever runs — so both the scrubbed spawn environment
+  and a second `CLAUDE*` cleanup inside the `-Command` itself apply, not just one.
+- **P11** — whether opening a terminal directly on a fleet junction's active target competes with
+  that fleet's own rotation. This stays a warning, not a refusal, and there is no `--fleet` flag to
+  make it stricter.
+
+`foster clients --fragment` gives every client its own entry in the Windows Terminal menu instead,
+by printing a fragment (JSON) for the Terminal to pick up. Create the fragment folder once, then
+redirect into it — in that order, because `>` does not create a directory:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster" | Out-Null
+foster clients --fragment > "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster\clients.json"
+```
+
+Three things that bite: the Terminal writes a stub of the profile into your own `settings.json` on
+first load; `wt -p <name>` with a name that does not match opens the **default** profile silently,
+so use `client open` instead when being certain matters; and the fragment has to stay UTF-8 —
+Windows PowerShell 5.1's `>` writes UTF-16 and breaks it. Restart the Terminal if the entry does
+not appear.
+
 ## A launched Claude.exe never inherits foster's own `CLAUDE*` env
 
 Foster commonly runs from inside a Code session the app is itself hosting, and that session's
