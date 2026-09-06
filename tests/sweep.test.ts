@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { accountDir } from '../src/domain/paths.js';
-import { formatStamp } from '../src/domain/stale.js';
+import {
+  DEFAULT_DIVERGED_TEMPLATE,
+  DEFAULT_STALE_TEMPLATE,
+  formatStamp,
+} from '../src/domain/stale.js';
+import { UNKNOWN_MARK_DETAIL } from '../src/engine/branchCards.js';
 import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -1040,5 +1045,150 @@ describe('a branch with nothing of its own', () => {
 
     expect(card(CONTAINED_CARD).title).toMatch(/^\(stale, stopped .*\) Macs$/);
     expect(card(CONTAINED_CARD).isArchived).toBe(true);
+  });
+});
+
+/**
+ * #35: `stripMarks` used to know only the words the current run was given, so
+ * a row marked by an earlier run in different words got a second mark stacked
+ * in front of the first instead of being recognised. The ledger already says
+ * what a row was actually marked with; this is the fix reading it.
+ */
+describe('#35: a mark is recognised whatever words it was written with', () => {
+  it('is not stacked when a later run is given different words, and settles either way', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    // Run 1: marked in Portuguese, as the `/fosteia` skill does.
+    sweep(false, { staleTemplate: '(defasada, parou {when}) ' });
+    expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
+    expect(ledger.read().find((event) => event.kind === 'card_retitled')).toMatchObject({
+      as: 'stale',
+      template: '(defasada, parou {when}) ',
+    });
+
+    // Run 2: the bare English default — the exact defect measured on a real
+    // store. The old behaviour stacked a second mark here; the fix recognises
+    // the Portuguese one from the ledger and leaves the row exactly as it is.
+    const dry = sweep(true);
+    expect(dry.branches.retitled.filter((o) => o.status === 'retitled')).toHaveLength(0);
+    sweep(false);
+    expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
+
+    // Run 3: the same Portuguese words again — the ordinary non-stacking case
+    // this already handled before #35.
+    const again = sweep(true, { staleTemplate: '(defasada, parou {when}) ' });
+    expect(again.branches.retitled.filter((o) => o.status === 'retitled')).toHaveLength(0);
+  });
+
+  it('skips a row wearing a mark no known template explains, and leaves its title untouched', () => {
+    fork();
+    const unknown = '[xoldx 01/09 18:10] Macs';
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: unknown }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    expect(report.branches.forks[0]!.skipped).toContainEqual({
+      sessionId: `local_${TRUNK_CARD}`,
+      title: unknown,
+      detail: UNKNOWN_MARK_DETAIL,
+    });
+    expect(card(TRUNK_CARD).title).toBe(unknown);
+    expect(ledger.read().filter((event) => event.kind === 'card_retitled')).toHaveLength(0);
+  });
+
+  it('records the template on the fostered event when the bring path marks a copy', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    // The trunk has no card anywhere in this account's reach — the app deleted
+    // it — so the branch pass has to bring it, marked, from the transcript.
+    tombstone([TRUNK]);
+
+    sweep();
+
+    expect(ledger.read().find((event) => event.kind === 'fostered')).toMatchObject({
+      prefix: `(stale, stopped ${STAMP}) `,
+      template: DEFAULT_STALE_TEMPLATE,
+    });
+  });
+
+  it('records the template on card_retitled for a diverged mark', () => {
+    wentOn();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(ledger.read().find((event) => event.kind === 'card_retitled')).toMatchObject({
+      as: 'diverged',
+      template: DEFAULT_DIVERGED_TEMPLATE,
+    });
+  });
+
+  it('records which known template explains the mark a tip write takes off', () => {
+    fork();
+    const marked = '(stale, stopped 01/09 18:10) Macs';
+    const file = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: marked, isArchived: true }),
+    );
+    ledger.append({
+      kind: 'card_retitled',
+      sessionId: `local_${TIP_CARD}`,
+      target: NEW_ACCOUNT,
+      path: file,
+      from: 'Macs',
+      to: marked,
+      fromArchived: false,
+      toArchived: true,
+      native: true,
+      as: 'stale',
+      template: DEFAULT_STALE_TEMPLATE,
+    });
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+
+    sweep();
+
+    expect(ledger.read().at(-1)).toMatchObject({
+      kind: 'card_retitled',
+      as: 'tip',
+      to: 'Macs',
+      template: DEFAULT_STALE_TEMPLATE,
+    });
   });
 });
