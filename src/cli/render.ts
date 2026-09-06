@@ -477,7 +477,16 @@ export function outcomeLine(outcome: Outcome, options: { restoring?: boolean } =
     failed: pc.red('x'),
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
-  const line = `  ${marks[outcome.status]} ${outcome.title}${detail}`;
+  // Said on the line itself, because it is the answer to the question the row
+  // provokes: this account already showed that conversation, so why is there a
+  // second one? Because the row it had opens a different file of it, and this
+  // one opens records that file does not hold.
+  const beyond = outcome.beyond
+    ? pc.dim(
+        ` (a second file of a conversation already here: ${outcome.beyond} record(s) no row here could open)`,
+      )
+    : '';
+  const line = `  ${marks[outcome.status]} ${outcome.title}${detail}${beyond}`;
   const standing = outcome.standing
     ? standingLine(outcome.standing, options.restoring === true, outcome.originSessionId)
     : '';
