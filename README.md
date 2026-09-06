@@ -124,11 +124,22 @@ carries the name of the instant it was made, and every later sweep sees it as al
 walks past — so a conversation renamed where it came from keeps the old name in every other account
 for ever, and the sidebar reads as if the work were missing when only its name is.
 
-Whose name wins is decided from the ledger, never from reading the strings: only a copy still
-wearing the last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch
-pass has marked the card since, and the fostering's `originalTitle` otherwise. On the store this was
-measured against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed
-by hand was exactly the row that must not be trampled.
+Whose name wins is decided from the ledger, never from reading the strings: a copy still wearing the
+last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch pass has
+marked the card since, and the fostering's `originalTitle` otherwise. On the store this was measured
+against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed by hand
+was exactly the row that must not be trampled.
+
+That test alone was too narrow. Open a copy in this account and the app generates a title for it,
+which matches no baseline — so a conversation renamed where it came from stayed out of step for
+ever, and the run reported it as "renamed here" when nobody had renamed anything. The card records
+who named it: `titleSource` is `auto` when the app generated the name, `user` when somebody renamed
+the row in the sidebar, `tool` when `set_session_title` wrote it, and absent on copies older than
+the field. So a second rule follows the first — **a name a person chose beats a name the app
+generated**, whichever side each is on, and a name chosen on both sides is a conflict the run prints
+with both names rather than settling. Authorship is the only question that can be answered here:
+nothing records _when_ a title changed (there is no `titleUpdatedAt`, and `lastActivityAt` moves when
+a conversation is merely opened), so "the newer rename wins" is not available at all.
 
 Marks survive it and never travel. The mark a branch wears is not part of its name, so it is put
 back in front of the new title; a mark the _original_ happens to wear is dropped, or the two would

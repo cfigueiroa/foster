@@ -19,12 +19,22 @@ import { retitleCards, type RetitleOutcome } from './retitle.js';
  * Three decisions hold this together, and all three come from the ledger rather
  * than from reading strings.
  *
- * **Whose title wins.** Only a copy still wearing the last title foster itself
- * wrote is rewritten. That is `card_retitled.to` when foster has marked the card
+ * **Whose title wins.** A copy still wearing the last title foster itself wrote
+ * is rewritten: that is `card_retitled.to` when foster has marked the card
  * since, and the fostering's `originalTitle` otherwise. A copy the user renamed
  * by hand matches neither and is left alone — measured on a real store, 875 of
  * 911 copies still matched, 9 wore a mark, and the single hand-renamed one was
  * exactly the row that must not be trampled.
+ *
+ * That test alone is too narrow, though, and the gap is not rare. Open a copy in
+ * this account and the app generates a title for it, which matches no baseline —
+ * so a conversation renamed where it came from stayed out of step for ever, and
+ * a sweep reported it as "renamed here" when nobody had renamed anything. The
+ * card records who named it (`titleSource`, see `namerOf`), so the second rule
+ * is authorship: a name a person chose beats a name the app generated, and a
+ * name chosen on both sides is a conflict this reports rather than settles.
+ * Authorship is the only question that can be answered here — nothing records
+ * *when* a title changed, so "the newer rename wins" is not available at all.
  *
  * **Marks are kept, and never copied.** The mark a branch wears is not part of
  * its name, so it survives the rewrite; and a mark the *origin* happens to wear
@@ -58,18 +68,30 @@ export interface TitleSyncItem {
   to: string;
   /** The mark being preserved, when the copy wears one. */
   mark?: string;
+  /**
+   * Why this copy may be rewritten: `foster-baseline` — it still wears the last
+   * title foster wrote, so nobody has chosen its name since; `app-named-here` —
+   * the app auto-titled it in this account, over a name a person chose in the
+   * account it came from.
+   */
+  because: 'foster-baseline' | 'app-named-here';
 }
 
 export interface TitleSyncSkipped {
   copySessionId: string;
   /**
-   * `renamed-here` — the copy no longer says what foster last wrote, so somebody
-   * chose its name; `no-baseline` — nothing records what foster wrote and the
-   * copy is not blank, so there is nothing to compare against; `unknown-mark` —
-   * foster marked this card but the mark cannot be told from the title beneath
-   * it; `origin-gone` — the card it was copied from can no longer be read.
+   * `renamed-here` — the copy no longer says what foster last wrote, and nothing
+   * proves the app put that name there; `renamed-both` — a person named the card
+   * on each side and the two disagree, which no rule can settle; `no-baseline` —
+   * nothing records what foster wrote and the copy is not blank, so there is
+   * nothing to compare against; `unknown-mark` — foster marked this card but the
+   * mark cannot be told from the title beneath it; `origin-gone` — the card it
+   * was copied from can no longer be read.
    */
-  reason: 'renamed-here' | 'no-baseline' | 'unknown-mark' | 'origin-gone';
+  reason: 'renamed-here' | 'renamed-both' | 'no-baseline' | 'unknown-mark' | 'origin-gone';
+  /** For `renamed-both`, the two names in play — the run lists them to be settled by hand. */
+  here?: string;
+  there?: string;
 }
 
 export interface PlanTitleSyncResult {
@@ -105,6 +127,36 @@ function baselineOf(
   }
   if (fostering.originalTitle === undefined) return undefined;
   return { title: fostering.originalTitle, mark: '' };
+}
+
+/**
+ * Who chose the name a card wears now, as the card itself records it.
+ *
+ * The app stamps `titleSource` on every write: `auto` when it generated the name
+ * itself, `user` when somebody renamed the row in the sidebar, `tool` when
+ * `set_session_title` wrote it — an agent, but always at a person's request, so
+ * both count as chosen. Anything else, the field missing included, is `unknown`:
+ * copies foster made before the field existed carry nothing, and 217 of 955
+ * cards on the measured store are exactly that.
+ *
+ * There is no record of *when* a title changed — no `titleUpdatedAt`, and
+ * `lastActivityAt` moves when a conversation is merely opened — so "keep
+ * whichever rename is newer" cannot be answered at all. Authorship can, and it
+ * settles the case that matters: a name a person chose beats a name the app
+ * generated, whichever side each is on.
+ */
+type Namer = 'person' | 'app' | 'unknown';
+
+function namerOf(card: { titleSource?: string }): Namer {
+  switch (card.titleSource) {
+    case 'user':
+    case 'tool':
+      return 'person';
+    case 'auto':
+      return 'app';
+    default:
+      return 'unknown';
+  }
 }
 
 /** The original's title with any mark of its own taken back off. */
@@ -159,6 +211,22 @@ export function planTitleSync(
     }
     const baseline = found;
 
+    const there = originTitle(origin, state.retitled.get(fostering.originSessionId));
+    // The mark goes back on. An app-generated title replaces whatever the branch
+    // pass had written, mark included, and the verdict that mark records — which
+    // branch stopped, which went on — is the sweep's, not the app's to drop.
+    const mark = baseline?.mark ?? '';
+    const to = mark + there;
+
+    // Already in step, so there is nothing to decide and nothing to report — no
+    // matter which side is out of line with the baseline, or who named either.
+    // Asked before authorship rather than after: a dry run against a real store
+    // printed a "conflict" whose two names were the same string, and the
+    // "renamed here" tally counted rows that already agreed.
+    if (to === here) continue;
+
+    let because: TitleSyncItem['because'] = 'foster-baseline';
+
     // A copy of a conversation nobody had named is the one case with nothing to
     // compare and nothing to lose: it still says nothing, so a name arriving now
     // overwrites no decision. 253 of 8357 fosterings on the measured store are
@@ -169,13 +237,26 @@ export function planTitleSync(
         continue;
       }
     } else if (here !== baseline.title) {
-      skipped.push({ copySessionId: fostering.copySessionId, reason: 'renamed-here' });
-      continue;
+      // The copy says something foster did not write. Until authorship was read
+      // that ended the matter, and it cost the case this was reported for: a
+      // conversation renamed in the account it came from, then opened here,
+      // where the app generated a name of its own over the copy. Nobody chose
+      // that name, and the row it left behind is the one the sidebar cannot be
+      // searched by.
+      if (namerOf(copy) !== 'app' || namerOf(origin) !== 'person') {
+        skipped.push({
+          copySessionId: fostering.copySessionId,
+          // Both sides chosen and disagreeing is a real conflict, not a gap in
+          // the rule: reported with both names so it can be settled by hand,
+          // never guessed at.
+          ...(namerOf(copy) === 'person' && namerOf(origin) === 'person'
+            ? { reason: 'renamed-both' as const, here, there }
+            : { reason: 'renamed-here' as const }),
+        });
+        continue;
+      }
+      because = 'app-named-here';
     }
-
-    const mark = baseline?.mark ?? '';
-    const to = mark + originTitle(origin, state.retitled.get(fostering.originSessionId));
-    if (to === here) continue;
 
     items.push({
       path: fostering.copyPath,
@@ -184,6 +265,7 @@ export function planTitleSync(
       from: here,
       to,
       ...(mark ? { mark } : {}),
+      because,
     });
   }
 
