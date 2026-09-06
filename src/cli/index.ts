@@ -13,7 +13,7 @@ import {
   samePath,
   storeRootOfCopy,
 } from '../domain/paths.js';
-import { currentAccount, requireCurrentAccount } from '../engine/account.js';
+import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
 import {
   canIdentify,
   identifyAccount,
@@ -2232,7 +2232,15 @@ program
         );
       }
       if (second !== undefined) throw new Error('--clear drops a name; it does not take one.');
-      const accountUuid = first ?? currentAccountUuid;
+      // A prefix is what people have in front of them — every screen prints the
+      // abbreviation, so asking for the whole uuid here would mean copying one
+      // out of a listing to undo what a listing showed.
+      const accountUuid = first
+        ? resolveAccountPrefix(
+            first,
+            accounts.map((ref) => ref.accountUuid),
+          )
+        : currentAccountUuid;
       if (!accountUuid) {
         throw new Error(
           'No account is recorded as signed in, so there is nothing to clear.\n' +
