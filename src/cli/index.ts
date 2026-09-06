@@ -424,6 +424,7 @@ function describeProcessTable(provenance: ProcessTableProvenance): string {
 
 program
   .command('doctor')
+  .helpGroup('Start here:')
   .description('check the environment before doing anything else')
   .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
@@ -588,6 +589,7 @@ program
 
 program
   .command('stores')
+  .helpGroup('Start here:')
   .description('installations foster knows about, and what to pass to --store')
   .option('--json', 'machine-readable output')
   .action(describeStores);
@@ -695,6 +697,7 @@ function resolveQuietly(
 
 program
   .command('clients')
+  .helpGroup('Start here:')
   .summary('the Claude Code clients on this machine, and who is signed into each')
   .description(
     'The Claude Code clients on this machine — one config directory per account.\n\n' +
@@ -806,249 +809,8 @@ function clientIdentityLine(client: ClaudeClient): string {
 }
 
 program
-  .command('scan')
-  .description('read-only inventory of accounts and sessions')
-  .option('--json', 'machine-readable output')
-  .action(function (this: Command) {
-    const { store, ledger } = context(this);
-    const config = readConfig(store);
-    const accounts = summarise(store, config.lastKnownAccountUuid, copySessionIds(ledger.read()));
-    const labels = labelsOf(ledger);
-    const manual = manualLabelsOf(ledger);
-
-    if (this.opts<{ json?: boolean }>().json) {
-      print(
-        accounts.map((row) => ({
-          accountUuid: row.account.accountUuid,
-          organizationUuid: row.account.organizationUuid,
-          label: manual.get(row.account.accountUuid) ?? null,
-          isCurrent: row.isCurrent,
-          sessions: row.nativeCount,
-          fostered: row.copyCount,
-        })),
-      );
-      return;
-    }
-
-    if (accounts.length === 0) {
-      console.log('No account directories found.');
-      return;
-    }
-
-    console.log(accountTree(groupByAccount(accounts), labels));
-  });
-
-sourceOptions(
-  filterOptions(program.command('list').description('list sessions available to foster')),
-)
-  .option('--all', 'also show sessions that could never appear in the sidebar')
-  .option('--json', 'machine-readable output')
-  .action(function (this: Command) {
-    const { store, ledger } = context(this);
-    const opts = this.opts<{
-      from?: string;
-      fromOrg?: string;
-      fromStore?: string;
-      all?: boolean;
-      json?: boolean;
-    }>();
-    const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
-    const accounts = listAccountDirs(sourceStore);
-    // Everything in another store is a candidate; only within one store does the
-    // account in use need excluding, because there its sessions are already here.
-    const current = sameStore(sourceStore, store) ? currentAccount(store, accounts) : undefined;
-
-    const sources = resolveSources(
-      accounts.filter((account) => account.accountUuid !== current?.accountUuid),
-      opts.from,
-      opts.fromOrg,
-    );
-    // The whole store is read even though only these accounts are offered: what
-    // makes a copy the last card of its conversation is decided by the accounts
-    // that are not on offer.
-    const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()));
-
-    if (opts.json) {
-      print(
-        candidates.map((session) => ({
-          sessionId: session.data.sessionId,
-          title: session.data.title ?? null,
-          cwd: session.data.cwd ?? null,
-          lastActivityAt: session.data.lastActivityAt ?? null,
-          accountUuid: session.account.accountUuid,
-          organizationUuid: session.account.organizationUuid,
-          fosterable: session.reasons.length === 0,
-          reasons: session.reasons,
-        })),
-      );
-      return;
-    }
-
-    if (candidates.length === 0) {
-      console.log('Nothing matches.');
-      return;
-    }
-
-    for (const session of candidates) console.log(sessionLine(session));
-    console.log(pc.bold(`\n${candidates.length} session(s)`));
-  });
-
-sourceOptions(
-  filterOptions(
-    program
-      .command('foster')
-      .description('copy sessions from another account into the current one')
-      .option('--session <id...>', 'only these sessions, by id or unique prefix')
-      .option('--to <accountUuid>', 'write the copies into this account instead')
-      .option('--to-org <organizationUuid>', 'write the copies into this organization')
-      .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
-      .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
-      .option('--yes', 'actually write; without it nothing is written')
-      .addOption(
-        // Passing both used to silently win for --dry-run, so a script that meant
-        // to write quietly did not. Naming the conflict says so instead.
-        new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'),
-      ),
-  ),
-).action(async function (this: Command) {
-  const { store, ledger } = context(this);
-  const opts = this.opts<{
-    title?: string;
-    cwd?: string;
-    since?: string;
-    archived?: boolean;
-    includeScheduled?: boolean;
-    session?: string[];
-    from?: string;
-    fromOrg?: string;
-    fromStore?: string;
-    to?: string;
-    toOrg?: string;
-    prefix: string;
-    restart?: boolean;
-    yes?: boolean;
-    dryRun?: boolean;
-  }>();
-
-  const target = resolveDestination(store, listAccountDirs(store), opts);
-  const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
-  const crossStore = !sameStore(sourceStore, store);
-  const filter = filterFrom(opts);
-
-  // Only the directory the copies are going to is excluded, and only when the
-  // sessions come from the same store: another organization of the same account
-  // is just as invisible and just as fosterable, and a different store shares no
-  // directory with the destination at all.
-  const sources = resolveSources(
-    listAccountDirs(sourceStore).filter(
-      (ref) =>
-        crossStore ||
-        !(
-          ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid
-        ),
-    ),
-    opts.from,
-    opts.fromOrg,
-  );
-
-  // Sessions that can never appear in the sidebar are always excluded here:
-  // offering them would only produce copies the app silently never lists.
-  let candidates = listFosterable(sourceStore, sources, ledger, filter);
-
-  if (opts.session?.length) {
-    try {
-      candidates = selectFosterSessions(candidates, opts.session);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`${message}\nRun "foster list" to see the ids.`);
-    }
-  }
-
-  if (candidates.length === 0) {
-    console.log('Nothing to foster.');
-    return;
-  }
-
-  // Default to a dry run: writing is opt-in via --yes.
-  const dryRun = opts.dryRun || !opts.yes;
-  const outcomes = fosterSessions(candidates, {
-    store,
-    ledger,
-    target,
-    sourceStore: sourceStore.root,
-    prefix: opts.prefix,
-    dryRun,
-    includeArchived: Boolean(opts.archived),
-    includeScheduled: Boolean(opts.includeScheduled),
-    // A conversation with a live writer branches when its copy is opened, which
-    // is the one failure that reads as foster losing work. Reported, never
-    // refused: copying the session you are working in is the ordinary case.
-    live: liveConversationIds(),
-    // Naming sessions one by one is a decision about those sessions, and only
-    // that brings back a copy the user deleted in the app.
-    explicit: Boolean(opts.session?.length),
-  });
-
-  for (const outcome of outcomes) console.log(outcomeLine(outcome));
-  const counts = summariseOutcomes(outcomes);
-
-  // Named outright when the sessions came from elsewhere: the destination is
-  // stated everywhere already, and a copy arriving from another installation is
-  // exactly the case where "from where?" is not obvious.
-  if (crossStore) console.log(pc.dim(`\nfrom ${sourceStore.root}`));
-
-  // Said on the dry run too: it is the moment before anything is written, which
-  // is exactly when knowing changes what someone does next.
-  const writers = describeWriters(
-    outcomes.map((outcome) => outcome.live).filter((id): id is string => Boolean(id)),
-    sessionRegistryRoots(process.env),
-  );
-
-  // Refusing a second row for one piece of work is right. Leaving the account on
-  // the half that stopped without saying so was not — and a per-line note scrolls
-  // off the screen on a sweep of a few hundred, so it is counted here too.
-  const behind = outcomes.filter((outcome) => outcome.standing?.ahead).length;
-  const forkNote =
-    behind === 0
-      ? ''
-      : pc.yellow(
-          `\n${behind} of the skipped ${behind === 1 ? 'is' : 'are'} the half of a fork that carried on; ` +
-            `this account is showing the half that stopped.\n` +
-            'foster consolidate lists them with their record counts. Run it before the restart, ' +
-            'not after: a card the app itself made waits either way.',
-        );
-
-  if (dryRun) {
-    console.log(
-      pc.bold(`\nDry run: ${counts.fostered} would be fostered, ${counts.skipped} skipped.`),
-    );
-    if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
-    if (forkNote) console.log(forkNote);
-    console.log(pc.dim('Re-run with --yes to write.'));
-    return;
-  }
-
-  console.log(
-    pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
-  );
-  if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
-  if (forkNote) console.log(forkNote);
-  if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
-    console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
-  }
-  await finish(store, Boolean(opts.restart));
-});
-
-/**
- * The whole job as one command.
- *
- * Everything below is what `foster foster --archived` and `foster restore`
- * already do, chained in the order that makes the second question meaningful,
- * with the two things a hand-run sequence never produced: a re-scan that says the
- * sweep is finished, and a count of what will never come at all.
- */
-program
   .command('sweep')
+  .helpGroup('Bringing conversations in:')
   .summary('bring everything into this account — archived and deleted included')
   .description(
     // Wrapped short on purpose: commander re-wraps to the terminal width and
@@ -1319,7 +1081,257 @@ function reportSweepRestart(restart: SweepRestart): void {
 }
 
 program
+  .command('scan')
+  .helpGroup('Bringing conversations in:')
+  .description('read-only inventory of accounts and sessions')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const config = readConfig(store);
+    const accounts = summarise(store, config.lastKnownAccountUuid, copySessionIds(ledger.read()));
+    const labels = labelsOf(ledger);
+    const manual = manualLabelsOf(ledger);
+
+    if (this.opts<{ json?: boolean }>().json) {
+      print(
+        accounts.map((row) => ({
+          accountUuid: row.account.accountUuid,
+          organizationUuid: row.account.organizationUuid,
+          label: manual.get(row.account.accountUuid) ?? null,
+          isCurrent: row.isCurrent,
+          sessions: row.nativeCount,
+          fostered: row.copyCount,
+        })),
+      );
+      return;
+    }
+
+    if (accounts.length === 0) {
+      console.log('No account directories found.');
+      return;
+    }
+
+    console.log(accountTree(groupByAccount(accounts), labels));
+  });
+
+sourceOptions(
+  filterOptions(
+    program
+      .command('list')
+      .helpGroup('Bringing conversations in:')
+      .description('list sessions available to foster'),
+  ),
+)
+  .option('--all', 'also show sessions that could never appear in the sidebar')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      from?: string;
+      fromOrg?: string;
+      fromStore?: string;
+      all?: boolean;
+      json?: boolean;
+    }>();
+    const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
+    const accounts = listAccountDirs(sourceStore);
+    // Everything in another store is a candidate; only within one store does the
+    // account in use need excluding, because there its sessions are already here.
+    const current = sameStore(sourceStore, store) ? currentAccount(store, accounts) : undefined;
+
+    const sources = resolveSources(
+      accounts.filter((account) => account.accountUuid !== current?.accountUuid),
+      opts.from,
+      opts.fromOrg,
+    );
+    // The whole store is read even though only these accounts are offered: what
+    // makes a copy the last card of its conversation is decided by the accounts
+    // that are not on offer.
+    const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()));
+
+    if (opts.json) {
+      print(
+        candidates.map((session) => ({
+          sessionId: session.data.sessionId,
+          title: session.data.title ?? null,
+          cwd: session.data.cwd ?? null,
+          lastActivityAt: session.data.lastActivityAt ?? null,
+          accountUuid: session.account.accountUuid,
+          organizationUuid: session.account.organizationUuid,
+          fosterable: session.reasons.length === 0,
+          reasons: session.reasons,
+        })),
+      );
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.log('Nothing matches.');
+      return;
+    }
+
+    for (const session of candidates) console.log(sessionLine(session));
+    console.log(pc.bold(`\n${candidates.length} session(s)`));
+  });
+
+sourceOptions(
+  filterOptions(
+    program
+      .command('foster')
+      .helpGroup('Bringing conversations in:')
+      .description('copy sessions from another account into the current one')
+      .option('--session <id...>', 'only these sessions, by id or unique prefix')
+      .option('--to <accountUuid>', 'write the copies into this account instead')
+      .option('--to-org <organizationUuid>', 'write the copies into this organization')
+      .option('--prefix <text>', 'title prefix for the copies (default: none)', DEFAULT_PREFIX)
+      .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
+      .option('--yes', 'actually write; without it nothing is written')
+      .addOption(
+        // Passing both used to silently win for --dry-run, so a script that meant
+        // to write quietly did not. Naming the conflict says so instead.
+        new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'),
+      ),
+  ),
+).action(async function (this: Command) {
+  const { store, ledger } = context(this);
+  const opts = this.opts<{
+    title?: string;
+    cwd?: string;
+    since?: string;
+    archived?: boolean;
+    includeScheduled?: boolean;
+    session?: string[];
+    from?: string;
+    fromOrg?: string;
+    fromStore?: string;
+    to?: string;
+    toOrg?: string;
+    prefix: string;
+    restart?: boolean;
+    yes?: boolean;
+    dryRun?: boolean;
+  }>();
+
+  const target = resolveDestination(store, listAccountDirs(store), opts);
+  const sourceStore = resolveSourceStore(store, opts.fromStore, ledger);
+  const crossStore = !sameStore(sourceStore, store);
+  const filter = filterFrom(opts);
+
+  // Only the directory the copies are going to is excluded, and only when the
+  // sessions come from the same store: another organization of the same account
+  // is just as invisible and just as fosterable, and a different store shares no
+  // directory with the destination at all.
+  const sources = resolveSources(
+    listAccountDirs(sourceStore).filter(
+      (ref) =>
+        crossStore ||
+        !(
+          ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid
+        ),
+    ),
+    opts.from,
+    opts.fromOrg,
+  );
+
+  // Sessions that can never appear in the sidebar are always excluded here:
+  // offering them would only produce copies the app silently never lists.
+  let candidates = listFosterable(sourceStore, sources, ledger, filter);
+
+  if (opts.session?.length) {
+    try {
+      candidates = selectFosterSessions(candidates, opts.session);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${message}\nRun "foster list" to see the ids.`);
+    }
+  }
+
+  if (candidates.length === 0) {
+    console.log('Nothing to foster.');
+    return;
+  }
+
+  // Default to a dry run: writing is opt-in via --yes.
+  const dryRun = opts.dryRun || !opts.yes;
+  const outcomes = fosterSessions(candidates, {
+    store,
+    ledger,
+    target,
+    sourceStore: sourceStore.root,
+    prefix: opts.prefix,
+    dryRun,
+    includeArchived: Boolean(opts.archived),
+    includeScheduled: Boolean(opts.includeScheduled),
+    // A conversation with a live writer branches when its copy is opened, which
+    // is the one failure that reads as foster losing work. Reported, never
+    // refused: copying the session you are working in is the ordinary case.
+    live: liveConversationIds(),
+    // Naming sessions one by one is a decision about those sessions, and only
+    // that brings back a copy the user deleted in the app.
+    explicit: Boolean(opts.session?.length),
+  });
+
+  for (const outcome of outcomes) console.log(outcomeLine(outcome));
+  const counts = summariseOutcomes(outcomes);
+
+  // Named outright when the sessions came from elsewhere: the destination is
+  // stated everywhere already, and a copy arriving from another installation is
+  // exactly the case where "from where?" is not obvious.
+  if (crossStore) console.log(pc.dim(`\nfrom ${sourceStore.root}`));
+
+  // Said on the dry run too: it is the moment before anything is written, which
+  // is exactly when knowing changes what someone does next.
+  const writers = describeWriters(
+    outcomes.map((outcome) => outcome.live).filter((id): id is string => Boolean(id)),
+    sessionRegistryRoots(process.env),
+  );
+
+  // Refusing a second row for one piece of work is right. Leaving the account on
+  // the half that stopped without saying so was not — and a per-line note scrolls
+  // off the screen on a sweep of a few hundred, so it is counted here too.
+  const behind = outcomes.filter((outcome) => outcome.standing?.ahead).length;
+  const forkNote =
+    behind === 0
+      ? ''
+      : pc.yellow(
+          `\n${behind} of the skipped ${behind === 1 ? 'is' : 'are'} the half of a fork that carried on; ` +
+            `this account is showing the half that stopped.\n` +
+            'foster consolidate lists them with their record counts. Run it before the restart, ' +
+            'not after: a card the app itself made waits either way.',
+        );
+
+  if (dryRun) {
+    console.log(
+      pc.bold(`\nDry run: ${counts.fostered} would be fostered, ${counts.skipped} skipped.`),
+    );
+    if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
+    if (forkNote) console.log(forkNote);
+    console.log(pc.dim('Re-run with --yes to write.'));
+    return;
+  }
+
+  console.log(
+    pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
+  );
+  if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
+  if (forkNote) console.log(forkNote);
+  if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
+    console.log(pc.yellow(`\n${TWO_SIDEBARS}`));
+  }
+  await finish(store, Boolean(opts.restart));
+});
+
+/**
+ * The whole job as one command.
+ *
+ * Everything below is what `foster foster --archived` and `foster restore`
+ * already do, chained in the order that makes the second question meaningful,
+ * with the two things a hand-run sequence never produced: a re-scan that says the
+ * sweep is finished, and a count of what will never come at all.
+ */
+program
   .command('restore')
+  .helpGroup('Bringing conversations in:')
   .description('bring back sessions deleted in the app, from the conversations they left behind')
   .option('--title <text>', 'only conversations whose title contains this text')
   .option('--session <id...>', 'only these conversations, by id or unique prefix')
@@ -1404,148 +1416,8 @@ program
   });
 
 program
-  .command('purge')
-  .description('destroy the conversations behind deleted sessions — permanently, with no undo')
-  .option('--title <text>', 'only conversations whose title contains this text')
-  .option('--session <id...>', 'only these conversations, by id or unique prefix')
-  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
-  .option('--this-store-only', 'judge "still referenced" from this installation alone')
-  .option('--json', 'machine-readable list of what would be destroyed')
-  .option('--yes', 'actually destroy; requires --confirm as well')
-  .option('--confirm <count>', 'the number this run destroys, as printed by the dry run')
-  .addOption(new Option('--dry-run', 'show what would happen and destroy nothing').conflicts('yes'))
-  .action(function (this: Command) {
-    const { store, ledger } = context(this);
-    const opts = this.opts<{
-      title?: string;
-      session?: string[];
-      configDir?: string[];
-      thisStoreOnly?: boolean;
-      json?: boolean;
-      yes?: boolean;
-      confirm?: string;
-      dryRun?: boolean;
-    }>();
-
-    // Every installation gets a say in whether a conversation is still in use,
-    // because a card in a profile foster is not pointed at right now is still a
-    // card, and the session it opens is still there after a restart. Narrowing
-    // that to one store is available, and is a worse question to ask. The store
-    // in use is not in this list because findPurgeable always counts it.
-    const referenceStores = opts.thisStoreOnly
-      ? []
-      : knownStores(ledger.read()).map((known) => layoutFor(known.root));
-
-    let candidates = findPurgeable({
-      store,
-      referenceStores,
-      env: process.env,
-      configDirs: opts.configDir ?? [],
-    });
-
-    if (opts.title) {
-      const needle = opts.title.toLowerCase();
-      candidates = candidates.filter((item) =>
-        (item.facts.title ?? '').toLowerCase().includes(needle),
-      );
-    }
-    if (opts.session?.length) {
-      const wanted = opts.session.map((id) => bareSessionId(id).toLowerCase());
-      const matches = (item: (typeof candidates)[number], id: string) =>
-        item.cliSessionId.toLowerCase().startsWith(id);
-      // Refused rather than quietly narrowed, as every other identifier flag in
-      // foster is. A typo that filtered to nothing fell through to "no deleted
-      // session still has its conversation on disk", which reads as "you have
-      // nothing left to clean up" and is not what happened.
-      const unmatched = wanted.filter((id) => !candidates.some((item) => matches(item, id)));
-      if (unmatched.length > 0) {
-        throw new Error(
-          `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
-            'Run "foster purge" with no --yes to see what is available.',
-        );
-      }
-      candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
-    }
-
-    const held = new Set(
-      liveSessions(sessionRegistryRoots(process.env, opts.configDir ?? [])).map((session) =>
-        session.sessionId.toLowerCase(),
-      ),
-    );
-    // Settled before anything is printed, so the number the user is asked to
-    // confirm is the number that will actually be destroyed — a conversation
-    // held open by a live process is skipped, and confirming a total that
-    // included it would be confirming something that never happens.
-    const doomed = candidates.filter((item) => !held.has(item.cliSessionId.toLowerCase()));
-
-    if (opts.json) {
-      // The doomed set, not every candidate: this flag says it lists what would
-      // be destroyed, and a script that feeds its length to --confirm has to get
-      // the same answer the command reached. Held conversations go to stderr so
-      // they are not lost, and stdout stays parseable.
-      print(
-        doomed.map((item) => ({
-          cliSessionId: item.cliSessionId,
-          title: item.facts.title ?? null,
-          cwd: item.facts.cwd ?? null,
-          lastActivityAt: item.facts.lastActivityAt ?? null,
-          deletedAt: item.deletedAt ?? null,
-          files: item.files,
-          bytes: item.bytes,
-        })),
-      );
-      const heldHere = candidates.length - doomed.length;
-      if (heldHere > 0) {
-        console.error(
-          pc.dim(
-            `${heldHere} more held open by a live claude process, and not listed: they cannot be purged now.`,
-          ),
-        );
-      }
-      return;
-    }
-
-    if (candidates.length === 0) {
-      console.log('Nothing to purge: no deleted session still has its conversation on disk.');
-      return;
-    }
-
-    const dryRun = opts.dryRun || !opts.yes;
-
-    if (!dryRun) assertPurgeConfirmed(opts.confirm, doomed.length);
-
-    const outcomes = purgeConversations(candidates, { ledger, dryRun, held });
-    for (const outcome of outcomes) console.log(purgeLine(outcome, dryRun));
-
-    const counts = summarisePurge(outcomes);
-    if (dryRun) {
-      console.log(
-        pc.bold(
-          `\nDry run: ${counts.purged} conversation(s) would be destroyed, ` +
-            `${formatBytes(counts.bytes)} in total.`,
-        ),
-      );
-      console.log(
-        pc.red('This cannot be undone, and foster keeps no copy. Read the list before confirming.'),
-      );
-      console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
-      return;
-    }
-
-    console.log(
-      pc.bold(
-        `\n${counts.purged} destroyed (${formatBytes(counts.bytes)}), ` +
-          `${counts.skipped} skipped, ${counts.failed} failed.`,
-      ),
-    );
-    // No restart offer, and nothing to see afterwards: these conversations had no
-    // card in any sidebar — that is what made them purgeable — so the app's view
-    // is exactly as it was.
-    console.log(pc.dim("The app's deletion markers were left where they are."));
-  });
-
-program
   .command('return')
+  .helpGroup('After the sweep:')
   .description('remove fostered copies, restoring the previous state')
   .option('--title <text>', 'only fosterings whose original title contains this text')
   .option('--session <id...>', 'only these origin sessions, by id or unique prefix')
@@ -1620,6 +1492,7 @@ ${continuedNote(continued.length)}`),
 
 program
   .command('consolidate')
+  .helpGroup('After the sweep:')
   .description('one row per piece of work, on the branch that carried on')
   .option('--to <accountUuid>', 'only cards in this account')
   .option('--session <id...>', 'only forks involving these conversations or cards')
@@ -2000,6 +1873,7 @@ const UNCLAIM_PREVIEW_LIMIT = 12;
 
 program
   .command('unclaim')
+  .helpGroup('After the sweep:')
   .description(
     'release the worktree claim a copy already on disk inherited from its original (issue #26)',
   )
@@ -2120,6 +1994,7 @@ function undoUnclaimCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bo
 
 program
   .command('status')
+  .helpGroup('After the sweep:')
   .description('what is currently fostered')
   .option('--all', 'list every copy instead of summarising by account')
   .option('--to <accountUuid>', 'only copies written into this account')
@@ -2209,6 +2084,7 @@ program
 
 program
   .command('label')
+  .helpGroup('Accounts:')
   .description('give an account a human name — the one in use, or any you name')
   .argument('[accountUuid]', 'the account to name; omit it for the one you are signed into')
   .argument('[label]')
@@ -2345,6 +2221,7 @@ program
 
 program
   .command('whoami')
+  .helpGroup('Accounts:')
   .description("the signed-in account's name, email and plan, read from the app's own cache")
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -2428,6 +2305,7 @@ program
 
 program
   .command('accounts')
+  .helpGroup('Accounts:')
   .description('every account on this machine: who, which plan, and whether it is still paid for')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -2495,6 +2373,7 @@ program
 
 program
   .command('identify')
+  .helpGroup('Accounts:')
   .description('name accounts by asking the API, using a credential foster already holds')
   .argument('[accountUuid]', 'the account to identify; omit for --all')
   .option('--all', 'identify every account that has no identity yet')
@@ -2601,6 +2480,7 @@ function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {
 
 program
   .command('usage')
+  .helpGroup('Accounts:')
   .description(
     "the signed-in account's live usage — the 5-hour and weekly limits, read from the API",
   )
@@ -2651,6 +2531,7 @@ program
 
 program
   .command('renewals')
+  .helpGroup('Accounts:')
   .description('when each account resets and renews — usage windows and billing dates in one place')
   .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
@@ -2707,6 +2588,7 @@ function describeIdentity(identity: Identity): string {
 
 program
   .command('switch')
+  .helpGroup('Credentials and clients:')
   .summary('sign a config directory in as another account, without a logout')
   .description(
     'Change which account a Claude Code config directory is signed in as.\n\n' +
@@ -2843,6 +2725,7 @@ program
 
 program
   .command('vault')
+  .helpGroup('Credentials and clients:')
   .summary('the credentials foster is holding, and whose they are')
   .description(
     'Every credential foster has kept, grouped by the client it belongs to and read from\n' +
@@ -2908,6 +2791,7 @@ program
 
 program
   .command('guard')
+  .helpGroup('Credentials and clients:')
   .summary('record whoever is signed into a client, so the vault can put them back')
   .description(
     'Add the credential a client currently holds to its history, if it is not already the\n' +
@@ -2952,6 +2836,7 @@ program
 
 program
   .command('point')
+  .helpGroup('Credentials and clients:')
   .summary('repoint a directory link at another client')
   .description(
     'Flip a junction so that whatever runs with CLAUDE_CONFIG_DIR set to it follows a\n' +
@@ -2991,6 +2876,7 @@ program
 
 const client = program
   .command('client')
+  .helpGroup('Credentials and clients:')
   .description('make a config directory that is a working client');
 
 client
@@ -3239,6 +3125,7 @@ client
 
 const profile = program
   .command('profile')
+  .helpGroup('Credentials and clients:')
   .description('name a Claude Desktop profile — a second userData root — for --store');
 
 profile
@@ -3372,6 +3259,7 @@ profile
 
 program
   .command('labels')
+  .helpGroup('Accounts:')
   .description('the name each account goes by — a label you gave, or the e-mail it answered with')
   .action(function (this: Command) {
     const { ledger } = context(this);
@@ -3395,6 +3283,7 @@ program
 
 program
   .command('pin')
+  .helpGroup('After the sweep:')
   .summary('pin sessions in the sidebar, or see what is pinned')
   .description(
     'Pin or unpin sessions in the Claude Desktop sidebar.\n\n' +
@@ -3577,7 +3466,150 @@ function selectPinnedIds(
 }
 
 program
+  .command('purge')
+  .helpGroup('After the sweep:')
+  .description('destroy the conversations behind deleted sessions — permanently, with no undo')
+  .option('--title <text>', 'only conversations whose title contains this text')
+  .option('--session <id...>', 'only these conversations, by id or unique prefix')
+  .option('--config-dir <path...>', 'extra Claude config directories to search for conversations')
+  .option('--this-store-only', 'judge "still referenced" from this installation alone')
+  .option('--json', 'machine-readable list of what would be destroyed')
+  .option('--yes', 'actually destroy; requires --confirm as well')
+  .option('--confirm <count>', 'the number this run destroys, as printed by the dry run')
+  .addOption(new Option('--dry-run', 'show what would happen and destroy nothing').conflicts('yes'))
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      title?: string;
+      session?: string[];
+      configDir?: string[];
+      thisStoreOnly?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      confirm?: string;
+      dryRun?: boolean;
+    }>();
+
+    // Every installation gets a say in whether a conversation is still in use,
+    // because a card in a profile foster is not pointed at right now is still a
+    // card, and the session it opens is still there after a restart. Narrowing
+    // that to one store is available, and is a worse question to ask. The store
+    // in use is not in this list because findPurgeable always counts it.
+    const referenceStores = opts.thisStoreOnly
+      ? []
+      : knownStores(ledger.read()).map((known) => layoutFor(known.root));
+
+    let candidates = findPurgeable({
+      store,
+      referenceStores,
+      env: process.env,
+      configDirs: opts.configDir ?? [],
+    });
+
+    if (opts.title) {
+      const needle = opts.title.toLowerCase();
+      candidates = candidates.filter((item) =>
+        (item.facts.title ?? '').toLowerCase().includes(needle),
+      );
+    }
+    if (opts.session?.length) {
+      const wanted = opts.session.map((id) => bareSessionId(id).toLowerCase());
+      const matches = (item: (typeof candidates)[number], id: string) =>
+        item.cliSessionId.toLowerCase().startsWith(id);
+      // Refused rather than quietly narrowed, as every other identifier flag in
+      // foster is. A typo that filtered to nothing fell through to "no deleted
+      // session still has its conversation on disk", which reads as "you have
+      // nothing left to clean up" and is not what happened.
+      const unmatched = wanted.filter((id) => !candidates.some((item) => matches(item, id)));
+      if (unmatched.length > 0) {
+        throw new Error(
+          `No purgeable conversation matches --session ${unmatched.join(', ')}.\n` +
+            'Run "foster purge" with no --yes to see what is available.',
+        );
+      }
+      candidates = candidates.filter((item) => wanted.some((id) => matches(item, id)));
+    }
+
+    const held = new Set(
+      liveSessions(sessionRegistryRoots(process.env, opts.configDir ?? [])).map((session) =>
+        session.sessionId.toLowerCase(),
+      ),
+    );
+    // Settled before anything is printed, so the number the user is asked to
+    // confirm is the number that will actually be destroyed — a conversation
+    // held open by a live process is skipped, and confirming a total that
+    // included it would be confirming something that never happens.
+    const doomed = candidates.filter((item) => !held.has(item.cliSessionId.toLowerCase()));
+
+    if (opts.json) {
+      // The doomed set, not every candidate: this flag says it lists what would
+      // be destroyed, and a script that feeds its length to --confirm has to get
+      // the same answer the command reached. Held conversations go to stderr so
+      // they are not lost, and stdout stays parseable.
+      print(
+        doomed.map((item) => ({
+          cliSessionId: item.cliSessionId,
+          title: item.facts.title ?? null,
+          cwd: item.facts.cwd ?? null,
+          lastActivityAt: item.facts.lastActivityAt ?? null,
+          deletedAt: item.deletedAt ?? null,
+          files: item.files,
+          bytes: item.bytes,
+        })),
+      );
+      const heldHere = candidates.length - doomed.length;
+      if (heldHere > 0) {
+        console.error(
+          pc.dim(
+            `${heldHere} more held open by a live claude process, and not listed: they cannot be purged now.`,
+          ),
+        );
+      }
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.log('Nothing to purge: no deleted session still has its conversation on disk.');
+      return;
+    }
+
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (!dryRun) assertPurgeConfirmed(opts.confirm, doomed.length);
+
+    const outcomes = purgeConversations(candidates, { ledger, dryRun, held });
+    for (const outcome of outcomes) console.log(purgeLine(outcome, dryRun));
+
+    const counts = summarisePurge(outcomes);
+    if (dryRun) {
+      console.log(
+        pc.bold(
+          `\nDry run: ${counts.purged} conversation(s) would be destroyed, ` +
+            `${formatBytes(counts.bytes)} in total.`,
+        ),
+      );
+      console.log(
+        pc.red('This cannot be undone, and foster keeps no copy. Read the list before confirming.'),
+      );
+      console.log(pc.dim(`Re-run with --yes --confirm ${counts.purged} to destroy them.`));
+      return;
+    }
+
+    console.log(
+      pc.bold(
+        `\n${counts.purged} destroyed (${formatBytes(counts.bytes)}), ` +
+          `${counts.skipped} skipped, ${counts.failed} failed.`,
+      ),
+    );
+    // No restart offer, and nothing to see afterwards: these conversations had no
+    // card in any sidebar — that is what made them purgeable — so the app's view
+    // is exactly as it was.
+    console.log(pc.dim("The app's deletion markers were left where they are."));
+  });
+
+program
   .command('transcript')
+  .helpGroup('Live sessions:')
   .summary("read a conversation's transcript")
   .description(
     "Read part of a conversation's transcript — the JSONL under ~/.claude*/projects.\n" +
@@ -3618,6 +3650,7 @@ program
 
 program
   .command('resume')
+  .helpGroup('Live sessions:')
   .summary('send one prompt to an existing conversation, headlessly')
   .description(
     'Send one prompt to an existing conversation via `claude -p --resume` and print the answer.\n\n' +
@@ -3648,6 +3681,7 @@ program
 
 program
   .command('live')
+  .helpGroup('Live sessions:')
   .description('conversations a claude process is holding open right now')
   .option('--json', 'machine-readable output')
   .option('--stop <id...>', 'end the process holding these conversations, by id or unique prefix')
@@ -3728,6 +3762,7 @@ program
 
 program
   .command('unstarted')
+  .helpGroup('Live sessions:')
   .summary('background-task requests whose session died before answering once')
   .description(
     'Find requests that never got a turn. A background-task chip is spawned into a\n' +
@@ -3836,6 +3871,7 @@ const SUGGESTED_RESCUE_WINDOW = '7d';
 
 program
   .command('rescue')
+  .helpGroup('Live sessions:')
   .summary('conversations stranded by a crash, and the resumes that bring them back')
   .description(
     'Find conversations whose sidebar card can only say "cannot reach your computer":\n' +
@@ -4193,6 +4229,7 @@ function indented(text: string): string {
 
 program
   .command('agent')
+  .helpGroup('The app:')
   .summary("run a Claude agent with foster's operations as its tools")
   .description(
     "Run a Claude agent with foster's operations as its tools.\n\n" +
@@ -4266,6 +4303,7 @@ program
 
 const app = program
   .command('app')
+  .helpGroup('The app:')
   .description('inspect or restart Claude Desktop')
   .action(function (this: Command) {
     reportDesktop(this);

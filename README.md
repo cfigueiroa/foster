@@ -913,20 +913,41 @@ came from, because two installations can hold the same account identifier.
 different profile — everything after it reads and writes there — so a second
 account is not a reason to quit and relaunch.
 
-The same operations are available as one-shot commands, for scripting:
+The same operations are available as one-shot commands, for scripting. `--help` files them under
+these same headings, so the list below and the one the program prints are the same shape:
 
 ```bash
+# Start here
 foster doctor    # environment check: store location, app state, whether it is running
-foster scan      # read-only inventory of accounts, organizations and sessions
-foster list      # sessions from other accounts that are available to foster
-foster label     # give an account a human name
-foster labels    # list the names given so far
-foster accounts  # every account here: who, which plan, whether it is still paid for
-foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
-foster renewals  # usage resets and billing dates across every account, in one place
-foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster stores    # installations foster knows about, and what to pass to --store
 foster clients   # the CLI's config directories, and who is signed into each
 foster clients --fragment # print a Windows Terminal fragment (JSON), one profile per client
+
+# Bringing conversations in
+foster sweep     # the whole job: every account, archived and deleted included
+foster scan      # read-only inventory of accounts, organizations and sessions
+foster list      # sessions from other accounts that are available to foster
+foster foster    # create the copies
+foster restore   # bring back sessions deleted in the app
+
+# After the sweep
+foster return    # remove fostered copies, restoring the previous state
+foster consolidate # one row per piece of work, on the branch that carried on
+foster unclaim   # release the worktree claim a copy inherited from its original
+foster status    # what is currently fostered
+foster pin       # pin sessions in the sidebar, or see what is pinned
+foster purge     # destroy the conversations behind deleted sessions, permanently
+
+# Accounts
+foster accounts  # every account here: who, which plan, whether it is still paid for
+foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster identify  # name an account by asking the API with a credential already on the machine
+foster label     # give an account a human name (--clear takes it back, --forget drops the sighting)
+foster labels    # the name each account goes by — a label you gave, or its e-mail
+foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
+foster renewals  # usage resets and billing dates across every account, in one place
+
+# Credentials and clients
 foster switch    # sign a client in as another account, without a logout
 foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
@@ -935,23 +956,20 @@ foster client new  # seed a config directory that is a working client
 foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
 foster client open # a Windows Terminal tab signed in as one client (--print shows the command)
 foster profile   # name a Desktop profile — new|register|forget|list — for --store
-foster sweep     # the whole job: every account, archived and deleted included
-foster foster    # create the copies
-foster restore   # bring back sessions deleted in the app
-foster purge     # destroy the conversations behind deleted sessions, permanently
-foster return    # remove fostered copies, restoring the previous state
-foster consolidate # one row per piece of work, on the branch that carried on
-foster status    # what is currently fostered
-foster pin       # pin sessions in the sidebar, or see what is pinned
-foster app       # status | quit | start | restart — drive Claude Desktop itself
-foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
-                 #   an interrupted run)
-foster transcript  # read a conversation's transcript, by cliSessionId
-foster resume    # send one prompt to an existing conversation, headlessly
+
+# Live sessions
 foster live      # conversations a claude process is holding open right now (--stop ends one,
                  #   --prune clears registry entries whose process is gone)
 foster rescue    # conversations stranded by a crash, and the resumes that bring them back
                  #   (--open puts each one in its own Windows Terminal tab)
+foster unstarted # background-task requests whose session died before answering once
+foster transcript  # read a conversation's transcript, by cliSessionId
+foster resume    # send one prompt to an existing conversation, headlessly
+
+# The app
+foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
+                 #   an interrupted run)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
