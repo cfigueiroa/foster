@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
 import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -352,6 +353,49 @@ describe('card_retitled', () => {
       to: 'Work',
       toArchived: true,
     });
+  });
+});
+
+describe('worktree_released / worktree_release_undone', () => {
+  const released = {
+    kind: 'worktree_released' as const,
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_card-1.json',
+    sessionId: 'local_card-1',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    worktreeName: 'wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+  };
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    expect(ledger.read()[0]).toMatchObject({ kind: 'worktree_released', path: released.path });
+  });
+
+  it('folds to the copy, keyed by path', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    // Keyed by `comparablePath`, the same normalisation every other lookup in
+    // this fold uses — two spellings of one file must land on one entry.
+    const card = project(ledger.read()).worktreeReleased.get(comparablePath(released.path));
+    expect(card).toMatchObject({
+      sessionId: 'local_card-1',
+      worktreePath: released.worktreePath,
+      worktreeName: released.worktreeName,
+      cwdFrom: released.cwdFrom,
+      cwdTo: released.cwdTo,
+    });
+  });
+
+  it('drops the card once the release is undone', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+    ledger.append({ kind: 'worktree_release_undone', path: released.path });
+
+    expect(project(ledger.read()).worktreeReleased.size).toBe(0);
   });
 });
 

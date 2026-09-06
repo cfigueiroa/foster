@@ -22,6 +22,8 @@ const EVENT_KINDS = new Set<string>([
   'client_root_forgotten',
   'handler_armed',
   'handler_restored',
+  'worktree_released',
+  'worktree_release_undone',
 ]);
 
 /**

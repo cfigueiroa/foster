@@ -179,6 +179,16 @@ command to run elsewhere instead.
 `sweep` deliberately never purges and never consolidates. Pass the "forked conversation" line
 on as it is: rows added, rows retitled, and that the clean title is the row to continue in.
 
+A fourth pass releases the worktree claim a copy already on disk inherited from its original,
+before 0.38.0 taught fostering not to hand one out (`foster unclaim`, issue #26's second half).
+It only ever touches copies — the ledger's own active fosterings decide that, never a scan — and
+is folded into the same "nothing is left" check.
+
+Releasing a claim takes no write guard, like `retitle`: it is allowed with Claude Desktop open,
+never refused for it. A card the app rewrites in the meantime simply keeps (or regains) its claim
+on disk, which the next `foster unclaim` or sweep pass finds and releases again — the change itself
+only becomes visible at the app's next restart, the same as a retitle.
+
 ## You cannot restart the app from a session the app started
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the

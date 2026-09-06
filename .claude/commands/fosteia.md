@@ -65,6 +65,8 @@ on rather than re-deriving it:
   command again and say why;
 - the "can never come" line, when there is one: scheduled tasks, sessions never opened, files
   over the 10 MB the app refuses to load. Report the count rather than leaving a silent gap;
+- how many copies were released from a stale worktree claim, if the line names any — a copy
+  already on disk that used to fight its original over a branch, now fixed rather than added;
 - whether the restart happened or is waiting on them.
 
 ## Never, in this command

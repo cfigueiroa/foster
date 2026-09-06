@@ -851,9 +851,10 @@ export async function sweepFlow(
   const wouldBranch =
     plan.branches.counts.fostered +
     plan.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
+  const wouldRelease = plan.worktreeClaims.items.length;
   const never = neverComesLine(plan.neverComes);
 
-  if (wouldFoster === 0 && wouldRestore === 0 && wouldBranch === 0) {
+  if (wouldFoster === 0 && wouldRestore === 0 && wouldBranch === 0 && wouldRelease === 0) {
     ui.log.info('Nothing to sweep: everything that can be in this account already is.');
     // Still said. "Nothing to do" and "nothing to do, and 13 sessions will never
     // come" are different states, and only one of them explains a gap the user
@@ -867,6 +868,7 @@ export async function sweepFlow(
       `${wouldFoster} session(s) to copy from the other accounts, archived included.`,
       `${wouldBranch} row(s) to add or mark for branches of forked conversations.`,
       `${wouldRestore} deleted conversation(s) to bring back.`,
+      `${wouldRelease} cop${wouldRelease === 1 ? 'y' : 'ies'} to release from a stale worktree claim.`,
       '',
       'Archived ones stay archived: they arrive in the app’s archived view, not in',
       'Recents. A forked conversation gets one row per branch: the branch that',
@@ -908,7 +910,8 @@ export async function sweepFlow(
       report.fostered.counts.fostered +
       report.branches.counts.fostered +
       report.branches.retitled.filter((outcome) => outcome.status === 'retitled').length +
-      report.restored.counts.fostered;
+      report.restored.counts.fostered +
+      report.worktreeClaims.counts.released;
     if (changed === 0) return;
 
     // Asked before offering, not after trying: restarting from a session the app
