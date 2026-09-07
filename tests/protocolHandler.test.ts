@@ -1175,6 +1175,56 @@ describe('restoreHandler', () => {
       { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: false },
     ]);
   });
+
+  it('can still act on a record a previous failed restore left behind', () => {
+    // Issue #46: the fold used to clear `handlerArmed` on *any* `handler_restored`,
+    // `restored: false` included — so a login whose first restore attempt failed
+    // left `state.handlerArmed` undefined, and this function's own "nothing to
+    // restore" branch above made retrying it a dead end. The fold now keeps
+    // `key`/`previous` and marks `restoreFailed` instead, so there is still a
+    // route to hand this function on a second call.
+    const command = '--user-data-dir=D:\\Claude-Work "%1"';
+    const events: LedgerEvent[] = [
+      {
+        v: 1,
+        ts: 1_700_000_000_000,
+        toolVersion: '0.0.0-test',
+        kind: 'handler_armed',
+        root: 'D:\\Claude-Work',
+        key: OPEN_KEY,
+        previous: PLAIN_PARAMETERS,
+        exe: EXE,
+        armed: command,
+      },
+      {
+        v: 1,
+        ts: 1_700_000_001_000,
+        toolVersion: '0.0.0-test',
+        kind: 'handler_restored',
+        root: 'D:\\Claude-Work',
+        restored: false,
+      },
+    ];
+    const state = project(events);
+    expect(state.handlerArmed).toMatchObject({
+      key: OPEN_KEY,
+      previous: PLAIN_PARAMETERS,
+      restoreFailed: true,
+    });
+
+    // The route is still stuck on the armed value, same as it would be on a
+    // machine where the first write-back genuinely failed.
+    const io = fakeIo({ parameters: command });
+    const appended: LedgerEventInput[] = [];
+
+    const result = restoreHandler(state, io, (e) => appended.push(e));
+
+    expect(result.ok).toBe(true);
+    expect(io.readValue(OPEN_KEY, 'Parameters').value).toBe(PLAIN_PARAMETERS);
+    expect(appended).toEqual([
+      { kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true },
+    ]);
+  });
 });
 
 describe('inspectHandler', () => {

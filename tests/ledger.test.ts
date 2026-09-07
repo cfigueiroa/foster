@@ -549,7 +549,10 @@ describe('client_root_registered / client_root_forgotten', () => {
  * The `claude://` handler, armed for one profile's sign-in and put back
  * afterwards — see `engine/protocolHandler.ts`. `handlerArmed` in the folded
  * state is the fact that a login is (or was left) in flight; a matching
- * `handler_restored` clears it, whatever `restored` said.
+ * `handler_restored` with `restored: true` clears it. One with
+ * `restored: false` means the write did not take — the route is still
+ * pointed at a profile, so `key`/`previous` have to survive for `--restore`
+ * and `doctor` to act on, marked with `restoreFailed` so callers can tell.
  */
 describe('handler_armed / handler_restored', () => {
   const KEY = 'HKCU\\Software\\Classes\\AppXaem4n1tckgw588q10avtdbzpbgt71c77\\Shell\\open';
@@ -591,7 +594,27 @@ describe('handler_armed / handler_restored', () => {
     });
   });
 
-  it('is cleared by a matching restore, whether or not it succeeded', () => {
+  it('is cleared by a matching restore that succeeded', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '--user-data-dir=D:\\Claude-Work "%1"',
+    });
+    ledger.append({ kind: 'handler_restored', root: 'D:\\Claude-Work', restored: true });
+
+    expect(project(ledger.read()).handlerArmed).toBeUndefined();
+    expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
+  });
+
+  it('keeps key and previous, marked failed, when the restore did not succeed', () => {
+    // A failed restore leaves the route pointed at a profile, so the one
+    // record naming what to put back has to survive — clearing it here
+    // would strand `app login --restore` and `doctor` with nothing to act
+    // on, which is the bug this test used to enshrine (issue #46).
     const ledger = makeLedger();
     ledger.append({
       kind: 'handler_armed',
@@ -603,7 +626,12 @@ describe('handler_armed / handler_restored', () => {
     });
     ledger.append({ kind: 'handler_restored', root: 'D:\\Claude-Work', restored: false });
 
-    expect(project(ledger.read()).handlerArmed).toBeUndefined();
+    expect(project(ledger.read()).handlerArmed).toMatchObject({
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+      restoreFailed: true,
+    });
     expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
   });
 });

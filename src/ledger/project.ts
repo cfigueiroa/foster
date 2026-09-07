@@ -40,14 +40,20 @@ export interface LedgerState {
   /**
    * The `claude://` handler's previous state, while a login is in flight —
    * see `HandlerArmedEvent`. `key` and `previous` are carried straight from
-   * the event. Cleared by `handler_restored`, so its presence alone says a
-   * login was interrupted before it could put the handler back.
+   * the event. A `handler_restored` with `restored: true` clears this, so its
+   * presence alone says a login was interrupted before it could put the
+   * handler back. One with `restored: false` means the attempt ran and the
+   * read-back did not match — there is still a route to put back, so `key`
+   * and `previous` stay put and `restoreFailed` is set, instead of throwing
+   * away the one record that says what to restore and to where.
    */
   handlerArmed?: {
     root: string;
     key: string;
     previous: string;
     at: number;
+    /** Set when the most recent `handler_restored` for this record failed. */
+    restoreFailed?: boolean;
   };
 }
 
@@ -277,7 +283,17 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
 
       case 'handler_restored':
-        handlerArmed = undefined;
+        // A successful restore closes the window `handler_armed` opened —
+        // there is nothing left to put back. A failed one means the write did
+        // not take: the route is still pointed at a profile, so the record of
+        // what to restore (`key`/`previous`) has to survive for `--restore`
+        // and `doctor` to act on, marked so callers can tell the last attempt
+        // did not work.
+        if (event.restored) {
+          handlerArmed = undefined;
+        } else if (handlerArmed !== undefined) {
+          handlerArmed = { ...handlerArmed, restoreFailed: true };
+        }
         break;
 
       case 'account_switched':
