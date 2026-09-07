@@ -4,6 +4,7 @@ import { describeUnfosterable } from '../domain/fostering.js';
 import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
+import type { DateOutcome, DatePlanItem } from '../engine/dates.js';
 import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
@@ -832,4 +833,35 @@ export function unclaimOutcomeLine(outcome: UnclaimOutcome): string {
   const to = outcome.cwdTo ?? outcome.cwdFrom ?? '';
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
   return `  ${mark} ${outcome.title}  ${pc.dim(claimName(outcome))} ${pc.dim('→')} ${to}${detail}`;
+}
+
+/**
+ * `formatDate` truncates to a day, which hides exactly the gap #47 is about —
+ * a card and its transcript disagreeing by hours on the same date. This keeps
+ * the minute.
+ */
+function formatDateTime(ms: number | undefined): string {
+  if (!ms) return '(no date on the card)';
+  return new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
+}
+
+/** One line of a `foster dates` plan: what a card wears now, and what it would move to. */
+export function datePlanLine(item: DatePlanItem): string {
+  const from = formatDateTime(item.from);
+  const to = item.transcriptAt === undefined ? '?' : formatDateTime(item.transcriptAt);
+  return `  ${item.title}  ${pc.dim(from)} ${pc.dim('→')} ${to}`;
+}
+
+/** The same line, marked with what actually happened to it. */
+export function dateOutcomeLine(outcome: DateOutcome): string {
+  const mark =
+    outcome.status === 'dated'
+      ? pc.green('+')
+      : outcome.status === 'failed'
+        ? pc.red('x')
+        : pc.dim('·');
+  const from = formatDateTime(outcome.from);
+  const to = formatDateTime(outcome.to);
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${shortId(outcome.sessionId)}  ${pc.dim(from)} ${pc.dim('→')} ${to}${detail}`;
 }

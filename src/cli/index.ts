@@ -58,6 +58,13 @@ import {
 import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
 import { retitleCards, undoRetitleRequests } from '../engine/retitle.js';
 import {
+  candidatesFromStore,
+  dateCards,
+  planDates,
+  requestsFromPlan,
+  undoDateRequests,
+} from '../engine/dates.js';
+import {
   knownStores,
   resolveStoreArg,
   storeExecutable,
@@ -90,6 +97,7 @@ import { Ledger } from '../ledger/log.js';
 import {
   copySessionIds,
   listActive,
+  listDated,
   listRepointed,
   listRetitled,
   listWorktreeReleased,
@@ -176,6 +184,8 @@ import { labelsOf, manualLabelsOf } from './names.js';
 import { runInteractive } from './interactive.js';
 import {
   accountTree,
+  dateOutcomeLine,
+  datePlanLine,
   forkLines,
   formatAge,
   formatBytes,
@@ -2177,6 +2187,131 @@ function undoUnclaimCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bo
   }
 
   const back = outcomes.filter((outcome) => outcome.status === 'undone').length;
+  if (dryRun) {
+    console.log(pc.bold(`\nDry run: ${back} would be put back.`));
+    console.log(pc.dim('Re-run with --yes to write.'));
+    return;
+  }
+  console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+}
+
+const DATES_PREVIEW_LIMIT = 12;
+
+program
+  .command('dates')
+  .helpGroup('After the sweep:')
+  .description(
+    "advance a card's date to match its transcript's last answer, when the transcript is ahead (issue #47)",
+  )
+  .option('--undo', 'put an advanced date back to what the app had')
+  .option('--json', 'machine-readable output')
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ undo?: boolean; json?: boolean; yes?: boolean; dryRun?: boolean }>();
+    const dryRun = opts.dryRun || !opts.yes;
+
+    if (opts.undo) {
+      undoDatesCommand(ledger, opts, dryRun);
+      return;
+    }
+
+    const { candidates, scanOf } = candidatesFromStore(store);
+    const items = planDates(candidates, scanOf);
+    const advancing = items.filter((item) => item.status === 'advance');
+
+    if (opts.json) {
+      // Same order as `sweep` and `unclaim`: the write (if any) happens before
+      // the JSON is shaped, so `--yes --json` reports what was actually done
+      // rather than degrading to a dry-run preview a scripted caller would
+      // mistake for the real thing.
+      if (dryRun) {
+        print({ items });
+      } else {
+        const outcomes = dateCards(requestsFromPlan(items), { ledger });
+        print({ items, outcomes });
+      }
+      return;
+    }
+
+    if (advancing.length === 0) {
+      console.log('No card here is behind its own transcript.');
+      return;
+    }
+
+    const count = advancing.length;
+    console.log(
+      pc.bold(
+        `${count} card${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} behind ` +
+          `${count === 1 ? 'its' : 'their'} own transcript — the sidebar files ` +
+          `${count === 1 ? 'it' : 'them'} by a date older than the work actually is.`,
+      ),
+    );
+    const shown = advancing.slice(0, DATES_PREVIEW_LIMIT);
+    for (const item of shown) console.log(datePlanLine(item));
+    if (advancing.length > shown.length) {
+      console.log(pc.dim(`  … and ${advancing.length - shown.length} more`));
+    }
+
+    if (dryRun) {
+      console.log(pc.dim('\nRe-run with --yes to advance them.'));
+      return;
+    }
+
+    const outcomes = dateCards(requestsFromPlan(items), { ledger });
+    console.log('');
+    for (const outcome of outcomes) console.log(dateOutcomeLine(outcome));
+
+    const dated = outcomes.filter((o) => o.status === 'dated').length;
+    const skipped = outcomes.filter((o) => o.status === 'skipped').length;
+    const failed = outcomes.filter((o) => o.status === 'failed').length;
+    console.log(pc.bold(`\n${dated} advanced, ${skipped} skipped, ${failed} failed.`));
+    console.log(
+      pc.dim(
+        "Like a retitle, this shows only at the app's next restart — restart Claude Desktop, " +
+          'or run "foster app restart". A card the app rewrites in the meantime keeps (or ' +
+          'regains) its own date, and the next "foster dates" finds and advances it again.',
+      ),
+    );
+    console.log(pc.dim('Undo with: foster dates --undo --yes'));
+  });
+
+function undoDatesCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: boolean): void {
+  const pending = listDated(project(ledger.read()));
+
+  if (opts.json && dryRun) {
+    print(pending);
+    return;
+  }
+
+  if (pending.length === 0 && !opts.json) {
+    console.log('No card has had its date advanced — there is nothing to put back.');
+    return;
+  }
+
+  // Same order as `sweep`: the write happens before `--json` is checked, so
+  // `--undo --yes --json` reports what was actually put back rather than the
+  // bare pending list a dry run would show.
+  const outcomes = dateCards(undoDateRequests(pending), { ledger, dryRun });
+
+  if (opts.json) {
+    print(outcomes);
+    return;
+  }
+
+  for (const outcome of outcomes) {
+    const mark =
+      outcome.status === 'dated'
+        ? pc.green('+')
+        : outcome.status === 'failed'
+          ? pc.red('x')
+          : pc.dim('·');
+    const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+    console.log(`  ${mark} ${shortId(outcome.sessionId)}${detail}`);
+  }
+
+  const back = outcomes.filter((outcome) => outcome.status === 'dated').length;
   if (dryRun) {
     console.log(pc.bold(`\nDry run: ${back} would be put back.`));
     console.log(pc.dim('Re-run with --yes to write.'));

@@ -16,6 +16,7 @@ export type LedgerEvent =
   | FosteringFollowedEvent
   | CardRepointedEvent
   | CardRetitledEvent
+  | CardDatedEvent
   | ConversationPurgedEvent
   | OperationFailedEvent
   | ProfileRegisteredEvent
@@ -322,6 +323,40 @@ export interface CardRetitledEvent extends BaseEvent {
 }
 
 /**
+ * A card's `lastActivityAt`, advanced to match its transcript's last answer.
+ *
+ * The third field foster writes into a file it did not create, and — unlike a
+ * title — one that drives sidebar ORDER: a bad value here does not just read
+ * oddly, it moves a row the user is looking for. #47: the app only stamps this
+ * field when it is itself hosting the conversation, so work done through the
+ * CLI, in a `cwd` the card was never opened from, advances the transcript
+ * while the card's own date sits frozen at the moment it was created — the row
+ * sinks in Recents and reads as work that never arrived.
+ *
+ * `from` is the *original* value, carried across repeated advances the same
+ * way `RetitledCard.from` is — optional because a card can in principle have
+ * no `lastActivityAt` at all before the first advance, and there is then
+ * nothing truthful to put back. Mirrors `CardRetitledEvent` deliberately: same
+ * atomic write, same "skip when it already says so", same undo shape (see
+ * `undoDateRequests` in `engine/dates.ts`, which is `undoRetitleRequests`
+ * copied rather than reinvented).
+ */
+export interface CardDatedEvent extends BaseEvent {
+  kind: 'card_dated';
+  /** The card's own session id, which the write does not change. */
+  sessionId: string;
+  /** The account directory it sits in. */
+  target: AccountRef;
+  path: string;
+  /** The `lastActivityAt` it wore before, when it had one at all. */
+  from?: number;
+  /** The `lastActivityAt` it wears now. */
+  to: number;
+  /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
+  native: boolean;
+}
+
+/**
  * A conversation destroyed on disk, recorded deliberately thin.
  *
  * The ledger exists so every operation can be replayed in reverse, and this is
@@ -524,6 +559,7 @@ export type LedgerEventInput =
   | Draft<FosteringFollowedEvent>
   | Draft<CardRepointedEvent>
   | Draft<CardRetitledEvent>
+  | Draft<CardDatedEvent>
   | Draft<ConversationPurgedEvent>
   | Draft<OperationFailedEvent>
   | Draft<ProfileRegisteredEvent>
@@ -570,6 +606,26 @@ export interface RetitledCard {
   toArchived?: boolean;
   native: boolean;
   retitledAt: number;
+}
+
+/**
+ * A card whose `lastActivityAt` is not what the app last had.
+ *
+ * `from` is the *original* value, carried across repeated writes the way
+ * `RetitledCard.from` is, so "what did the app's card say?" has one answer
+ * however many times a sweep has advanced it since. Optional because a card
+ * with no `lastActivityAt` at all has nothing to be carried forward.
+ */
+export interface DatedCard {
+  sessionId: string;
+  path: string;
+  target: AccountRef;
+  /** The `lastActivityAt` the app had, before foster first touched it. */
+  from?: number;
+  /** The `lastActivityAt` it wears now. */
+  to: number;
+  native: boolean;
+  datedAt: number;
 }
 
 /**

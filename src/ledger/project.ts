@@ -3,6 +3,7 @@ import type { KnownIdentity } from '../domain/identity.js';
 import { comparablePath } from '../domain/paths.js';
 import type {
   ActiveFostering,
+  DatedCard,
   LedgerEvent,
   RepointedCard,
   RetitledCard,
@@ -21,6 +22,11 @@ export interface LedgerState {
   repointed: Map<string, RepointedCard>;
   /** Cards wearing a title, or an archived flag, the app did not give them, keyed by session id. */
   retitled: Map<string, RetitledCard>;
+  /**
+   * Cards wearing a `lastActivityAt` the app did not give them, keyed by
+   * session id — see `CardDatedEvent`.
+   */
+  dated: Map<string, DatedCard>;
   /**
    * Copies whose worktree claim was released and not yet put back, keyed by
    * path — see `WorktreeReleasedEvent`.
@@ -67,6 +73,7 @@ export function project(events: LedgerEvent[]): LedgerState {
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
   const retitled = new Map<string, RetitledCard>();
+  const dated = new Map<string, DatedCard>();
   const worktreeReleased = new Map<string, WorktreeReleasedCard>();
   const profiles = new Map<string, string>();
   const clientRoots = new Map<string, 'client' | 'container'>();
@@ -242,6 +249,30 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      case 'card_dated': {
+        // Same shape as `card_retitled`: the first write's `from` is what the
+        // app had, later writes carry it forward, and a write that lands back
+        // on that value is indistinguishable from never having touched the
+        // card at all — which is what makes `undoDateRequests` need no event
+        // of its own, only another write in the other direction.
+        const known = dated.get(event.sessionId);
+        const from = known?.from ?? event.from;
+        const back = from !== undefined && event.to === from;
+        if (back) dated.delete(event.sessionId);
+        else {
+          dated.set(event.sessionId, {
+            sessionId: event.sessionId,
+            path: event.path,
+            target: event.target,
+            ...(from === undefined ? {} : { from }),
+            to: event.to,
+            native: event.native,
+            datedAt: event.ts,
+          });
+        }
+        break;
+      }
+
       case 'worktree_released':
         // Keyed the same way `storeRootOfCopy` comparisons are everywhere else in
         // this fold: two spellings of one file must not become two open releases,
@@ -320,6 +351,7 @@ export function project(events: LedgerEvent[]): LedgerState {
     identities,
     repointed,
     retitled,
+    dated,
     worktreeReleased,
     profiles,
     clientRoots,
@@ -335,6 +367,11 @@ export function listRepointed(state: LedgerState): RepointedCard[] {
 /** Cards wearing a title or flag the app did not give them, oldest write first. */
 export function listRetitled(state: LedgerState): RetitledCard[] {
   return [...state.retitled.values()].sort((a, b) => a.retitledAt - b.retitledAt);
+}
+
+/** Cards wearing a `lastActivityAt` the app did not give them, oldest write first. */
+export function listDated(state: LedgerState): DatedCard[] {
+  return [...state.dated.values()].sort((a, b) => a.datedAt - b.datedAt);
 }
 
 /** Copies whose worktree claim is released and not yet put back, oldest first. */
