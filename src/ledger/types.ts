@@ -550,6 +550,20 @@ export interface RetitledCard {
   from: string;
   /** The title it wears now. */
   to: string;
+  /**
+   * The title left by the most recent write that could carry a mark — absent
+   * when nothing has marked this card, or when `tip` took the mark back off.
+   *
+   * Only `stale` and `diverged` put a mark on; `as: 'synced'` rewrites the title
+   * *underneath* the mark and leaves the mark exactly as it was. Recorded
+   * separately from `to` because the difference is invisible afterwards: read
+   * the mark off the latest title instead and a sync's own work is taken for a
+   * mark, which the next sync then writes in front all over again. Measured on
+   * a real store — a conversation renamed at its origin with an emoji in front
+   * gained one more emoji per sweep, and the run never stopped saying "still out
+   * of step".
+   */
+  markedTo?: string;
   /** The archived flag the app had, when foster changed it at all. */
   fromArchived?: boolean;
   /** The archived flag now, when foster set it. */
@@ -605,6 +619,17 @@ export interface ActiveFostering {
   copySessionId: string;
   copyPath: string;
   originalTitle?: string;
+  /**
+   * What foster put in front of the title when it made this copy, when it put
+   * anything — the `↪ ` of the era before 0.37.0, and empty ever since.
+   *
+   * Kept because it is foster's own writing and nothing else can prove that: it
+   * carries no moment, so `templatesSeen` will not derive a template from it and
+   * `stripMarks` cannot take it off. Without this a copy still wearing it reads
+   * as a title somebody chose, and the title pass reports a conflict over a
+   * prefix foster wrote itself.
+   */
+  prefix?: string;
   /** The conversation behind both the copy and the original, when it was recorded. */
   cliSessionId?: string;
   /** The installation the original lives in, when it is not the one holding the copy. */

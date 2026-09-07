@@ -40,6 +40,14 @@ export interface CodeSessionData {
   worktreeLazy?: unknown;
   title?: string;
   titleSource?: string;
+  /**
+   * The names this card used to wear, newest first — the app appends to it
+   * whenever it writes a new title. There is no timestamp on any of them, so
+   * this cannot date a rename; what it can do is order two of them. A card
+   * whose history already holds the name the other side is wearing has been
+   * through that name and moved on. See `titleSync.ts`.
+   */
+  previousTitles?: string[];
   createdAt?: number;
   lastActivityAt?: number;
   /** Absent on sessions the user never opened; those do not show up under "Recents". */

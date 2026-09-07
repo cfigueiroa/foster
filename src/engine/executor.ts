@@ -237,7 +237,15 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       state.active.get(key) ??
       (session.data.cliSessionId ? state.active.get(fosteringKey(originId, target)) : undefined);
     if (active) {
-      const skip = resolveExisting(active, { explicit, dryRun, ledger, kin });
+      const skip = resolveExisting(active, {
+        explicit,
+        dryRun,
+        ledger,
+        kin,
+        here,
+        cliSessionId: session.data.cliSessionId,
+        cwd: copyCwd(session.data),
+      });
       if (skip) {
         outcomes.push({ originSessionId: originId, title, ...skip });
         continue;
@@ -409,12 +417,35 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
  */
 function resolveExisting(
   active: ActiveFostering,
-  context: { explicit: boolean; dryRun: boolean; ledger: Ledger; kin: Lineage },
+  context: {
+    explicit: boolean;
+    dryRun: boolean;
+    ledger: Ledger;
+    kin: Lineage;
+    /** The destination, so identity can be checked against reach before it is trusted. */
+    here: Sidebar;
+    /** The conversation the session offered *now* holds — usually the same one `active` names. */
+    cliSessionId: string | undefined;
+    /** Where a fresh copy of the offered session would land, which decides which file it opens. */
+    cwd: string | undefined;
+  },
 ): Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined {
   const state = inspectCopy(active);
 
   if (state.kind === 'present') {
-    return { status: 'skipped', detail: ALREADY_HERE, copyPath: active.copyPath };
+    // The ledger and the file on disk agree the copy exists, but neither says
+    // which of the conversation's files it opens (#36) — a copy made before #40
+    // taught fostering to compare files can be the shorter one. Ask the same
+    // question the fresh-session path asks a few lines below the call site:
+    // does the file the offered card would open hold records nothing in the
+    // destination reaches? A "no" is the ordinary case and keeps the refusal;
+    // a "yes" means identity vouched for a copy that cannot show the work, so
+    // this falls through and lets the caller foster a fresh one instead.
+    const beyond = context.here.unreached(context.cliSessionId, context.cwd);
+    if (beyond === 0) {
+      return { status: 'skipped', detail: ALREADY_HERE, copyPath: active.copyPath };
+    }
+    return undefined;
   }
 
   if (state.kind === 'unreachable') {

@@ -54,6 +54,7 @@ import {
   type ConsolidationEntry,
 } from '../engine/consolidate.js';
 import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
+import { retitleCards, undoRetitleRequests } from '../engine/retitle.js';
 import {
   knownStores,
   resolveStoreArg,
@@ -88,6 +89,7 @@ import {
   copySessionIds,
   listActive,
   listRepointed,
+  listRetitled,
   listWorktreeReleased,
   project,
   selectByTarget,
@@ -577,6 +579,18 @@ program
             "the package's private copy)",
         ),
       );
+    } else if (handler.armed?.restoreFailed) {
+      // `restoreFailed` only survives in the fold when a `handler_restored`
+      // event actually ran and its read-back did not match — so this is not
+      // a guess: the last attempt to put the handler back is known to have
+      // failed, and `key`/`previous` are still there to try again with.
+      console.log(
+        pc.yellow(
+          `  claude:// links are still armed for ${handler.armed.root} (foster app login, since ` +
+            `${formatDate(handler.armed.at)}) — the last restore attempt failed.\n` +
+            '  foster app login --restore --yes',
+        ),
+      );
     } else if (handler.current?.userDataDir !== undefined) {
       const when = handler.armed ? formatDate(handler.armed.at) : 'unknown';
       console.log(
@@ -852,6 +866,10 @@ program
     '--sync-titles',
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
+  .option(
+    '--undo-retitles',
+    'put every marked card back to the title and archived flag the app had before the branch pass touched it',
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -866,14 +884,23 @@ program
       stalePrefix: string;
       branchPrefix: string;
       syncTitles?: boolean;
+      undoRetitles?: boolean;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
     }>();
+    const dryRun = opts.dryRun || !opts.yes;
+
+    // No destination to resolve here — the ledger already knows every path,
+    // account and prior title an undo needs, the same way `consolidate --undo`
+    // needs none of the fork-detection this command otherwise does.
+    if (opts.undoRetitles) {
+      await undoRetitles(store, ledger, opts, dryRun);
+      return;
+    }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
-    const dryRun = opts.dryRun || !opts.yes;
     const report = runSweep({
       store,
       ledger,
@@ -920,6 +947,69 @@ program
     // if the wait was mistaken for a hang and interrupted.
     reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
   });
+
+/**
+ * Put the marked cards of one account back to the title and archived flag the
+ * app had.
+ *
+ * Same shape as `undoConsolidation` below: what the write needs — path, account,
+ * and what the card wore before the branch pass ever touched it — is already in
+ * the ledger, so this scans no transcript and takes no guard, the same as
+ * `retitle.ts` itself.
+ *
+ * Scoped to one account, like everything else this command does. The ledger
+ * remembers every card foster has ever marked, in every account and every
+ * installation it has been pointed at, and a flag on a command that otherwise
+ * works on one destination must not quietly reach all of them — `--yes` would
+ * be the only thing standing in front of a rewrite the user could not see
+ * coming.
+ */
+async function undoRetitles(
+  store: StoreLayout,
+  ledger: Ledger,
+  opts: { to?: string; toOrg?: string; restart?: boolean; json?: boolean },
+  dryRun: boolean,
+): Promise<void> {
+  const target = resolveDestination(store, listAccountDirs(store), opts);
+  const cards = listRetitled(project(ledger.read())).filter(
+    (card) =>
+      card.target.accountUuid === target.accountUuid &&
+      card.target.organizationUuid === target.organizationUuid,
+  );
+  const outcomes =
+    cards.length === 0 ? [] : retitleCards(undoRetitleRequests(cards), { ledger, dryRun });
+
+  // The same run either way: `--json` describes what this call did, rather than
+  // printing the ledger and returning before the write it was asked for.
+  if (opts.json) {
+    print({ target, dryRun, marked: cards.length, outcomes });
+    return;
+  }
+
+  if (cards.length === 0) {
+    console.log('No cards are marked in this account — there is nothing to put back.');
+    return;
+  }
+
+  console.log(pc.bold(`${cards.length} marked row(s) in this account`));
+  for (const outcome of outcomes) {
+    console.log(
+      outcome.status === 'retitled'
+        ? titleSyncLine(outcome.from, outcome.to)
+        : `  ${pc.red('!')} ${outcome.to}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+    );
+  }
+
+  if (dryRun) {
+    console.log(pc.bold(`\nDry run: ${outcomes.length} would be put back.`));
+    console.log(pc.dim('Re-run with --yes to write, before the restart rather than after it.'));
+    return;
+  }
+
+  const back = outcomes.filter((outcome) => outcome.status === 'retitled').length;
+  console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+  await finish(store, Boolean(opts.restart));
+}
 
 function printPhase(heading: string, outcomes: Outcome[]): void {
   console.log(pc.bold(`\n${heading}`));
@@ -1573,7 +1663,7 @@ program
     if (continued.length > 0)
       console.log(
         pc.dim(`
-${continuedNote(continued.length)}`),
+${continuedNote(continued)}`),
       );
     await finish(store, Boolean(opts.restart));
   });
