@@ -1,5 +1,6 @@
 import type { AccountRef } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
+import type { RetitledCard } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
@@ -174,4 +175,27 @@ export function retitleCards(
   }
 
   return outcomes;
+}
+
+/**
+ * Put a mark's title and archived flag back to what the app had.
+ *
+ * Built from the ledger alone, the same way `repoint.ts`'s `undoRequests` is:
+ * `from` and `fromArchived` are the values a `card_retitled` fold carries
+ * forward across repeated marks, so this needs no scan and works for an
+ * account nobody is signed into. Tagged `as: 'tip'` because that is the write
+ * this already means elsewhere — a title with no mark in front of it — and
+ * because writing `to === from` is exactly what makes the fold's own `back`
+ * check drop the card from `retitled` rather than record a write that undid
+ * itself into nothing.
+ */
+export function undoRetitleRequests(cards: RetitledCard[]): RetitleRequest[] {
+  return cards.map((card) => ({
+    path: card.path,
+    target: card.target,
+    native: card.native,
+    title: card.from,
+    ...(card.fromArchived === undefined ? {} : { archived: card.fromArchived }),
+    as: 'tip',
+  }));
 }

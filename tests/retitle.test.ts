@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { retitleCards } from '../src/engine/retitle.js';
+import { retitleCards, undoRetitleRequests } from '../src/engine/retitle.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listRetitled, project } from '../src/ledger/project.js';
 import { makeStore, NEW_ACCOUNT, session, writeSession } from './helpers/store.js';
@@ -164,5 +164,76 @@ describe('retitleCards', () => {
 
     expect(outcome!.status).toBe('failed');
     expect(ledger.read()).toHaveLength(0);
+  });
+});
+
+describe('putting a mark back', () => {
+  it('restores the title and the flag the app had, and drops the card from retitled', () => {
+    const { file, ledger } = fixture();
+
+    retitleCards(
+      [
+        {
+          path: file,
+          target: NEW_ACCOUNT,
+          native: true,
+          title: '(stale) Work',
+          archived: true,
+          as: 'stale',
+        },
+      ],
+      { ledger },
+    );
+
+    const marked = listRetitled(project(ledger.read()));
+    expect(marked).toHaveLength(1);
+    expect(marked[0]).toMatchObject({ from: 'Work', fromArchived: false });
+
+    retitleCards(undoRetitleRequests(marked), { ledger });
+
+    const written = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    expect(written.title).toBe('Work');
+    expect(written.isArchived).toBe(false);
+
+    const events = ledger.read();
+    const undo = events[events.length - 1];
+    // `to === from` is exactly what the fold's own `back` check looks for: the
+    // app already has what it had before foster ever touched this card, so
+    // there is nothing left here for `retitled` to keep.
+    expect(undo).toMatchObject({ kind: 'card_retitled', as: 'tip', to: marked[0]!.from });
+    expect(listRetitled(project(events))).toHaveLength(0);
+  });
+
+  it('carries a mark through repeated writes, then undoes to the original', () => {
+    const { file, ledger } = fixture();
+
+    // Two marks in a row, the way a diverged branch gets retitled twice as the
+    // sweep keeps recomputing which branch is the tip.
+    retitleCards(
+      [{ path: file, target: NEW_ACCOUNT, native: true, title: '(stale) Work', as: 'stale' }],
+      { ledger },
+    );
+    retitleCards(
+      [
+        {
+          path: file,
+          target: NEW_ACCOUNT,
+          native: true,
+          title: '(other branch) Work',
+          as: 'diverged',
+        },
+      ],
+      { ledger },
+    );
+
+    const marked = listRetitled(project(ledger.read()));
+    expect(marked).toHaveLength(1);
+    // The original title survives both marks, the way `RepointedCard.from` does.
+    expect(marked[0]!.from).toBe('Work');
+
+    retitleCards(undoRetitleRequests(marked), { ledger });
+
+    expect(JSON.parse(readFileSync(file, 'utf8')).title).toBe('Work');
+    expect(listRetitled(project(ledger.read()))).toHaveLength(0);
   });
 });
