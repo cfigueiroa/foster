@@ -14,6 +14,7 @@ const EVENT_KINDS = new Set<string>([
   'fostering_followed',
   'card_repointed',
   'card_retitled',
+  'card_dated',
   'conversation_purged',
   'failed',
   'profile_registered',
