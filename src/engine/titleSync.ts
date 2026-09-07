@@ -178,7 +178,16 @@ function baselineOf(
   // because a card foster writes keeps whatever `titleSource` it already had.
   // A mark is an anchored prefix, so what `stripMarks` took off is exactly the
   // front of the title — no need to go looking for the seam a second time.
-  if (here !== made && stripMarks(here, templates) === made) {
+  //
+  // Foster's own copy marker comes off in the same pass, from the fostering's
+  // record of it rather than from the words: the `↪ ` of the era before 0.37.0
+  // carries no moment, so no template is ever derived from it and `stripMarks`
+  // leaves it standing. Two rows on the measured store wore one, and both were
+  // reported as named on both sides over a prefix foster wrote itself.
+  const clean = stripMarks(here, templates);
+  const marker = fostering.prefix ?? '';
+  const beneath = marker && clean.startsWith(marker) ? clean.slice(marker.length) : clean;
+  if (here !== made && beneath === made) {
     return { title: here, mark: here.slice(0, here.length - made.length) };
   }
   return { title: made, mark: '' };

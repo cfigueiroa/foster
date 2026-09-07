@@ -117,6 +117,7 @@ export function project(events: LedgerEvent[]): LedgerState {
           copySessionId: event.copySessionId,
           copyPath: event.copyPath,
           originalTitle: event.originalTitle,
+          ...(event.prefix ? { prefix: event.prefix } : {}),
           cliSessionId: event.cliSessionId,
           originStore: event.originStore,
           fosteredAt: event.ts,

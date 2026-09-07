@@ -82,7 +82,7 @@ function fixture(
 }
 
 /** The fostering the copy came from, as the ledger records it. */
-function fostered(f: Fixture, originalTitle: string | undefined): void {
+function fostered(f: Fixture, originalTitle: string | undefined, prefix = ''): void {
   f.ledger.append({
     kind: 'fostered',
     originSessionId: 'local_origin',
@@ -90,7 +90,7 @@ function fostered(f: Fixture, originalTitle: string | undefined): void {
     target: HERE,
     copySessionId: 'local_copy',
     copyPath: f.copyPath,
-    prefix: '',
+    prefix,
     ...(originalTitle === undefined ? {} : { originalTitle }),
   });
 }
@@ -442,6 +442,35 @@ describe('planTitleSync', () => {
     const told = planTitleSync(f.store, f.ledger, HERE, undefined, ['(continuou, até {when}) ']);
     expect(told.items).toEqual([]);
     expect(told.skipped).toEqual([]);
+  });
+
+  it('knows its own copy marker, which carries no moment for a template to be made of', () => {
+    // The `↪ ` of the era before 0.37.0. `templatesSeen` will not derive a
+    // template from it — no stamp — so `stripMarks` cannot take it off, and two
+    // rows on the measured store were reported as named on both sides over a
+    // prefix foster had written itself.
+    const f = fixture('The name it has now', '↪ The name it had then', {
+      origin: 'tool',
+      copy: 'tool',
+    });
+    fostered(f, 'The name it had then', '↪ ');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('↪ The name it has now');
+    expect(plan.items[0]?.mark).toBe('↪ ');
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('takes the copy marker and a branch mark off together', () => {
+    const f = fixture('The name it has now', '(stale, stopped 01/09 09:00) ↪ The name it had then');
+    fostered(f, 'The name it had then', '↪ ');
+    marked(f, 'local_origin', 'Outra conversa', '(stale, stopped 02/09 10:00) Outra conversa');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('(stale, stopped 01/09 09:00) ↪ The name it has now');
+    expect(plan.items[0]?.mark).toBe('(stale, stopped 01/09 09:00) ↪ ');
   });
 
   it('writes a name onto a copy of a conversation nobody had titled', () => {

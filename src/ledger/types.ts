@@ -619,6 +619,17 @@ export interface ActiveFostering {
   copySessionId: string;
   copyPath: string;
   originalTitle?: string;
+  /**
+   * What foster put in front of the title when it made this copy, when it put
+   * anything — the `↪ ` of the era before 0.37.0, and empty ever since.
+   *
+   * Kept because it is foster's own writing and nothing else can prove that: it
+   * carries no moment, so `templatesSeen` will not derive a template from it and
+   * `stripMarks` cannot take it off. Without this a copy still wearing it reads
+   * as a title somebody chose, and the title pass reports a conflict over a
+   * prefix foster wrote itself.
+   */
+  prefix?: string;
   /** The conversation behind both the copy and the original, when it was recorded. */
   cliSessionId?: string;
   /** The installation the original lives in, when it is not the one holding the copy. */
