@@ -152,6 +152,12 @@ export interface Outcome {
    * the two differ by the prefix, and a branch pass names the stale rows by it.
    */
   copyTitle?: string;
+  /**
+   * The copy's own session id, when one was minted — the id the app will show
+   * this row under. The branch pass needs it to know which row a moved pin
+   * should now point at when the branch that carried on had no row here yet.
+   */
+  copySessionId?: string;
 }
 
 /**
@@ -344,6 +350,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         status: 'fostered',
         copyPath,
         copyTitle: copy.title,
+        copySessionId: copy.sessionId,
         ...liveFlag,
         ...beyondFlag,
       });
@@ -396,6 +403,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         status: 'fostered',
         copyPath,
         copyTitle: copy.title,
+        copySessionId: copy.sessionId,
         ...liveFlag,
         ...beyondFlag,
       });

@@ -690,6 +690,9 @@ export function sweepSummary(report: SweepReport): string[] {
   const unknownMark = unknownMarkNames(branches.forks);
   if (unknownMark) lines.push(pc.yellow(unknownMark));
 
+  const pinLine = pinFixesLine(report.pinFixes);
+  if (pinLine) lines.push(pc.yellow(pinLine));
+
   if (report.liveWriters.length > 0) {
     const one = report.liveWriters.length === 1;
     lines.push(
@@ -809,6 +812,38 @@ function unknownMarkNames(forks: ForkOutcome[]): string {
     `${head}\n${titles.join('\n')}${tail}\n` +
     'Fix the words by hand, or run with the --stale-prefix/--branch-prefix that matches them.'
   );
+}
+
+/**
+ * Say which pinned rows the branch pass just left stale, and what to pin
+ * instead — issue #23. Pinning lives in the app's own IndexedDB keyed on
+ * session id, so a row the branch pass marks stale keeps whatever pin it had,
+ * and the branch that carried on arrives unpinned.
+ *
+ * Named whether or not the pin could actually be moved: the read behind this
+ * is attempted on every run, so there is something to say on a run
+ * that could not write.
+ *
+ * Empty when the branch pass touched no pinned row, so a run with nothing
+ * pinned stays quiet.
+ */
+function pinFixesLine(pinFixes: SweepReport['pinFixes']): string {
+  if (pinFixes.fixes.length === 0) return '';
+  const one = pinFixes.fixes.length === 1;
+  const named = pinFixes.fixes
+    .map(
+      (fix) => `  "${fix.staleTitle}" is a branch that stopped — pin "${fix.cleanTitle}" instead`,
+    )
+    .join('\n');
+  const head = `${pinFixes.fixes.length} pinned row${one ? '' : 's'} ${one ? 'is' : 'are'} a branch that stopped:`;
+
+  if (pinFixes.moved) {
+    return `${head}\n${named}\nMoved: pinned ${one ? 'it' : 'them'} onto the branch that carried on.`;
+  }
+  const why = pinFixes.blocked
+    ? `\n${pinFixes.blocked}`
+    : '\nRe-run the sweep once the pin can be written, or move it by hand with "foster pin".';
+  return `${head}\n${named}${why}`;
 }
 
 /** The name a worktree claim shows, whichever field the card carried. */

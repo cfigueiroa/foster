@@ -198,6 +198,7 @@ describe('sweepSummary', () => {
     archived: 0,
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },
+    pinFixes: { fixes: [], moved: false },
     ...overrides,
   });
 
@@ -236,6 +237,58 @@ describe('sweepSummary', () => {
 
   it('says nothing about forks when there are none', () => {
     expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/fork/);
+  });
+
+  it('names a pinned row the branch pass marked stale, and the row to pin instead', () => {
+    const lines = sweepSummary(
+      report({
+        pinFixes: {
+          fixes: [
+            {
+              staleSessionId: 'local_stale',
+              staleTitle: 'Macs',
+              cleanTitle: 'Macs',
+              cleanSessionId: 'local_clean',
+            },
+          ],
+          moved: true,
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain('"Macs" is a branch that stopped — pin "Macs" instead');
+    expect(lines).toMatch(/Moved:/);
+  });
+
+  it('still names the pin fix when the app was open and it could not move', () => {
+    const lines = sweepSummary(
+      report({
+        pinFixes: {
+          fixes: [
+            {
+              staleSessionId: 'local_stale',
+              staleTitle: 'Macs',
+              cleanTitle: 'Macs (other branch, went on 02/09 12:00)',
+              cleanSessionId: 'local_clean',
+            },
+          ],
+          moved: false,
+          blocked: 'Claude Desktop is running (userData lockfile is held by a running app).',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain('is a branch that stopped');
+    expect(lines).toMatch(/Claude Desktop is running/);
+    expect(lines).not.toMatch(/Moved:/);
+  });
+
+  it('says nothing about pins when the branch pass touched none', () => {
+    expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/pin/i);
   });
 });
 
