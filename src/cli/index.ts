@@ -54,6 +54,7 @@ import {
   type ConsolidationEntry,
 } from '../engine/consolidate.js';
 import { repointCards, undoRequests, type RepointOutcome } from '../engine/repoint.js';
+import { retitleCards, undoRetitleRequests } from '../engine/retitle.js';
 import {
   knownStores,
   resolveStoreArg,
@@ -88,6 +89,7 @@ import {
   copySessionIds,
   listActive,
   listRepointed,
+  listRetitled,
   listWorktreeReleased,
   project,
   selectByTarget,
@@ -844,6 +846,10 @@ program
     '--sync-titles',
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
+  .option(
+    '--undo-retitles',
+    'put every marked card back to the title and archived flag the app had before the branch pass touched it',
+  )
   .option('--restart', 'restart Claude Desktop afterwards, so the copies show up')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
@@ -858,14 +864,23 @@ program
       stalePrefix: string;
       branchPrefix: string;
       syncTitles?: boolean;
+      undoRetitles?: boolean;
       restart?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
     }>();
+    const dryRun = opts.dryRun || !opts.yes;
+
+    // No destination to resolve here — the ledger already knows every path,
+    // account and prior title an undo needs, the same way `consolidate --undo`
+    // needs none of the fork-detection this command otherwise does.
+    if (opts.undoRetitles) {
+      await undoRetitles(store, ledger, opts, dryRun);
+      return;
+    }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
-    const dryRun = opts.dryRun || !opts.yes;
     const report = runSweep({
       store,
       ledger,
@@ -912,6 +927,52 @@ program
     // if the wait was mistaken for a hang and interrupted.
     reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
   });
+
+/**
+ * Put every marked card back to the title and archived flag the app had.
+ *
+ * Same shape as `undoConsolidation` below: everything the write needs — path,
+ * account, and what the card wore before the branch pass ever touched it — is
+ * already in the ledger, so this reads no store and takes no guard, the same
+ * as `retitle.ts` itself.
+ */
+async function undoRetitles(
+  store: StoreLayout,
+  ledger: Ledger,
+  opts: { restart?: boolean; json?: boolean },
+  dryRun: boolean,
+): Promise<void> {
+  const cards = listRetitled(project(ledger.read()));
+
+  if (opts.json) {
+    print(cards);
+    return;
+  }
+
+  if (cards.length === 0) {
+    console.log('No cards are marked — there is nothing to put back.');
+    return;
+  }
+
+  const outcomes = retitleCards(undoRetitleRequests(cards), { ledger, dryRun });
+  for (const outcome of outcomes) {
+    console.log(
+      outcome.status === 'retitled'
+        ? titleSyncLine(outcome.from, outcome.to)
+        : `  ${pc.red('!')} ${outcome.to}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+    );
+  }
+
+  if (dryRun) {
+    console.log(pc.bold(`\nDry run: ${outcomes.length} would be put back.`));
+    console.log(pc.dim('Re-run with --yes to write, before the restart rather than after it.'));
+    return;
+  }
+
+  const back = outcomes.filter((outcome) => outcome.status === 'retitled').length;
+  console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+  await finish(store, Boolean(opts.restart));
+}
 
 function printPhase(heading: string, outcomes: Outcome[]): void {
   console.log(pc.bold(`\n${heading}`));
