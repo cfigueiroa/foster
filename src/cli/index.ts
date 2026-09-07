@@ -929,32 +929,49 @@ program
   });
 
 /**
- * Put every marked card back to the title and archived flag the app had.
+ * Put the marked cards of one account back to the title and archived flag the
+ * app had.
  *
- * Same shape as `undoConsolidation` below: everything the write needs — path,
- * account, and what the card wore before the branch pass ever touched it — is
- * already in the ledger, so this reads no store and takes no guard, the same
- * as `retitle.ts` itself.
+ * Same shape as `undoConsolidation` below: what the write needs — path, account,
+ * and what the card wore before the branch pass ever touched it — is already in
+ * the ledger, so this scans no transcript and takes no guard, the same as
+ * `retitle.ts` itself.
+ *
+ * Scoped to one account, like everything else this command does. The ledger
+ * remembers every card foster has ever marked, in every account and every
+ * installation it has been pointed at, and a flag on a command that otherwise
+ * works on one destination must not quietly reach all of them — `--yes` would
+ * be the only thing standing in front of a rewrite the user could not see
+ * coming.
  */
 async function undoRetitles(
   store: StoreLayout,
   ledger: Ledger,
-  opts: { restart?: boolean; json?: boolean },
+  opts: { to?: string; toOrg?: string; restart?: boolean; json?: boolean },
   dryRun: boolean,
 ): Promise<void> {
-  const cards = listRetitled(project(ledger.read()));
+  const target = resolveDestination(store, listAccountDirs(store), opts);
+  const cards = listRetitled(project(ledger.read())).filter(
+    (card) =>
+      card.target.accountUuid === target.accountUuid &&
+      card.target.organizationUuid === target.organizationUuid,
+  );
+  const outcomes =
+    cards.length === 0 ? [] : retitleCards(undoRetitleRequests(cards), { ledger, dryRun });
 
+  // The same run either way: `--json` describes what this call did, rather than
+  // printing the ledger and returning before the write it was asked for.
   if (opts.json) {
-    print(cards);
+    print({ target, dryRun, marked: cards.length, outcomes });
     return;
   }
 
   if (cards.length === 0) {
-    console.log('No cards are marked — there is nothing to put back.');
+    console.log('No cards are marked in this account — there is nothing to put back.');
     return;
   }
 
-  const outcomes = retitleCards(undoRetitleRequests(cards), { ledger, dryRun });
+  console.log(pc.bold(`${cards.length} marked row(s) in this account`));
   for (const outcome of outcomes) {
     console.log(
       outcome.status === 'retitled'
