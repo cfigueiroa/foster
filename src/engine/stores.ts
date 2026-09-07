@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import {
   candidateStoreRoots,
   directoryKey,
+  isLegacyAppDataStore,
   layoutFor,
   resolveStore,
   samePath,
@@ -78,6 +79,14 @@ export interface KnownStore {
    * one reads the token itself, so neither proves who is signed in *now*.
    */
   hasTokenCache?: boolean;
+  /**
+   * Set when this row is the pre-MSIX `%APPDATA%\Claude` store, sitting
+   * alongside a `Packages\Claude_<hash>` installation `directoryKey` did not
+   * fold it into — see `isLegacyAppDataStore`. Only ever true outside the
+   * app's own container, which is exactly where the two would otherwise read
+   * as two unrelated installations rather than one store seen two ways.
+   */
+  legacy?: boolean;
 }
 
 /** Just the read: this takes the ledger's events, not the object holding them. */
@@ -89,7 +98,7 @@ export function knownStores(
   const seen = new Map<string, KnownStore>();
   const stores: KnownStore[] = [];
 
-  const offer = (root: string, hint: KnownStore['hint'], name?: string): void => {
+  const offer = (root: string, hint: KnownStore['hint'], name?: string, legacy?: boolean): void => {
     const store = layoutFor(root);
     // The filesystem decides what is the same store and what still exists. A
     // directory that has gone is dropped rather than offered — a menu entry that
@@ -117,6 +126,7 @@ export function knownStores(
       // directory — the installed app or a running profile keeps its own hint,
       // it just also has a name now.
       if (name !== undefined) known.name ??= name;
+      if (legacy) known.legacy = true;
       return;
     }
 
@@ -129,6 +139,7 @@ export function knownStores(
       ...(name !== undefined ? { name } : {}),
       ...(config.lastKnownAccountUuid ? { accountUuid: config.lastKnownAccountUuid } : {}),
       ...(config.hasTokenCache ? { hasTokenCache: true } : {}),
+      ...(legacy ? { legacy: true } : {}),
     };
     seen.set(key, found);
     stores.push(found);
@@ -141,7 +152,12 @@ export function knownStores(
     // the roots after it are the installed app's own conventional locations.
     const fromEnvProfile =
       env.CLAUDE_USER_DATA_DIR !== undefined && samePath(dir, env.CLAUDE_USER_DATA_DIR);
-    offer(dir, fromEnvProfile ? 'profile' : 'installed app');
+    // Only ever true for a plain %APPDATA%\Claude sitting beside a packaged
+    // install it did not fold into (isLegacyAppDataStore gates on the packaged
+    // root actually being present) — never for the env-var profile case, which
+    // names a directory the user chose on purpose, not a leftover.
+    const legacy = !fromEnvProfile && isLegacyAppDataStore(dir, env);
+    offer(dir, fromEnvProfile ? 'profile' : 'installed app', undefined, legacy);
   }
   for (const dir of runningStores(list)) offer(dir, 'profile');
   for (const event of events) {

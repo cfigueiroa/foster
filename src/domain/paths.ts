@@ -138,6 +138,50 @@ export function directoryKey(dir: string): string | undefined {
 }
 
 /**
+ * Whether `dir` is the plain `%APPDATA%\Claude` path, sitting on a machine that
+ * also has a packaged (`Packages\Claude_<hash>\...`) installation `directoryKey`
+ * did NOT fold it into.
+ *
+ * Measured 05/09/2026: run from inside the app's own container, MSIX
+ * virtualisation makes `%APPDATA%\Claude` and the package directory the same
+ * physical directory, so `directoryKey` folds them and `knownStores` offers one
+ * row. Run from an ordinary terminal — outside the container — the
+ * virtualisation does not apply, `statSync` reports two different
+ * device/inode pairs, and the plain path is the real, pre-MSIX store: a
+ * leftover from before the app was packaged, still holding whatever was
+ * fostered into it back then.
+ *
+ * The false positive to avoid is calling a genuinely standalone install
+ * "legacy": on macOS and Linux, and on a Windows machine that was never
+ * packaged at all, `%APPDATA%\Claude` (or its platform equivalent) is simply
+ * the store. So this only returns true when a packaged root is actually
+ * present on this machine AND did not fold into `dir` — never from the shape
+ * of `dir` alone.
+ */
+export function isLegacyAppDataStore(dir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!env.APPDATA || !samePath(dir, path.join(env.APPDATA, 'Claude'))) return false;
+
+  const localAppData = env.LOCALAPPDATA;
+  if (!localAppData) return false;
+  const packages = path.join(localAppData, 'Packages');
+  if (!existsSync(packages)) return false;
+
+  const key = directoryKey(dir);
+  return safeReaddir(packages).some((entry) => {
+    if (!entry.startsWith('Claude')) return false;
+    const packaged = path.join(packages, entry, 'LocalCache', 'Roaming', 'Claude');
+    // Only a real store counts as "a packaged install also exists" — a package
+    // folder with nothing fostered into it yet is not the second installation
+    // this is trying to name.
+    if (!existsSync(path.join(packaged, CODE_SESSIONS))) return false;
+    // Folded into one directory already (inside the app's own container) — not
+    // two installations, so `dir` is not legacy relative to this one.
+    if (key !== undefined && directoryKey(packaged) === key) return false;
+    return true;
+  });
+}
+
+/**
  * How to recognise a store's own processes.
  *
  * Two facts are needed and neither is guessable from the path alone. The

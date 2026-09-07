@@ -1266,6 +1266,18 @@ installation's config carries a cached OAuth token entry at all, presence only, 
 existence check `doctor` reports and never the token itself — reading that stays `usage`'s job
 alone (see [Safety model](#safety-model)).
 
+On Windows, the packaged app answers to two paths — a `Packages\Claude_<hash>\...` directory and
+the pre-virtualisation `%APPDATA%\Claude` one — and whether those fold into a single row or list
+as two depends on where this command runs. Run from inside the app's own container (a Code
+session it hosts), MSIX virtualisation makes them the same physical directory and one row is
+printed. Run from an ordinary terminal, the virtualisation does not apply and the two are genuinely
+different directories on disk — so `%APPDATA%\Claude` gets its own row, marked `(installed app,
+legacy (pre-MSIX))`: it is the store from before the app was packaged, and a `sweep` run inside the
+app never sees whatever conversations are still sitting in it. That label only appears when a
+packaged install is actually present on the same machine; on macOS and Linux, and on a Windows
+machine that was never packaged at all, `%APPDATA%\Claude` (or its platform equivalent) is simply
+the store, unlabelled.
+
 `--store` resolves an argument against exactly this list, trying each in turn: a path that
 exists is always taken as a path; failing that, a registered name, exact, tried before a path
 piece that happens to match too; failing that, an account — a label, an e-mail, or a unique uuid

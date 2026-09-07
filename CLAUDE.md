@@ -364,6 +364,25 @@ what the app's container believes, never what a browser on the same machine woul
 `foster doctor` says so explicitly (`registry seen from inside the app's container: ...`) rather
 than judging a handler it cannot trust.
 
+## The packaged store's two paths fold, or they don't, depending on where you run
+
+Measured 05/09/2026, same MSIX install: the packaged app answers to two paths — the
+`Packages\Claude_<hash>\...` directory and the pre-virtualisation `%APPDATA%\Claude` one —
+and `directoryKey` (`src/domain/paths.ts`) folds them into a single `foster stores` row only when
+`statSync` reports the same device and inode for both. Inside the app's own container that is
+true, because MSIX virtualisation makes `%APPDATA%\Claude` a view onto the package directory. From
+an ordinary terminal it is false — the two are genuinely different directories, and `%APPDATA%\Claude`
+is the real pre-MSIX store, still holding whatever was fostered into it before the app was packaged.
+Run `foster stores` from inside a hosted Code session and you see one installation; run it from an
+ordinary PowerShell on the same machine and you see two.
+
+`isLegacyAppDataStore` (same file) is what keeps the second row honest: it labels `%APPDATA%\Claude`
+`legacy (pre-MSIX)` only when a `Packages\Claude*` store is actually present on the machine and did
+not fold into it — never from the shape of the path alone. That gate matters because
+`%APPDATA%\Claude` (or its platform equivalent) is simply _the_ store on macOS, on Linux, and on a
+Windows machine that was never packaged at all; calling it legacy there would be wrong, not just
+imprecise.
+
 ## Signing a second profile in
 
 Measured 05/09/2026, superseding the classic-key hypothesis above: what actually decides where a
