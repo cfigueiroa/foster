@@ -1,4 +1,10 @@
-import { applyFilter, byRecency, selectByIds, type SessionFilter } from '../domain/filter.js';
+import {
+  applyFilter,
+  byRecency,
+  selectByIds,
+  type ReachCheck,
+  type SessionFilter,
+} from '../domain/filter.js';
 import type { AccountRef, DiscoveredSession, StoreLayout, Unfosterable } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds } from '../ledger/project.js';
@@ -14,14 +20,24 @@ import { transcriptBytes, transcriptRoots } from '../store/transcripts.js';
  * The on-disk `_foster` marker dies the first time the app saves a copy, so a
  * scan that does not consult the ledger will offer those copies as if they were
  * new sessions. Every surface — command, menu, agent — has to go through here.
+ *
+ * `here` is the destination's own reach, built by the caller with `sidebarOf` —
+ * not resolved from an account id here, because the destination's cards can
+ * live in a different store than `store` names (an install read cross-store via
+ * `--from-store`), and only the caller knows which. Given it, a copy that
+ * carried on somewhere `here` cannot reach can be offered back rather than
+ * refused as not the last card left (#49). Left out, a caller with no settled
+ * destination yet — `foster list` without a fixed one — keeps asking only "is
+ * this the last one?", which is the answer it always gave.
  */
 export function listFosterable(
   store: StoreLayout,
   sources: AccountRef[],
   ledger: Ledger,
   filter: SessionFilter = {},
+  here?: ReachCheck,
 ): DiscoveredSession[] {
-  return fosterableFrom(scanStore(store, copySessionIds(ledger.read())), sources, filter);
+  return fosterableFrom(scanStore(store, copySessionIds(ledger.read())), sources, filter, here);
 }
 
 /**
@@ -36,8 +52,9 @@ export function fosterableFrom(
   scanned: DiscoveredSession[],
   sources: AccountRef[],
   filter: SessionFilter = {},
+  here?: ReachCheck,
 ): DiscoveredSession[] {
-  return byRecency(applyFilter(fromAccounts(scanned, sources), filter));
+  return byRecency(applyFilter(fromAccounts(scanned, sources), filter, here));
 }
 
 /**

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyPrefix,
   buildFosterCopy,
+  copyCwd,
   DEFAULT_PREFIX,
   fosteringKey,
   mintSessionId,
@@ -240,6 +241,54 @@ describe('worktreeClaim', () => {
       worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
       worktreeName: 'wt-a',
     });
+  });
+});
+
+/**
+ * #41: `copyCwd` used to send every worktree card to `originCwd` regardless of
+ * what either directory could actually reach. `reach` is the caller's own
+ * measurement — plain numbers, never a `Lineage` — so these are pure, with no
+ * transcript on disk; the multi-file version of this, through `fosterSessions`,
+ * lives in `tests/executor.test.ts`.
+ */
+describe('copyCwd', () => {
+  const held = () =>
+    session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      originCwd: 'C:\\home\\repo',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+
+  it('keeps sending the copy to the repository with no reach to compare', () => {
+    expect(copyCwd(held())).toBe('C:\\home\\repo');
+  });
+
+  it('keeps sending it there when the two are tied, or neither is measurable', () => {
+    expect(copyCwd(held(), { atCwd: 3, atOriginCwd: 3 })).toBe('C:\\home\\repo');
+    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: undefined })).toBe('C:\\home\\repo');
+    // A directory nobody could measure never outranks the repository — an
+    // unmeasurable `atCwd` is not treated as "reaches nothing", but it does not
+    // win either.
+    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: 1 })).toBe('C:\\home\\repo');
+  });
+
+  it('sends the copy to the worktree once it measurably reaches more', () => {
+    expect(copyCwd(held(), { atCwd: 5, atOriginCwd: 2 })).toBe(
+      'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    );
+  });
+
+  it('sends it to the worktree when the repository is not measurable at all', () => {
+    // The "13 open nothing" case: nothing under the repository's project
+    // directory matches this conversation, so `atOriginCwd` cannot be measured.
+    expect(copyCwd(held(), { atCwd: 1, atOriginCwd: undefined })).toBe(
+      'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    );
+  });
+
+  it('is unaffected by reach when the card is not in a worktree at all', () => {
+    expect(copyCwd(session(), { atCwd: 1, atOriginCwd: 99 })).toBe('/workspace/project');
   });
 });
 
