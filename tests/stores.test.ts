@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -91,6 +91,41 @@ function copyIn(root: string): string {
     NEW_ACCOUNT.organizationUuid,
     'local_00000000-0000-4000-8000-0000000000d2.json',
   );
+}
+
+/**
+ * A machine carrying both a packaged (`Packages\Claude_<hash>\...`) store and
+ * a plain `%APPDATA%\Claude` one — two real temp directories, so `directoryKey`
+ * reports two distinct device/inode pairs the way it would outside the app's
+ * container. `LOCALAPPDATA` and `APPDATA` are given separate branches of `base`
+ * on purpose, so the two stores are never accidentally the same directory.
+ */
+function makeSideBySideStores(): {
+  packagedRoot: string;
+  appDataRoot: string;
+  env: NodeJS.ProcessEnv;
+} {
+  const base = mkdtempSync(path.join(tmpdir(), 'foster-msix-'));
+
+  const packagedRoot = path.join(
+    base,
+    'Local',
+    'Packages',
+    'Claude_pzs8sxrjxfjjc',
+    'LocalCache',
+    'Roaming',
+    'Claude',
+  );
+  mkdirSync(path.join(packagedRoot, 'claude-code-sessions'), { recursive: true });
+
+  const appDataRoot = path.join(base, 'Roaming', 'Claude');
+  mkdirSync(path.join(appDataRoot, 'claude-code-sessions'), { recursive: true });
+
+  return {
+    packagedRoot,
+    appDataRoot,
+    env: { LOCALAPPDATA: path.join(base, 'Local'), APPDATA: path.join(base, 'Roaming') },
+  };
 }
 
 describe('knownStores', () => {
@@ -225,6 +260,42 @@ describe('knownStores', () => {
     const found = knownStores([], { CLAUDE_USER_DATA_DIR: store.root }, () => []);
 
     expect(found.find((known) => known.root === store.root)?.hasTokenCache).toBeUndefined();
+  });
+
+  it('flags the pre-MSIX %APPDATA%\\Claude row when a packaged install sits beside it', () => {
+    // Outside the app's container, MSIX virtualisation does not apply and
+    // directoryKey sees two different directories — the exact case measured
+    // 05/09/2026 from an ordinary terminal, where the plain path used to list
+    // as an unrelated second installation.
+    const { packagedRoot, appDataRoot, env } = makeSideBySideStores();
+
+    const found = knownStores([], env, () => []);
+
+    expect(found).toHaveLength(2);
+    expect(
+      found.find((known) => known.root === path.resolve(packagedRoot))?.legacy,
+    ).toBeUndefined();
+    expect(found.find((known) => known.root === path.resolve(appDataRoot))?.legacy).toBe(true);
+  });
+
+  it('does not flag a lone %APPDATA%\\Claude with no packaged install anywhere', () => {
+    // The false positive the issue calls out: on a machine that was never
+    // packaged at all (and on macOS/Linux, where this path shape does not even
+    // apply), the plain path is simply the store and must not be labelled
+    // legacy just because of where it sits.
+    const base = mkdtempSync(path.join(tmpdir(), 'foster-plain-'));
+    const appDataRoot = path.join(base, 'Roaming', 'Claude');
+    mkdirSync(path.join(appDataRoot, 'claude-code-sessions'), { recursive: true });
+
+    const found = knownStores(
+      [],
+      { LOCALAPPDATA: path.join(base, 'Local'), APPDATA: path.join(base, 'Roaming') },
+      () => [],
+    );
+
+    expect(found).toHaveLength(1);
+    expect(found[0]!.root).toBe(path.resolve(appDataRoot));
+    expect(found[0]!.legacy).toBeUndefined();
   });
 });
 

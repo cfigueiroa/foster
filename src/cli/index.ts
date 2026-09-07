@@ -619,13 +619,18 @@ program
 
 /**
  * How a `KnownStore`'s hint, existence and run state read on one line —
- * `installed app`, `profile`, `used before` or `registered`, `, gone` only for
+ * `installed app`, `profile`, `used before` or `registered`, `, legacy
+ * (pre-MSIX)` for the plain `%APPDATA%\Claude` row that sits beside a packaged
+ * install it did not fold into (see `isLegacyAppDataStore`), `, gone` only for
  * a registered name whose directory has since vanished (every other hint
  * requires the directory to exist to be offered at all), `, running` when the
  * lockfile is held.
  */
 function storeState(known: KnownStore): string {
-  return `${known.hint}${known.exists ? '' : ', gone'}${known.running ? ', running' : ''}`;
+  return (
+    `${known.hint}${known.legacy ? ', legacy (pre-MSIX)' : ''}` +
+    `${known.exists ? '' : ', gone'}${known.running ? ', running' : ''}`
+  );
 }
 
 /**
@@ -673,6 +678,9 @@ function describeStores(this: Command): void {
           root: known.root,
           name: known.name ?? null,
           knownBy: known.hint,
+          // Only ever true for the pre-MSIX %APPDATA%\Claude row sitting beside
+          // a packaged install it did not fold into — see `isLegacyAppDataStore`.
+          legacy: known.legacy ?? false,
           exists: known.exists,
           running: known.running,
           account: known.accountUuid ?? null,
