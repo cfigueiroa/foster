@@ -38,6 +38,20 @@ export interface SessionFilter {
    * swept up.
    */
   includeScheduled?: boolean;
+  /**
+   * Bring across a conversation the app spawned from a background-task chip.
+   *
+   * Running unattended is the point of one, exactly as it is for a schedule, so
+   * the copy is given a focus time and the link back to the chip is dropped —
+   * see buildFosterCopy. What crosses is the reading of what it did.
+   *
+   * Off by default for the same reason `--include-scheduled` is: these never had
+   * a row anywhere, so bringing them in is a decision to make rather than a gap
+   * to close. It is worth making, though, and the flag exists because the
+   * alternative was reconstructing the record by hand: a spawned session can
+   * carry a full piece of work and nothing in the sidebar will ever mention it.
+   */
+  includeSpawned?: boolean;
 }
 
 /** The reasons that still stand once the caller has said what it will accept. */
@@ -51,6 +65,13 @@ export function blockingReasons(session: DiscoveredSession, filter: SessionFilte
     // — and the copy is given a focus time of its own so it lands in Recents. A
     // session that was merely never opened is a different matter and stays out:
     // this flag is about scheduled tasks, not about that.
+    excused.add('never-opened');
+  }
+  if (filter.includeSpawned && session.reasons.includes('spawned-task')) {
+    excused.add('spawned-task');
+    // Alongside the one above and never on its own, on the same reasoning: a
+    // session the app spawned was never focused because nobody was there to
+    // focus it. A session that was merely never opened stays out.
     excused.add('never-opened');
   }
   return excused.size === 0
