@@ -5,6 +5,7 @@ import type { ActiveFostering } from '../ledger/types.js';
 import type { LiveWriter } from '../store/liveSessions.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { indexTranscripts, transcriptRoots } from '../store/transcripts.js';
+import { lineageAt, type Lineage } from './lineage.js';
 import { lockfileHeld } from './lockfile.js';
 
 export type { LiveWriter };
@@ -33,6 +34,42 @@ export interface ContinuedFostering {
   transcriptAt: number;
   /** What the original account's card still says. */
   cardAt: number;
+  /**
+   * Whether the original card's own working directory reaches every record the
+   * conversation now holds.
+   *
+   * #49: a conversation can occupy more than one file (#36), and a card opens
+   * only the one under the project directory for its own `cwd`. When the work
+   * that "carried on" was written in a directory the original never named, the
+   * original's file is real but short — opening it does not bring the missing
+   * records back, whatever the ledger says happened. True whenever the
+   * question cannot be answered (a conversation held in one file, or a `cwd`
+   * that matches none of its files), which keeps the reassurance this replaced
+   * for every case it already covered correctly.
+   */
+  reachesFully: boolean;
+}
+
+/**
+ * Whether opening a card at `cwd` would show every record `cliSessionId` holds.
+ *
+ * `Sidebar.unreached` asks the same question of a destination account's whole
+ * set of cards; this asks it of one card's own directory, which is what
+ * `continuedNote` needs to know before promising the original account "brings
+ * everything back".
+ */
+function reachesEverything(kin: Lineage, cliSessionId: string, cwd: string | undefined): boolean {
+  const full = kin.scanOf(cliSessionId);
+  if (full === undefined) return true;
+  const reach = kin.reachOf(cliSessionId, cwd);
+  // Undefined either means the conversation lives in one file — which is by
+  // definition the whole of it — or that `cwd` cannot be matched to any of its
+  // files. Both leave the question unanswerable rather than answered "no", and
+  // `Sidebar.unreached` treats the same undefined the same way: silence is not
+  // evidence of a gap.
+  if (reach === undefined) return true;
+  for (const uuid of full.uuids) if (!reach.uuids.has(uuid)) return false;
+  return true;
 }
 
 /**
@@ -50,6 +87,10 @@ export function continuedSince(
   if (fosterings.length === 0) return [];
 
   const transcripts = indexTranscripts(transcriptRoots(env));
+  // Built from the same roots `transcripts` was — `lineageAt` rather than
+  // `lineage`, so this reads exactly the directories `env` names rather than
+  // whatever `useTranscriptRoots` last pinned production's default lineage to.
+  const kin = lineageAt(transcriptRoots(env));
   const out: ContinuedFostering[] = [];
 
   for (const fostering of fosterings) {
@@ -72,7 +113,12 @@ export function continuedSince(
     }
 
     if (transcriptAt > card.lastActivityAt + SLACK_MS) {
-      out.push({ fostering, transcriptAt, cardAt: card.lastActivityAt });
+      out.push({
+        fostering,
+        transcriptAt,
+        cardAt: card.lastActivityAt,
+        reachesFully: reachesEverything(kin, cliSessionId, card.cwd),
+      });
     }
   }
 
@@ -109,12 +155,37 @@ function readCard(file: string): CodeSessionData | undefined {
  * fostering, and the reassurance existing only in the command would leave the
  * fright exactly where it happens.
  */
-export function continuedNote(count: number): string {
+export function continuedNote(continued: ContinuedFostering[]): string {
+  const count = continued.length;
   const one = count === 1;
+  // #49: this used to say "nothing is lost" unconditionally. True while both
+  // cards open one file; false the moment the conversation continued in a
+  // directory the original's own card does not name, because the original
+  // then opens the shorter of the two files that name shares (#36).
+  const short = continued.filter((c) => !c.reachesFully).length;
+
+  if (short === 0) {
+    return [
+      `${count} of these carried on after being fostered. Nothing is lost: ${one ? 'it is' : 'they are'} the`,
+      `same conversation, and opening ${one ? 'it' : 'them'} in the original account brings everything back.`,
+      'Only the date and title on the row are the old ones, until you open it.',
+    ].join('\n');
+  }
+
+  if (short === count) {
+    return [
+      `${count} of these carried on after being fostered, in a directory the original card does not name.`,
+      `Opening ${one ? 'it' : 'them'} in the original account will not bring everything back: the`,
+      "conversation continued somewhere the original's own working directory cannot reach, so it opens",
+      'a file missing what was written there.',
+    ].join('\n');
+  }
+
   return [
-    `${count} of these carried on after being fostered. Nothing is lost: ${one ? 'it is' : 'they are'} the`,
-    `same conversation, and opening ${one ? 'it' : 'them'} in the original account brings everything back.`,
-    'Only the date and title on the row are the old ones, until you open it.',
+    `${count} of these carried on after being fostered. For ${count - short} of them, opening the`,
+    `original account brings everything back — same conversation, same file. For the other ${short},`,
+    'it will not: the conversation continued in a directory that card does not name, so it opens a',
+    'file missing what was written there.',
   ].join('\n');
 }
 

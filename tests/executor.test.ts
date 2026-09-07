@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -311,5 +311,94 @@ describe('archived sessions', () => {
 
     expect(outcome!.status).toBe('skipped');
     expect(outcome!.detail).toBe('scheduled-task');
+  });
+});
+
+/**
+ * #63: `resolveExisting` used to vouch for a copy the ledger called `present`
+ * without asking whether that copy could actually open the work — the question
+ * `unreached` exists to answer a few lines below the call site. A copy made
+ * while the origin card sat in a worktree, then left behind when the card was
+ * repointed at the repository (#36: one `cliSessionId` can occupy more than one
+ * file), was refused on identity alone even though the repository's file holds
+ * a record the worktree's copy cannot reach.
+ */
+describe('#63: identity does not outrank reach', () => {
+  const CLI_ID = '00000000-0000-4000-8000-0000000000e1';
+  const SHARED_A = '00000000-0000-4000-8000-0000000000e2';
+  const SHARED_B = '00000000-0000-4000-8000-0000000000e3';
+  const TREE_ONLY = '00000000-0000-4000-8000-0000000000e4';
+  const REPO_ONLY = '00000000-0000-4000-8000-0000000000e5';
+  const ORIGIN_ID = '00000000-0000-4000-8000-0000000000e6';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+  const REPO = 'C:\\work\\project';
+
+  function rec(uuid: string) {
+    return { uuid, type: 'assistant' };
+  }
+
+  /** Writes one of the conversation's two files, named the way the app names them. */
+  function transcript(configDir: string, project: string, uuids: string[]): void {
+    const dir = path.join(configDir, 'projects', project);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${CLI_ID}.jsonl`),
+      uuids.map((uuid) => JSON.stringify(rec(uuid))).join('\n'),
+      'utf8',
+    );
+  }
+
+  it('re-fosters when the ledger already calls it present but the offered card reaches more', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-reach-'));
+    // The worktree's file holds the shared history plus one record of its own;
+    // the repository's holds the same shared history plus a different one —
+    // the split #36 describes, one `cliSessionId` naming two files.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED_A, SHARED_B, TREE_ONLY]);
+    transcript(configDir, 'C--work-project', [SHARED_A, SHARED_B, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    // The origin starts in the worktree, so the only copy fostering can make is
+    // one that opens the worktree's file — the shorter of the two.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: TREE, originCwd: TREE }),
+    );
+    const first = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(first[0]!.status).toBe('fostered');
+
+    // The card is repointed at the repository — by hand, by `foster point`, or
+    // by the app itself — so it now names the fuller file. Nothing told the
+    // existing copy, which still sits in the worktree.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+
+    const second = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    expect(second[0]!.status).toBe('fostered');
+    expect(second[0]!.beyond).toBe(1);
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(2);
+  });
+
+  it('still skips when the existing copy already reaches everything the offered card would', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-reach-same-'));
+    transcript(configDir, 'C--work-project', [SHARED_A, SHARED_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    const second = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+
+    expect(second[0]!.status).toBe('skipped');
+    expect(second[0]!.detail).toBe('already in this account');
+    expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
   });
 });
