@@ -1,7 +1,10 @@
 import {
   conversationRoot,
-  indexTranscripts,
+  fileOpenedFrom,
+  idsMentionedIn,
+  indexAllTranscripts,
   scanConversation,
+  scanConversationFiles,
   transcriptRoots,
   type ConversationScan,
 } from '../store/transcripts.js';
@@ -46,6 +49,52 @@ export interface Lineage {
    * six times over. Undefined when there is no transcript to read.
    */
   scanOf(cliSessionId: string | undefined): ConversationScan | undefined;
+  /**
+   * The records one card can open, which is not the whole conversation.
+   *
+   * `scanOf` answers what the work holds; this answers what a row reaches. They
+   * differ exactly when a conversation occupies more than one file, because the
+   * app opens the one under the project directory for that card's working
+   * directory — so an account holding the shorter file holds a row that cannot
+   * reach the rest, and a card offered from elsewhere may be the only way to
+   * open it.
+   *
+   * Undefined when it cannot be told rather than guessed at: a conversation on
+   * one file needs no such question, and a working directory naming no file of
+   * this conversation says nothing about what the card reaches. Callers treat
+   * that as "no answer", which leaves the behaviour they had before asking.
+   */
+  reachOf(cliSessionId: string | undefined, cwd: string | undefined): ConversationScan | undefined;
+  /**
+   * Resolve roots that only look unrelated, for these conversations.
+   *
+   * `conversationRoot` reads the first record a transcript holds, which is the
+   * shared ancestor only when the app copied the conversation from its
+   * beginning. Fork it from a point in the middle instead and the copy opens on
+   * a record from the middle — rewritten with no parent, so nothing in the head
+   * says where it came from — and the two halves answer with different roots
+   * while holding thousands of records in common. Measured on a real store: two
+   * halves of one conversation sharing 2097 records, the second's root sitting
+   * at position 16818 of the first.
+   *
+   * The evidence is that record itself. A root found *inside* another
+   * conversation is that conversation's own history, so the branch it heads
+   * belongs to the same work, and its root is filed as an alias of the host's.
+   *
+   * Called by whoever is about to group conversations, never on the way in: it
+   * reads every transcript named here, which is seconds rather than
+   * milliseconds. Idempotent, and remembers what it has already been given.
+   */
+  deepen(cliSessionIds: Iterable<string>): void;
+  /**
+   * Every transcript on disk, every path it occupies, keyed by conversation.
+   *
+   * The same directory walk the other answers are built on, exposed so a caller
+   * that also needs the whole index — the orphan search, which asks which
+   * transcripts nothing points at — walks the tree once with this rather than
+   * once more on its own. A sweep used to do that walk six times over.
+   */
+  transcripts(): ReadonlyMap<string, string[]>;
 }
 
 /**
@@ -60,27 +109,85 @@ export function useTranscriptRoots(dirs: string[] | undefined): void {
 }
 
 export function lineageAt(projectsDirs: string[]): Lineage {
-  let transcripts: Map<string, string> | undefined;
+  let index: Map<string, string[]> | undefined;
   const roots = new Map<string, string | undefined>();
   const scans = new Map<string, ConversationScan | undefined>();
+  /** One file's records, memoised by path — several cards can open the same file. */
+  const perFile = new Map<string, ConversationScan>();
+  /** A root that turned out to be a record of another conversation, and whose. */
+  const alias = new Map<string, string>();
+  const deepened = new Set<string>();
 
-  const fileOf = (cliSessionId: string | undefined): string | undefined => {
-    if (cliSessionId === undefined || cliSessionId === '') return undefined;
-    transcripts ??= indexTranscripts(projectsDirs);
-    return transcripts.get(cliSessionId);
+  const transcripts = (): Map<string, string[]> => {
+    index ??= indexAllTranscripts(projectsDirs);
+    return index;
   };
 
-  const rootOf = (cliSessionId: string | undefined): string | undefined => {
-    if (cliSessionId === undefined || cliSessionId === '') return undefined;
+  /**
+   * Every path this conversation occupies, because none of them is the whole of
+   * it. `scanConversationFiles` has the measurement; the short version is that
+   * one `cliSessionId` continued from two working directories leaves two files,
+   * and taking the first the directory walk offered hid 6070 records on a real
+   * store.
+   */
+  const filesOf = (cliSessionId: string | undefined): string[] => {
+    if (cliSessionId === undefined || cliSessionId === '') return [];
+    return transcripts().get(cliSessionId) ?? [];
+  };
+
+  const headOf = (cliSessionId: string): string | undefined => {
     // `has` rather than a truthy check: a conversation whose root could not be
     // read is remembered as unanswerable, so a failed read is not repeated for
     // every card that points at it.
     if (roots.has(cliSessionId)) return roots.get(cliSessionId);
 
-    const file = fileOf(cliSessionId);
-    const root = file ? conversationRoot(file) : undefined;
+    // Every file's own first record, not just one file's. Two transcripts of one
+    // conversation disagree about their head whenever the second was started
+    // from the middle, and a conversation that answered with the wrong one of
+    // them was grouped away from its own siblings.
+    const heads: string[] = [];
+    for (const file of filesOf(cliSessionId)) {
+      const head = conversationRoot(file);
+      if (head !== undefined && !heads.includes(head)) heads.push(head);
+    }
+
+    const root = heads[0];
+    // The rest are the same work by construction — one id, one conversation —
+    // so they are filed as aliases of it and every id reaching any of them
+    // canonicalises to the same answer, whichever file the walk offered first.
+    if (root !== undefined) {
+      for (const other of heads.slice(1)) {
+        if (alias.has(other) || canonical(root) === other) continue;
+        alias.set(other, root);
+      }
+    }
+
     roots.set(cliSessionId, root);
     return root;
+  };
+
+  /**
+   * Follow the aliases to the root that stands for the whole work.
+   *
+   * Guarded against a cycle rather than assumed free of one: two transcripts
+   * can each hold the other's first record, and a chain that returns to where
+   * it started must stop somewhere rather than spin.
+   */
+  const canonical = (root: string): string => {
+    let at = root;
+    const seen = new Set<string>([at]);
+    for (;;) {
+      const next = alias.get(at);
+      if (next === undefined || seen.has(next)) return at;
+      seen.add(next);
+      at = next;
+    }
+  };
+
+  const rootOf = (cliSessionId: string | undefined): string | undefined => {
+    if (cliSessionId === undefined || cliSessionId === '') return undefined;
+    const head = headOf(cliSessionId);
+    return head === undefined ? undefined : canonical(head);
   };
 
   return {
@@ -96,14 +203,66 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       if (cliSessionId === undefined || cliSessionId === '') return undefined;
       if (scans.has(cliSessionId)) return scans.get(cliSessionId);
 
-      const file = fileOf(cliSessionId);
-      const scan = file === undefined ? undefined : scanConversation(file);
+      const files = filesOf(cliSessionId);
+      const scan = files.length === 0 ? undefined : scanConversationFiles(files);
       scans.set(cliSessionId, scan);
       return scan;
     },
+
+    reachOf(cliSessionId, cwd) {
+      const files = filesOf(cliSessionId);
+      // One file is the whole conversation, and `scanOf` already answers for it.
+      if (files.length < 2) return undefined;
+      const file = fileOpenedFrom(files, cwd);
+      if (file === undefined) return undefined;
+      let scan = perFile.get(file);
+      if (scan === undefined) {
+        scan = scanConversation(file);
+        perFile.set(file, scan);
+      }
+      return scan;
+    },
+
+    deepen(cliSessionIds) {
+      const heads = new Map<string, string>();
+      for (const id of cliSessionIds) {
+        if (deepened.has(id)) continue;
+        deepened.add(id);
+        const head = headOf(id);
+        if (head !== undefined) heads.set(id, head);
+      }
+      // One conversation cannot be a fork of itself, and one root cannot be
+      // found inside another transcript that does not exist yet to be read.
+      if (heads.size < 2) return;
+
+      const wanted = new Set(heads.values());
+      for (const [id, head] of heads) {
+        for (const file of filesOf(id)) {
+          for (const found of idsMentionedIn(file, wanted)) {
+            // Its own head is not evidence of anything, and a root already
+            // spoken for keeps the first answer: the alias is a claim about one
+            // record, and two hosts holding it say the same thing.
+            if (found === head || alias.has(found)) continue;
+            // A root that is this conversation's own head would make the work
+            // point at itself once canonicalised.
+            if (canonical(head) === found) continue;
+            alias.set(found, head);
+          }
+        }
+      }
+    },
+
+    transcripts,
   };
 }
 
-export function lineage(env: NodeJS.ProcessEnv = process.env): Lineage {
-  return lineageAt(installedRoots ?? transcriptRoots(env));
+/**
+ * The lineage of everything this machine's Claude directories hold.
+ *
+ * `extra` is the caller's further config directories — the same list the
+ * orphan search takes — so a sweep asked to look in one more place reads its
+ * transcripts through the one index too.
+ */
+export function lineage(env: NodeJS.ProcessEnv = process.env, extra: string[] = []): Lineage {
+  return lineageAt(installedRoots ?? transcriptRoots(env, extra));
 }

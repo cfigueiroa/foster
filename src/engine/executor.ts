@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { buildFosterCopy, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
+import { buildFosterCopy, copyCwd, DEFAULT_PREFIX, fosteringKey } from '../domain/fostering.js';
 import { accountDir, sessionPath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
@@ -10,7 +10,7 @@ import { errorMessage } from '../util/fs.js';
 
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
 import { lineage, lineageAt, type Lineage } from './lineage.js';
-import { BRANCH_HERE, sidebarOf, type BranchStanding } from './sidebar.js';
+import { BRANCH_HERE, sidebarOf, type BranchStanding, type Sidebar } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
 
@@ -73,16 +73,54 @@ export interface FosterOptions {
   env?: NodeJS.ProcessEnv;
   /** Transcript `projects/` directories. Wins over `env` when both are given. */
   projectsDirs?: string[];
+  /**
+   * A lineage the caller already built. Wins over both of the above: the sweep
+   * runs several passes over one store, and each pass building its own meant
+   * the same transcripts were read once per pass.
+   */
+  kin?: Lineage;
+  /**
+   * The destination already read, for the same reason. The run marks what it
+   * plans into it, so a caller's next pass sees this one's copies.
+   */
+  here?: Sidebar;
+  /**
+   * Accept a session whose conversation the destination already shows a
+   * *branch* of — never an exact copy of. This is the sweep's branch pass, which
+   * gives every branch of a fork a row of its own. Narrower than `explicit`:
+   * that one also brings back a copy the user deleted in the app, and a bulk
+   * pass must not.
+   */
+  acceptBranches?: boolean;
+  /**
+   * Write the copies archived whatever their source says, and record that it
+   * was foster's decision. The branch that stopped goes to the archived view.
+   */
+  archive?: boolean;
+  /**
+   * The template `prefix`'s mark was made from, `{when}` unfilled — set by the
+   * branch pass when it brings a copy in with a mark already in front of its
+   * title. Recorded on the `fostered` event so a later run recognises the mark
+   * whatever words it is itself given — see `templatesSeen` in `domain/stale.ts`.
+   */
+  template?: string;
 }
 
 export type OutcomeStatus = 'fostered' | 'skipped' | 'failed' | 'returned';
 
 /**
+ * "Fostered" is foster's word for the act, not for the state, and on a row the
+ * account already holds it was read as "did not bring it" — twice in one session,
+ * on conversations that were sitting in the sidebar the whole time. The report
+ * says where the row is, not what the run did to it.
+ */
+export const ALREADY_HERE = 'already in this account';
+
+/**
  * Said out loud because it looks like nothing happened and something did: the
  * copy this account already has is the one that carried on.
  */
-export const FOLLOWED_BRANCH =
-  'already fostered; the app branched it and the copy here follows the branch';
+export const FOLLOWED_BRANCH = `${ALREADY_HERE}; the app branched it and the copy here follows the branch`;
 
 export interface Outcome {
   originSessionId: string;
@@ -104,6 +142,16 @@ export interface Outcome {
    * the same thing.
    */
   standing?: BranchStanding;
+  /**
+   * Records this copy opens that no row in the destination could reach — the
+   * reason a card was brought for a conversation the account already shows.
+   */
+  beyond?: number;
+  /**
+   * The title the copy was written with, when one was. `title` is the origin's;
+   * the two differ by the prefix, and a branch pass names the stale rows by it.
+   */
+  copyTitle?: string;
 }
 
 /**
@@ -137,8 +185,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   // Keyed by branch as well, because the id is exactly what a branch changes: the
   // pair this check exists to prevent is most often made *by* the branch, one
   // account holding the conversation and the other holding what it forked into.
-  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env);
-  const here = sidebarOf(store, target, copySessionIds(ledger.read()), kin);
+  const kin =
+    options.kin ?? (options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(options.env));
+  const here = options.here ?? sidebarOf(store, target, copySessionIds(ledger.read()), kin);
 
   // No gate here on purpose. Every copy gets a session id the app has never seen,
   // so a running app neither reads nor writes the file: it is invisible to the
@@ -168,18 +217,25 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    const key = fosteringKey(originId, target);
+    // Keyed on the conversation the origin card holds *now*. An origin card the
+    // app has branched since is a card for different work, and the fostering
+    // recorded against it says nothing about the conversation it holds today.
+    const key = fosteringKey(originId, target, session.data.cliSessionId);
     if (mintedInBatch.has(key)) {
       outcomes.push({
         originSessionId: originId,
         title,
         status: 'skipped',
-        detail: 'already fostered',
+        detail: ALREADY_HERE,
       });
       continue;
     }
 
-    const active = state.active.get(key);
+    // The legacy key is consulted second, so a fostering written before the
+    // conversation was recorded still answers for the card it was made from.
+    const active =
+      state.active.get(key) ??
+      (session.data.cliSessionId ? state.active.get(fosteringKey(originId, target)) : undefined);
     if (active) {
       const skip = resolveExisting(active, { explicit, dryRun, ledger, kin });
       if (skip) {
@@ -189,6 +245,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // Reconciled: the ledger no longer counts it as active, so fall through and
       // make the copy the caller asked for.
       state.active.delete(key);
+      state.active.delete(fosteringKey(originId, target));
     }
 
     // Asked after the ledger, which knows about foster's own copies, and about
@@ -196,7 +253,30 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // already showing here would gain a second row for the same work.
     const cliSessionId = session.data.cliSessionId;
     const shownHere = here.reason(cliSessionId);
-    if (shownHere !== undefined && !explicit) {
+    // A branch pass lifts only the branch answer. An exact copy stays refused:
+    // two cards opening one transcript is the duplicate this check exists for.
+    const branchAccepted =
+      options.acceptBranches === true &&
+      shownHere !== undefined &&
+      shownHere.startsWith(BRANCH_HERE);
+    /**
+     * Records this copy would open that nothing here can.
+     *
+     * The refusal above rests on two cards opening one transcript, which is what
+     * makes the second one worthless. That is not always true: one
+     * `cliSessionId` can name several files, the app opens the one under the
+     * project directory for the card's working directory, and an account can
+     * therefore show a row for a conversation while being unable to reach most
+     * of it. Measured on this store: 47 (account, conversation) pairs where
+     * another account held the card that opens the fuller file, 8159 records
+     * between them, and the refusal was the only thing standing in the way.
+     *
+     * Asked of the working directory the *copy* will have, not the source's:
+     * a card in a worktree is rewritten to open in the repository it was cut
+     * from, so asking the source would promise records the copy does not open.
+     */
+    const beyond = here.unreached(cliSessionId, copyCwd(session.data));
+    if (shownHere !== undefined && !explicit && !branchAccepted && beyond === 0) {
       // Only a branch is worth weighing. Two cards for the *same* conversation
       // open the same transcript, so there is no half to be on the wrong side of.
       const standing = shownHere.startsWith(BRANCH_HERE) ? here.standing(cliSessionId) : undefined;
@@ -216,12 +296,16 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         ? { originStore: options.sourceStore }
         : {}),
       prefix,
+      ...(options.archive ? { archived: true } : {}),
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
     // Carried on the outcome rather than acted on: the copy is sound either way,
     // and what a live writer changes is only what the caller should be told.
     const liveFlag =
       cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
+    // Only worth saying when the row was already here: everywhere else the whole
+    // conversation is new and "records nothing here reaches" is every record.
+    const beyondFlag = shownHere !== undefined && beyond > 0 ? { beyond } : {};
 
     /**
      * What this batch has committed to bringing, whether or not bytes are being
@@ -235,7 +319,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // both hold a card for one conversation would otherwise pass this check
       // twice and produce the pair itself, in a single run.
       if (copy.cliSessionId) {
-        here.markPlanned(copy.cliSessionId);
+        here.markPlanned(copy.cliSessionId, copy.cwd);
       }
     };
 
@@ -245,7 +329,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         title,
         status: 'fostered',
         copyPath,
+        copyTitle: copy.title,
         ...liveFlag,
+        ...beyondFlag,
       });
       // A dry run has to make the same marks a real one does, or it stops
       // describing the real one. Both of these are batch state, and leaving them
@@ -286,6 +372,8 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
           ? { originStore: options.sourceStore }
           : {}),
         prefix,
+        ...(options.archive ? { archived: true } : {}),
+        ...(options.template ? { template: options.template } : {}),
       });
       recordPlanned();
       outcomes.push({
@@ -293,7 +381,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         title,
         status: 'fostered',
         copyPath,
+        copyTitle: copy.title,
         ...liveFlag,
+        ...beyondFlag,
       });
     } catch (error) {
       const reason = errorMessage(error);
@@ -324,7 +414,7 @@ function resolveExisting(
   const state = inspectCopy(active);
 
   if (state.kind === 'present') {
-    return { status: 'skipped', detail: 'already fostered', copyPath: active.copyPath };
+    return { status: 'skipped', detail: ALREADY_HERE, copyPath: active.copyPath };
   }
 
   if (state.kind === 'unreachable') {
@@ -332,7 +422,7 @@ function resolveExisting(
     // gone would put a second copy there the moment the drive came back.
     return {
       status: 'skipped',
-      detail: 'already fostered, into an installation that is not reachable to check',
+      detail: `${ALREADY_HERE}, in an installation that is not reachable to check`,
       copyPath: active.copyPath,
     };
   }

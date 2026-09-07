@@ -1,6 +1,13 @@
 import { fosteringKey } from '../domain/fostering.js';
 import type { KnownIdentity } from '../domain/identity.js';
-import type { ActiveFostering, LedgerEvent, RepointedCard } from './types.js';
+import { comparablePath } from '../domain/paths.js';
+import type {
+  ActiveFostering,
+  LedgerEvent,
+  RepointedCard,
+  RetitledCard,
+  WorktreeReleasedCard,
+} from './types.js';
 
 export type { KnownIdentity };
 
@@ -12,6 +19,36 @@ export interface LedgerState {
   identities: Map<string, KnownIdentity>;
   /** Cards sitting on a conversation the app did not put them on, keyed by session id. */
   repointed: Map<string, RepointedCard>;
+  /** Cards wearing a title, or an archived flag, the app did not give them, keyed by session id. */
+  retitled: Map<string, RetitledCard>;
+  /**
+   * Copies whose worktree claim was released and not yet put back, keyed by
+   * path — see `WorktreeReleasedEvent`.
+   */
+  worktreeReleased: Map<string, WorktreeReleasedCard>;
+  /**
+   * Named Desktop installations, keyed by name. Re-registering a name points it
+   * at a new root — the fold keeps only the latest, which is the rename.
+   */
+  profiles: Map<string, string>;
+  /**
+   * Registered CLI client roots, keyed by the root itself, holding whether it is
+   * a single client directory or a container of several — see
+   * `ClientRootRegisteredEvent`.
+   */
+  clientRoots: Map<string, 'client' | 'container'>;
+  /**
+   * The `claude://` handler's previous state, while a login is in flight —
+   * see `HandlerArmedEvent`. `key` and `previous` are carried straight from
+   * the event. Cleared by `handler_restored`, so its presence alone says a
+   * login was interrupted before it could put the handler back.
+   */
+  handlerArmed?: {
+    root: string;
+    key: string;
+    previous: string;
+    at: number;
+  };
 }
 
 /**
@@ -23,14 +60,24 @@ export function project(events: LedgerEvent[]): LedgerState {
   const labels = new Map<string, string>();
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
+  const retitled = new Map<string, RetitledCard>();
+  const worktreeReleased = new Map<string, WorktreeReleasedCard>();
+  const profiles = new Map<string, string>();
+  const clientRoots = new Map<string, 'client' | 'container'>();
+  let handlerArmed: LedgerState['handlerArmed'];
   // Which fostering a copy belongs to, so a repoint can find it. The fold is
   // keyed on the origin session, and a repoint knows only the card it rewrote.
   const fosteringOfCopy = new Map<string, string>();
 
   for (const event of events) {
     switch (event.kind) {
+      // An empty label is how a name is taken back: the log is append-only, so
+      // "no longer called that" has to be something written down rather than a
+      // line removed. `applyLabel` refuses to write one, so the only source is
+      // `label --clear`, and the account falls back to whatever else names it.
       case 'account_labelled':
-        labels.set(event.accountUuid, event.label);
+        if (event.label) labels.set(event.accountUuid, event.label);
+        else labels.delete(event.accountUuid);
         break;
 
       case 'account_identity_seen': {
@@ -62,7 +109,7 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
 
       case 'fostered': {
-        const key = fosteringKey(event.originSessionId, event.target);
+        const key = fosteringKey(event.originSessionId, event.target, event.cliSessionId);
         active.set(key, {
           originSessionId: event.originSessionId,
           origin: event.origin,
@@ -73,13 +120,22 @@ export function project(events: LedgerEvent[]): LedgerState {
           cliSessionId: event.cliSessionId,
           originStore: event.originStore,
           fosteredAt: event.ts,
+          ...(event.archived ? { archivedByFoster: true } : {}),
         });
         fosteringOfCopy.set(event.copySessionId, key);
         break;
       }
 
       case 'returned':
-        active.delete(fosteringKey(event.originSessionId, event.target));
+        // Resolved through the copy rather than recomputed. The key carries the
+        // conversation now, and a `returned` written before it did — or after
+        // the fostering followed a branch — cannot rebuild the key it was filed
+        // under. The copy id can: it is what the fostering was indexed by when
+        // it was written, whatever the key looked like.
+        active.delete(
+          fosteringOfCopy.get(event.copySessionId) ??
+            fosteringKey(event.originSessionId, event.target),
+        );
         fosteringOfCopy.delete(event.copySessionId);
         break;
 
@@ -88,7 +144,13 @@ export function project(events: LedgerEvent[]): LedgerState {
         // holds has moved. Keeping the fostering and moving its pointer is the
         // whole point — dropping it is what used to make the next sweep write a
         // second card for work that already had a row.
-        const key = fosteringKey(event.originSessionId, event.target);
+        // Resolved through the copy, and filed back under the same key. The key
+        // names the conversation that was copied *from the origin*, which does
+        // not move when the app branches the copy; `cliSessionId` is what tracks
+        // where the copy went, and that is the field to update.
+        const key =
+          fosteringOfCopy.get(event.copySessionId) ??
+          fosteringKey(event.originSessionId, event.target, event.from);
         const fostering = active.get(key);
         if (fostering) {
           active.set(key, { ...fostering, cliSessionId: event.to, followedBranch: true });
@@ -112,6 +174,7 @@ export function project(events: LedgerEvent[]): LedgerState {
         const key = fosteringOfCopy.get(event.sessionId);
         const fostering = key === undefined ? undefined : active.get(key);
         if (key !== undefined && fostering) {
+          // Same as above: the key stays, only where the copy points moves.
           active.set(key, { ...fostering, cliSessionId: event.to });
         }
 
@@ -137,6 +200,86 @@ export function project(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      case 'card_retitled': {
+        // The original title and flag are what the first write saw; later ones
+        // carry them forward, so the answer to "what did the app have here?" is
+        // the same however many sweeps have marked the card since. A card written
+        // back to exactly that stops being one of these.
+        const known = retitled.get(event.sessionId);
+        const from = known?.from ?? event.from;
+        const fromArchived = known ? known.fromArchived : event.fromArchived;
+        const archivedNow = event.toArchived ?? known?.toArchived;
+        const back = event.to === from && (archivedNow ?? false) === (fromArchived ?? false);
+        if (back) retitled.delete(event.sessionId);
+        else {
+          retitled.set(event.sessionId, {
+            sessionId: event.sessionId,
+            path: event.path,
+            target: event.target,
+            from,
+            to: event.to,
+            ...(fromArchived === undefined ? {} : { fromArchived }),
+            ...(archivedNow === undefined ? {} : { toArchived: archivedNow }),
+            native: event.native,
+            retitledAt: event.ts,
+          });
+        }
+        break;
+      }
+
+      case 'worktree_released':
+        // Keyed the same way `storeRootOfCopy` comparisons are everywhere else in
+        // this fold: two spellings of one file must not become two open releases,
+        // one of them invisible to `--undo` because it was written under the path
+        // the other case happened to use.
+        worktreeReleased.set(comparablePath(event.path), {
+          path: event.path,
+          sessionId: event.sessionId,
+          ...(event.worktreePath !== undefined ? { worktreePath: event.worktreePath } : {}),
+          ...(event.worktreeName !== undefined ? { worktreeName: event.worktreeName } : {}),
+          ...(event.worktreeLazy !== undefined ? { worktreeLazy: event.worktreeLazy } : {}),
+          ...(event.cwdFrom !== undefined ? { cwdFrom: event.cwdFrom } : {}),
+          ...(event.cwdTo !== undefined ? { cwdTo: event.cwdTo } : {}),
+          releasedAt: event.ts,
+        });
+        break;
+
+      case 'worktree_release_undone':
+        worktreeReleased.delete(comparablePath(event.path));
+        break;
+
+      // Re-registering a known name is the rename: `set` replaces the root a
+      // name pointed at rather than refusing, because a profile is the name,
+      // not the path underneath it.
+      case 'profile_registered':
+        profiles.set(event.name, event.root);
+        break;
+
+      case 'profile_forgotten':
+        profiles.delete(event.name);
+        break;
+
+      case 'client_root_registered':
+        clientRoots.set(event.root, event.as);
+        break;
+
+      case 'client_root_forgotten':
+        clientRoots.delete(event.root);
+        break;
+
+      case 'handler_armed':
+        handlerArmed = {
+          root: event.root,
+          key: event.key,
+          previous: event.previous,
+          at: event.ts,
+        };
+        break;
+
+      case 'handler_restored':
+        handlerArmed = undefined;
+        break;
+
       case 'account_switched':
       case 'conversation_purged':
       case 'failed':
@@ -146,12 +289,32 @@ export function project(events: LedgerEvent[]): LedgerState {
     }
   }
 
-  return { active, labels, identities, repointed };
+  return {
+    active,
+    labels,
+    identities,
+    repointed,
+    retitled,
+    worktreeReleased,
+    profiles,
+    clientRoots,
+    ...(handlerArmed ? { handlerArmed } : {}),
+  };
 }
 
 /** Cards currently pointed somewhere the app did not point them, oldest move first. */
 export function listRepointed(state: LedgerState): RepointedCard[] {
   return [...state.repointed.values()].sort((a, b) => a.repointedAt - b.repointedAt);
+}
+
+/** Cards wearing a title or flag the app did not give them, oldest write first. */
+export function listRetitled(state: LedgerState): RetitledCard[] {
+  return [...state.retitled.values()].sort((a, b) => a.retitledAt - b.retitledAt);
+}
+
+/** Copies whose worktree claim is released and not yet put back, oldest first. */
+export function listWorktreeReleased(state: LedgerState): WorktreeReleasedCard[] {
+  return [...state.worktreeReleased.values()].sort((a, b) => a.releasedAt - b.releasedAt);
 }
 
 /**
@@ -244,6 +407,9 @@ export function isFostered(
   state: LedgerState,
   originSessionId: string,
   target: { accountUuid: string; organizationUuid: string },
+  cliSessionId?: string,
 ): boolean {
-  return state.active.has(fosteringKey(originSessionId, target));
+  if (state.active.has(fosteringKey(originSessionId, target, cliSessionId))) return true;
+  // The legacy key, for fosterings written before the conversation was recorded.
+  return cliSessionId !== undefined && state.active.has(fosteringKey(originSessionId, target));
 }

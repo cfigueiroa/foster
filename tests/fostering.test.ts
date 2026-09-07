@@ -6,6 +6,7 @@ import {
   fosteringKey,
   mintSessionId,
   unfosterableReasons,
+  worktreeClaim,
 } from '../src/domain/fostering.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT, session } from './helpers/store.js';
 
@@ -87,11 +88,158 @@ describe('buildFosterCopy', () => {
     expect(copy.someFutureField).toEqual({ nested: true });
   });
 
+  /**
+   * The claim is on the card; the lease is in the app's store, under the session
+   * id that took it out. A copy has a new id, so carrying the claim across is
+   * how two cards come to name one directory — and a branch only checks out in
+   * one worktree, so the app refuses whichever card it reaches second and drops
+   * that session into the main repository.
+   */
+  it('drops the worktree the original holds, whose lease the copy cannot have', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.worktreePath).toBeUndefined();
+    expect(copy.worktreeName).toBeUndefined();
+  });
+
+  it('opens the copy in the repository the worktree was cut from', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project');
+  });
+
+  /** Nothing to relocate to, so the directory is left as it was found. */
+  it('leaves cwd alone when the source names a worktree but no repository', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
+    delete held.originCwd;
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project/.claude/worktrees/topic-a1b2c3');
+  });
+
+  /**
+   * Most cards sitting in a worktree never name one: on a real store, 2798 of
+   * the 3898 with a `cwd` under `.claude/worktrees/` carried no `worktreePath`.
+   * A copy of one used to open inside another card's directory, which is why
+   * the directory itself has to be read and not just the fields.
+   */
+  it('relocates a copy sitting in a worktree the card never named', () => {
+    const held = session({
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+    });
+    const copy = buildFosterCopy(held, { origin: OLD_ACCOUNT });
+    expect(copy.cwd).toBe('/workspace/project');
+  });
+
+  /** A worktree promised but not yet cut is still a claim the copy cannot hold. */
+  it('drops a lazy worktree the same way', () => {
+    const promised = session({
+      worktreeLazy: { path: '/workspace/project/.claude/worktrees/topic-a1b2c3' },
+    });
+    const copy = buildFosterCopy(promised, { origin: OLD_ACCOUNT });
+    expect(copy.worktreeLazy).toBeUndefined();
+  });
+
+  it('leaves the working directory untouched when it is already the repository', () => {
+    const copy = buildFosterCopy(
+      session({ cwd: '/workspace/elsewhere', originCwd: '/workspace/elsewhere' }),
+      { origin: OLD_ACCOUNT },
+    );
+    expect(copy.cwd).toBe('/workspace/elsewhere');
+  });
+
   it('does not mutate the source', () => {
-    const original = session({ title: 'Refactor parser' });
+    // Carries a worktree, so the removal and the relocation are both exercised
+    // against the original rather than skipped over.
+    const original = session({
+      title: 'Refactor parser',
+      cwd: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      originCwd: '/workspace/project',
+      worktreePath: '/workspace/project/.claude/worktrees/topic-a1b2c3',
+      worktreeName: 'topic-a1b2c3',
+    });
     const snapshot = structuredClone(original);
     buildFosterCopy(original, { origin: OLD_ACCOUNT });
     expect(original).toEqual(snapshot);
+  });
+});
+
+describe('worktreeClaim', () => {
+  it('is undefined for a card sitting in no worktree at all', () => {
+    expect(worktreeClaim(session())).toBeUndefined();
+  });
+
+  it('names what a release would remove, and where cwd would move to', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      originCwd: 'C:\\home\\repo',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+      cwdTo: 'C:\\home\\repo',
+    });
+  });
+
+  it('leaves cwd out when it already reads as the repository', () => {
+    // The claim fields alone are enough to call this a claim, even though the
+    // directory itself is already the repository — nothing left to relocate.
+    const held = session({
+      cwd: 'C:\\home\\repo',
+      originCwd: 'C:\\home\\repo',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+  });
+
+  it('recognises a worktree the card never named, by the directory alone', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      originCwd: 'C:\\home\\repo',
+    });
+    expect(worktreeClaim(held)).toEqual({ cwdTo: 'C:\\home\\repo' });
+  });
+
+  it('treats a lazy worktree promise as a claim too', () => {
+    const promised = session({
+      worktreeLazy: { path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a' },
+    });
+    expect(worktreeClaim(promised)).toEqual({
+      worktreeLazy: { path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a' },
+    });
+  });
+
+  it('has nowhere to send cwd when the card names no repository', () => {
+    const held = session({
+      cwd: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
+    delete held.originCwd;
+    expect(worktreeClaim(held)).toEqual({
+      worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+      worktreeName: 'wt-a',
+    });
   });
 });
 

@@ -41,6 +41,12 @@ export interface BranchWeight {
   shared: number;
   /** The last record carrying a timestamp — the last thing said, not the last write. */
   lastMessageAt?: number;
+  /**
+   * The last answer written on this branch — where the work was left. Not a
+   * ranking input; it is what a stale row is stamped with, and
+   * `transcripts.ts` explains why the last record would stamp it wrong.
+   */
+  lastAssistantAt?: number;
 }
 
 export interface Fork {
@@ -92,6 +98,7 @@ export function weighBranches(cliSessionIds: string[], kin: Lineage): BranchWeig
       only,
       shared: scan.uuids.size - only,
       ...(scan.lastMessageAt === undefined ? {} : { lastMessageAt: scan.lastMessageAt }),
+      ...(scan.lastAssistantAt === undefined ? {} : { lastAssistantAt: scan.lastAssistantAt }),
     });
   }
 
@@ -112,6 +119,33 @@ function byAdvancement(a: BranchWeight, b: BranchWeight): number {
   if (said !== 0) return said;
   if (a.total !== b.total) return b.total - a.total;
   return a.cliSessionId.localeCompare(b.cliSessionId);
+}
+
+/**
+ * Did this branch go on after the tip did?
+ *
+ * The question `byAdvancement` cannot answer, and the one a reader is actually
+ * asking of a second row. The tip is the branch holding most work of its own,
+ * which is not the same as the branch that spoke last: when both halves carry
+ * records nobody else has, the fatter one wins the ranking while the other may
+ * be where the work was left an hour ago.
+ *
+ * A branch counts as diverged only when it holds records of its own *and* its
+ * last **answer** is later than the tip's. Both halves are load-bearing:
+ *
+ *  - a branch holding nothing the tip does not hold has nothing to go back
+ *    for, however recently the app touched it;
+ *  - the last *message* would be the wrong clock. Opening a stale row appends
+ *    a user record to its transcript, so a branch nobody has worked in since
+ *    can carry the newer message purely because somebody clicked it — the same
+ *    trap `stoppedAtOf` avoids, and the reason `mtime` was rejected above. An
+ *    answer is written only when the work actually went on.
+ */
+export function divergedFrom(branch: BranchWeight, tip: BranchWeight): boolean {
+  if (branch.cliSessionId === tip.cliSessionId) return false;
+  if (branch.only === 0) return false;
+  const went = branch.lastAssistantAt ?? 0;
+  return went > (tip.lastAssistantAt ?? tip.lastMessageAt ?? 0);
 }
 
 export interface Forks {
@@ -136,8 +170,14 @@ export interface Forks {
  * conversations are in no fork at all.
  */
 export function forksOf(cliSessionIds: Iterable<string>, kin: Lineage): Forks {
+  const ids = [...cliSessionIds];
+  // Before grouping, not after: a branch forked from the middle of a
+  // conversation answers with a root of its own until this has run, and would
+  // be grouped as work nobody else shares.
+  kin.deepen(ids);
+
   const byRoot = new Map<string, Set<string>>();
-  for (const cliSessionId of cliSessionIds) {
+  for (const cliSessionId of ids) {
     const root = kin.rootOf(cliSessionId);
     if (root === undefined) continue;
     const members = byRoot.get(root);

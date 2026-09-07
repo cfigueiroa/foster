@@ -1,4 +1,4 @@
-import { openSync, readSync, closeSync, statSync } from 'node:fs';
+import { openSync, readSync, closeSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { samePath } from '../domain/paths.js';
@@ -68,8 +68,10 @@ export function transcriptRoots(
  * path.
  */
 export function indexTranscripts(projectsDirs: string | string[]): Map<string, string> {
-  // First one wins: the same conversation can be mirrored under a second project
-  // directory, and either copy opens the same session.
+  // First one wins, which is an answer to "is there a transcript, and where do I
+  // point a reader at it" and to nothing else. The copies are not mirrors — see
+  // `scanConversationFiles` — so anything measuring a conversation must take
+  // every path instead.
   return new Map(
     [...indexAllTranscripts(projectsDirs)].map(([id, files]) => [id, files[0]!] as const),
   );
@@ -111,6 +113,48 @@ export function indexAllTranscripts(projectsDirs: string | string[]): Map<string
 }
 
 /**
+ * The project directory a working directory's transcripts live under.
+ *
+ * The app stores a conversation at `projects/<this>/<cliSessionId>.jsonl`, so
+ * this is what decides which of a conversation's files a given card opens — the
+ * question `scanConversationFiles` explains the need for. Every separator and
+ * every `.`, `:` and `_` becomes a dash, which is why the mapping only runs this
+ * way: two different directories can encode to one name, and the reverse cannot
+ * be recovered at all. Measured on this store: the encoded `cwd` names a project
+ * directory the conversation actually occupies for 6805 of 7597 cards, and every
+ * one of the 792 misses is a card in a worktree whose conversation was never
+ * written there.
+ *
+ * A caller that cannot find the answer here must treat it as "cannot tell"
+ * rather than as "no records": a miss is far more often a card pointing
+ * somewhere empty than proof about what it reaches.
+ */
+export function projectDirName(cwd: string): string {
+  let name = '';
+  for (const ch of cwd) {
+    name += ch === '\\' || ch === '/' || ch === ':' || ch === '.' || ch === '_' ? '-' : ch;
+  }
+  return name;
+}
+
+/**
+ * The one file a card opens, out of everything its conversation occupies.
+ *
+ * Undefined when that cannot be told: no working directory, no file under the
+ * name it encodes to, or — because the encoding is lossy — more than one. The
+ * refusal is deliberate; see `projectDirName`.
+ */
+export function fileOpenedFrom(
+  files: readonly string[],
+  cwd: string | undefined,
+): string | undefined {
+  if (cwd === undefined || cwd === '') return undefined;
+  const wanted = projectDirName(cwd).toLowerCase();
+  const hits = files.filter((file) => path.basename(path.dirname(file)).toLowerCase() === wanted);
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/**
  * What a conversation keeps when the app branches it.
  *
  * A branch is not a new conversation: the app copies the history into a new file
@@ -134,6 +178,39 @@ export function conversationRoot(file: string): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * Which of `wanted` this transcript mentions as a record id.
+ *
+ * Deliberately not a JSON walk. The caller asks this of every transcript it can
+ * see, and on a real store that is 6.7 GB: parsing costs 118 seconds, while
+ * reading and matching the id shape costs under 5. Nothing here needs the
+ * records — only whether an id occurs — so the parse is the whole expense and
+ * none of the answer.
+ *
+ * Read as latin1 because the ids are ASCII and the decoder is the second cost
+ * after the parse; a multi-byte character cannot forge or hide one.
+ */
+export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): string[] {
+  if (wanted.size === 0) return [];
+  let text: string;
+  try {
+    text = readFileSync(file, 'latin1');
+  } catch {
+    // Unreadable says nothing about lineage, exactly as a missing root does.
+    return [];
+  }
+
+  const found = new Set<string>();
+  for (const match of text.matchAll(RECORD_ID)) {
+    const id = match[1]!;
+    if (wanted.has(id)) found.add(id);
+  }
+  return [...found];
+}
+
+/** A record's own id, as the transcript writes it. */
+const RECORD_ID = /"uuid":"([0-9a-fA-F-]{36})"/g;
 
 export interface TranscriptFacts {
   path: string;
@@ -171,6 +248,50 @@ export function readTranscriptFacts(file: string, cliSessionId: string): Transcr
   }
 
   return facts;
+}
+
+/**
+ * What was asked of a conversation, in the words that started it.
+ *
+ * The one thing worth recovering from a conversation that never answered. A
+ * request that died before its first turn has no history to resume; what it has
+ * is the prompt, and that is enough to ask again somewhere healthy.
+ *
+ * Two things in the head are user records without being the prompt, and both
+ * would win by position if this took the first one it saw. The harness injects
+ * `<system-reminder>` blocks as user turns, and a tool result comes back as one
+ * too — structured content with no `text` part, which is why the text is
+ * gathered from the parts rather than read off the record.
+ */
+export function firstPrompt(file: string): string | undefined {
+  for (const record of headRecords(file)) {
+    if (record.type !== 'user') continue;
+    const message = record.message as { content?: unknown } | undefined;
+    const content = message?.content;
+    const text =
+      typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content
+              .filter(
+                (part): part is { type: 'text'; text: string } =>
+                  typeof part === 'object' &&
+                  part !== null &&
+                  (part as { type?: unknown }).type === 'text' &&
+                  typeof (part as { text?: unknown }).text === 'string',
+              )
+              .map((part) => part.text)
+              .join('\n')
+          : '';
+    const trimmed = text.trim();
+    if (trimmed === '') continue;
+    // A reminder is scaffolding the harness wrote, not something anyone asked
+    // for. Skipped rather than stripped: a record that is one is not also the
+    // prompt, and half a reminder read as a request is worse than reading on.
+    if (trimmed.startsWith('<system-reminder>')) continue;
+    return trimmed;
+  }
+  return undefined;
 }
 
 /** How much of a transcript's tail to read when recovering where it last ran. */
@@ -236,6 +357,18 @@ export interface ConversationScan {
    * that had been running all morning, because its card had just been clicked.
    */
   lastMessageAt?: number;
+  /**
+   * The last record the assistant wrote — the last time the work moved.
+   *
+   * Kept apart from `lastMessageAt` because the two disagree in exactly the
+   * case that matters. Opening a card whose conversation stopped a day ago
+   * resumes it, and the resume appends user records — task notifications, a
+   * result line — with today's timestamp and no answer after them. Measured on
+   * a real store: last answer 18:10 the day before, last record 08:24 that
+   * morning, from one click. A stale row stamped with the click would claim to
+   * be the newest thing there.
+   */
+  lastAssistantAt?: number;
 }
 
 /**
@@ -254,16 +387,70 @@ export interface ConversationScan {
 export function scanConversation(file: string): ConversationScan {
   const uuids = new Set<string>();
   let lastMessageAt: number | undefined;
+  let lastAssistantAt: number | undefined;
 
   for (const record of streamRecords(file)) {
     if (typeof record.uuid === 'string' && record.uuid !== '') uuids.add(record.uuid);
     if (typeof record.timestamp === 'string') {
       const at = Date.parse(record.timestamp);
-      if (Number.isFinite(at)) lastMessageAt = at;
+      if (Number.isFinite(at)) {
+        lastMessageAt = at;
+        if (record.type === 'assistant') lastAssistantAt = at;
+      }
     }
   }
 
-  return { uuids, ...(lastMessageAt === undefined ? {} : { lastMessageAt }) };
+  return {
+    uuids,
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
+  };
+}
+
+/**
+ * One conversation read across every file it occupies, as one scan.
+ *
+ * A `cliSessionId` can name more than one transcript, and those files are not
+ * copies of each other. The app finds a conversation's transcript under the
+ * project directory for the card's `cwd`, so continuing one conversation from
+ * two working directories — a repository and a worktree cut from it — leaves
+ * two files under one id, each holding the records written while that card was
+ * the one being used. Measured on a real store: 41 conversations with more than
+ * one file, 24 of them with records the first file does not hold, 6070 records
+ * in total that reading one file cannot see.
+ *
+ * Union rather than choice, because neither file is the conversation on its
+ * own. Ids survive whatever copying happened, so the shared history counts once
+ * and each side's own records count too — the same property `weighBranches`
+ * already relies on. The timestamps are the latest either file offers: the
+ * question they answer is when this work last moved, and it moved in whichever
+ * file moved last.
+ */
+export function scanConversationFiles(files: readonly string[]): ConversationScan {
+  const scans = files.map(scanConversation);
+  if (scans.length === 1) return scans[0]!;
+
+  const uuids = new Set<string>();
+  let lastMessageAt: number | undefined;
+  let lastAssistantAt: number | undefined;
+  for (const scan of scans) {
+    for (const uuid of scan.uuids) uuids.add(uuid);
+    lastMessageAt = later(lastMessageAt, scan.lastMessageAt);
+    lastAssistantAt = later(lastAssistantAt, scan.lastAssistantAt);
+  }
+
+  return {
+    uuids,
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
+  };
+}
+
+/** The later of two moments, when either may be missing. */
+function later(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.max(a, b);
 }
 
 /** How much of a transcript to hold in memory at once while streaming it. */

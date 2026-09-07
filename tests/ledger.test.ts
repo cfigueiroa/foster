@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
 import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
@@ -35,6 +36,24 @@ describe('Ledger', () => {
 
   it('returns empty for a ledger that does not exist yet', () => {
     expect(makeLedger().read()).toEqual([]);
+  });
+
+  it('round-trips the optional template field on a fostered event, old entries folding without it', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      ...fostered,
+      prefix: '(stale, stopped 01/09 18:10) ',
+      template: '(stale, stopped {when}) ',
+    });
+    ledger.append({
+      ...fostered,
+      originSessionId: 'local_origin-2',
+      copySessionId: 'local_copy-2',
+    });
+
+    const events = ledger.read();
+    expect(events[0]).toMatchObject({ template: '(stale, stopped {when}) ' });
+    expect((events[1] as { template?: string }).template).toBeUndefined();
   });
 
   it('survives a torn final line instead of losing the whole log', () => {
@@ -288,5 +307,303 @@ describe('selectByTarget', () => {
   it('narrows by organization on its own', () => {
     const picked = selectByTarget(active, undefined, OTHER.organizationUuid.slice(0, 8));
     expect(picked.map((f) => f.originSessionId)).toEqual(['b1']);
+  });
+});
+
+/**
+ * A title or flag foster rewrote on a card. The fold keeps what the app had,
+ * however many sweeps have marked the card since, and forgets the card once it
+ * is back to that.
+ */
+describe('card_retitled', () => {
+  const marked = {
+    kind: 'card_retitled' as const,
+    sessionId: 'local_card-1',
+    target: NEW_ACCOUNT,
+    path: '/store/new/local_card-1.json',
+    native: true,
+    as: 'stale' as const,
+  };
+  const STALE = '(stale, stopped 01/09 18:10) Work';
+  const LATER = '(stale, stopped 02/09 05:56) Work';
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+
+    expect(ledger.read()[0]).toMatchObject({ kind: 'card_retitled', to: STALE });
+  });
+
+  it('folds to the card, carrying the original title and flag across repeated marks', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({ ...marked, from: STALE, to: LATER });
+
+    expect(project(ledger.read()).retitled.get('local_card-1')).toMatchObject({
+      from: 'Work',
+      to: LATER,
+      fromArchived: false,
+      toArchived: true,
+    });
+  });
+
+  it('drops the card once it is back to what the app had', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({
+      ...marked,
+      from: STALE,
+      to: 'Work',
+      fromArchived: true,
+      toArchived: false,
+      as: 'tip',
+    });
+
+    expect(project(ledger.read()).retitled.size).toBe(0);
+  });
+
+  it('keeps the card while the title is back but the flag is not', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+    ledger.append({ ...marked, from: STALE, to: 'Work', as: 'tip' });
+
+    expect(project(ledger.read()).retitled.get('local_card-1')).toMatchObject({
+      to: 'Work',
+      toArchived: true,
+    });
+  });
+
+  /**
+   * #35's own field: the template a mark was made from, so a later run
+   * recognises it whatever words that run was itself given. Optional so an
+   * old log — written before this existed — still folds.
+   */
+  it('round-trips the optional template field', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      ...marked,
+      from: 'Work',
+      to: STALE,
+      fromArchived: false,
+      toArchived: true,
+      template: '(stale, stopped {when}) ',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'card_retitled',
+      template: '(stale, stopped {when}) ',
+    });
+  });
+
+  it('still folds an old event that carries no template at all', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
+
+    const events = ledger.read();
+    expect((events[0] as { template?: string }).template).toBeUndefined();
+    expect(project(events).retitled.get('local_card-1')).toMatchObject({ from: 'Work', to: STALE });
+  });
+});
+
+describe('worktree_released / worktree_release_undone', () => {
+  const released = {
+    kind: 'worktree_released' as const,
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_card-1.json',
+    sessionId: 'local_card-1',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    worktreeName: 'wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+  };
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    expect(ledger.read()[0]).toMatchObject({ kind: 'worktree_released', path: released.path });
+  });
+
+  it('folds to the copy, keyed by path', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+
+    // Keyed by `comparablePath`, the same normalisation every other lookup in
+    // this fold uses — two spellings of one file must land on one entry.
+    const card = project(ledger.read()).worktreeReleased.get(comparablePath(released.path));
+    expect(card).toMatchObject({
+      sessionId: 'local_card-1',
+      worktreePath: released.worktreePath,
+      worktreeName: released.worktreeName,
+      cwdFrom: released.cwdFrom,
+      cwdTo: released.cwdTo,
+    });
+  });
+
+  it('drops the card once the release is undone', () => {
+    const ledger = makeLedger();
+    ledger.append(released);
+    ledger.append({ kind: 'worktree_release_undone', path: released.path });
+
+    expect(project(ledger.read()).worktreeReleased.size).toBe(0);
+  });
+});
+
+/**
+ * A name given to a Desktop installation other than the default. The fold
+ * keeps only the latest root for a name — re-registering is the rename — and
+ * forgetting removes the name from state without touching the log line that
+ * created it.
+ */
+describe('profile_registered / profile_forgotten', () => {
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'profile_registered',
+      name: 'work',
+      root: 'D:\\Claude-Work',
+    });
+  });
+
+  it('folds to a name naming a root', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+
+    expect(project(ledger.read()).profiles.get('work')).toBe('D:\\Claude-Work');
+  });
+
+  it('treats re-registering a name with a new root as the rename', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work-2' });
+
+    const profiles = project(ledger.read()).profiles;
+    expect(profiles.get('work')).toBe('D:\\Claude-Work-2');
+    expect(profiles.size).toBe(1);
+  });
+
+  it('forgets a name without erasing the registration from the log', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'profile_registered', name: 'work', root: 'D:\\Claude-Work' });
+    ledger.append({ kind: 'profile_forgotten', name: 'work' });
+
+    expect(project(ledger.read()).profiles.has('work')).toBe(false);
+    expect(ledger.read().map((e) => e.kind)).toEqual(['profile_registered', 'profile_forgotten']);
+  });
+});
+
+/**
+ * A filesystem root registered as somewhere `foster` looks for CLI client
+ * config directories — a single client, or a container of several.
+ */
+describe('client_root_registered / client_root_forgotten', () => {
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+  });
+
+  it('folds to a root naming what kind it is', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'client_root_registered',
+      root: 'C:\\home\\.claude-contas',
+      as: 'container',
+    });
+
+    expect(project(ledger.read()).clientRoots.get('C:\\home\\.claude-contas')).toBe('container');
+  });
+
+  it('re-registering the same root with a different kind replaces it', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'container' });
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'client' });
+
+    expect(project(ledger.read()).clientRoots.get('C:\\home\\work')).toBe('client');
+  });
+
+  it('forgets a root without erasing the registration from the log', () => {
+    const ledger = makeLedger();
+    ledger.append({ kind: 'client_root_registered', root: 'C:\\home\\work', as: 'client' });
+    ledger.append({ kind: 'client_root_forgotten', root: 'C:\\home\\work' });
+
+    expect(project(ledger.read()).clientRoots.has('C:\\home\\work')).toBe(false);
+    expect(ledger.read().map((e) => e.kind)).toEqual([
+      'client_root_registered',
+      'client_root_forgotten',
+    ]);
+  });
+});
+
+/**
+ * The `claude://` handler, armed for one profile's sign-in and put back
+ * afterwards — see `engine/protocolHandler.ts`. `handlerArmed` in the folded
+ * state is the fact that a login is (or was left) in flight; a matching
+ * `handler_restored` clears it, whatever `restored` said.
+ */
+describe('handler_armed / handler_restored', () => {
+  const KEY = 'HKCU\\Software\\Classes\\AppXaem4n1tckgw588q10avtdbzpbgt71c77\\Shell\\open';
+
+  it('is read back as an event', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '--user-data-dir=D:\\Claude-Work "%1"',
+    });
+
+    expect(ledger.read()[0]).toMatchObject({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+    });
+  });
+
+  it('folds to a record of what to put back', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '--user-data-dir=D:\\Claude-Work "%1"',
+    });
+
+    expect(project(ledger.read()).handlerArmed).toMatchObject({
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+    });
+  });
+
+  it('is cleared by a matching restore, whether or not it succeeded', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'handler_armed',
+      root: 'D:\\Claude-Work',
+      key: KEY,
+      previous: '"%1"',
+      exe: 'C:\\Apps\\Claude.exe',
+      armed: '--user-data-dir=D:\\Claude-Work "%1"',
+    });
+    ledger.append({ kind: 'handler_restored', root: 'D:\\Claude-Work', restored: false });
+
+    expect(project(ledger.read()).handlerArmed).toBeUndefined();
+    expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
   });
 });

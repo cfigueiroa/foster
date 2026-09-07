@@ -144,10 +144,11 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
       'sweep_everything',
       'The whole job in one call: copy every fosterable session from the other accounts into ' +
         'the current one — archived included, and the copies stay archived — then bring back ' +
-        'conversations the app deleted that nothing points at, then re-scan to confirm both are ' +
-        'exhausted. Use this for "bring everything here", rather than foster_sessions, which ' +
-        'leaves archived sessions behind and cannot reach deleted ones. It never purges and ' +
-        'never consolidates: forks are counted and reported for the user to decide. The result ' +
+        'conversations the app deleted that nothing points at, give every branch of a forked ' +
+        'conversation a row of its own (the branch that carried on keeps its title, the rest are ' +
+        'marked stale and archived), then re-scan to confirm all of it is exhausted. Use this for ' +
+        '"bring everything here", rather than foster_sessions, which leaves archived sessions ' +
+        'behind and cannot reach deleted ones. It never purges and never consolidates. The result ' +
         `carries the restart command, and says when foster must not run it itself. ${mutationGate}`,
       {
         prefix: z.string().optional().describe('title prefix marking the copies'),

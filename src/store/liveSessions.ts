@@ -10,6 +10,9 @@ import {
 } from '../util/processes.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { configDirCandidates } from './configDirs.js';
+import { accountDir, layoutFor, listAccountDirs } from '../domain/paths.js';
+import { isSessionFileName } from '../domain/naming.js';
+import { readCliSessionId } from './sessionFile.js';
 
 /**
  * The CLI's registry of running sessions.
@@ -65,6 +68,14 @@ export interface LiveCliSession {
   /** The conversation the process is holding open. */
   sessionId: string;
   cwd?: string;
+  /**
+   * Who started this CLI process, when the record says. `'claude-desktop'` is
+   * the app spawning a Code session inside itself; anything else, terminal.
+   * Records too old to carry one are treated as terminal — the safe default,
+   * since a terminal session is never mistaken for one the app can be asked
+   * about.
+   */
+  entrypoint?: string;
   /** What the file says about its writer, for anything that has to verify it. */
   identity: WriterIdentity;
 }
@@ -154,6 +165,33 @@ function inspectWriter(identity: WriterIdentity, rows: ProcessRow[]): WriterInsp
     // The pid gate, not this, decides whether a process exists; a table read a
     // moment earlier is entitled to have missed one.
     return { verdict: 'unknown', note: `pid ${identity.pid} is not in the process table` };
+  }
+
+  // tasklist rows never carry a creation time, so without this check every
+  // partial row would fall straight through to the 'plausible' return at the
+  // bottom — the two checks in between (creation time, then recordedAt) both
+  // require fields a partial row never has. That is exactly backwards: a
+  // partial row is the case with the LEAST evidence, and 'plausible' is what
+  // lets `endableWriter` hand a pid to `taskkill /F /T`. With parent links gone
+  // too, `isSelfHostedBy` cannot see that the pid is foster's own ancestor
+  // either, so a partial row must never come out as anything but 'mismatch' (a
+  // name alone still proves a stranger) or 'unknown' — never 'confirmed', never
+  // 'plausible'.
+  if (row.partial) {
+    if (!couldBeWriter(row)) {
+      return {
+        verdict: 'mismatch',
+        row,
+        note: `pid ${identity.pid} is ${row.name || 'a process'}, which is not a claude session`,
+      };
+    }
+    return {
+      verdict: 'unknown',
+      row,
+      note:
+        `pid ${identity.pid} is ${row.name || 'a process'}, but the process table was read ` +
+        'through tasklist, which reports no creation time or path to check the record against',
+    };
   }
 
   if (identity.procStartedAt !== undefined && row.startedAt !== undefined) {
@@ -530,6 +568,81 @@ export function liveSessionFor(
   return liveSessions(roots, alive).find((session) => session.sessionId.toLowerCase() === wanted);
 }
 
+/**
+ * The subset of a known installation this needs — deliberately narrower than
+ * `KnownStore` (`src/engine/stores.ts`), so this module never has to import the
+ * engine layer just to describe the shape it reads.
+ */
+export interface HostCandidate {
+  root: string;
+  /** The name it was registered under, when it has one. */
+  name?: string;
+  /** The account this installation last recorded — `readConfig(store).lastKnownAccountUuid`. */
+  accountUuid?: string;
+  /** Whether the directory is still there; a gone store cannot hold a live card. */
+  exists: boolean;
+}
+
+/**
+ * An index from a CLI session id to the store whose card names it.
+ *
+ * The registry's `sessionId` is the CLI's own id for the conversation
+ * (`93dd914b-…`). The card the app writes is named after a *different* id — the
+ * app's own session id (`local_360c2711-….json`) — and carries the CLI id
+ * inside itself, as the `cliSessionId` field. So the link between a registry
+ * entry and the store hosting it cannot be found by filename at all; it only
+ * exists by reading cards and comparing that field. (`storeHoldsSession` in
+ * `paths.ts` checks the opposite pairing — a card's *own* id against
+ * `CLAUDE_CODE_HOST_SESSION_ID` — and stays right for that.)
+ *
+ * Built once per set of candidate stores rather than once per registry entry:
+ * `foster live` and `app status` ask this question of every live session, and
+ * the card tree does not get any smaller for asking about them one at a time.
+ * Only existing stores are scanned — a store whose directory is gone cannot
+ * hold a card — and an unreadable or malformed card is skipped rather than
+ * read as evidence of anything. The first store (in the order given) whose
+ * card claims an id wins, matching the linear scan this replaces.
+ */
+export function buildHostedIndex(stores: HostCandidate[]): Map<string, HostCandidate> {
+  const index = new Map<string, HostCandidate>();
+  for (const store of stores) {
+    if (!store.exists) continue;
+    const layout = layoutFor(store.root);
+    for (const account of listAccountDirs(layout)) {
+      const dir = accountDir(layout, account);
+      for (const entry of safeReaddir(dir)) {
+        if (!isSessionFileName(entry)) continue;
+        const cliSessionId = readCliSessionId(path.join(dir, entry));
+        if (!cliSessionId) continue;
+        const key = cliSessionId.toLowerCase();
+        if (!index.has(key)) index.set(key, store);
+      }
+    }
+  }
+  return index;
+}
+
+/**
+ * Which known installation is hosting a registry entry, if any.
+ *
+ * Looks the entry's CLI session id up in an index built by `buildHostedIndex` —
+ * see there for why a card has to be read to answer this at all.
+ *
+ * A terminal session (any entrypoint but `'claude-desktop'`) is never looked
+ * up: it did not come from an installation at all, so a card that happens to
+ * carry its id as `cliSessionId` would be a coincidence, not an answer. A
+ * hosted entry whose card cannot be found — deleted since, or in a store
+ * foster does not know about — comes back `undefined` rather than a guess at
+ * the likeliest one.
+ */
+export function hostedStoreFor(
+  session: { sessionId: string; entrypoint?: string },
+  index: Map<string, HostCandidate>,
+): HostCandidate | undefined {
+  if (session.entrypoint !== 'claude-desktop') return undefined;
+  return index.get(session.sessionId.toLowerCase());
+}
+
 function readRegistryFile(file: string): Omit<LiveCliSession, 'registryFile'> | undefined {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
@@ -550,6 +663,7 @@ function readRegistryFile(file: string): Omit<LiveCliSession, 'registryFile'> | 
       pid,
       sessionId,
       ...(typeof parsed.cwd === 'string' ? { cwd: parsed.cwd } : {}),
+      ...(typeof parsed.entrypoint === 'string' ? { entrypoint: parsed.entrypoint } : {}),
       identity: {
         pid,
         ...(procStartedAt !== undefined ? { procStartedAt } : {}),

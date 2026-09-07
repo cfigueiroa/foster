@@ -29,6 +29,15 @@ export interface StoreConfig {
    * which is the default and the case that matters — see engine/desktop.ts.
    */
   menuBarEnabled?: boolean;
+  /**
+   * Whether the config file carries an OAuth token cache entry — the current
+   * `oauth:tokenCacheV2` key or the older `oauth:tokenCache`. Presence only: the
+   * value itself, whichever key holds it, is never read out of `parsed`, so this
+   * says a credential was cached here at some point, not which account it
+   * belongs to or whether it still works. Undefined, like the other optional
+   * fields here, means "no" — no config to check, or neither key present.
+   */
+  hasTokenCache?: boolean;
 }
 
 /**
@@ -52,6 +61,10 @@ export function readConfig(store: StoreLayout): StoreConfig {
     if (key === 'updaterLastSeenVersion') out.updaterLastSeenVersion = value;
   }
   if (typeof parsed.menuBarEnabled === 'boolean') out.menuBarEnabled = parsed.menuBarEnabled;
+  // Presence only, checked directly against the parsed keys — the blob itself is
+  // never assigned to `out` and never leaves this function, whichever of the two
+  // names it is filed under.
+  if ('oauth:tokenCacheV2' in parsed || 'oauth:tokenCache' in parsed) out.hasTokenCache = true;
   return out;
 }
 

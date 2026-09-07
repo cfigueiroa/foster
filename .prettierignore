@@ -1,0 +1,6 @@
+# Nested git worktrees. `git worktree add` under .claude/ puts a whole second
+# checkout inside this one, and prettier walks it: `npm run check` then reports
+# style failures in files this repository does not track and cannot fix, which
+# reads as a red gate over someone else's scratch work. Measured 05/09/2026, on
+# a run whose own diff was clean.
+.claude/worktrees/

@@ -22,10 +22,17 @@ vi.mock('../src/engine/vault.js', () => ({
   rememberCredential: vi.fn(),
 }));
 vi.mock('../src/engine/anthropicApi.js', () => ({ fetchLiveProfile: vi.fn() }));
+// The app's own hint about whose the Desktop credential is — the cheap half of
+// what keeps the second run off the network.
+vi.mock('../src/store/config.js', () => ({ readConfig: vi.fn(() => ({})) }));
 
 const { readAccessToken } = await import('../src/store/credential.js');
 const { fetchLiveProfile } = await import('../src/engine/anthropicApi.js');
-const { identifyAccount, canIdentify } = await import('../src/engine/identify.js');
+const { listClients } = await import('../src/store/clients.js');
+const { readCliCredential } = await import('../src/store/cliCredential.js');
+const { readConfig } = await import('../src/store/config.js');
+const { identifyAccount, canIdentify, identifyHeldAccounts } =
+  await import('../src/engine/identify.js');
 
 const WANTED = '11111111-1111-4111-8111-111111111111';
 const OTHER = '22222222-2222-4222-8222-222222222222';
@@ -93,6 +100,68 @@ describe('identifyAccount', () => {
   });
 });
 
+/**
+ * The automatic half. What matters is not that it names accounts — identifyAccount
+ * already did — but that the second run is silent: a machine whose credentials all
+ * have known owners must not go to the network again just because something printed
+ * an account.
+ */
+describe('identifyHeldAccounts', () => {
+  it('names every account its credentials reach, one question per credential', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted' });
+    vi.mocked(listClients).mockReturnValueOnce([
+      {
+        configDir: 'C:\\clients\\other',
+        isDefault: false,
+        inUse: false,
+        signedIn: true,
+        conversations: 0,
+        live: 0,
+      },
+    ] as ReturnType<typeof listClients>);
+    vi.mocked(readCliCredential).mockReturnValueOnce({
+      raw: '{}',
+      accessToken: 'key-other',
+      oauth: { accessToken: 'key-other' },
+    } as unknown as ReturnType<typeof readCliCredential>);
+    const log = ledger();
+
+    const named = await identifyHeldAccounts(store, log, 1000);
+
+    expect(named).toEqual([WANTED, OTHER]);
+    expect(vi.mocked(fetchLiveProfile)).toHaveBeenCalledTimes(2);
+    expect(project(log.read()).identities.get(OTHER)?.email).toBe('him@x.test');
+  });
+
+  it('asks nothing when every credential belongs to an account already known', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted' });
+    vi.mocked(readConfig).mockReturnValue({ lastKnownAccountUuid: WANTED } as ReturnType<
+      typeof readConfig
+    >);
+    const log = ledger();
+
+    // The first run pays for the answer...
+    await identifyHeldAccounts(store, log, 1000);
+    expect(vi.mocked(fetchLiveProfile)).toHaveBeenCalledTimes(1);
+
+    // ...and the second knows the app's own account without asking, because the
+    // config hint says whose that credential is and the ledger now holds it.
+    vi.mocked(fetchLiveProfile).mockClear();
+    const again = await identifyHeldAccounts(store, log, 2000);
+
+    expect(again).toEqual([]);
+    expect(vi.mocked(fetchLiveProfile)).not.toHaveBeenCalled();
+  });
+
+  it('does not ask with a credential that has lapsed', async () => {
+    vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted', expiresAt: 1 });
+    const log = ledger();
+
+    expect(await identifyHeldAccounts(store, log, 10_000)).toEqual([]);
+    expect(vi.mocked(fetchLiveProfile)).not.toHaveBeenCalled();
+  });
+});
+
 describe('canIdentify', () => {
   it('is true with a live credential and false when the only one is expired', () => {
     vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted' });
@@ -100,5 +169,43 @@ describe('canIdentify', () => {
 
     vi.mocked(readAccessToken).mockReturnValue({ token: 'key-wanted', expiresAt: 1 });
     expect(canIdentify(store, 10_000)).toBe(false);
+  });
+
+  // The D4 guard from the other direction: `client register` must never let
+  // identify present a fleet credential to the API. identify.ts calls
+  // `listClients()` with no arguments at all, so a registered root cannot
+  // reach it no matter what the ledger holds — proved here by handing
+  // `listClients` an implementation that WOULD return the container's signed-in
+  // child if it ever received registered dirs, then showing a registered
+  // container in the ledger changes nothing about what identify sees.
+  it('does not present a credential from a client root registered in the ledger', () => {
+    const log = ledger();
+    log.append({ kind: 'client_root_registered', root: 'C:\\accounts', as: 'container' });
+    expect(project(log.read()).clientRoots.get('C:\\accounts')).toBe('container');
+
+    vi.mocked(listClients).mockImplementationOnce((_env, _extra, registeredDirs) =>
+      registeredDirs && registeredDirs.length > 0
+        ? ([
+            {
+              configDir: 'C:\\accounts\\llm02',
+              isDefault: false,
+              inUse: false,
+              signedIn: true,
+              conversations: 0,
+              live: 0,
+            },
+          ] as ReturnType<typeof listClients>)
+        : [],
+    );
+    vi.mocked(readCliCredential).mockReturnValue({
+      raw: '{}',
+      accessToken: 'key-fleet',
+      oauth: { accessToken: 'key-fleet' },
+    } as unknown as ReturnType<typeof readCliCredential>);
+    vi.mocked(readAccessToken).mockReturnValue(undefined);
+
+    // If identify's call site ever grew a default that read the ledger, this
+    // would flip to true on the fleet credential above.
+    expect(canIdentify(store, 1000)).toBe(false);
   });
 });

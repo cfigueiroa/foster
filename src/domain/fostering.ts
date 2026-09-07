@@ -1,7 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { VERSION } from '../version.js';
 import { SESSION_ID_PREFIX } from './naming.js';
+import { samePath } from './paths.js';
 import type { AccountRef, CodeSessionData, Unfosterable } from './types.js';
+
+/**
+ * The app's own worktree layout, which is `<repo>/.claude/worktrees/<name>`.
+ * Matching the shape is not the same as guessing: a directory that does not end
+ * this way is left exactly as it came.
+ */
+const WORKTREE_TAIL = /[/\\]\.claude[/\\]worktrees[/\\][^/\\]+[/\\]?$/;
+
+/** The repository a worktree was cut from, or the directory itself when it is not one. */
+function repositoryOf(dir: string): string {
+  const trimmed = dir.replace(WORKTREE_TAIL, '');
+  return trimmed === '' ? dir : trimmed;
+}
 
 /**
  * Prefix put in front of a copy's title. Empty by default: no marker at all.
@@ -117,7 +131,16 @@ export function buildRestoredSession(facts: {
   return {
     sessionId: `${SESSION_ID_PREFIX}${facts.cliSessionId}`,
     cliSessionId: facts.cliSessionId,
-    ...(facts.cwd === undefined ? {} : { cwd: facts.cwd, originCwd: facts.cwd }),
+    // The transcript records where the conversation ran, which is a worktree
+    // whenever the app gave it one — and a restored card that opens there would
+    // land inside a directory another card holds, with no repository to fall
+    // back to, since both fields would name the worktree. So the repository is
+    // what goes in: the worktree the conversation used is gone or spoken for by
+    // the time a deletion is being undone, and the app cuts a fresh one when the
+    // conversation next needs to edit.
+    ...(facts.cwd === undefined
+      ? {}
+      : { cwd: repositoryOf(facts.cwd), originCwd: repositoryOf(facts.cwd) }),
     // An untitled restore is still worth having; it just says what it is. Left
     // unset, the app labels it "General coding session", which is indistinguishable
     // from every other untitled one — worse than blank for finding it again.
@@ -133,6 +156,64 @@ export function buildRestoredSession(facts: {
   };
 }
 
+/**
+ * What releasing a worktree claim would change, or nothing when the card holds
+ * no claim at all.
+ *
+ * Pulled out of `buildFosterCopy` so the same test drives a repair over a copy
+ * already on disk (`engine/unclaim.ts`), not just a copy being written for the
+ * first time. `cwdTo` is set only when there is somewhere to move `cwd` to and
+ * it is not already there — a card whose `cwd` already reads as its `originCwd`
+ * needs the fields removed and nothing relocated.
+ */
+export interface WorktreeClaim {
+  worktreePath?: string;
+  worktreeName?: string;
+  worktreeLazy?: unknown;
+  cwdTo?: string;
+}
+
+export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined {
+  const inWorktree =
+    card.worktreePath !== undefined ||
+    card.worktreeName !== undefined ||
+    card.worktreeLazy !== undefined ||
+    (typeof card.cwd === 'string' &&
+      typeof card.originCwd === 'string' &&
+      card.originCwd !== '' &&
+      !samePath(card.cwd, card.originCwd));
+  if (!inWorktree) return undefined;
+
+  const cwdTo =
+    typeof card.originCwd === 'string' &&
+    card.originCwd !== '' &&
+    (typeof card.cwd !== 'string' || !samePath(card.cwd, card.originCwd))
+      ? card.originCwd
+      : undefined;
+
+  return {
+    ...(card.worktreePath !== undefined ? { worktreePath: card.worktreePath } : {}),
+    ...(card.worktreeName !== undefined ? { worktreeName: card.worktreeName } : {}),
+    ...(card.worktreeLazy !== undefined ? { worktreeLazy: card.worktreeLazy } : {}),
+    ...(cwdTo !== undefined ? { cwdTo } : {}),
+  };
+}
+
+/**
+ * The working directory a copy of this card would open in.
+ *
+ * Which matters beyond the copy itself: a `cliSessionId` can name more than one
+ * transcript, and the app finds the one to open under the project directory for
+ * the card's `cwd` — so this is what decides which records the copy would
+ * actually reach. Anything weighing a copy before making it has to ask this
+ * rather than the source's own `cwd`, or it promises records the copy will not
+ * open. Reads the claim rather than restating it, so it cannot drift from what
+ * `buildFosterCopy` does. See `transcripts.ts`.
+ */
+export function copyCwd(card: CodeSessionData): string | undefined {
+  return worktreeClaim(card)?.cwdTo ?? card.cwd;
+}
+
 export interface BuildCopyOptions {
   origin: AccountRef;
   /**
@@ -145,15 +226,24 @@ export interface BuildCopyOptions {
   prefix?: string;
   now?: number;
   sessionId?: string;
+  /**
+   * What the copy's archived flag should be, whatever the source's is. Left out,
+   * the copy keeps the source's — the ordinary case, and the one the sweep's
+   * "archived stays archived" rests on. The branch pass sets it: a row for the
+   * branch that stopped goes to the archived view however its source is filed.
+   */
+  archived?: boolean;
 }
 
 /**
  * Produce the session object to write into the target account's directory.
  *
  * Unknown keys are carried over untouched — the app normalises the file itself on
- * first open. Only four things change: a fresh identity, the fostering marker, the
- * prefixed title, and the removal of any stale error inherited from the origin
- * account (which the sidebar would otherwise render as a warning badge).
+ * first open. Five things change: a fresh identity, the fostering marker, the
+ * prefixed title, the removal of any stale error inherited from the origin
+ * account (which the sidebar would otherwise render as a warning badge), and the
+ * worktree the source holds, which is dropped along with the `cwd` inside it for
+ * the reason spelled out below.
  */
 export function buildFosterCopy(
   source: CodeSessionData,
@@ -164,6 +254,38 @@ export function buildFosterCopy(
 
   delete copy.error;
   delete copy.errorAt;
+
+  // A lease on a worktree does not travel with a copy.
+  //
+  // A card names the worktree it holds (`worktreePath`/`worktreeName`) while the
+  // lease itself lives in the app's own store of worktrees, keyed by the session
+  // id that took it out. A copy mints a fresh id, so what it would inherit is the
+  // claim without the lease: two cards naming one directory, and — since a branch
+  // can only be checked out in one worktree — a git refusal for whichever of them
+  // the app reaches second. That session lands in the main repository instead and
+  // loses whatever it had not committed. Measured on a real store, 1100 cards
+  // named a worktree; of the 853 whose card was still live, 88% named a
+  // directory that no longer existed.
+  //
+  // Naming the fields is not enough to recognise the state, which is why the
+  // test is on the directory as well: a card whose `cwd` is not its `originCwd`
+  // is sitting in a worktree whether or not it says so. On that same store 3898
+  // cards had a `cwd` under `.claude/worktrees/`, and 2798 of them named no
+  // worktree at all — 2469 pointing at a directory that was already gone. Every
+  // card whose `cwd` differed from its `originCwd` was in a worktree, so the
+  // wider test brought in no other kind of directory. `worktreeLazy` is a
+  // worktree the app has promised but not yet cut, and it travels no better.
+  //
+  // `originCwd` is the repository the worktree came from, and the copy opens
+  // there instead. A source without one keeps the directory it had — there is
+  // nowhere else to send it.
+  const claim = worktreeClaim(copy);
+  if (claim) {
+    delete copy.worktreePath;
+    delete copy.worktreeName;
+    delete copy.worktreeLazy;
+    if (claim.cwdTo !== undefined) copy.cwd = claim.cwdTo;
+  }
 
   // What made the original invisible outside its own account, dropped so the copy
   // is an ordinary conversation.
@@ -190,6 +312,8 @@ export function buildFosterCopy(
     copy.lastFocusedAt = source.lastFocusedAt ?? options.now ?? Date.now();
   }
 
+  if (options.archived !== undefined) copy.isArchived = options.archived;
+
   copy.sessionId = options.sessionId ?? mintSessionId();
   // A session with no title would otherwise become a copy titled with nothing but
   // the marker — "↪ " — which says it is a copy and nothing else. Saying it had
@@ -208,9 +332,29 @@ export function buildFosterCopy(
   return copy;
 }
 
-/** Key used to make fostering idempotent: one active copy per origin session per target account. */
-export function fosteringKey(originSessionId: string, target: AccountRef): string {
-  return `${originSessionId}@${target.accountUuid}/${target.organizationUuid}`;
+/**
+ * Key used to make fostering idempotent: one active copy per origin session, per
+ * target account, **per conversation**.
+ *
+ * The conversation is part of the identity because a card is not one. Opening a
+ * conversation that is live elsewhere makes the app branch it: it writes a new
+ * transcript and repoints the card at the branch. That happens to origin cards
+ * too, and then the ledger — keyed on the card alone — answered "already
+ * fostered" for a conversation it had never copied, and no sweep would bring it
+ * again. Measured on a real store: 38 of 8312 active fosterings had an origin
+ * card holding a conversation other than the one recorded for it.
+ *
+ * Left out when the conversation is unknown, which keeps the key events written
+ * before it was recorded still fold to what they always did.
+ */
+export function fosteringKey(
+  originSessionId: string,
+  target: AccountRef,
+  cliSessionId?: string,
+): string {
+  // Case folded, as this identifier is everywhere else it is compared.
+  const work = cliSessionId ? `#${cliSessionId.toLowerCase()}` : '';
+  return `${originSessionId}${work}@${target.accountUuid}/${target.organizationUuid}`;
 }
 
 /** How a reason reads in a sentence. Shared so a flag and a report cannot drift. */

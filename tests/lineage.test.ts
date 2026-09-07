@@ -4,7 +4,9 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findDuplicates } from '../src/engine/duplicates.js';
 import { FOLLOWED_BRANCH, fosterSessions } from '../src/engine/executor.js';
+import { forksOf } from '../src/engine/branches.js';
 import { lineageAt } from '../src/engine/lineage.js';
+import { sidebarFrom } from '../src/engine/sidebar.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listActive, listRepointed, project } from '../src/ledger/project.js';
 import { selectReturnTargets } from '../src/ops/active.js';
@@ -29,6 +31,10 @@ const BRANCH = '00000000-0000-4000-8000-0000000000e2';
 const UNRELATED = '00000000-0000-4000-8000-0000000000e3';
 /** A second fork of the same work, for the case where a card is moved twice. */
 const SECOND = '00000000-0000-4000-8000-0000000000f2';
+/** A branch the app copied from the middle of ORIGINAL, so it heads its own root. */
+const MIDWAY = '00000000-0000-4000-8000-0000000000f4';
+/** The record MIDWAY opens on, which ORIGINAL holds in the middle of its history. */
+const MID_RECORD = '00000000-0000-4000-8000-0000000000f5';
 
 /** A config directory with transcripts in it, as CLAUDE_CONFIG_DIR points at. */
 function transcripts(files: Record<string, string[]>): NodeJS.ProcessEnv {
@@ -70,6 +76,29 @@ function forked(): NodeJS.ProcessEnv {
     // No card points at this one, so it is invisible to every weighing until
     // something moves a card onto it.
     [SECOND]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000f3')],
+  });
+}
+
+/**
+ * The same work forked from the middle, on its own tree.
+ *
+ * Kept apart from `forked()` because that fixture's shape is load-bearing:
+ * which half carried on is read off the records each holds, and adding any
+ * would answer a different question in the tests that use it.
+ */
+function forkedMidway(): NodeJS.ProcessEnv {
+  return transcripts({
+    [ORIGINAL]: [
+      META,
+      record(ROOT),
+      record('00000000-0000-4000-8000-0000000000e4'),
+      record(MID_RECORD),
+      record('00000000-0000-4000-8000-0000000000f6'),
+    ],
+    // Opens on a record ORIGINAL holds well past its own first, rewritten with
+    // no parent — so `conversationRoot` gives the two different answers.
+    [MIDWAY]: [META, record(MID_RECORD), record('00000000-0000-4000-8000-0000000000f7')],
+    [UNRELATED]: [META, record('00000000-0000-4000-8000-0000000000e6')],
   });
 }
 
@@ -569,5 +598,505 @@ describe('findDuplicates', () => {
     );
     expect(report.branches).toHaveLength(0);
     expect(report.copies).toHaveLength(0);
+  });
+});
+
+/**
+ * The sweep's branch pass: a row for a branch the account already shows another
+ * branch of. Narrower than naming the session — that also brings back a copy
+ * the user deleted in the app, and a bulk pass must not.
+ */
+describe('accepting a branch', () => {
+  it('fosters a branch of work the account shows, when asked for branches', () => {
+    const { store, ledger } = branchWaiting();
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+    });
+
+    expect(outcomes[0]!.status).toBe('fostered');
+    expect(outcomes[0]!.copyTitle).toBe('Sample session');
+  });
+
+  it('still refuses a second card for exactly the conversation the account shows', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e7', cliSessionId: ORIGINAL }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000e8', cliSessionId: ORIGINAL }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+    });
+
+    expect(outcomes[0]!.status).toBe('skipped');
+    expect(outcomes[0]!.detail).toBe('this account already has that conversation');
+  });
+
+  it('writes the copy archived when told to, and records that as its own decision', () => {
+    const { store, ledger } = branchWaiting();
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs: projects(forked()),
+      acceptBranches: true,
+      prefix: '(stale) ',
+      archive: true,
+    });
+
+    expect(outcomes[0]!.copyTitle).toBe('(stale) Sample session');
+    const copy = scanAccount(store, NEW_ACCOUNT).find((entry) => entry.isCopy);
+    expect(copy!.data.isArchived).toBe(true);
+    expect(listActive(project(ledger.read()))[0]!.archivedByFoster).toBe(true);
+  });
+});
+
+describe('the transcript index', () => {
+  it('lists every path a conversation occupies, from the walk the answers share', () => {
+    const kin = lineageAt(projects(forked()));
+
+    expect(kin.transcripts().get(ORIGINAL)).toHaveLength(1);
+    expect(kin.transcripts().has(SECOND)).toBe(true);
+    expect(kin.rootOf(ORIGINAL)).toBe(ROOT);
+  });
+});
+
+/**
+ * The mirror of "a copy the app branched": the card that was copied *from* is
+ * the one the app moved.
+ *
+ * Measured on a real store: 38 of 8312 active fosterings had an origin card
+ * holding a conversation other than the one recorded against it. Keyed on the
+ * card alone, the ledger answered "already fostered" for work it had never
+ * copied — and no sweep, not even one naming the session outright, would bring
+ * it. The conversation is what was fostered; the card is only where it was
+ * found.
+ */
+describe('an origin card the app branched', () => {
+  function fosteredFrom(): {
+    store: StoreLayout;
+    ledger: Ledger;
+    projectsDirs: string[];
+    originPath: string;
+  } {
+    const store = makeStore();
+    const originPath = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000f1', cliSessionId: ORIGINAL }),
+    );
+    const ledger = ledgerIn();
+    const projectsDirs = projects(forked());
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+    return { store, ledger, projectsDirs, originPath };
+  }
+
+  it('brings the conversation the card now holds, instead of calling it already fostered', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again).toHaveLength(1);
+    expect(again[0]!.status).toBe('fostered');
+  });
+
+  it('keeps the fostering of the conversation it copied before', () => {
+    const { store, ledger, projectsDirs, originPath } = fosteredFrom();
+    appBranches(originPath, UNRELATED);
+
+    fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    // Two rows, two fosterings: the second must not evict the first, or the copy
+    // already in the sidebar would stop being anything `foster return` knows.
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(active.map((entry) => entry.cliSessionId).sort()).toEqual([ORIGINAL, UNRELATED].sort());
+  });
+
+  it('is still skipped when the card holds the conversation it was fostered for', () => {
+    const { store, ledger, projectsDirs } = fosteredFrom();
+
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger,
+      target: NEW_ACCOUNT,
+      projectsDirs,
+    });
+
+    expect(again[0]).toMatchObject({ status: 'skipped', detail: 'already in this account' });
+  });
+});
+
+/**
+ * A fork that began in the middle of a conversation.
+ *
+ * `conversationRoot` reads the first record, which is the shared ancestor only
+ * when the copy started at the beginning. Fork from the middle and the copy
+ * opens on a record from the middle, rewritten with no parent — so the halves
+ * disagree about their root while holding the same history. Measured on a real
+ * store: 2097 records in common, the second's root at position 16818 of the
+ * first, and every sweep treating them as unrelated work.
+ */
+describe('deepen', () => {
+  it('leaves the roots alone until it is asked', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    expect(kin.rootOf(MIDWAY)).toBe(MID_RECORD);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(false);
+  });
+
+  it('files a root found inside another conversation as that conversation’s work', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    kin.deepen([ORIGINAL, MIDWAY]);
+
+    expect(kin.rootOf(MIDWAY)).toBe(ROOT);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+
+  it('does not join conversations that merely both exist', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    kin.deepen([ORIGINAL, MIDWAY, UNRELATED]);
+
+    expect(kin.sameWork(ORIGINAL, UNRELATED)).toBe(false);
+  });
+
+  it('groups the pair into one fork, which is what the sweep reads', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    const forks = forksOf([ORIGINAL, MIDWAY], kin).all();
+
+    expect(forks).toHaveLength(1);
+    expect(forks[0]!.branches.map((branch) => branch.cliSessionId).sort()).toEqual(
+      [ORIGINAL, MIDWAY].sort(),
+    );
+  });
+});
+
+/**
+ * One conversation, two transcripts.
+ *
+ * A `cliSessionId` names a conversation; the file holding it lives under the
+ * project directory for the card's working directory. Continue one conversation
+ * from a repository and from a worktree cut out of it and there are two files
+ * under one id, each holding the records written while its card was the one in
+ * use. Nothing makes them copies of each other, and the directory walk offers
+ * whichever it offers.
+ *
+ * Measured on a real store: 41 conversations with more than one file, 24 in
+ * which the first file read does not hold every record, 6070 records invisible
+ * in total, worst single case 1362.
+ */
+describe('a conversation held in more than one file', () => {
+  /** The same id written into two project directories, with the records each holds. */
+  function twoPlaces(first: Record<string, string[]>, second: Record<string, string[]>): string[] {
+    const config = mkdtempSync(path.join(tmpdir(), 'foster-two-'));
+    const write = (project: string, tree: Record<string, string[]>): void => {
+      const dir = path.join(config, 'projects', project);
+      mkdirSync(dir, { recursive: true });
+      for (const [id, records] of Object.entries(tree)) {
+        writeFileSync(path.join(dir, `${id}.jsonl`), `${records.join('\n')}\n`, 'utf8');
+      }
+    };
+    // Named so the repository sorts before the worktree cut out of it, which is
+    // the order the real store produces and the order that hid the records.
+    write('-workspace-project', first);
+    write('-workspace-project--worktree', second);
+    return [path.join(config, 'projects')];
+  }
+
+  const SHARED = '00000000-0000-4000-8000-0000000000c1';
+  const ONLY_FIRST = '00000000-0000-4000-8000-0000000000c2';
+  const ONLY_SECOND = '00000000-0000-4000-8000-0000000000c3';
+
+  function at(when: string, uuid: string, type = 'user'): string {
+    return JSON.stringify({ uuid, type, timestamp: when });
+  }
+
+  it('counts every record, not the ones the first file happens to hold', () => {
+    const kin = lineageAt(
+      twoPlaces(
+        { [ORIGINAL]: [META, record(ROOT), record(SHARED), record(ONLY_FIRST)] },
+        { [ORIGINAL]: [META, record(ROOT), record(SHARED), record(ONLY_SECOND)] },
+      ),
+    );
+
+    const scan = kin.scanOf(ORIGINAL)!;
+    expect(scan.uuids.size).toBe(4);
+    expect(scan.uuids.has(ONLY_FIRST)).toBe(true);
+    expect(scan.uuids.has(ONLY_SECOND)).toBe(true);
+  });
+
+  it('takes the last answer from whichever file answered last', () => {
+    const kin = lineageAt(
+      twoPlaces(
+        {
+          [ORIGINAL]: [META, record(ROOT), at('2026-09-05T17:38:00.000Z', ONLY_FIRST, 'assistant')],
+        },
+        {
+          [ORIGINAL]: [
+            META,
+            record(ROOT),
+            at('2026-09-05T20:12:00.000Z', ONLY_SECOND, 'assistant'),
+          ],
+        },
+      ),
+    );
+
+    expect(kin.scanOf(ORIGINAL)!.lastAssistantAt).toBe(Date.parse('2026-09-05T20:12:00.000Z'));
+  });
+
+  it('does not let a partial file decide which branch carried on', () => {
+    // The branch holds three records of its own. The conversation holds four,
+    // but only one of them is in the file the walk offers first — so reading one
+    // file ranked the branch above the conversation it was cut from.
+    const kin = lineageAt(
+      twoPlaces(
+        {
+          [ORIGINAL]: [META, record(ROOT), record(ONLY_FIRST)],
+          [BRANCH]: [
+            META,
+            record(ROOT),
+            record('00000000-0000-4000-8000-0000000000c5'),
+            record('00000000-0000-4000-8000-0000000000c6'),
+            record('00000000-0000-4000-8000-0000000000c7'),
+          ],
+        },
+        {
+          [ORIGINAL]: [
+            META,
+            record(ROOT),
+            record(ONLY_SECOND),
+            record('00000000-0000-4000-8000-0000000000c8'),
+            record('00000000-0000-4000-8000-0000000000c9'),
+          ],
+        },
+      ),
+    );
+
+    const fork = forksOf([ORIGINAL, BRANCH], kin).all()[0]!;
+    expect(fork.branches[0]!.cliSessionId).toBe(ORIGINAL);
+    expect(fork.branches[0]!.only).toBe(4);
+  });
+
+  it('recognises the work through the head of either file', () => {
+    // The file the walk offers first opens on a record from the middle — a fork
+    // the app began partway through, under the same id — so the two files of one
+    // conversation give two different roots. Answering with only that one filed
+    // the conversation away from the sibling that shares its beginning.
+    const kin = lineageAt(
+      twoPlaces(
+        {
+          [ORIGINAL]: [META, record(MID_RECORD), record(ONLY_FIRST)],
+          [BRANCH]: [META, record(ROOT), record('00000000-0000-4000-8000-0000000000ca')],
+        },
+        { [ORIGINAL]: [META, record(ROOT), record(ONLY_SECOND)] },
+      ),
+    );
+
+    expect(kin.sameWork(ORIGINAL, BRANCH)).toBe(true);
+    // Both heads answer for the one work, so the group does not depend on which
+    // file the directory walk happened to hand over first.
+    expect(kin.rootOf(BRANCH)).toBe(kin.rootOf(ORIGINAL));
+  });
+
+  it('reads every file when deepening, not just the first', () => {
+    // The record MIDWAY opens on is written only into the second file of
+    // ORIGINAL, which is exactly the evidence `deepen` exists to find.
+    const kin = lineageAt(
+      twoPlaces(
+        {
+          [ORIGINAL]: [META, record(ROOT), record(ONLY_FIRST)],
+          [MIDWAY]: [META, record(MID_RECORD), record(ONLY_SECOND)],
+        },
+        { [ORIGINAL]: [META, record(ROOT), record(MID_RECORD)] },
+      ),
+    );
+
+    kin.deepen([ORIGINAL, MIDWAY]);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+});
+
+/**
+ * Two files of one conversation, and the row that can only open one of them.
+ *
+ * The refusal to add a second card for a conversation the account already shows
+ * rests on both cards opening the same transcript. That is not always true: the
+ * app opens the file under the project directory for the card's working
+ * directory, so an account can show a conversation and still be unable to reach
+ * most of it. Measured on this store: 90 cards open a partial file, putting
+ * 19,398 records out of reach, and for 47 (account, conversation) pairs another
+ * account held the card that opens the fuller one.
+ */
+describe('bringing the file the account cannot open', () => {
+  const REPO = '/workspace/project';
+  const TREE = '/workspace/project/.claude/worktrees/w';
+  const SHORT_ONLY = '00000000-0000-4000-8000-0000000000d1';
+  const FULL_ONLY = '00000000-0000-4000-8000-0000000000d2';
+  const HERE_CARD = '00000000-0000-4000-8000-0000000000d3';
+  const THERE_CARD = '00000000-0000-4000-8000-0000000000d4';
+
+  /** The conversation written into the repository's directory and the worktree's. */
+  function split(): string[] {
+    const config = mkdtempSync(path.join(tmpdir(), 'foster-split-'));
+    const write = (project: string, records: string[]): void => {
+      const dir = path.join(config, 'projects', project);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, `${ORIGINAL}.jsonl`), `${records.join('\n')}\n`, 'utf8');
+    };
+    write('-workspace-project', [
+      META,
+      record(ROOT),
+      record(FULL_ONLY),
+      record('00000000-0000-4000-8000-0000000000d5'),
+    ]);
+    write('-workspace-project--claude-worktrees-w', [META, record(ROOT), record(SHORT_ONLY)]);
+    return [path.join(config, 'projects')];
+  }
+
+  /** The destination shows the worktree's file; the repository's waits elsewhere. */
+  function stores() {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: TREE, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: THERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+    return store;
+  }
+
+  it('knows which file a card opens, and which it cannot', () => {
+    const kin = lineageAt(split());
+
+    expect(kin.reachOf(ORIGINAL, TREE)!.uuids.has(SHORT_ONLY)).toBe(true);
+    expect(kin.reachOf(ORIGINAL, TREE)!.uuids.has(FULL_ONLY)).toBe(false);
+    expect(kin.reachOf(ORIGINAL, REPO)!.uuids.has(FULL_ONLY)).toBe(true);
+    // The whole conversation is still the union of both.
+    expect(kin.scanOf(ORIGINAL)!.uuids.size).toBe(4);
+  });
+
+  it('says nothing when the working directory names none of its files', () => {
+    const kin = lineageAt(split());
+    expect(kin.reachOf(ORIGINAL, '/somewhere/else')).toBe(undefined);
+    expect(kin.reachOf(ORIGINAL, undefined)).toBe(undefined);
+  });
+
+  it('counts what the offered card opens that the row here cannot', () => {
+    const store = stores();
+    const kin = lineageAt(split());
+    const here = sidebarFrom(scanAccount(store, NEW_ACCOUNT), kin);
+
+    expect(here.shows(ORIGINAL)).toBe(true);
+    expect(here.reason(ORIGINAL)).toContain('already has that conversation');
+    expect(here.unreached(ORIGINAL, REPO)).toBe(2);
+    // The file it already opens brings nothing, which is the ordinary case.
+    expect(here.unreached(ORIGINAL, TREE)).toBe(0);
+  });
+
+  it('brings the fuller file instead of refusing it as a duplicate', () => {
+    const store = stores();
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ status: 'fostered', beyond: 2 });
+  });
+
+  it('still refuses a card that opens the same file the row here opens', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: THERE_CARD, cliSessionId: ORIGINAL, cwd: REPO, originCwd: REPO }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes[0]).toMatchObject({ status: 'skipped' });
+    expect(outcomes[0]!.detail).toContain('already has that conversation');
+  });
+
+  it('asks about the directory the copy will open in, not the source card’s', () => {
+    // The source sits in the worktree, so its copy is rewritten to open in the
+    // repository — and it is the repository's file that holds the extra records.
+    // Asking the source's own directory would have found nothing to bring.
+    const store = makeStore();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_CARD, cliSessionId: ORIGINAL, cwd: TREE, originCwd: TREE }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: THERE_CARD,
+        cliSessionId: ORIGINAL,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      store,
+      ledger: ledgerIn(),
+      target: NEW_ACCOUNT,
+      dryRun: true,
+      kin: lineageAt(split()),
+    });
+
+    expect(outcomes[0]).toMatchObject({ status: 'fostered', beyond: 2 });
   });
 });

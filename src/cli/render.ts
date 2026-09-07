@@ -1,7 +1,10 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import { describeUnfosterable } from '../domain/fostering.js';
+import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
+import type { RetitleOutcome } from '../engine/retitle.js';
+import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
@@ -475,7 +478,16 @@ export function outcomeLine(outcome: Outcome, options: { restoring?: boolean } =
     failed: pc.red('x'),
   };
   const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
-  const line = `  ${marks[outcome.status]} ${outcome.title}${detail}`;
+  // Said on the line itself, because it is the answer to the question the row
+  // provokes: this account already showed that conversation, so why is there a
+  // second one? Because the row it had opens a different file of it, and this
+  // one opens records that file does not hold.
+  const beyond = outcome.beyond
+    ? pc.dim(
+        ` (a second file of a conversation already here: ${outcome.beyond} record(s) no row here could open)`,
+      )
+    : '';
+  const line = `  ${marks[outcome.status]} ${outcome.title}${detail}${beyond}`;
   const standing = outcome.standing
     ? standingLine(outcome.standing, options.restoring === true, outcome.originSessionId)
     : '';
@@ -515,6 +527,50 @@ function standingLine(standing: BranchStanding, restoring: boolean, originId: st
 }
 
 /**
+ * One fork of the branch pass, as the sweep lists it: which branch carried on,
+ * then every row it added or marked, in the title each row now wears.
+ */
+export function forkLines(fork: ForkOutcome): string[] {
+  const tip = fork.rows.find((row) => row.tip);
+  const held = tip ? ` — the branch that carried on holds ${tip.total} records` : '';
+  const lines = [pc.dim(`  fork ${shortId(fork.root)}: ${fork.rows.length} branches${held}`)];
+  for (const outcome of fork.brought) lines.push(broughtLine(outcome));
+  for (const outcome of fork.retitled) lines.push(retitleLine(outcome));
+  for (const row of fork.skipped) {
+    lines.push(`  ${pc.dim('·')} ${row.title}${pc.dim(` (${row.detail})`)}`);
+  }
+  return lines;
+}
+
+/** A row the branch pass added, named by the title the copy wears. */
+function broughtLine(outcome: Outcome): string {
+  const marks: Record<OutcomeStatus, string> = {
+    fostered: pc.green('+'),
+    returned: pc.green('-'),
+    skipped: pc.dim('·'),
+    failed: pc.red('x'),
+  };
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${marks[outcome.status]} ${outcome.copyTitle ?? outcome.title}${detail}`;
+}
+
+/** A row the branch pass renamed: what it said, what it says now. */
+export function retitleLine(outcome: RetitleOutcome): string {
+  const mark =
+    outcome.status === 'retitled'
+      ? pc.green('~')
+      : outcome.status === 'failed'
+        ? pc.red('x')
+        : pc.dim('·');
+  const filed =
+    outcome.archived === undefined
+      ? ''
+      : pc.dim(outcome.archived.to ? ' → archived view' : ' → out of the archived view');
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${outcome.from || '(untitled)'} ${pc.dim('→')} ${outcome.to}${filed}${detail}`;
+}
+
+/**
  * The lines a sweep ends on, shared by the command and the menu so both say the
  * same thing about the same run.
  *
@@ -524,28 +580,65 @@ function standingLine(standing: BranchStanding, restoring: boolean, originId: st
  */
 export function sweepSummary(report: SweepReport): string[] {
   const lines: string[] = [];
-  const { fostered, restored } = report;
+  const { fostered, restored, branches } = report;
 
+  // The rows the branch pass added are copies too, and a first line that said
+  // "0 fostered" over seven of them read as a run that did nothing.
+  const rows = branches.counts.fostered;
+  const forBranches = rows > 0 ? `, ${rows} row${rows === 1 ? '' : 's'} for branches` : '';
   lines.push(
     report.dryRun
       ? pc.bold(
-          `Dry run: ${fostered.counts.fostered} would be fostered, ${restored.counts.fostered} restored.`,
+          `Dry run: ${fostered.counts.fostered} would be fostered${forBranches}, ` +
+            `${restored.counts.fostered} restored.`,
         )
       : pc.bold(
-          `${fostered.counts.fostered} fostered, ${restored.counts.fostered} restored, ` +
-            `${fostered.counts.skipped + restored.counts.skipped} skipped, ` +
-            `${fostered.counts.failed + restored.counts.failed} failed.`,
+          `${fostered.counts.fostered} fostered${forBranches}, ${restored.counts.fostered} restored, ` +
+            `${fostered.counts.skipped + branches.counts.skipped + restored.counts.skipped} skipped, ` +
+            `${fostered.counts.failed + branches.counts.failed + restored.counts.failed} failed.`,
         ),
   );
 
-  // Said whenever any copy carries the flag, because the archived view is where
-  // they land and Recents is where people look. A run that brought a hundred
+  // Separate from the count above: these are copies already on this disk, not
+  // rows the sweep just wrote, so folding them into "N fostered" would credit
+  // the sweep with bringing something it merely repaired.
+  const claims = report.worktreeClaims;
+  if (claims.items.length > 0) {
+    lines.push(
+      report.dryRun
+        ? `${claims.items.length} cop${claims.items.length === 1 ? 'y' : 'ies'} to release from worktree claims.`
+        : `released ${claims.counts.released} from worktree claims` +
+            (claims.counts.skipped + claims.counts.failed > 0
+              ? ` (${claims.counts.skipped} skipped, ${claims.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+
+  // Said whenever any row lands there, because the archived view is where they
+  // land and Recents is where people look. A run that brought a hundred
   // sessions and appears to have brought none is this sentence going unsaid.
   if (report.archived > 0) {
     const one = report.archived === 1;
     lines.push(
-      `${report.archived} of them ${one ? 'was archived and stays' : 'were archived and stay'} archived — ` +
-        `${one ? 'it is' : 'they are'} in the app's archived view, not in Recents.`,
+      `${report.archived} of the rows ${one ? 'is' : 'are'} in the app's archived view, not in Recents — ` +
+        'archived copies stay archived, and the branches that stopped are filed there.',
+    );
+  }
+
+  // Same reasoning as the worktree line above: a title brought back into step is
+  // a copy repaired, not a row brought.
+  const titles = report.titleSync;
+  if (titles && titles.items.length > 0) {
+    const one = titles.items.length === 1;
+    lines.push(
+      report.dryRun
+        ? `${titles.items.length} title${one ? '' : 's'} to bring into step with ${one ? 'its' : 'their'} original.`
+        : `${titles.counts.synced} title${titles.counts.synced === 1 ? '' : 's'} brought into step` +
+            (titles.counts.skipped + titles.counts.failed > 0
+              ? ` (${titles.counts.skipped} skipped, ${titles.counts.failed} failed)`
+              : '') +
+            '.',
     );
   }
 
@@ -553,10 +646,22 @@ export function sweepSummary(report: SweepReport): string[] {
   if (confirmation) {
     lines.push(
       confirmation.exhausted
-        ? pc.green('Nothing is left to sweep: a second run would foster 0 and restore 0.')
+        ? pc.green(
+            'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
+              'restore 0, and release 0 worktree claims' +
+              (confirmation.titlesOutOfStep === undefined
+                ? '.'
+                : ', and bring 0 titles into step.'),
+          )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
-              `${confirmation.restorable} still to restore. Run it again.`,
+              `${confirmation.branches} row(s) still to add or mark for branches, ` +
+              `${confirmation.restorable} still to restore, ` +
+              `${confirmation.worktreeClaims} worktree claim(s) still to release` +
+              (confirmation.titlesOutOfStep
+                ? `, ${confirmation.titlesOutOfStep} title(s) still out of step`
+                : '') +
+              '. Run it again.',
           ),
     );
   }
@@ -564,26 +669,25 @@ export function sweepSummary(report: SweepReport): string[] {
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
 
-  if (report.forks > 0) {
-    const one = report.forks === 1;
-    const { theirOnly, hereOnly } = report.forkGap;
+  if (branches.forks.length > 0) {
+    const forks = branches.forks.length;
+    const added = branches.counts.fostered;
+    const marked = branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
+    const filed =
+      branches.archived > 0 ? `, ${branches.archived} filed in the archived view as stale` : '';
     lines.push(
-      pc.yellow(
-        `${report.forks} ${one ? 'session is' : 'sessions are'} the half of a fork that carried on; ` +
-          `this account is showing the half that stopped.\n` +
-          // The size of the decision, not just that there is one. A fork worth 7
-          // records against 2625 and one worth 2352 against 3609 read identically
-          // without it, and only the second is worth stopping for.
-          `Merging would gain ${theirOnly} record(s) and stop showing ${hereOnly}.\n` +
-          'Which half survives is a reading decision, so the sweep stops here: ' +
-          'foster consolidate lists them, and needs the app closed.\n' +
-          // Said here because it is what makes the decision small. Left unsaid,
-          // "hides records" reads as irreversible, and the tidy-up never happens.
-          'Nothing is destroyed either way — the transcripts stay, and ' +
-          'foster consolidate --undo puts the cards back.',
-      ),
+      `${forks} forked conversation${forks === 1 ? '' : 's'}, one row per branch: ` +
+        `${added} row${added === 1 ? '' : 's'} added, ${marked} retitled${filed}.\n` +
+        // What the reader has to know to pick a row: the clean title is the one
+        // to continue in, and a marked one says when it was left.
+        `The branch that carried on keeps its title; the others wear "${branches.staleTemplate.trim()}" ` +
+        'with the moment of their last answer.\n' +
+        'Nothing is hidden — foster consolidate collapses a fork to one row if you want that.',
     );
   }
+
+  const unknownMark = unknownMarkNames(branches.forks);
+  if (unknownMark) lines.push(pc.yellow(unknownMark));
 
   if (report.liveWriters.length > 0) {
     const one = report.liveWriters.length === 1;
@@ -640,5 +744,92 @@ export function neverComesLine(never: NeverComes): string {
       `The background ${spawned === 1 ? 'one is' : 'ones are'} too: foster --include-spawned.`,
     );
   }
-  return ways.length > 0 ? [line, ...ways].join('\n') : line;
+  const withEscape = ways.length > 0 ? [line, ...ways].join('\n') : line;
+
+  const stranded = strandedNames(never);
+  return stranded ? `${withEscape}\n${stranded}` : withEscape;
+}
+
+/** At most this many named before the line turns into a wall of titles. */
+const NAMED_LIMIT = 10;
+
+/**
+ * The ones with no way in, by name.
+ *
+ * Only those: a scheduled task is named by `--include-scheduled` one line up,
+ * and a spawned one the same way by `--include-spawned`, so repeating either
+ * title lengthens the report without telling the reader anything they can act
+ * on. What is left has no flag and no follow-up command, and a bare count of it
+ * is the gap this exists to close — a sweep once reported "2 never opened" and
+ * neither title appeared anywhere, which is indistinguishable from having
+ * brought everything.
+ *
+ * Empty when everything blocked had a flag of its own, so a clean run stays quiet.
+ */
+function strandedNames(never: NeverComes): string {
+  const stranded = never.sessions.filter(
+    (session) => session.reason !== 'scheduled-task' && session.reason !== 'spawned-task',
+  );
+  if (stranded.length === 0) return '';
+  const shown = stranded.slice(0, NAMED_LIMIT);
+  const rest = stranded.length - shown.length;
+  const titles = shown.map((session) => `  ${session.title ?? '(untitled)'}`);
+  // Said before the list, because the reader has to know these are the ones a
+  // second run will not fix either.
+  const head = `The ${stranded.length === 1 ? 'one' : `${stranded.length}`} with no way in:`;
+  const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
+  return `${head}\n${titles.join('\n')}${tail}`;
+}
+
+/**
+ * Rows the branch pass left alone because they already wear a mark it cannot
+ * account for — named the way `strandedNames` names a session with no way in,
+ * so the user can fix the words by hand or run with the prefix that matches.
+ *
+ * Counted separately from every other skip: it is a decision left to the
+ * user, not work the sweep failed to finish, so it never counts against
+ * "nothing is left to sweep" — see `sweepSummary`'s confirmation line, which
+ * this plays no part in.
+ *
+ * Empty when nothing wears an unexplained mark, so a clean run stays quiet.
+ */
+function unknownMarkNames(forks: ForkOutcome[]): string {
+  const rows = forks
+    .flatMap((fork) => fork.skipped)
+    .filter((row) => row.detail === UNKNOWN_MARK_DETAIL);
+  if (rows.length === 0) return '';
+  const shown = rows.slice(0, NAMED_LIMIT);
+  const rest = rows.length - shown.length;
+  const titles = shown.map((row) => `  ${row.title}`);
+  const one = rows.length === 1;
+  const head = `${rows.length} row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark foster cannot account for, left as ${one ? 'it is' : 'they are'}:`;
+  const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
+  return (
+    `${head}\n${titles.join('\n')}${tail}\n` +
+    'Fix the words by hand, or run with the --stale-prefix/--branch-prefix that matches them.'
+  );
+}
+
+/** The name a worktree claim shows, whichever field the card carried. */
+function claimName(item: { worktreeName?: string; worktreePath?: string }): string {
+  return item.worktreeName ?? item.worktreePath ?? '(worktree)';
+}
+
+/** One line of a plan: what a copy still names, and where a release sends it. */
+export function unclaimPlanLine(item: UnclaimItem): string {
+  const to = item.cwdTo ?? item.cwdFrom ?? '';
+  return `  ${item.title}  ${pc.dim(claimName(item))} ${pc.dim('→')} ${to}`;
+}
+
+/** The same line, marked with what actually happened to it. */
+export function unclaimOutcomeLine(outcome: UnclaimOutcome): string {
+  const mark =
+    outcome.status === 'released'
+      ? pc.green('-')
+      : outcome.status === 'failed'
+        ? pc.red('x')
+        : pc.dim('·');
+  const to = outcome.cwdTo ?? outcome.cwdFrom ?? '';
+  const detail = outcome.detail ? pc.dim(` (${outcome.detail})`) : '';
+  return `  ${mark} ${outcome.title}  ${pc.dim(claimName(outcome))} ${pc.dim('→')} ${to}${detail}`;
 }

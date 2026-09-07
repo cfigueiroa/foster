@@ -5,7 +5,13 @@ import {
   formatAge,
   formatBytes,
   groupByAccount,
+  neverComesLine,
+  sweepSummary,
+  unclaimOutcomeLine,
+  unclaimPlanLine,
 } from '../src/cli/render.js';
+import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
+import type { UnclaimItem, UnclaimOutcome } from '../src/engine/unclaim.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -168,5 +174,207 @@ describe('formatAge', () => {
 
   it('does not report the future as a very long time ago', () => {
     expect(formatAge(now + 86_400_000, now)).toBe('just now');
+  });
+});
+
+describe('sweepSummary', () => {
+  const counts = { fostered: 0, skipped: 0, failed: 0, returned: 0 };
+  const report = (overrides: Partial<SweepReport> = {}): SweepReport => ({
+    store: 'C:\\store',
+    target: { accountUuid: ACCOUNT_A, organizationUuid: ORG_1 },
+    dryRun: false,
+    fostered: { outcomes: [], counts },
+    branches: {
+      forks: [],
+      outcomes: [],
+      retitled: [],
+      archived: 0,
+      counts,
+      staleTemplate: '(stale, stopped {when}) ',
+      divergedTemplate: '(other branch, went on {when}) ',
+    },
+    restored: { outcomes: [], counts },
+    worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
+    archived: 0,
+    liveWriters: [],
+    neverComes: { total: 0, byReason: {}, sessions: [] },
+    ...overrides,
+  });
+
+  it('says one row per branch, and never that the app has to be closed', () => {
+    const lines = sweepSummary(
+      report({
+        branches: {
+          forks: [{ root: 'r', tip: 't', rows: [], brought: [], retitled: [], skipped: [] }],
+          outcomes: [],
+          retitled: [
+            {
+              path: 'p',
+              sessionId: 's',
+              from: 'Work',
+              to: '(stale, stopped 01/09 18:10) Work',
+              status: 'retitled',
+              as: 'stale',
+            },
+          ],
+          archived: 2,
+          counts: { ...counts, fostered: 1 },
+          staleTemplate: '(stale, stopped {when}) ',
+          divergedTemplate: '(other branch, went on {when}) ',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      '1 forked conversation, one row per branch: 1 row added, 1 retitled, 2 filed in the archived view as stale.',
+    );
+    expect(lines).toContain('"(stale, stopped {when})"');
+    expect(lines).not.toMatch(/needs the app closed/);
+  });
+
+  it('says nothing about forks when there are none', () => {
+    expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/fork/);
+  });
+});
+
+describe('unclaimPlanLine', () => {
+  const item = (overrides: Partial<UnclaimItem> = {}): UnclaimItem => ({
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_a.json',
+    sessionId: 'local_a',
+    title: 'Refactor parser',
+    worktreeName: 'wt-a',
+    worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+    ...overrides,
+  });
+
+  it('names the title, the worktree, and where the release would send cwd', () => {
+    const line = plain(unclaimPlanLine(item()));
+    expect(line).toContain('Refactor parser');
+    expect(line).toContain('wt-a');
+    expect(line).toContain('C:\\home\\repo');
+  });
+
+  it('falls back to the worktree path when there is no name', () => {
+    const line = plain(unclaimPlanLine(item({ worktreeName: undefined })));
+    expect(line).toContain('C:\\home\\repo\\.claude\\worktrees\\wt-a');
+  });
+
+  it('shows the cwd the card already wears when the release would not move it', () => {
+    const line = plain(unclaimPlanLine(item({ cwdTo: undefined })));
+    expect(line).toContain(item().cwdFrom);
+  });
+});
+
+describe('unclaimOutcomeLine', () => {
+  const outcome = (overrides: Partial<UnclaimOutcome> = {}): UnclaimOutcome => ({
+    path: 'C:\\home\\repo\\.claude\\worktrees\\wt-a\\local_a.json',
+    sessionId: 'local_a',
+    title: 'Refactor parser',
+    status: 'released',
+    worktreeName: 'wt-a',
+    cwdFrom: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    cwdTo: 'C:\\home\\repo',
+    ...overrides,
+  });
+
+  it('marks a release, a skip and a failure differently', () => {
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'released' })))).toContain('-');
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'skipped' })))).toContain('·');
+    expect(plain(unclaimOutcomeLine(outcome({ status: 'failed' })))).toContain('x');
+  });
+
+  it('carries the detail along for a skip or a failure', () => {
+    const line = plain(
+      unclaimOutcomeLine(outcome({ status: 'failed', detail: 'the card could not be read' })),
+    );
+    expect(line).toContain('the card could not be read');
+  });
+});
+
+describe('neverComesLine', () => {
+  const never = (sessions: NeverComeSession[]): NeverComes => {
+    const byReason: Partial<Record<NeverComeSession['reason'], number>> = {};
+    for (const one of sessions) byReason[one.reason] = (byReason[one.reason] ?? 0) + 1;
+    return { total: sessions.length, byReason, sessions };
+  };
+
+  it('names the ones with no way in, so the count is not the only trace of them', () => {
+    // The whole reason this exists: a sweep reported "2 never opened" and the two
+    // titles appeared nowhere, which reads exactly like having brought everything.
+    const line = plain(
+      neverComesLine(
+        never([
+          { title: 'Guard for every versioned plist', reason: 'never-opened' },
+          { title: 'Half-written draft', reason: 'too-large' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('Guard for every versioned plist');
+    expect(line).toContain('Half-written draft');
+    expect(line).toContain('2 with no way in');
+  });
+
+  it('leaves scheduled tasks unnamed, because the flag above already answers them', () => {
+    const line = plain(
+      neverComesLine(
+        never([
+          { title: 'Nightly watchdog', reason: 'scheduled-task' },
+          { title: 'Second watchdog', reason: 'scheduled-task' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('foster --include-scheduled');
+    expect(line).not.toContain('Nightly watchdog');
+    expect(line).not.toContain('with no way in');
+  });
+
+  it('names the stranded ones even when scheduled tasks are the bulk of the gap', () => {
+    const line = plain(
+      neverComesLine(
+        never([
+          ...Array.from({ length: 8 }, (_, i) => ({
+            title: `Watchdog ${i}`,
+            reason: 'scheduled-task' as const,
+          })),
+          { title: 'The one nobody would find', reason: 'never-opened' },
+        ]),
+      ),
+    );
+
+    expect(line).toContain('The one nobody would find');
+    expect(line).toContain('The one with no way in');
+  });
+
+  it('caps the list rather than printing a wall of titles', () => {
+    const line = plain(
+      neverComesLine(
+        never(
+          Array.from({ length: 13 }, (_, i) => ({
+            title: `Stranded ${i}`,
+            reason: 'never-opened' as const,
+          })),
+        ),
+      ),
+    );
+
+    expect(line).toContain('Stranded 9');
+    expect(line).not.toContain('Stranded 10');
+    expect(line).toContain('...and 3 more');
+  });
+
+  it('gives an untitled session a name to be listed under', () => {
+    const line = plain(neverComesLine(never([{ title: undefined, reason: 'never-opened' }])));
+
+    expect(line).toContain('(untitled)');
+  });
+
+  it('stays empty when there is no gap at all', () => {
+    expect(neverComesLine(never([]))).toBe('');
   });
 });

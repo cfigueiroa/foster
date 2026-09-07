@@ -1,6 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  DesktopControlError,
   inspectDesktop,
   inspectDesktopFor,
   packagedAppId,
@@ -14,12 +15,16 @@ import {
   type ProcessRow,
 } from '../src/engine/desktop.js';
 import { appHolds, heldInMemory, inspectApp } from '../src/engine/safety.js';
+import { storeExecutable } from '../src/engine/stores.js';
 import { layoutFor, storeIdentity } from '../src/domain/paths.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ActiveFostering } from '../src/ledger/types.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
-const DESKTOP = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
+// Under \Packages\Claude..., like the app's own MSIX package directory: proof
+// enough on its own that a row is the app, independent of any helper process.
+const DESKTOP =
+  'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
 // Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
 // that looks like somebody's home directory.
 const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
@@ -186,6 +191,31 @@ describe('inspectDesktop', () => {
 
     expect(inspectDesktop(() => table, {}).selfHosted).toBe(false);
   });
+
+  it('reports uncertain rather than not-running when a partial table still shows a claude.exe', () => {
+    // tasklist reports nothing but a name and a pid, so isDesktopProcess (which
+    // demands a readable path) fails every row — same shape as "not running",
+    // but there is a claude.exe sitting right there that this table cannot
+    // explain either way.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktop(() => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toMatch(/tasklist/);
+    expect(state.uncertain).toMatch(/1 claude\.exe/);
+  });
+
+  it('stays a certain not-running on a partial table with no claude.exe at all', () => {
+    // A name alone proves absence even when it cannot prove identity: nothing
+    // here is called claude.exe, so there is nothing to be uncertain about.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'git.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktop(() => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toBeUndefined();
+  });
 });
 
 describe('packagedAppId', () => {
@@ -317,6 +347,22 @@ describe('quitDesktop', () => {
   it('says nothing to do when the app is not running', async () => {
     const result = await quitDesktop(storeWith({}), { list: () => [], env: outside });
     expect(result.outcome).toBe('not-running');
+  });
+
+  it('refuses rather than guesses when the table is too thin to tell', async () => {
+    // Returning 'not-running' here would let a restart flow start a second
+    // instance on top of one that may already be up — the table simply cannot
+    // rule that out, so this must not look like the certain case above.
+    const store = storeWith({});
+    const table: ProcessRow[] = [
+      { pid: PID, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
+      DesktopControlError,
+    );
+    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
+      /cannot tell/,
+    );
   });
 
   it('refuses to close the app it is running inside', async () => {
@@ -467,10 +513,208 @@ describe('starting the app', () => {
     expect(started).toEqual([[EXE, store.root]]);
   });
 
+  it('scrubs CLAUDE* out of the environment a profile launch receives', async () => {
+    // Starting a profile from inside a hosted Code session must not hand the
+    // new instance the marker that would make it think it, too, is hosted —
+    // see launchEnv.ts.
+    const store = makeStore();
+    let received: NodeJS.ProcessEnv | undefined;
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (_exe, _root, env) => {
+        received = env;
+      },
+      executable: () => EXE,
+      env: { CLAUDE_CODE_HOST_SESSION_ID: '00000000-0000-4000-8000-00000000000a', PATH: 'kept' },
+    });
+
+    expect(received).toEqual({ PATH: 'kept' });
+  });
+
   it('says so plainly when there is no installed app to start a profile with', async () => {
     await expect(
       startDesktop(makeStore(), { timeoutMs: 1, executable: () => undefined }),
     ).rejects.toThrow(/Start it yourself/);
+  });
+});
+
+describe('starting a profile with package identity', () => {
+  /**
+   * Not a real machine path (this repo is public) — the same shape measured
+   * 05/09/2026: a real MSIX install under `\WindowsApps\`, with the version and
+   * architecture folded into the package's full name.
+   */
+  const WINDOWSAPPS_EXE =
+    'C:\\Program Files\\WindowsApps\\Claude_1.46388.2.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe';
+
+  it('prefers Invoke-CommandInDesktopPackage when the executable is a real MSIX install', async () => {
+    const store = makeStore();
+    const identityLaunches: Array<[string, string, string]> = [];
+    let launchedWith: 'identity' | 'direct' | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: () => expect.unreachable('identity should win when it is available'),
+      launchProfileWithIdentity: (appId, exe, root) => {
+        identityLaunches.push([appId, exe, root]);
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+    });
+
+    expect(identityLaunches).toEqual([
+      ['Claude_pzs8sxrjxfjjc!Claude', WINDOWSAPPS_EXE, store.root],
+    ]);
+    expect(launchedWith).toBe('identity');
+  });
+
+  it('falls back to the direct launcher when the identity launch throws', async () => {
+    const store = makeStore();
+    const direct: string[][] = [];
+    let launchedWith: 'identity' | 'direct' | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => direct.push([exe, root]),
+      launchProfileWithIdentity: () => {
+        throw new Error('Invoke-CommandInDesktopPackage is not recognised');
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      onProfileLaunch: (method) => {
+        launchedWith = method;
+      },
+    });
+
+    expect(direct).toEqual([[WINDOWSAPPS_EXE, store.root]]);
+    expect(launchedWith).toBe('direct');
+  });
+
+  it('gives the identity launcher a scrubbed environment, the same as the direct one', async () => {
+    const store = makeStore();
+    let received: NodeJS.ProcessEnv | undefined;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfileWithIdentity: (_appId, _exe, _root, env) => {
+        received = env;
+      },
+      executable: () => WINDOWSAPPS_EXE,
+      env: { CLAUDE_CODE_HOST_SESSION_ID: '00000000-0000-4000-8000-00000000000a', PATH: 'kept' },
+    });
+
+    expect(received).toEqual({ PATH: 'kept' });
+  });
+
+  it('never attempts identity for an executable outside \\WindowsApps\\', async () => {
+    const store = makeStore();
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfileWithIdentity: () =>
+        expect.unreachable('not a WindowsApps executable; identity should never be tried'),
+      launchProfile: () => {},
+      executable: () => 'C:\\Apps\\Claude_1.0.0_x64__test\\app\\Claude.exe',
+    });
+  });
+});
+
+describe('raising a hidden window after starting a profile', () => {
+  const EXE = 'C:\\Apps\\Claude_1.0.0_x64__test\\app\\Claude.exe';
+
+  /**
+   * A row this environment can prove is the app: its own path sits under the
+   * store's root, which `CLAUDE_USER_DATA_DIR` makes a known store root — see
+   * `underKnownStoreRoot` in desktop.ts. Independent of `EXE` above, which is
+   * only ever what `executable()` hands `startDesktop` to launch with.
+   */
+  function runningRow(store: StoreLayout): ProcessRow {
+    const path = `${store.root}\\Claude.exe`;
+    return {
+      pid: 900,
+      parentPid: 9,
+      name: 'claude.exe',
+      path,
+      commandLine: `"${path}" --user-data-dir="${store.root}"`,
+    };
+  }
+
+  it('sends a second launch when the window is still hidden after the check window', async () => {
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const launches: string[][] = [];
+    let raised = false;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [runningRow(store)],
+      env,
+      lockfileHeld: () => true,
+      windowVisible: () => false,
+      windowCheckTimeoutMs: 10,
+      windowCheckStepMs: 5,
+      onWindowRaised: () => {
+        raised = true;
+      },
+    });
+
+    expect(launches).toEqual([
+      [EXE, store.root],
+      [EXE, store.root],
+    ]);
+    expect(raised).toBe(true);
+  });
+
+  it('does not relaunch when the window is already visible', async () => {
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const launches: string[][] = [];
+    let raised = false;
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [runningRow(store)],
+      env,
+      lockfileHeld: () => true,
+      windowVisible: () => true,
+      windowCheckStepMs: 5,
+      onWindowRaised: () => {
+        raised = true;
+      },
+    });
+
+    expect(launches).toEqual([[EXE, store.root]]);
+    expect(raised).toBe(false);
+  });
+
+  it('skips the window check entirely when no main pid can be attributed', async () => {
+    const store = makeStore();
+    const launches: string[][] = [];
+
+    await startDesktop(store, {
+      timeoutMs: 1,
+      launch: () => expect.unreachable('a profile has no application id to activate'),
+      launchProfile: (exe, root) => launches.push([exe, root]),
+      executable: () => EXE,
+      list: () => [],
+      env: {},
+      lockfileHeld: () => true,
+      windowVisible: () => expect.unreachable('nothing running to check the window of'),
+      onWindowRaised: () => expect.unreachable('nothing to raise'),
+    });
+
+    expect(launches).toEqual([[EXE, store.root]]);
   });
 });
 
@@ -552,6 +796,83 @@ describe('desktopExecutable', () => {
   });
 });
 
+describe('storeExecutable (engine/stores.ts)', () => {
+  /**
+   * With two profiles up there are two mains, same as `inspectDesktopFor`
+   * above — and here it matters what each one's own path actually is, because
+   * a staged update can leave a running instance ahead of what the registry
+   * still names.
+   */
+  const ONE = 'C:\\one';
+  const TWO = 'C:\\two';
+  const exeOne =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_1.2.3.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+  const exeTwo =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_9.9.9.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+
+  // Windows only: storeExecutable resolves the root it is given through
+  // path.resolve, and on the POSIX CI runner a literal `C:\one` is a relative
+  // path — it comes back under the working directory, matches neither
+  // instance's --user-data-dir, and the lookup falls through to the first app
+  // process for both stores. The identity logic itself is covered above with
+  // roots that exist on any platform.
+  it.skipIf(process.platform !== 'win32')('reports the executable of each running instance', () => {
+    const table = rows(
+      {
+        pid: 500,
+        parentPid: 9,
+        path: exeOne,
+        commandLine: `"Claude.exe" --user-data-dir="${ONE}"`,
+      },
+      {
+        pid: 700,
+        parentPid: 9,
+        path: exeTwo,
+        commandLine: `"Claude.exe" --user-data-dir="${TWO}"`,
+      },
+    );
+    const list = () => table;
+
+    expect(storeExecutable(ONE, list, {}, () => undefined)).toEqual({
+      executable: exeOne,
+      version: '1.2.3.0',
+    });
+    expect(storeExecutable(TWO, list, {}, () => undefined)).toEqual({
+      executable: exeTwo,
+      version: '9.9.9.0',
+    });
+  });
+
+  it('falls back to the registered command for a store that is not running', () => {
+    // No live process to ask, but every profile launches through the one binary
+    // the claude:// handler names, so that is the best available answer.
+    const registered = `"${exeOne}" "%1"`;
+
+    expect(
+      storeExecutable(
+        ONE,
+        () => [],
+        {},
+        () => registered,
+      ),
+    ).toEqual({
+      executable: exeOne,
+      version: '1.2.3.0',
+    });
+  });
+
+  it('has no answer when nothing is running and nothing is registered', () => {
+    expect(
+      storeExecutable(
+        ONE,
+        () => [],
+        {},
+        () => undefined,
+      ),
+    ).toEqual({});
+  });
+});
+
 describe('runningStores', () => {
   /**
    * A profile can be started by environment variable or by the --user-data-dir
@@ -586,6 +907,13 @@ describe('runningStores', () => {
 
   it('says nothing when no instance names a profile', () => {
     expect(runningStores(() => rows(withCmd('"Claude.exe"')))).toEqual([]);
+  });
+
+  it('ignores a partial row — it has no command line to read a profile out of', () => {
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    expect(runningStores(() => table)).toEqual([]);
   });
 });
 
@@ -644,6 +972,19 @@ describe('inspectDesktopFor', () => {
     });
     expect(inspectDesktopFor(profile(ONE), () => table, {}).selfHosted).toBe(true);
   });
+
+  it('still reports uncertain for a non-default store on a partial table', () => {
+    // A partial row has no --user-data-dir to filter by, so filtering it away
+    // would have turned this profile's "cannot tell" into a confident "not
+    // running" — instead every row is kept and inspectDesktop's own handling
+    // decides.
+    const table: ProcessRow[] = [
+      { pid: 900, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
+    ];
+    const state = inspectDesktopFor(profile(ONE), () => table, {});
+    expect(state.running).toBe(false);
+    expect(state.uncertain).toMatch(/tasklist/);
+  });
 });
 
 describe('matching an instance to a store with two names', () => {
@@ -691,5 +1032,62 @@ describe('a switchless process is not a wildcard', () => {
     const store = makeStore(); // a temp dir, never a candidate root
 
     expect(inspectDesktopFor(storeIdentity(store.root, {}), () => table, {}).running).toBe(false);
+  });
+});
+
+describe('a standalone claude.exe is never the app', () => {
+  /**
+   * `~/.local/bin/claude.exe` on a machine with a dozen Code CLIs running: named
+   * claude.exe, a readable path, and not under `\claude-code\` — every negative
+   * filter passes it, which is exactly the gap this proof requirement closes.
+   * With the app closed, the old rule made every one of them a `desktop` row and
+   * the tie-break in `inspectDesktop` handed one of their pids to
+   * `taskkill /F /T`.
+   */
+  const STANDALONE = 'C:\\home\\.local\\bin\\claude.exe';
+
+  it('is not the app with the app closed', () => {
+    const table = rows({
+      pid: 800,
+      parentPid: 9,
+      path: STANDALONE,
+      commandLine: `"${STANDALONE}"`,
+      startedAt: 1_000,
+    });
+
+    expect(inspectDesktop(() => table, {})).toMatchObject({ running: false });
+  });
+
+  it('stays out of the main pid with the real app up beside it', () => {
+    const table = rows(
+      {
+        pid: 800,
+        parentPid: 9,
+        path: STANDALONE,
+        commandLine: `"${STANDALONE}"`,
+        startedAt: 1_000,
+      },
+      { pid: 500, parentPid: 9, startedAt: 5_000 },
+      { pid: 501, parentPid: 500, commandLine: '"Claude.exe" --type=renderer' },
+    );
+
+    expect(inspectDesktop(() => table, {}).mainPid).toBe(500);
+  });
+
+  it('still recognises a profile whose executable sits under the store root', () => {
+    // Neither the \Packages\Claude proof nor a typed helper applies here — the
+    // store-root proof is the only one that can carry a profile whose exe was
+    // simply dropped inside the userData directory it points at.
+    const store = makeStore();
+    const env = { CLAUDE_USER_DATA_DIR: store.root };
+    const exe = `${store.root}\\Claude.exe`;
+    const table = rows({
+      pid: 500,
+      parentPid: 9,
+      path: exe,
+      commandLine: `"${exe}" --user-data-dir="${store.root}"`,
+    });
+
+    expect(inspectDesktop(() => table, env).running).toBe(true);
   });
 });

@@ -85,14 +85,39 @@ foster sweep          # what it would do, writing nothing
 foster sweep --yes    # do it
 ```
 
-It copies every fosterable session from the other accounts, **archived ones included**, brings back
-conversations the app deleted that nothing still points at, and then re-scans to say whether either
-pass has anything left. That last part is the reason it exists as a command rather than as advice:
-measured on one real store, the same sweep offered 15 sessions without `--archived` and 141 with it,
-so anyone who did not know the flag finished with a tenth of the work done and no way to tell.
+It copies every fosterable session from the other accounts, **archived ones included**, gives every
+branch of a forked conversation a row of its own, brings back conversations the app deleted that
+nothing still points at, and then re-scans to say whether any pass has anything left. That last part
+is the reason it exists as a command rather than as advice: measured on one real store, the same
+sweep offered 15 sessions without `--archived` and 141 with it, so anyone who did not know the flag
+finished with a tenth of the work done and no way to tell.
 
 Archived copies **stay archived**. They arrive in the app's archived view rather than reappearing in
 Recents — bringing the conversation across is the point, not undoing the decision to tuck it away.
+
+A forked conversation — one piece of work continued in more than one account, each continuation on
+a transcript of its own — gets **one row per branch**, and the rows say which one to open. The
+branch that carried on keeps its title untouched. Every other branch is retitled
+`(stale, stopped DD/MM HH:MM) …`, stamped with the moment of its last answer, and filed in the
+archived view — the row already in the account included, whoever made it. Nothing is chosen and
+nothing is hidden: the stale rows still open, they just no longer look like the row to continue in.
+The one branch that gets no row of its own is one holding nothing of its own — every record of it
+already in the branch that carried on — because a row for it would open nothing the clean row does
+not.
+`--stale-prefix` changes the words a fresh mark is written with, and `--branch-prefix` does the same
+for a branch that went on rather than stopped; `{when}` is where the moment goes in either. Measured
+on the store that prompted this: the row the user had pinned held 328 records while the branches in
+two other accounts held 3157 and 2564, and every previous sweep had reported that nothing was left to
+do.
+
+Recognising a mark an _earlier_ run wrote never depends on being told those same words again. The
+ledger already says what a row was actually marked with, so a bare `foster sweep` — the English
+defaults — still recognises a row the `/fosteia` skill marked in Portuguese last week, and leaves it
+exactly as it is rather than stacking a second mark in front of the first: `--stale-prefix` and
+`--branch-prefix` only ever choose the words a _new_ mark is written with (#35). Measured on a real
+store: 10 rows would have been rewritten that way by one bare `foster sweep --yes` on 05/09/2026. A row
+wearing a mark no known template can explain — a hand edit, or a foster too old to have recorded one —
+is left alone and named in the sweep's summary, rather than guessed at.
 
 It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
 the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
@@ -100,15 +125,95 @@ unmentioned reads as having brought everything. One of the three has a way out �
 [scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
 under a flat "never".
 
+A fourth pass releases the worktree claim a copy already on disk inherited from its original,
+before fostering learned not to hand one out — see
+[Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
+whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
+
+A fifth pass, `--sync-titles`, brings a copy's title back into step with the original's. A copy
+carries the name of the instant it was made, and every later sweep sees it as already fostered and
+walks past — so a conversation renamed where it came from keeps the old name in every other account
+for ever, and the sidebar reads as if the work were missing when only its name is.
+
+Whose name wins is decided from the ledger, never from reading the strings: a copy still wearing the
+last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch pass has
+marked the card since, and the fostering's `originalTitle` otherwise. On the store this was measured
+against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed by hand
+was exactly the row that must not be trampled.
+
+That test alone was too narrow. Open a copy in this account and the app generates a title for it,
+which matches no baseline — so a conversation renamed where it came from stayed out of step for
+ever, and the run reported it as "renamed here" when nobody had renamed anything. The card records
+who named it: `titleSource` is `auto` when the app generated the name, `user` when somebody renamed
+the row in the sidebar, `tool` when `set_session_title` wrote it, and absent on copies older than
+the field. So a second rule follows the first — **a name a person chose beats a name the app
+generated**, whichever side each is on, and a name chosen on both sides is a conflict the run prints
+with both names rather than settling. Authorship is the only question that can be answered here:
+nothing records _when_ a title changed (there is no `titleUpdatedAt`, and `lastActivityAt` moves when
+a conversation is merely opened), so "the newer rename wins" is not available at all.
+
+Marks survive it and never travel. The mark a branch wears is not part of its name, so it is put
+back in front of the new title; a mark the _original_ happens to wear is dropped, or the two would
+stack. Both are derived by subtracting the title from the record that carries it, which is what
+keeps this clear of the [prefix problem](#when-one-conversation-becomes-two) — a run does not have to
+be told the words a mark was written with to recognise one. When a card has been marked twice and the
+mark can no longer be told from the title beneath it, the copy is left alone rather than rewritten
+with a guess. It is off by default because the first run on a store fostered into for weeks rewrites
+in bulk, and only shows at the next restart.
+
 Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
 transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
-choosing which half of a fork survives hides records, and that is a reading decision — forks are
-counted, reported, and left alone.
+with a row per branch nothing is hidden, so collapsing a fork to one row is a tidy-up for whoever
+wants one, not a decision the sweep has to leave open.
+
+One scan, one lineage, one walk of the transcript tree per run. The passes used to build their own,
+and a `--yes` run read every card in the store five times over and walked the transcript tree six —
+on a store of eleven accounts, half a minute of the run was spent reading what it had just read.
 
 `--restart` restarts Claude Desktop at the end, which is what makes the copies visible. A Claude
 Code session started from the app's sidebar is a child process of the app, so restarting from
 inside one would kill the caller part-way through; the sweep asks first and ends with the command
 to run from a terminal outside the app instead of failing after writing everything.
+
+## Copies that still claim a worktree
+
+A card names the worktree it holds in `worktreePath` / `worktreeName`, but the lease itself lives
+in the app's own store of worktrees, keyed by the session id that took it out. A copy used to
+carry the claim without the lease — a fresh id naming a directory it cannot hold — so when the app
+reached the second card on that branch it refused with `fatal: 'claude/<branch>' is already used
+by worktree at '<path>'` and dropped the session into the main repository, uncommitted work and
+all. Fostering has not made that mistake since 0.38.0: a fresh copy drops the claim and opens in
+the repository the worktree was cut from instead.
+
+What that fix could not reach is what was already on disk. `foster unclaim` is the repair:
+
+```bash
+foster unclaim          # what it would release, writing nothing
+foster unclaim --yes    # release it
+```
+
+Only **copies** are ever touched — the candidates are the active fosterings foster's own ledger
+already tracks, never a card discovered by scanning the store, so a native card carrying the same
+stale claim is left exactly as it is. The write removes the three claim fields and moves `cwd` to
+the repository the worktree was cut from, the same relocation `buildFosterCopy` makes for a copy
+being minted fresh, and carries every other key on the card through untouched.
+
+The release is recorded, so it can be put back: `foster unclaim --undo --yes` restores the claim
+and the directory, refusing a card that has since moved on — repointed, retitled into a different
+`cwd`, or handed a fresh worktree by the app — rather than overwriting it.
+
+Releasing a claim takes no write guard, unlike a repoint — it is allowed with Claude Desktop open,
+the same as [a retitle](#when-one-conversation-becomes-two). The app reads the session directory once,
+at startup, and only ever rewrites a card it is holding in memory, whole, the next time something
+about it changes. A release that write overwrites is not lost: `planUnclaim` re-derives the claim
+from whatever is on disk, so a card the app hands the fields back to is simply one the next plan
+finds again, and the next `foster unclaim` — or the next sweep — releases it a second time. The
+change becomes visible at the app's next restart either way, exactly like a retitle.
+
+`foster sweep` runs this as its fourth pass, on the destination store, after the other three have
+written — so "bring everything here" also stops a freshly arrived copy from fighting its original
+over a branch. Two follow-ups from the original issue (#26) stay open: the `branch` a stale, archived
+row still claims, and the cosmetic `keptDirtyWorktree` a copy cannot really have.
 
 ## Undoing a deletion
 
@@ -252,7 +357,15 @@ points that card at the fork. From then on there are two conversations where the
 halves usually live in different accounts, and fostering between those accounts puts both in the same
 sidebar — one piece of work, several rows, nothing to tell them apart but a date.
 
-`foster consolidate` reduces that to one row per account, on the half that carried on:
+`foster sweep` answers this without choosing: one row per branch, the branch that carried on under
+its own title and every other branch retitled stale and filed in the archived view — see
+[the whole sweep](#the-whole-sweep). The retitle is the one write the sweep makes to a card it did
+not create, and it changes only the title and the archived flag; the ledger records both before
+and after, native or not, and a stale row that later carries on gets its title back and, if it was
+foster that filed it away, its place in Recents.
+
+`foster consolidate` is the tidy-up for anyone who wants one row per account instead, on the half
+that carried on:
 
 ```bash
 foster consolidate                  # what it would do, writing nothing
@@ -472,20 +585,67 @@ starts, populates its own store, takes its own instance lock, and runs beside th
 installation without disturbing it.
 
 Signing in is where it gets awkward, and it is worth understanding why rather than giving up at the
-symptom. The `claude://` protocol belongs to the installed package, so when the browser hands back
-the OAuth callback, Windows routes it to the package and starts an instance on the **default**
-`userData`. The profile never receives its own callback and sits on the sign-in screen forever.
+symptom. Claude Desktop ships as an MSIX package, and Windows resolves the `claude://` protocol
+through **package activation**, not the classic per-user registry key you might expect to find and
+edit — that key still exists, but it is MSIX registry virtualization's private copy, visible only
+from inside the app's own container, and a browser running outside the container never sees it. So
+the browser's OAuth callback always lands on package activation, which starts an instance on
+whichever `userData` the packaged registration currently names — normally the default installation.
+The profile never receives its own callback and sits on the sign-in screen forever.
 
-But look at what that registration actually is:
+**Measured on 05/09/2026 (Claude Desktop 1.46388.2, foster 0.40.0): two Claude Desktop windows
+signed into two accounts, the second through the ordinary Google flow.** Three facts made it work:
+
+- What actually decides the destination is a **packaged ProgID** —
+  `HKCU\Software\Classes\AppX<hash>`, the key Windows creates when it registers the package for
+  `claude://` — not the classic `…\claude\shell\open\command` key. Its `Shell\open` subkey carries
+  `AppUserModelID` (which package this is) and `Parameters`, the argument string appended to the
+  package's own executable the moment a link is activated — normally just `"%1"`.
+- `Parameters` is the user's own registry value (`FullControl`, no elevation needed), so pointing it
+  at `--user-data-dir=<profile> "%1"` for the length of one sign-in routes the very next callback to
+  that profile. This is the one registry **value** `foster` ever writes — never a key, never a
+  level — restored verbatim once the sign-in lands, times out, or is cancelled.
+- The callback process only _finds_ the profile it is meant to forward to when that profile's own
+  instance was itself started **with package identity** (`Invoke-CommandInDesktopPackage`, not a
+  bare `Claude.exe` child process). A profile started by running the executable directly never sees
+  the callback at all and ends up a second, broken instance on the same `userData`. `foster app
+start` and `foster app login` both start a profile this way now, falling back to a direct launch
+  only when the cmdlet is missing or fails.
+
+```bash
+foster --store work app login --yes
+```
+
+**Arm first, then sign in.** `app login` only prints the instruction to click "Continue with
+Google" once the handler is actually routed — not a moment before — because Edge and some Chrome
+profiles hold a standing permission to auto-launch `claude://` from claude.ai with no dialog in
+between, so the routing has to already be in place before the sign-in can possibly fire the
+callback. If the browser opens Claude by itself the instant you start the Google flow, that is
+expected: the link is routed. Success is detected without reading the callback at all — the
+profile's own token cache appears, or its account changes, either of which ends the wait early and
+restores `Parameters` on the spot; `--timeout <seconds>` caps the wait instead of leaving it open
+until Ctrl+C. If the profile is running without package identity, `app login` refuses rather than
+arming a handler whose callback cannot land — `--restart-profile` closes it and starts it again the
+right way in one step. There is one hazard worth knowing regardless: if any Claude window restarts
+while the login is armed (an app update or repair), the packaged registration gets rewritten out
+from under it, and `app login` says so rather than overwriting what the app just wrote. A login left
+routed by a crash, or by Ctrl+C reaching something other than this process, is what
+`foster app login --restore --yes` and the warning in `foster doctor` are for.
+
+For the cases `app login` cannot change the routing for — an installed app that already owns the
+handler, or a machine where the registry value cannot be touched — manual delivery and the e-mail
+code are the fallbacks. Manual delivery works off what the packaged registration actually is:
 
 ```
-HKCU\Software\Classes\claude\shell\open\command
-  "…\WindowsApps\Claude_…\app\Claude.exe" "%1"
+HKCU\Software\Classes\AppX<hash>\Shell\open
+  AppUserModelID = Claude_<publisher>!Claude
+  Parameters     = "%1"
 ```
 
-A plain executable with the URL as an argument — no package activation, no broker. And a second
-invocation carrying the same `--user-data-dir` loses that profile's single-instance lock and
-forwards its argv to the instance holding it. So the callback can simply be delivered by hand:
+Just an argument string appended to the package's own executable at activation — no broker beyond
+that. And a second invocation carrying the same `--user-data-dir` finds that profile's
+single-instance lock and forwards its argv to the instance holding it (again, only when that
+instance was itself started with package identity). So the callback can simply be delivered by hand:
 
 ```powershell
 & "…\app\Claude.exe" --user-data-dir="<profile>" "claude://<the callback URL>"
@@ -502,23 +662,32 @@ authorization code is single-use and short-lived, so do it promptly.
 foster --store "D:\Claude-Work" app link "claude://<the callback URL>"
 ```
 
-It refuses anything that is not a `claude://` link, and never prints or records the URL.
+It refuses anything that is not a `claude://` link, and never prints or records the URL — the same
+rule `app login` follows: a single-use sign-in code has no business in foster's own output.
 
-Demonstrated once, end to end: two accounts signed in simultaneously in the same Windows session,
-each in its own instance, with the default installation untouched. An account whose organization
-requires SSO will still refuse — that is the account's policy, not this mechanism.
+This has been demonstrated both ways — the browser flow above, and hand-delivering the callback URL
+— with two accounts signed in simultaneously in the same Windows session, each in its own instance,
+the default installation untouched. An account whose organization requires SSO will still refuse —
+that is the account's policy, not this mechanism.
 
 `foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
 for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
-directories of every running instance so you know what to pass to `--store`.
+directories of every running instance so you know what to pass to `--store` — or give it a name
+once with `foster profile new|register` so you never have to retype the path (see `foster stores`
+under [Usage](#usage)).
 
-It can also start one. `foster --store <profile> app start` runs the installed executable — the one
-Windows records when it registers the `claude://` handler — with the switch that points it at that
-profile, so `app restart` works there too:
+It can also start one. `foster --store <profile> app start` prefers
+`Invoke-CommandInDesktopPackage` when the executable found is a real MSIX install — see the package
+identity fact above — falling back to running the executable directly, and says which one it used;
+`app restart` works there too:
 
 ```bash
 foster --store "D:\Claude-Work" app restart --terminate
 ```
+
+A profile that comes back from a restart can come up with its window hidden (signed in, but nothing
+visible — the "closed to tray" state carried across the relaunch); `app start` and `app login` both
+give it a few seconds to appear and, if it has not, send one more launch to raise it, and say so.
 
 Everything that inspects or closes an app is scoped to the store you name. The installed app is the
 one whose main process carries no switch; a profile is matched by its own path. And `foster` refuses
@@ -551,11 +720,15 @@ credits, of its own.
 
 The identity is read from the client's own `.claude.json` — the profile the CLI cached for itself,
 the same at-rest category as the session files — and the credential beside it is not read, here or
-anywhere: its presence is what "signed in" means. The rest of foster already treats clients as
-first-class sources: `restore`, `purge` and `live` search all of them, which is how a machine with
-two clients gets the whole answer rather than the default's half.
+anywhere: its presence is what "signed in" means. `restore`, `purge` and `live` already search
+every `~/.claude*` sibling this way, which is how a machine with two such clients gets the whole
+answer rather than the default's half — but a root added with `foster client register`, below,
+does not join that search: it feeds `clients` and launch only, and `--config-dir` is still how
+`restore`, `purge` and `live` reach it, on purpose (see the `foster stores` section above).
 
-Launching stays in the shell, where an interactive program belongs. A function that sets the
+Launching can stay in the shell, or go through `foster client open <client>`, which alone knows
+name -> directory -> identity -> live writers -> junction target, and refuses the cases that bite
+instead of opening into them. Staying in the shell is the portable option: a function that sets the
 variable, hands every argument through, and puts the environment back whatever happens is all it
 takes — the two halves the obvious one-liner gets wrong are the `finally` and the `@args`:
 
@@ -578,8 +751,18 @@ function claude-as {
 }
 ```
 
-`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — the list
-of clients is the directories that exist, so there is nothing to register anywhere.
+`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — a
+`~/.claude*` sibling needs no registration, `foster clients` finds it on its own. A directory
+that does not live there — `~\.claude-contas\<name>`, or a whole folder of them — does:
+`foster client register <path>` names one directory, `--container` names a directory that holds
+one client per immediate child, and `foster client forget <path>` withdraws either without
+touching anything underneath it. Both are dry runs unless you pass `--yes`, in the shape below.
+
+```bash
+foster client register ~\.claude-contas --container            # dry run
+foster client register ~\.claude-contas --container --yes      # list its children in `clients`
+foster client forget ~\.claude-contas --yes                     # stop listing them
+```
 
 `foster client new` makes a better one than `mkdir` does. A bare directory plus a login
 authenticates, but sessions run there quietly have fewer capabilities than sessions run anywhere
@@ -599,6 +782,29 @@ else's identity.
 foster client new ~\.claude-work            # dry run
 foster client new ~\.claude-work --yes      # make it, signed out
 ```
+
+#### One entry per client in the Windows Terminal menu
+
+`foster clients --fragment` prints a Windows Terminal fragment (JSON) with one profile per client
+this machine lists — registered roots included, a junction resolved to its target — so every client
+gets its own entry in the `wt` menu without hand-editing `settings.json`. Run these two commands in
+this order: the `Fragments` folder does not exist until something creates it, and PowerShell's `>`
+does not create one on the way.
+
+```powershell
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster" | Out-Null
+foster clients --fragment > "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster\clients.json"
+```
+
+Three things worth knowing before you rely on it. The Terminal writes a stub of the profile into
+your own `settings.json` the first time it loads the fragment, so this is not without side effects
+on a file that is yours. `wt -p <name>` with a name that does not match opens the **default**
+profile silently (microsoft/terminal#6086) — on a machine where `~/.claude` is the default, that is
+a tab on the wrong account with no error at all, so prefer `foster client open` when being certain
+matters more than a menu entry. And the fragment has to stay UTF-8: PowerShell 7's `>` writes it
+that way, but Windows PowerShell 5.1's writes UTF-16 and breaks the file.
+
+Restart Windows Terminal if the entry does not appear.
 
 ### Switching a client's account
 
@@ -749,39 +955,64 @@ came from, because two installations can hold the same account identifier.
 different profile — everything after it reads and writes there — so a second
 account is not a reason to quit and relaunch.
 
-The same operations are available as one-shot commands, for scripting:
+The same operations are available as one-shot commands, for scripting. `--help` files them under
+these same headings, so the list below and the one the program prints are the same shape:
 
 ```bash
+# Start here
 foster doctor    # environment check: store location, app state, whether it is running
+foster stores    # installations foster knows about, and what to pass to --store
+foster clients   # the CLI's config directories, and who is signed into each
+foster clients --fragment # print a Windows Terminal fragment (JSON), one profile per client
+
+# Bringing conversations in
+foster sweep     # the whole job: every account, archived and deleted included
+foster sweep --sync-titles # also re-title copies whose original has been renamed since
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
-foster label     # give an account a human name
-foster labels    # list the names given so far
+foster foster    # create the copies
+foster restore   # bring back sessions deleted in the app
+
+# After the sweep
+foster return    # remove fostered copies, restoring the previous state
+foster consolidate # one row per piece of work, on the branch that carried on
+foster unclaim   # release the worktree claim a copy inherited from its original
+foster status    # what is currently fostered
+foster pin       # pin sessions in the sidebar, or see what is pinned
+foster purge     # destroy the conversations behind deleted sessions, permanently
+
+# Accounts
 foster accounts  # every account here: who, which plan, whether it is still paid for
+foster whoami    # the signed-in account's name, email and plan, from the app's own cache
+foster identify  # name an account by asking the API with a credential already on the machine
+foster label     # give an account a human name (--clear takes it back, --forget drops the sighting)
+foster labels    # the name each account goes by — a label you gave, or its e-mail
 foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
 foster renewals  # usage resets and billing dates across every account, in one place
-foster whoami    # the signed-in account's name, email and plan, from the app's own cache
-foster clients   # the CLI's config directories, and who is signed into each
+
+# Credentials and clients
 foster switch    # sign a client in as another account, without a logout
 foster vault     # the credentials foster is holding, and whose they are
 foster guard     # record the account a client holds, so it can be put back later
 foster point     # repoint a directory link at another client
 foster client new  # seed a config directory that is a working client
-foster sweep     # the whole job: every account, archived and deleted included
-foster foster    # create the copies
-foster restore   # bring back sessions deleted in the app
-foster purge     # destroy the conversations behind deleted sessions, permanently
-foster return    # remove fostered copies, restoring the previous state
-foster consolidate # one row per piece of work, on the branch that carried on
-foster status    # what is currently fostered
-foster pin       # pin sessions in the sidebar, or see what is pinned
-foster app       # status | quit | start | restart — drive Claude Desktop itself
-foster transcript  # read a conversation's transcript, by cliSessionId
-foster resume    # send one prompt to an existing conversation, headlessly
+foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
+foster client open # a Windows Terminal tab signed in as one client (--print shows the command)
+foster profile   # name a Desktop profile — new|register|forget|list — for --store
+
+# Live sessions
 foster live      # conversations a claude process is holding open right now (--stop ends one,
                  #   --prune clears registry entries whose process is gone)
 foster rescue    # conversations stranded by a crash, and the resumes that bring them back
                  #   (--open puts each one in its own Windows Terminal tab)
+foster unstarted # background-task requests whose session died before answering once
+foster transcript  # read a conversation's transcript, by cliSessionId
+foster resume    # send one prompt to an existing conversation, headlessly
+
+# The app
+foster app       # status | quit | start | restart — drive Claude Desktop itself
+foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
+                 #   an interrupted run)
 foster agent     # hand a task to a Claude agent that drives the operations above
 ```
 
@@ -858,9 +1089,25 @@ asked about. That match is the safety: a token belonging to someone else is disc
 against the account that was asked. The sighting lands in the ledger the same way a sign-in's would,
 so the dashboard, `accounts` and the menu pick it up. `foster identify <account>` names one,
 `foster identify --all` sweeps every account that has no identity yet, and the menu offers "Identify
-it" on an unnamed account when a key to ask with is on hand. Like `usage`, it goes to the network
-only when you run it — never on its own — and when foster holds no live credential for an account it
-says so rather than guessing.
+it" on an unnamed account when a key to ask with is on hand. When foster holds no live credential for
+an account it says so rather than guessing.
+
+It also asks on its own, ahead of the commands that print an account by name — `accounts`, `labels`,
+`stores`, `live`, `status`, `sweep`, `scan`, `clients`, `doctor`, `whoami`. What makes that
+affordable is asking per _credential_ rather than per account: a token answers with its own
+`account.uuid`, so a single round names everyone it can reach, where asking per account would be one
+request per pair. A credential whose owner is already on disk — the app's own config hint, a client's
+cached profile, a vault entry the API has answered for before — is skipped once that owner has an
+identity, so on the ordinary machine, after the first time, the run asks nothing at all. Failures are
+silent: a name is a courtesy, and the command you actually asked for runs regardless. `purge`,
+`return`, `switch` and the rest never trigger it — they act on ids and paths, and a run that only
+means to move files should not be waiting on the network.
+
+And a name, once known, is used. Every screen used to print eight hex digits for an account whose
+e-mail was already sitting in the ledger, because it read the labels map and nothing else. The order
+now is the label first — someone sat down and chose it — then the e-mail the API answered with, then
+the abbreviation. Only the `label` field in JSON still means strictly what a person named, because
+that is what it promises.
 
 **Two servers, and why only one of them answers.** This is worth understanding, because it is the
 line between what `identify` and `accounts` can tell you and what they cannot. Anthropic runs the
@@ -921,6 +1168,13 @@ that produced it, and a later reading can only correct a field by finding a diff
 which it cannot do once the app has compacted the profile away. `foster label <accountUuid> --forget`
 discards what is remembered about an account and leaves the name you chose alone; the sighting stays
 in the log, and the next real reading starts the record over.
+
+`--clear` is the opposite half: it drops the name **you** gave and leaves the sighting, so the
+account goes back to being called by its e-mail. That only became worth having once an unlabelled
+account is named by its e-mail rather than by eight hex digits — clearing a label is now a choice to
+be called what the API calls you, not a choice to be anonymous. The log is append-only, so taking a
+name back is a line saying so (`account_labelled` with an empty label) rather than a line removed;
+`label` itself refuses an empty name, so `--clear` is the only thing that ever writes one.
 
 `status` answers the same question the other way round. It summarises by account by default —
 how many copies, and where — because with a few hundred of them a line per copy is not an answer
@@ -992,15 +1246,47 @@ against the installations below — `--store work` finds `D:\Claude-Work`. A pie
 them is reported rather than guessed at, and one that matches nothing and is not a directory is an
 error rather than an empty store.
 
-`foster stores` lists the installations it can name without being told — the installed app, whatever
-is running, and the profiles the ledger has been used in — with the account each one holds, which is
-the question a second profile exists to answer. The menu offers the same list, so a profile you have
-worked in once never has to be typed again.
+`foster stores` lists the installations it can name without being told, from **four** sources: the
+installed app; whatever is running right now; the profiles the ledger has already been fostered
+into; and — new — the ones registered on purpose, `foster profile new` or `profile register`,
+for a profile that has neither run nor been fostered into yet. Each line carries the account it
+holds, which is the question a second profile exists to answer, and the menu offers the same
+list, so a profile you have worked in once never has to be typed again.
 
 ```
-* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) 9866b1e8
-  D:\Claude-Work                           (profile, running) not signed in
+* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) last seen as 9866b1e8
+  D:\Claude-Work                           (profile, running) last seen as not signed in
+  work                                     (registered, gone) last seen as not signed in
 ```
+
+A registered name is the one row that survives its own directory disappearing — `(registered,
+gone)` above — because a name is the one thing foster remembers on purpose past that; `foster
+profile forget` is how you stop hearing about it. `--json` adds `signedIn`: whether that
+installation's config carries a cached OAuth token entry at all, presence only, the same
+existence check `doctor` reports and never the token itself — reading that stays `usage`'s job
+alone (see [Safety model](#safety-model)).
+
+`--store` resolves an argument against exactly this list, trying each in turn: a path that
+exists is always taken as a path; failing that, a registered name, exact, tried before a path
+piece that happens to match too; failing that, an account — a label, an e-mail, or a unique uuid
+prefix, the same three `foster clients` already prints; and last, a distinctive piece of a path,
+because a profile's is long and nobody remembers it exactly. A piece matching more than one
+installation is reported rather than guessed at, the same as an ambiguous session identifier,
+because with `--store` the guess decides which installation gets written to.
+
+**What `--store <name>` means for the verbs that already existed: they now act on that profile
+instead of the installed app, by design.** `foster --store work sweep` scans **that** profile's
+other accounts and writes the copies inside it — each profile keeps its own
+`claude-code-sessions`, so two profiles mean two independent sweeps, and neither ever sees the
+other's cards — and `sweep --restart` already restarts the instance that was actually named.
+`foster --store work rescue` lists that profile's stranded cards; the transcripts it reads for
+them still come from `transcriptRoots`, which is CLI-side and shared, so one transcript can
+legitimately show up under two profiles. `foster --store work consolidate` and
+`foster --store work return` still require **that** profile's own app closed, with the
+refuse-to-close-the-one-you-are-running-inside rule intact. None of these verbs learns a new
+**client** directory from a profile — that stays `client register`'s job, a separate registry on
+purpose (see [More than one client at once](#more-than-one-client-at-once)); what changes here is
+only which store they read and write.
 
 `foster clients` is the same list for the CLI: its config directories — one per account — with who
 is signed into each, read from each client's own cached profile; the credential contributes only its
@@ -1027,6 +1313,24 @@ and `foster live --stop` will not end a process it cannot identify — the kill 
 and the tree it takes with it would be a stranger's. Reading the process table is the Windows half
 of foster: anywhere else there is none, every entry stays listed, and `--stop` refuses everything
 rather than guessing.
+
+Reading the table itself has its own fallback. PowerShell's `Get-CimInstance Win32_Process` answers
+first — it is the only reader that reports a parent pid — but PowerShell can hang at start-up rather
+than fail quickly: measured 05/09/2026, a machine whose PowerShell was blocked at start-up by a
+WinFsp/Cryptomator drive that had stopped answering made every `powershell.exe` invocation wait 20 s
+and then error, and every foster command that reads the process table reported an empty machine as a
+result. When PowerShell fails or is missing, `wmic` answers next with the same six fields (pid,
+parent pid, name, path, command line, start time); when wmic also fails or is not installed (it is a
+Feature on Demand as of Windows 11 24H2, so a fresh install may not have it), `tasklist` answers with
+pid and name only. A table read through `wmic` changes nothing; a table read through `tasklist`
+changes what foster is willing to conclude from it: `app status` reports that it cannot tell the app
+from a Claude Code session rather than guessing "not running", `live --stop` refuses a partial row
+outright rather than risk `taskkill /F /T` against the wrong process, and `sweep --restart` hands
+over the command instead of trying. `foster doctor` names which reader actually answered and why the
+ones before it were passed over. A PowerShell that fails once is not retried for the rest of that
+run — the hang is paid at most once, not once per read. The native readers decode their output as
+`latin1` rather than Unicode, so a path or command line containing non-ASCII characters can come back
+wrong; the ASCII markers foster actually greps for are unaffected.
 
 The session foster is running in is never ended, for the same reason it refuses to close the app it
 runs inside — the kill would take the command with it, part-way through. That used to be answered by
@@ -1133,6 +1437,28 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   show for it.
 - **The originals are never modified.** Fostering only ever _adds_ a file to the current account's
   folder. There is no move, and no rewrite of anything under the old account.
+- **Naming a profile or a client root is a write; opening one is not.** The ledger's four newest
+  event kinds — `profile_registered`, `profile_forgotten`, `client_root_registered`,
+  `client_root_forgotten` — are append-only records of what foster calls something, never of an
+  account or a credential; folding them (`LedgerState.profiles`, `LedgerState.clientRoots`) is
+  what lets `--store <name>` and `foster clients` still find a root days after the command that
+  named it. `profile new`, `profile register`, `profile forget`, `client register` and
+  `client forget` all follow `client new`'s shape: blockers first, a dry run by default, `--yes`
+  to apply, the ledger entry only after a finished write. Starting an instance, opening a terminal,
+  or handing it a link is not a write at all — `app start`, `app restart`, `app link` and
+  `client open` never touch the ledger, because launching a profile or a client that already exists
+  changes nothing foster remembers about it.
+- **One system setting is ever touched, and only for the length of one sign-in.** The `Parameters`
+  value under the packaged ProgID's `Shell\open` key (`HKCU\Software\Classes\AppX<hash>\Shell\open`)
+  is the only registry value, or setting of any kind outside `~/.foster`, that `foster` ever writes —
+  never a key, never a level: the key always already exists, because it is the app's own
+  registration. What the run is about to overwrite is recorded in the ledger, verbatim, before it
+  happens, then undone once the sign-in lands or the wait gives up — the real previous value is
+  written back exactly as read. `app login --restore` and the warning `foster doctor` prints when
+  `Parameters` is still routed cover the run that does not get to undo it itself. It also refuses to
+  run at all from inside Claude Desktop's own container, where the registry it would read and write
+  is MSIX's private, virtualized copy — a change there could never reach the browser in the first
+  place.
 - **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
   already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
   It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,
@@ -1166,12 +1492,14 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   turns the other never got, so read both before choosing; `--session` overrides, and for pairs
   already on disk `status` counts them and `foster return --branches` removes them.
 
-  Refusing it is right and refusing it silently was not, because the account keeps whichever half
-  reached it first. When the half being turned away is the one that carried on, the sweep now weighs
-  the two and says so — how many records each holds that the other does not — and names
-  `foster consolidate`, which is what moves the row you have onto the half that kept going. The other
-  direction gets no such line: skipping the half that stopped is simply correct, and a note under
-  every refusal would bury the handful that matter.
+  Refusing it is right for `foster foster`, and refusing it silently was not, because the account
+  keeps whichever half reached it first. When the half being turned away is the one that carried
+  on, the command weighs the two and says so — how many records each holds that the other does not
+  — and names `foster consolidate`. The other direction gets no such line: skipping the half that
+  stopped is simply correct, and a note under every refusal would bury the handful that matter.
+  `foster sweep` does not refuse at all: it brings every branch as its own row, the branch that
+  carried on under its title and the rest marked stale, so the account never keeps the wrong half
+  by accident.
 
   Removal keeps one row per piece of work, always: a card foster did not write if there is one,
   otherwise the half that carried on after the fork — measured by the records it holds that no
@@ -1259,11 +1587,22 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
 
   **What reads the app's:** one command, `foster usage` (and the matching "Usage right now" in the
   menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
-  `accounts`, or the agent. The reader lives in one file, `store/credential.ts`.
+  `accounts`, `guard`, or the agent. `guard` copies the CLI's own credential (see "What copies the
+  CLI's" below); it never touches the app's sealed token. The reader lives in one file,
+  `store/credential.ts`.
 
-  **What copies the CLI's:** `switch` and `guard`. Both go through `store/cliCredential.ts` and
-  `engine/vault.ts`, and what they do is _copy bytes_: foster never mints a credential, never
-  refreshes one, never removes one, and never signs anyone in. OAuth is interactive and stays yours.
+  `foster stores` and `foster doctor` come closer than any of those and still stop short on
+  purpose: `signedIn` in `--json` (and "gone"/"not signed in" in the text) says only whether a
+  config carries a cached OAuth token entry at all — checked directly against the parsed JSON's
+  own keys, the value itself never assigned anywhere — which is presence, not proof, and a
+  different question from what the token is worth. Listing installations never doubles as reading
+  one of them.
+
+  **What copies the CLI's:** `switch`, `guard`, and `client open --guard`, which runs the same
+  read-then-remember pair `guard` does before opening the tab. All of them go through
+  `store/cliCredential.ts` and `engine/vault.ts`, and what they do is _copy bytes_: foster never
+  mints a credential, never refreshes one, never removes one, and never signs anyone in. OAuth is
+  interactive and stays yours.
   The bytes are copied verbatim rather than re-serialised, because a field this version does not know
   about is a field a rewrite would drop — and a dropped field in a credential produces a file that
   parses, looks right and does not authenticate.
@@ -1288,8 +1627,13 @@ natively. foster adds no API to the app; it widens what the app's own API can kn
   **The agent is fenced off from all of it**, on the same footing as `purge`: `switch`, `point`,
   `client new` and `vault` are not among its tools and it is told not to reach for them through the
   shell. Changing who you are signed in as is not a step on the way to something else, and a
-  credential is not a file for a model to move. The read-only half — `clients`, `accounts`, `usage`,
-  `renewals`, `identify` — answers "which account has quota" without any of it.
+  credential is not a file for a model to move. The same fence covers naming an installation and
+  opening one: `profile new|register|forget`, `client register|forget`, `profile open` and
+  `client open` start interactive programs or change what foster remembers about accounts, so
+  none of them is a tool either — the system prompt names all four families and tells the model to
+  say which account needs an app or a terminal open and let the user do it, rather than reach for
+  the shell. The read-only half — `clients`, `accounts`, `usage`, `renewals`, `identify` — answers
+  "which account has quota" without any of it.
 
   **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
   read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
@@ -1361,8 +1705,10 @@ if realistic account identifiers or personal filesystem paths appear in tracked 
 
 ### Releasing
 
-The version lives in three files — `package.json`, `src/version.ts` (stamped into every copy foster
-writes) and `install.ps1` (which pins the release it downloads). Bump them together, then tag:
+The version lives in four files — `package.json`, `package-lock.json` (which restates it twice, and
+which `npm install` alone would leave reporting a version the release never had), `src/version.ts`
+(stamped into every copy foster writes) and `install.ps1` (which pins the release it downloads).
+`npm run version:set X.Y.Z` (`scripts/version.mjs`) bumps all four together, then tag:
 
 ```bash
 npm run version:set 0.11.1
@@ -1370,7 +1716,7 @@ git commit -am "chore: release 0.11.1" && git tag -a v0.11.1 -m "foster v0.11.1"
 git push && git push origin v0.11.1
 ```
 
-Pushing the tag runs the release workflow, which refuses to publish unless the three versions agree
+Pushing the tag runs the release workflow, which refuses to publish unless the four versions agree
 with each other and with the tag. It then builds the bundle, smoke-tests that it actually starts,
 generates the SHA256 the installer verifies, and creates the release with both assets. Run the
 workflow manually from the Actions tab to exercise all of that without publishing anything.

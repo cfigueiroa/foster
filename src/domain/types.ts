@@ -29,6 +29,15 @@ export interface CodeSessionData {
   cliSessionId?: string;
   cwd?: string;
   originCwd?: string;
+  /**
+   * The worktree this card holds. The claim is here; the lease is in the app's
+   * own store, keyed by session id — which is why a copy must not carry either
+   * across. See `buildFosterCopy`.
+   */
+  worktreePath?: string;
+  worktreeName?: string;
+  /** A worktree the app has promised the session but not yet cut. Same reasoning. */
+  worktreeLazy?: unknown;
   title?: string;
   titleSource?: string;
   createdAt?: number;
@@ -45,14 +54,22 @@ export interface CodeSessionData {
   /** Present on sessions created by a scheduled task; those are listed elsewhere in the app. */
   scheduledTaskId?: string;
   /**
-   * Present on sessions the app spawned from a background-task chip.
+   * Present on sessions the app spawned from a background-task chip, naming the
+   * session that spawned it.
    *
    * The same shape of thing as `scheduledTaskId`: the conversation ran on its
    * own, unattended, so it never got a focus time and never reached Recents.
    * What it did is an ordinary transcript, and can be substantial — this was
    * found on a session carrying 562 turns of work that had no card anywhere.
+   * Also what `foster unstarted` reads to tell a request that was made of the
+   * app from a conversation a person opened themselves.
    */
   spawnedFrom?: { sessionId?: string; taskId?: string; title?: string };
+  /**
+   * Turns that finished. Zero alongside an `error` is a request that died before
+   * answering once, which leaves nothing to resume and only a prompt to recover.
+   */
+  completedTurns?: number;
   isArchived?: boolean;
   model?: string;
   /** A stale failure from the origin account; rendered as a warning badge. Stripped when fostering. */
