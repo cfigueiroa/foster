@@ -54,8 +54,25 @@ export function findRollouts(sessionsDir: string): string[] {
   return found;
 }
 
-/** How much of a rollout to read when looking only for its `session_meta` line. */
-const META_HEAD_BYTES = 16 * 1024;
+/**
+ * How much of a rollout to read at a time when looking only for its
+ * `session_meta` line, and how far to go before giving up.
+ *
+ * The first line is not small. `session_meta` carries `base_instructions` —
+ * Codex's whole system prompt — so measured over 200 real rollouts it ran to a
+ * median of 19,278 bytes and a maximum of 43,111, and only 13 of the 200 fitted
+ * in the 16 KB this once budgeted. That was not a rounding error: `firstLineOf`
+ * refuses a truncated line rather than parse half a record, so the corpus came
+ * back unreadable — 1,484 of 1,498 rollouts on the store this was first run
+ * against, with the tool honestly reporting every one of them as such.
+ *
+ * So it grows rather than guesses: one chunk, then doubling, until the newline
+ * turns up or the ceiling does. The ceiling keeps the original promise — a
+ * rollout can run to hundreds of megabytes, and nothing past its first line is
+ * discovery's business.
+ */
+const META_CHUNK_BYTES = 64 * 1024;
+const META_MAX_BYTES = 4 * 1024 * 1024;
 
 /** The facts `session_meta` carries, plus the one fact only the filesystem has. */
 export interface CodexRolloutMeta {
@@ -127,7 +144,7 @@ export function readRolloutMeta(file: string): CodexRolloutMeta | undefined {
 }
 
 /** The rollout's first line, or undefined if it does not fit in the read budget. */
-function firstLineOf(file: string, maxBytes = META_HEAD_BYTES): string | undefined {
+function firstLineOf(file: string, maxBytes = META_MAX_BYTES): string | undefined {
   let fd: number;
   try {
     fd = openSync(file, 'r');
@@ -135,16 +152,20 @@ function firstLineOf(file: string, maxBytes = META_HEAD_BYTES): string | undefin
     return undefined;
   }
   try {
-    const buffer = Buffer.alloc(maxBytes);
-    const read = readSync(fd, buffer, 0, maxBytes, 0);
-    const text = buffer.subarray(0, read).toString('utf8');
-    const newline = text.indexOf('\n');
-    if (newline !== -1) return text.slice(0, newline);
-    // No newline within the budget: either the whole (tiny) file was read, in
-    // which case this is the only line, or the line itself is longer than the
-    // budget and reading further would still not find one. Only the first case
-    // is safe to treat as a complete line.
-    return read < maxBytes ? text : undefined;
+    let budget = Math.min(META_CHUNK_BYTES, maxBytes);
+    for (;;) {
+      const buffer = Buffer.alloc(budget);
+      const read = readSync(fd, buffer, 0, budget, 0);
+      const text = buffer.subarray(0, read).toString('utf8');
+      const newline = text.indexOf('\n');
+      if (newline !== -1) return text.slice(0, newline);
+      // No newline yet. If the read came up short the file ended, so this is
+      // the only line it has; otherwise there is more to look at, until the
+      // ceiling says a file this shaped is not a rollout worth guessing about.
+      if (read < budget) return text;
+      if (budget >= maxBytes) return undefined;
+      budget = Math.min(budget * 2, maxBytes);
+    }
   } catch {
     return undefined;
   } finally {

@@ -61,10 +61,44 @@ export interface CodexThread {
  * (a single matching tag wraps the whole trimmed message) rather than by
  * naming every tag Codex might use, since "and friends" is an open set.
  */
-const SYNTHETIC_PREAMBLE = /^<([a-zA-Z][\w-]*)>[\s\S]*<\/\1>\s*$/;
+const LEADING_PREAMBLE = /^<([a-zA-Z][\w-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1>\s*/;
+
+/**
+ * The message with every synthetic block taken off the front.
+ *
+ * Codex does not only send preambles as whole messages. Measured over the first
+ * user message of 250 real rollouts: 96 were one wrapped element, which testing
+ * the whole message against a single tag does catch — but 93 more opened with a
+ * block like `<uploaded_files>…</uploaded_files>` and then carried the person's
+ * own words after it, and every one of those was missed. On a real corpus that
+ * titled 559 of 1,497 threads `<recommended_plugins> Here is a list of plugins
+ * that are available but not installed…`.
+ *
+ * Stripping rather than skipping is what keeps the turn: the human sentence is
+ * in there, behind the block. Applied until nothing more comes off, since the
+ * blocks stack — and an empty result means the message was preamble and nothing
+ * else, which is the case `isSyntheticPreamble` still names. The opening tag
+ * may carry attributes: 29 threads opened `<codex_internal_context
+ * source="goal">`, which a tag pattern allowing none of them walked straight
+ * past.
+ *
+ * One injected shape is deliberately left alone. 167 of the same 1,497 threads
+ * open `# AGENTS.md instructions for <path>` — markdown, not an element, and
+ * telling it from a person who genuinely pasted a heading means matching that
+ * one sentence rather than a structure. It is named here so the next reader
+ * knows it was measured and passed over, not missed.
+ */
+export function withoutPreamble(text: string): string {
+  let out = text.trim();
+  for (;;) {
+    const next = out.replace(LEADING_PREAMBLE, '').trim();
+    if (next === out) return out;
+    out = next;
+  }
+}
 
 export function isSyntheticPreamble(text: string): boolean {
-  return SYNTHETIC_PREAMBLE.test(text.trim());
+  return withoutPreamble(text) === '';
 }
 
 /** How long a title is allowed to run before it is clipped for display. */
@@ -131,7 +165,12 @@ export function parseCodexRollout(records: readonly CodexRecord[]): CodexThread 
       currentTurn = undefined;
       return;
     }
-    currentTurn = { text: text.trim(), assistantText: [], toolCalls: [], reasoningCount: 0 };
+    currentTurn = {
+      text: withoutPreamble(text),
+      assistantText: [],
+      toolCalls: [],
+      reasoningCount: 0,
+    };
     turns.push(currentTurn);
   };
 
