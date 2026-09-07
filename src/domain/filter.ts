@@ -131,20 +131,54 @@ export function selectByIds(
 }
 
 /**
+ * What `applyFilter` needs to ask before refusing a copy whose conversation
+ * still has a card of its own elsewhere — the same question #69 taught
+ * `resolveExisting` to ask instead of trusting identity alone.
+ *
+ * Shaped to match `engine/sidebar.ts`'s `Sidebar` rather than importing it: this
+ * module is domain-layer data-shaping, and a `Lineage`-backed answer is
+ * necessarily built from reading transcripts, which stays the caller's job.
+ */
+export interface ReachCheck {
+  unreached(cliSessionId: string | undefined, cwd: string | undefined): number;
+}
+
+/**
  * Selection is filter-first rather than a checkbox list: with a few hundred
  * sessions, picking them one by one is unusable. The user narrows, sees the
  * count, and confirms the batch.
+ *
+ * `here` is optional so every caller that has not been taught to measure reach
+ * keeps the old answer for a copy: refused unless it is the last card left.
  */
 export function applyFilter(
   sessions: DiscoveredSession[],
   filter: SessionFilter,
+  here?: ReachCheck,
 ): DiscoveredSession[] {
   return sessions.filter((session) => {
-    // A copy is not a source while its conversation still has a card of its own.
-    // When it is the last one left, it is the only way that conversation can
-    // reach another account at all.
-    if (session.isCopy && !session.isStranded) return false;
-    if (!filter.includeUnfosterable && blockingReasons(session, filter).length > 0) return false;
+    // A copy is not a source while its conversation still has a card of its own
+    // — unless the copy carried on somewhere that card cannot reach (#49). "Is
+    // this the last one left?" missed exactly that: a copy fostered while its
+    // origin still existed, then continued in a working directory the origin
+    // never named, held records nothing else could reach and was never offered
+    // back. Asking what it reaches beyond `here` catches that case without
+    // reopening the ordinary one — ordinary copies answer zero and stay refused.
+    const copyWithCard = session.isCopy && !session.isStranded;
+    if (copyWithCard) {
+      const beyond = here?.unreached(session.data.cliSessionId, session.data.cwd) ?? 0;
+      if (beyond === 0) return false;
+    }
+
+    // `unfosterableReasons` marks every copy `already-a-copy`, and `markStranded`
+    // already lifts that mark for the one case it used to recognise — the last
+    // card left. A copy passing only because of `beyond` above needs the same
+    // lift here, or this check would refuse right back what the one above just
+    // let through.
+    const blocking = blockingReasons(session, filter).filter(
+      (reason) => reason !== 'already-a-copy' || !copyWithCard,
+    );
+    if (!filter.includeUnfosterable && blocking.length > 0) return false;
 
     if (filter.title) {
       const title = session.data.title ?? '';

@@ -9,7 +9,7 @@ import { blockingReasons } from '../domain/filter.js';
 import { errorMessage } from '../util/fs.js';
 
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
-import { lineage, lineageAt, type Lineage } from './lineage.js';
+import { lineage, lineageAt, worktreeReachOf, type Lineage } from './lineage.js';
 import { BRANCH_HERE, sidebarOf, type BranchStanding, type Sidebar } from './sidebar.js';
 import { inspectCopy } from './reconcile.js';
 import { assertRemovable, type RemovalGuard } from './safety.js';
@@ -198,6 +198,11 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   for (const session of sessions) {
     const title = session.data.title ?? '(untitled)';
     const originId = session.data.sessionId;
+    // Read once per session and reused everywhere `copyCwd` is asked below —
+    // the existing-copy check, the "opens more than here can reach" check, and
+    // the write itself — so all three agree on which of the source's two
+    // directories the copy would open in (#41).
+    const reach = worktreeReachOf(kin, session.data);
 
     // Judged the same way the filter judges it, so a session the caller was
     // shown as available cannot be refused here for the reason it was shown
@@ -244,7 +249,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         kin,
         here,
         cliSessionId: session.data.cliSessionId,
-        cwd: copyCwd(session.data),
+        cwd: copyCwd(session.data, reach),
       });
       if (skip) {
         outcomes.push({ originSessionId: originId, title, ...skip });
@@ -283,7 +288,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
      * a card in a worktree is rewritten to open in the repository it was cut
      * from, so asking the source would promise records the copy does not open.
      */
-    const beyond = here.unreached(cliSessionId, copyCwd(session.data));
+    const beyond = here.unreached(cliSessionId, copyCwd(session.data, reach));
     if (shownHere !== undefined && !explicit && !branchAccepted && beyond === 0) {
       // Only a branch is worth weighing. Two cards for the *same* conversation
       // open the same transcript, so there is no half to be on the wrong side of.
@@ -305,6 +310,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         : {}),
       prefix,
       ...(options.archive ? { archived: true } : {}),
+      reach,
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
     // Carried on the outcome rather than acted on: the copy is sound either way,
