@@ -139,6 +139,18 @@ import {
 } from '../store/liveSessions.js';
 import { selectWriters, stopWriters } from '../ops/writers.js';
 import {
+  codexSessionsDir,
+  findRollouts,
+  readRolloutMeta,
+  readRolloutRecords,
+} from '../store/codex.js';
+import {
+  FIDELITY_NOTE,
+  inventoryEntry,
+  parseCodexRollout,
+  type CodexInventoryEntry,
+} from '../engine/codexImport.js';
+import {
   firstPrompt,
   indexTranscripts,
   transcriptRoots,
@@ -4380,6 +4392,94 @@ function indented(text: string): string {
     .map((line) => `    ${line}`)
     .join('\n');
 }
+
+/**
+ * `foster import-codex --list` — the first, read-only slice of issue #19.
+ *
+ * Discovery (`src/store/codex.ts`) plus the parser (`src/engine/codexImport.ts`)
+ * are enough to answer "what is here", and that is deliberately all this
+ * build answers. Every other write foster makes points at something Claude
+ * Desktop itself created; a Codex import would put a conversation into
+ * `~/.claude/projects` and a card in the sidebar that no Claude session ever
+ * produced. The owner has not decided that is worth doing yet, so there is no
+ * --yes here, no card, no ledger event — only counting.
+ */
+program
+  .command('import-codex')
+  .helpGroup('Codex CLI (read-only):')
+  .summary('inventory Codex CLI threads on this machine — reads only, writes nothing')
+  .description(
+    'Finds Codex CLI rollouts under ~/.codex/sessions (CODEX_HOME overrides it), parses each\n' +
+      'one into turns, and prints what would be importable. This is the whole of what this\n' +
+      'build does: it writes no transcript, no card, and no ledger event, so there is nothing\n' +
+      'here to undo. The write half of issue #19 — actually minting a card from one of these —\n' +
+      'stays blocked on a scope question the issue raises and does not settle: every other\n' +
+      'write foster makes points at something Claude Desktop itself created, and this would\n' +
+      'not.\n\n' +
+      FIDELITY_NOTE,
+  )
+  .option('--list', 'list the Codex threads found on this machine (the only mode this build has)')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const opts = this.opts<{ list?: boolean; json?: boolean }>();
+    if (!opts.list) {
+      throw new Error(
+        'foster import-codex only supports --list in this build. Writing an imported\n' +
+          'conversation is not implemented yet — see issue #19.',
+      );
+    }
+
+    const sessionsDir = codexSessionsDir();
+    if (!isDirectory(sessionsDir)) {
+      console.log(
+        `No Codex sessions directory at ${sessionsDir} — Codex CLI may not be installed here.`,
+      );
+      return;
+    }
+
+    const entries: CodexInventoryEntry[] = [];
+    let unreadable = 0;
+    for (const file of findRollouts(sessionsDir)) {
+      const meta = readRolloutMeta(file);
+      if (!meta) {
+        unreadable++;
+        continue;
+      }
+      const thread = parseCodexRollout(readRolloutRecords(file));
+      entries.push(inventoryEntry(meta, thread));
+    }
+    entries.sort((a, b) => b.updatedAt - a.updatedAt);
+
+    if (opts.json) {
+      print({ readOnly: true, sessionsDir, entries, unreadable });
+      return;
+    }
+
+    console.log(
+      pc.bold(`Codex CLI threads under ${sessionsDir} — read-only, nothing is written.\n`),
+    );
+    if (entries.length === 0) {
+      console.log('No Codex rollouts found.');
+    } else {
+      for (const entry of entries) {
+        console.log(`  ${entry.title ?? pc.dim('(untitled)')}`);
+        console.log(
+          pc.dim(
+            `    ${entry.cwd ?? '(unknown cwd)'}  ·  ${entry.turnCount} turn(s)  ·  ` +
+              `${entry.toolCallCount} tool call(s)  ·  ${entry.reasoningCount} reasoning item(s)`,
+          ),
+        );
+      }
+    }
+    if (unreadable > 0) {
+      console.log(pc.yellow(`\n${unreadable} rollout(s) could not be read and are not listed.`));
+    }
+    console.log(
+      pc.bold(`\n${entries.length} Codex thread(s) found. `) +
+        pc.dim('Nothing is written — this only lists what would be importable.'),
+    );
+    console.log(pc.dim(`\n${FIDELITY_NOTE}`));
+  });
 
 program
   .command('agent')
