@@ -559,19 +559,18 @@ const PACKAGE_IDENTITY_SCRIPT = (pid: number): string =>
 export function processPackageIdentity(
   pid: number,
   env: NodeJS.ProcessEnv = process.env,
+  run: CommandRunner = execFileSyncRunner,
 ): PackageIdentity {
   if (process.platform !== 'win32') return 'unknown';
-  try {
-    const exe = systemExePath(POWERSHELL_RELATIVE, env);
-    const out = execFileSync(
-      exe,
-      ['-NoProfile', '-NonInteractive', '-Command', PACKAGE_IDENTITY_SCRIPT(pid)],
-      { windowsHide: true, stdio: 'pipe', encoding: 'utf8', timeout: TIMEOUT_MS },
-    ).trim();
-    return out === 'packaged' || out === 'none' ? out : 'unknown';
-  } catch {
-    return 'unknown';
-  }
+  const exe = systemExePath(POWERSHELL_RELATIVE, env);
+  const outcome = run(
+    exe,
+    ['-NoProfile', '-NonInteractive', '-Command', PACKAGE_IDENTITY_SCRIPT(pid)],
+    { timeoutMs: TIMEOUT_MS, encoding: 'utf8' },
+  );
+  if (!outcome.ok) return 'unknown';
+  const out = outcome.stdout.trim();
+  return out === 'packaged' || out === 'none' ? out : 'unknown';
 }
 
 /**
@@ -593,27 +592,24 @@ export function processPackageIdentity(
 export function mainWindowVisible(
   pid: number,
   env: NodeJS.ProcessEnv = process.env,
+  run: CommandRunner = execFileSyncRunner,
 ): boolean | undefined {
   if (process.platform !== 'win32') return undefined;
-  try {
-    const exe = systemExePath(POWERSHELL_RELATIVE, env);
-    const script =
-      "$ErrorActionPreference='Stop'; try { " +
-      `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
-      'if ($p.MainWindowHandle -ne 0) { Write-Output visible } else { Write-Output hidden } ' +
-      '} catch { Write-Output unknown }';
-    const out = execFileSync(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
-      windowsHide: true,
-      stdio: 'pipe',
-      encoding: 'utf8',
-      timeout: TIMEOUT_MS,
-    }).trim();
-    if (out === 'visible') return true;
-    if (out === 'hidden') return false;
-    return undefined;
-  } catch {
-    return undefined;
-  }
+  const exe = systemExePath(POWERSHELL_RELATIVE, env);
+  const script =
+    "$ErrorActionPreference='Stop'; try { " +
+    `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
+    'if ($p.MainWindowHandle -ne 0) { Write-Output visible } else { Write-Output hidden } ' +
+    '} catch { Write-Output unknown }';
+  const outcome = run(exe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    timeoutMs: TIMEOUT_MS,
+    encoding: 'utf8',
+  });
+  if (!outcome.ok) return undefined;
+  const out = outcome.stdout.trim();
+  if (out === 'visible') return true;
+  if (out === 'hidden') return false;
+  return undefined;
 }
 
 /**
