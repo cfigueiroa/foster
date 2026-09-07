@@ -225,13 +225,27 @@ export interface DatePlanItem {
  * without writing anything.
  *
  * This is the one place the "never move a date backwards" rule lives: a
- * candidate becomes `advance` only when `transcriptAt` is strictly greater
- * than the card's own `lastActivityAt` (or the card has none at all yet).
- * Everything else — same date, or a card already ahead of what its own
- * transcript says — is reported as `already-ahead` rather than silently
- * dropped, which is what lets the command say so for every card it looked at
- * rather than only the ones it touched.
+ * candidate becomes `advance` only when `transcriptAt` is ahead of the card's
+ * own `lastActivityAt` by more than the slack below (or the card has none at
+ * all yet). Everything else — same date, a gap too small to mean anything, or
+ * a card already ahead of what its own transcript says — is reported as
+ * `already-ahead` rather than silently dropped, which is what lets the command
+ * say so for every card it looked at rather than only the ones it touched.
  */
+/**
+ * How far ahead the transcript has to be before moving the card is worth a write.
+ *
+ * The same minute `continued.ts` allows, for the same reason: the card is
+ * stamped when the app saves the session and the transcript when the CLI writes
+ * a line, so the two are never exactly equal even for a conversation nobody has
+ * touched. Measured against a real store, without this 640 of 2,011 writes — a
+ * third of them — moved a card by less than a minute, which no sidebar ordering
+ * can show and which the run printed as `2026-08-31 10:48 → 2026-08-31 10:48`,
+ * a line that reads as a bug. A write that cannot change what the user sees is
+ * churn on a field that decides where their rows sit.
+ */
+const SLACK_MS = 60_000;
+
 export function planDates(
   candidates: DateCandidate[],
   scanOf: (cliSessionId: string) => ConversationScan | undefined,
@@ -254,7 +268,7 @@ export function planDates(
       return { ...base, status: 'no-transcript' as const };
     }
 
-    if (from !== undefined && from >= transcriptAt) {
+    if (from !== undefined && from >= transcriptAt - SLACK_MS) {
       return { ...base, transcriptAt, status: 'already-ahead' as const };
     }
 
