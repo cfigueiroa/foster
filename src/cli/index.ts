@@ -569,6 +569,18 @@ program
             "the package's private copy)",
         ),
       );
+    } else if (handler.armed?.restoreFailed) {
+      // `restoreFailed` only survives in the fold when a `handler_restored`
+      // event actually ran and its read-back did not match — so this is not
+      // a guess: the last attempt to put the handler back is known to have
+      // failed, and `key`/`previous` are still there to try again with.
+      console.log(
+        pc.yellow(
+          `  claude:// links are still armed for ${handler.armed.root} (foster app login, since ` +
+            `${formatDate(handler.armed.at)}) — the last restore attempt failed.\n` +
+            '  foster app login --restore --yes',
+        ),
+      );
     } else if (handler.current?.userDataDir !== undefined) {
       const when = handler.armed ? formatDate(handler.armed.at) : 'unknown';
       console.log(
