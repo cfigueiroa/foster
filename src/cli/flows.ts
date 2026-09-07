@@ -1064,7 +1064,7 @@ export async function returnFlow(ui: Ui, store: StoreLayout, ledger: Ledger): Pr
     const outcomes = returnFosterings(chosen, { store, ledger });
     const counts = summariseOutcomes(outcomes);
     ui.log.success(`${counts.returned} returned, ${counts.failed} failed.`);
-    if (continued.length > 0) ui.log.info(continuedNote(continued.length));
+    if (continued.length > 0) ui.log.info(continuedNote(continued));
     await offerRestart(ui, store, 'They are still in the sidebar until the app starts again.');
   } catch (error) {
     // The gate refuses only for copies the running app may be holding in memory,
