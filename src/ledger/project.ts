@@ -210,6 +210,13 @@ export function project(events: LedgerEvent[]): LedgerState {
         const fromArchived = known ? known.fromArchived : event.fromArchived;
         const archivedNow = event.toArchived ?? known?.toArchived;
         const back = event.to === from && (archivedNow ?? false) === (fromArchived ?? false);
+        // What this write did to the mark, taken from the write's own account of
+        // itself rather than from the strings: a sync changes the title under the
+        // mark and leaves the mark alone, `tip` is the write that takes one off,
+        // and the two marking kinds leave the mark they just put on standing in
+        // front of `to`.
+        const markedTo =
+          event.as === 'synced' ? known?.markedTo : event.as === 'tip' ? undefined : event.to;
         if (back) retitled.delete(event.sessionId);
         else {
           retitled.set(event.sessionId, {
@@ -218,6 +225,7 @@ export function project(events: LedgerEvent[]): LedgerState {
             target: event.target,
             from,
             to: event.to,
+            ...(markedTo === undefined ? {} : { markedTo }),
             ...(fromArchived === undefined ? {} : { fromArchived }),
             ...(archivedNow === undefined ? {} : { toArchived: archivedNow }),
             native: event.native,

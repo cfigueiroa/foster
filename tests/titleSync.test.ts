@@ -36,8 +36,19 @@ interface Sources {
   copy?: string;
 }
 
+/** The names each card used to wear, newest first, as the app records them. */
+interface Histories {
+  origin?: string[];
+  copy?: string[];
+}
+
 /** A store with one card in the origin account and its copy in this one. */
-function fixture(originTitle: string, copyTitle: string, sources: Sources = {}): Fixture {
+function fixture(
+  originTitle: string,
+  copyTitle: string,
+  sources: Sources = {},
+  histories: Histories = {},
+): Fixture {
   const root = mkdtempSync(path.join(tmpdir(), 'foster-sync-'));
   const store = layoutFor(root);
   const dir = (ref: AccountRef) =>
@@ -53,6 +64,7 @@ function fixture(originTitle: string, copyTitle: string, sources: Sources = {}):
       sessionId: 'local_origin',
       title: originTitle,
       ...(sources.origin ? { titleSource: sources.origin } : {}),
+      ...(histories.origin ? { previousTitles: histories.origin } : {}),
     }),
   );
   writeFileSync(
@@ -61,6 +73,7 @@ function fixture(originTitle: string, copyTitle: string, sources: Sources = {}):
       sessionId: 'local_copy',
       title: copyTitle,
       ...(sources.copy ? { titleSource: sources.copy } : {}),
+      ...(histories.copy ? { previousTitles: histories.copy } : {}),
     }),
   );
 
@@ -93,6 +106,20 @@ function marked(f: Fixture, sessionId: string, from: string, to: string): void {
     to,
     native: false,
     as: 'stale',
+  });
+}
+
+/** A title foster wrote to bring a copy into step — a write that adds no mark. */
+function syncedBy(f: Fixture, from: string, to: string): void {
+  f.ledger.append({
+    kind: 'card_retitled',
+    sessionId: 'local_copy',
+    target: HERE,
+    path: f.copyPath,
+    from,
+    to,
+    native: false,
+    as: 'synced',
   });
 }
 
@@ -259,6 +286,142 @@ describe('planTitleSync', () => {
     expect(plan.items[0]?.to).toBe(
       '(outro ramo, seguiu 26/08 14:24) Recuperar chats antigos, renomeado',
     );
+  });
+
+  it('never takes its own sync for a mark, however many times it is run', () => {
+    // Measured on a real store: the origin was renamed with an emoji in front,
+    // the first run copied that across, and every run after it read the emoji
+    // as a branch mark and wrote it in front again — one more emoji per sweep,
+    // with the run never once saying it had finished.
+    const f = fixture('👁️ Validação de plist com plistlib', 'Validação de plist com plistlib');
+    fostered(f, 'Validação de plist com plistlib');
+
+    const first = planTitleSync(f.store, f.ledger, HERE);
+    expect(first.items[0]?.to).toBe('👁️ Validação de plist com plistlib');
+    applyTitleSync(first.items, { ledger: f.ledger });
+
+    const second = planTitleSync(f.store, f.ledger, HERE);
+    expect(second.items).toEqual([]);
+    expect(second.skipped).toEqual([]);
+  });
+
+  it('carries the branch mark through a sync without stacking it', () => {
+    const f = fixture('The name it has now', '(stale, stopped 01/09) The name it had then');
+    fostered(f, 'The name it had then');
+    marked(f, 'local_copy', 'The name it had then', '(stale, stopped 01/09) The name it had then');
+
+    const first = planTitleSync(f.store, f.ledger, HERE);
+    expect(first.items[0]?.to).toBe('(stale, stopped 01/09) The name it has now');
+    applyTitleSync(first.items, { ledger: f.ledger });
+
+    const second = planTitleSync(f.store, f.ledger, HERE);
+    expect(second.items).toEqual([]);
+  });
+
+  it('does not invent a mark from a sync when the copy was never marked', () => {
+    const f = fixture('🚚 The name it has now', '🚚 The name it had then');
+    fostered(f, 'The name it had then');
+    syncedBy(f, 'The name it had then', '🚚 The name it had then');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('🚚 The name it has now');
+    expect(plan.items[0]?.mark).toBeUndefined();
+  });
+
+  it('takes the name the origin moved on to, when its history proves the copy is behind', () => {
+    // Neither card carries a timestamp for its title, so "which rename is
+    // newer" cannot be dated. It can still be ordered: the origin's history
+    // holds the very name the copy is wearing, so the origin has been through
+    // it and gone on. Measured on a real store, this is exactly the shape of
+    // the one conflict that was not foster's own mark.
+    const f = fixture(
+      '🚀 Contrato social OAB',
+      '⭐ Contrato social OAB',
+      { origin: 'tool', copy: 'tool' },
+      { origin: ['⭐ Contrato social OAB', 'Contrato social OAB'], copy: ['Contrato social OAB'] },
+    );
+    fostered(f, 'Contrato social OAB');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items[0]?.to).toBe('🚀 Contrato social OAB');
+    expect(plan.items[0]?.because).toBe('renamed-later-there');
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it('leaves the copy alone when the copy is the side renamed later', () => {
+    const f = fixture(
+      '⭐ Contrato social OAB',
+      '🚀 Contrato social OAB',
+      { origin: 'tool', copy: 'tool' },
+      { origin: ['Contrato social OAB'], copy: ['⭐ Contrato social OAB', 'Contrato social OAB'] },
+    );
+    fostered(f, 'Contrato social OAB');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([{ copySessionId: 'local_copy', reason: 'renamed-here' }]);
+  });
+
+  it('still reports a conflict when each history has been through the other name', () => {
+    // Renamed past each other: both readings are available and they disagree,
+    // which is no better than having none.
+    const f = fixture(
+      '⭐ Contrato social OAB',
+      '🚀 Contrato social OAB',
+      { origin: 'user', copy: 'user' },
+      { origin: ['🚀 Contrato social OAB'], copy: ['⭐ Contrato social OAB'] },
+    );
+    fostered(f, 'Contrato social OAB');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped[0]?.reason).toBe('renamed-both');
+  });
+
+  it('knows its own mark on a card the ledger does not name, and calls it no rename', () => {
+    // A card foster writes keeps whatever `titleSource` it already had, so its
+    // own mark reads as a name a person chose. Measured on a real store: four
+    // of the five "named on both sides" conflicts were this, not a rename.
+    const f = fixture(
+      'Configuração de Macs M5 Max',
+      '(defasada, parou 02/09 08:24) Configuração de Macs M5 Max',
+      { origin: 'tool', copy: 'tool' },
+    );
+    fostered(f, 'Configuração de Macs M5 Max');
+    // The words are in the log, from a mark made on some other card entirely.
+    marked(f, 'local_origin', 'Outra conversa', '(defasada, parou 01/09 18:10) Outra conversa');
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([]);
+  });
+
+  it("takes the origin's own mark off even when the ledger does not name that write", () => {
+    // Both halves of one fork, each marked on its own sweep. The copy's mark is
+    // kept and the origin's is not carried over — otherwise the two stack, which
+    // is what a dry run against a real store produced: four rows planned to be
+    // rewritten with the same mark twice over.
+    const f = fixture(
+      '(defasada, parou 01/09 18:10) Configuração de Macs M5 Max',
+      '(defasada, parou 02/09 08:24) Configuração de Macs M5 Max',
+    );
+    fostered(f, 'Configuração de Macs M5 Max');
+    marked(
+      f,
+      'local_copy',
+      'Configuração de Macs M5 Max',
+      '(defasada, parou 02/09 08:24) Configuração de Macs M5 Max',
+    );
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([]);
   });
 
   it('writes a name onto a copy of a conversation nobody had titled', () => {

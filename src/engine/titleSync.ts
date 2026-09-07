@@ -1,5 +1,6 @@
 import { layoutFor, sessionPath } from '../domain/paths.js';
-import type { AccountRef, StoreLayout } from '../domain/types.js';
+import { stripMarks, templatesSeen } from '../domain/stale.js';
+import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, project, type LedgerState } from '../ledger/project.js';
 import type { ActiveFostering, RetitledCard } from '../ledger/types.js';
@@ -72,21 +73,24 @@ export interface TitleSyncItem {
    * Why this copy may be rewritten: `foster-baseline` — it still wears the last
    * title foster wrote, so nobody has chosen its name since; `app-named-here` —
    * the app auto-titled it in this account, over a name a person chose in the
-   * account it came from.
+   * account it came from; `renamed-later-there` — a person named both sides, and
+   * the origin's own history proves it has been through the name this copy wears
+   * and moved past it.
    */
-  because: 'foster-baseline' | 'app-named-here';
+  because: 'foster-baseline' | 'app-named-here' | 'renamed-later-there';
 }
 
 export interface TitleSyncSkipped {
   copySessionId: string;
   /**
    * `renamed-here` — the copy no longer says what foster last wrote, and nothing
-   * proves the app put that name there; `renamed-both` — a person named the card
-   * on each side and the two disagree, which no rule can settle; `no-baseline` —
-   * nothing records what foster wrote and the copy is not blank, so there is
-   * nothing to compare against; `unknown-mark` — foster marked this card but the
-   * mark cannot be told from the title beneath it; `origin-gone` — the card it
-   * was copied from can no longer be read.
+   * proves the app put that name there, or the copy is the side renamed later;
+   * `renamed-both` — a person named the card on each side, the two disagree, and
+   * neither history says which name came last; `no-baseline` — nothing records
+   * what foster wrote and the copy is not blank, so there is nothing to compare
+   * against; `unknown-mark` — foster marked this card but the mark cannot be told
+   * from the title beneath it; `origin-gone` — the card it was copied from can no
+   * longer be read.
    */
   reason: 'renamed-here' | 'renamed-both' | 'no-baseline' | 'unknown-mark' | 'origin-gone';
   /** For `renamed-both`, the two names in play — the run lists them to be settled by hand. */
@@ -117,16 +121,68 @@ export interface PlanTitleSyncResult {
 function baselineOf(
   fostering: ActiveFostering,
   retitled: RetitledCard | undefined,
+  here: string,
+  templates: readonly string[],
 ): { title: string; mark: string } | 'unknown-mark' | undefined {
   if (retitled) {
+    // The mark is read off the last write that could have made one, never off
+    // the latest title. A sync's `to` is `mark + whatever the origin is called
+    // now`, so subtracting the title this copy was made with lands on the
+    // origin's own new prefix and calls it a mark — which the next sync then
+    // writes in front all over again. Nothing marked means no mark, whatever
+    // the syncs since have made the title look like.
+    if (retitled.markedTo === undefined) return { title: retitled.to, mark: '' };
     const made = fostering.originalTitle;
-    if (made !== undefined && retitled.to.endsWith(made)) {
-      return { title: retitled.to, mark: retitled.to.slice(0, retitled.to.length - made.length) };
+    if (made !== undefined && retitled.markedTo.endsWith(made)) {
+      const mark = retitled.markedTo.slice(0, retitled.markedTo.length - made.length);
+      return { title: retitled.to, mark };
     }
     return 'unknown-mark';
   }
-  if (fostering.originalTitle === undefined) return undefined;
-  return { title: fostering.originalTitle, mark: '' };
+  const made = fostering.originalTitle;
+  if (made === undefined) return undefined;
+  // A mark this card wears from before the ledger carried one — written under
+  // another card's id, or by a run whose entry the fold has since dropped. The
+  // templates come from the ledger too (#35), so this still reads foster's own
+  // writes rather than guessing at a prefix: a mark made from words the log
+  // proves foster used, sitting on exactly the title this copy was made with.
+  // Measured on a real store, this is what four of the five "named on both
+  // sides" conflicts were — foster's own mark, reported as somebody's rename
+  // because a card foster writes keeps whatever `titleSource` it already had.
+  // A mark is an anchored prefix, so what `stripMarks` took off is exactly the
+  // front of the title — no need to go looking for the seam a second time.
+  if (here !== made && stripMarks(here, templates) === made) {
+    return { title: here, mark: here.slice(0, here.length - made.length) };
+  }
+  return { title: made, mark: '' };
+}
+
+/**
+ * Which side was renamed later, when a person named both — or nothing, when
+ * that cannot be told.
+ *
+ * No clock can answer this. The card carries no `titleUpdatedAt`, and
+ * `lastActivityAt` moves when a conversation is merely opened. What the card
+ * does carry is `previousTitles`, the names it used to wear: a side whose
+ * history already holds the name the *other* side is wearing has been through
+ * that name and moved on, which orders the two without dating either. Measured
+ * on a real store: the origin's history held `⭐ Contrato social OAB` while the
+ * copy was still wearing it and the origin had gone on to `🚀`.
+ *
+ * Both histories holding the other's name means the two were renamed past each
+ * other and neither reading is safe; neither holding it means there is nothing
+ * to go on. Both are genuine ties, and a tie is still the user's to settle.
+ */
+function newerSide(
+  here: string,
+  there: string,
+  copy: CodeSessionData,
+  origin: CodeSessionData,
+): 'here' | 'there' | undefined {
+  const movedOnThere = (origin.previousTitles ?? []).includes(here);
+  const movedOnHere = (copy.previousTitles ?? []).includes(there);
+  if (movedOnThere === movedOnHere) return undefined;
+  return movedOnThere ? 'there' : 'here';
 }
 
 /**
@@ -159,11 +215,27 @@ function namerOf(card: { titleSource?: string }): Namer {
   }
 }
 
-/** The original's title with any mark of its own taken back off. */
-function originTitle(card: { title?: string }, retitled: RetitledCard | undefined): string {
+/**
+ * The original's title with any mark of its own taken back off.
+ *
+ * The ledger answers first, and exactly: a card still wearing the title one of
+ * foster's own writes left is worth what that write says it was worth before it.
+ * Failing that — a mark made under another card's id, or by a run whose entry
+ * the fold has since dropped — the words are still the ledger's own (#35), so a
+ * mark made from a template this log proves foster used comes off too. Both
+ * matter for the same reason: whatever stays on here is carried across to the
+ * copy, in front of the mark the copy already wears, and the two stack.
+ */
+function originTitle(
+  card: { title?: string },
+  retitled: RetitledCard | undefined,
+  templates: readonly string[],
+): string {
   const title = card.title ?? '';
-  if (retitled && title === retitled.to) return retitled.from;
-  return title;
+  // `from` is the title foster first saw, which is not always a clean one: a
+  // card the app forked from a marked row was already wearing that mark before
+  // foster ever wrote to it. So both readings go through the templates.
+  return stripMarks(retitled && title === retitled.to ? retitled.from : title, templates);
 }
 
 function storeFor(fostering: ActiveFostering, store: StoreLayout): StoreLayout {
@@ -183,6 +255,10 @@ export function planTitleSync(
 ): PlanTitleSyncResult {
   const items: TitleSyncItem[] = [];
   const skipped: TitleSyncSkipped[] = [];
+  // The words every mark this ledger proves foster wrote was made from — how a
+  // mark left on a card before the ledger carried one is recognised, whatever
+  // language the run that wrote it was speaking (#35).
+  const templates = templatesSeen(ledger.read());
 
   for (const fostering of listActive(state)) {
     if (
@@ -204,14 +280,19 @@ export function planTitleSync(
     }
 
     const here = copy.title ?? '';
-    const found = baselineOf(fostering, state.retitled.get(fostering.copySessionId));
+    const found = baselineOf(
+      fostering,
+      state.retitled.get(fostering.copySessionId),
+      here,
+      templates,
+    );
     if (found === 'unknown-mark') {
       skipped.push({ copySessionId: fostering.copySessionId, reason: 'unknown-mark' });
       continue;
     }
     const baseline = found;
 
-    const there = originTitle(origin, state.retitled.get(fostering.originSessionId));
+    const there = originTitle(origin, state.retitled.get(fostering.originSessionId), templates);
     // The mark goes back on. An app-generated title replaces whatever the branch
     // pass had written, mark included, and the verdict that mark records — which
     // branch stopped, which went on — is the sweep's, not the app's to drop.
@@ -244,18 +325,28 @@ export function planTitleSync(
       // that name, and the row it left behind is the one the sidebar cannot be
       // searched by.
       if (namerOf(copy) !== 'app' || namerOf(origin) !== 'person') {
-        skipped.push({
-          copySessionId: fostering.copySessionId,
-          // Both sides chosen and disagreeing is a real conflict, not a gap in
-          // the rule: reported with both names so it can be settled by hand,
-          // never guessed at.
-          ...(namerOf(copy) === 'person' && namerOf(origin) === 'person'
-            ? { reason: 'renamed-both' as const, here, there }
-            : { reason: 'renamed-here' as const }),
-        });
-        continue;
+        // Both sides chosen and disagreeing is the one case authorship cannot
+        // settle — but it is not always a tie. Whichever card has already worn
+        // the other's current name has been through it and moved on, so the
+        // later rename is knowable without a clock; only when neither history
+        // says so is this reported for the user to settle by hand.
+        const bothChosen = namerOf(copy) === 'person' && namerOf(origin) === 'person';
+        const newer = bothChosen
+          ? newerSide(here.slice(mark.length), there, copy, origin)
+          : undefined;
+        if (newer !== 'there') {
+          skipped.push({
+            copySessionId: fostering.copySessionId,
+            ...(bothChosen && newer === undefined
+              ? { reason: 'renamed-both' as const, here, there }
+              : { reason: 'renamed-here' as const }),
+          });
+          continue;
+        }
+        because = 'renamed-later-there';
+      } else {
+        because = 'app-named-here';
       }
-      because = 'app-named-here';
     }
 
     items.push({
