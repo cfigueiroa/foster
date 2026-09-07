@@ -12,3 +12,9 @@ coverage/
 Thumbs.db
 .idea/
 .vscode/
+
+# Agent scratch: worktrees and checkpoints land under .claude/, and only the
+# commands are meant to be tracked. Salvaged from PR #10, whose docs were
+# superseded but whose guard was not.
+.claude/*
+!.claude/commands/
