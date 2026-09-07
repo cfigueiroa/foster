@@ -820,7 +820,7 @@ function unknownMarkNames(forks: ForkOutcome[]): string {
  * and the branch that carried on arrives unpinned.
  *
  * Named whether or not the pin could actually be moved: the read behind this
- * is safe with Claude Desktop open, so there is something to say even on a run
+ * is attempted on every run, so there is something to say on a run
  * that could not write.
  *
  * Empty when the branch pass touched no pinned row, so a run with nothing

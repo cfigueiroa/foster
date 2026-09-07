@@ -83,7 +83,7 @@ import { fosterableFrom, liveConversationIds } from './foster.js';
  * wrote: pinning lives in the app's own IndexedDB, keyed on session id
  * (`store/pinstate.ts`), so a row the branch pass just marked stale keeps
  * whatever pin it had and the branch that carried on arrives unpinned. The
- * check always reads — that costs one LevelDB read and is safe with the app
+ * check always reads — one LevelDB read, which the app usually refuses (see
  * open — and only writes when the store allows it, degrading to a message in
  * `report.pinFixes` otherwise (#23).
  *
@@ -206,7 +206,7 @@ export interface PinFix {
 /**
  * What the branch pass found in the pin list, and what it could do about it.
  *
- * Reading is safe with Claude Desktop open — it is one LevelDB read, the same
+ * Reading is attempted whatever the app is doing — one LevelDB read, the same
  * one `foster pin` makes to list what is pinned. Writing is not: the database
  * is the app's own and is locked while it runs, so `moved` is only ever true
  * once that write actually lands.
@@ -593,10 +593,21 @@ function phase(outcomes: Outcome[]): SweepPhase {
  * issue #23.
  *
  * Reading the pin list is one LevelDB read, the same one `foster pin` makes to
- * list what is pinned, and is safe with Claude Desktop open — so this runs on
- * every sweep, dry run included. Writing is not safe with the app open, and is
- * skipped rather than failing the run when it cannot be done: a pin that could
- * not be moved is a line in the summary, never a reason the sweep errors out.
+ * list what is pinned, and it is attempted on every sweep, dry run included.
+ *
+ * It usually fails. Measured with Claude Desktop open — the ordinary state
+ * during a sweep, and the reason `--restart` exists — the read comes back
+ * `MANIFEST-000001 names the log 000000.log, which is not there`: the app holds
+ * its own database and does not share it. That is caught and read as "nothing
+ * pinned", so the pass stays silent rather than wrong and the sweep never fails
+ * for it. The practical consequence is that the naming half mostly runs once
+ * the app has been closed, alongside the moving half. Reading a copy of a live
+ * database instead would trade a clear refusal for a snapshot torn mid-write,
+ * so that is left for a follow-up rather than guessed at here.
+ *
+ * Writing is not safe with the app open either, and is skipped rather than
+ * failing the run: a pin that could not be moved is a line in the summary,
+ * never a reason the sweep errors out.
  */
 function runPinPass(
   store: StoreLayout,
