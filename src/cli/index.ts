@@ -1561,7 +1561,7 @@ program
     if (continued.length > 0)
       console.log(
         pc.dim(`
-${continuedNote(continued.length)}`),
+${continuedNote(continued)}`),
       );
     await finish(store, Boolean(opts.restart));
   });
