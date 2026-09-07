@@ -25,7 +25,7 @@ One command, one tool call. What runs before the sweep is not decoration: those 
 the name this conversation gets at the end, measured rather than remembered.
 
 ```
-"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(outro ramo, seguiu {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(mais recente, até {when}) "
 ```
 
 Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
@@ -88,10 +88,11 @@ on rather than re-deriving it:
   for rows that are not there;
 - what a fork looks like now, which is three outcomes and not two: the branch holding most work
   of its own keeps its title; a branch that **stopped earlier** wears "(defasada, parou DD/MM
-  HH:MM)" and sits in the archived view; and a branch that **went on after it** wears "(outro
-  ramo, seguiu DD/MM HH:MM)" and stays in the sidebar — that last one is where the most recent
-  work is, so say it plainly. If a row they had pinned was archived as stale, the current row
-  needs pinning again;
+  HH:MM)" and sits in the archived view; and a branch that **went on after it** wears "(mais
+  recente, até DD/MM HH:MM)" and stays in the sidebar — that last one is where the most recent
+  work is, so say it plainly, and say it as the row to open rather than as a lesser one: it holds
+  the newest work, and the clean title holds the bulk of the history. If a row they had pinned was
+  archived as stale, the current row needs pinning again;
 - how many titles were brought back into step with their original, when the run names any, and
   that a copy renamed by hand is left alone on purpose;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
