@@ -85,6 +85,19 @@ export function applyPrefix(title: string | undefined, prefix: string): string {
 export function unfosterableReasons(data: CodeSessionData, knownCopy = false): Unfosterable[] {
   const reasons: Unfosterable[] = [];
   if (data.scheduledTaskId) reasons.push('scheduled-task');
+  // Only when it was also never opened, and the difference is the whole rule.
+  //
+  // `scheduledTaskId` marks a card the app files somewhere other than Recents,
+  // so it holds a session back on its own. `spawnedFrom` marks nothing of the
+  // kind: it records who started the work, and a spawned session the user went
+  // on to open is an ordinary visible row. Measured on a real store, 994 of the
+  // 995 sessions carrying this field had been opened — treating the field alone
+  // as a reason would have held back every one of them.
+  //
+  // What is worth naming is the remaining case: work that ran unattended and
+  // never got a card anywhere. That one is invisible, and unlike a bare
+  // `never-opened` record it usually has a whole conversation behind it.
+  if (data.spawnedFrom && data.lastFocusedAt === undefined) reasons.push('spawned-task');
   if (data.lastFocusedAt === undefined) reasons.push('never-opened');
   if (data.isArchived) reasons.push('archived');
   // The marker is not the only evidence, and it is not durable: the app writes a
@@ -290,6 +303,15 @@ export function buildFosterCopy(
     copy.lastFocusedAt = source.lastFocusedAt ?? options.now ?? Date.now();
   }
 
+  // The same treatment, for the same reason. What is dropped here is only the
+  // link back to the chip that started the work — the session it names lives in
+  // the origin account and means nothing in this one — and the focus time is
+  // set because a card without one is the other way to be correct and invisible.
+  if (copy.spawnedFrom !== undefined) {
+    delete copy.spawnedFrom;
+    copy.lastFocusedAt = source.lastFocusedAt ?? options.now ?? Date.now();
+  }
+
   if (options.archived !== undefined) copy.isArchived = options.archived;
 
   copy.sessionId = options.sessionId ?? mintSessionId();
@@ -333,4 +355,18 @@ export function fosteringKey(
   // Case folded, as this identifier is everywhere else it is compared.
   const work = cliSessionId ? `#${cliSessionId.toLowerCase()}` : '';
   return `${originSessionId}${work}@${target.accountUuid}/${target.organizationUuid}`;
+}
+
+/** How a reason reads in a sentence. Shared so a flag and a report cannot drift. */
+const UNFOSTERABLE_NAMES: Record<Unfosterable, string> = {
+  'scheduled-task': 'scheduled task',
+  'spawned-task': 'background task',
+  'never-opened': 'never opened',
+  'too-large': "over the app's size limit",
+  archived: 'archived',
+  'already-a-copy': 'already a copy',
+};
+
+export function describeUnfosterable(reason: Unfosterable): string {
+  return UNFOSTERABLE_NAMES[reason];
 }

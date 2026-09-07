@@ -100,8 +100,25 @@ on rather than re-deriving it:
   that a copy renamed by hand is left alone on purpose;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
   command again and say why;
-- the "can never come" line, when there is one: scheduled tasks, sessions never opened, files
-  over the 10 MB the app refuses to load. Report the count rather than leaving a silent gap;
+- the "can never come" line, when there is one: scheduled tasks, background tasks, sessions
+  never opened, files over the 10 MB the app refuses to load. Report the count rather than
+  leaving a silent gap — and pass on the ways out the line itself offers, because most of that
+  count has one: `--include-scheduled` for the scheduled ones, `--include-spawned` for the
+  background ones;
+- **what is behind anything still counted as never opened.** That reason is a missing focus
+  time and nothing else, so an abandoned record and a conversation that ran its whole life
+  outside the app look identical in the count. Measure before calling it a loss:
+
+  ```
+  foster list --all --json
+  ```
+
+  Each row carries `transcriptBytes` for those sessions — `0` means there is genuinely nothing
+  there, and anything substantial is work with no card anywhere. Name the ones that are not
+  empty, with their size; do not report them as an unreachable gap without saying what is in
+  them. This is not hypothetical: one such session held 1.4 MB of finished work whose change
+  had already been merged;
+
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
 - whether the restart happened or is waiting on them.
