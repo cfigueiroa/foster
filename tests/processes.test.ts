@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mainWindowVisible,
   parseTasklistCsv,
   parseWmicList,
+  processPackageIdentity,
   processTableProvenance,
   readProcessesWith,
   regExePath,
@@ -325,6 +327,83 @@ describe('readProcessesWith', () => {
       'C:\\W\\System32\\wbem\\wmic.exe',
       'C:\\W\\System32\\tasklist.exe',
     ]);
+  });
+});
+
+// Both functions below open with `if (process.platform !== 'win32') return <negative>`,
+// a check the issue that added the CommandRunner seam left untouched — only the
+// spawn itself gained one. On the POSIX CI runner that check answers before the
+// injected runner is ever called, so these cases only exercise the outcome
+// mapping they are written to prove on the Windows leg of the matrix.
+describe('processPackageIdentity', () => {
+  const ENV = { SystemRoot: 'C:\\W' };
+
+  function runner(outcome: CommandOutcome): CommandRunner {
+    return () => outcome;
+  }
+
+  it.skipIf(process.platform !== 'win32')('reads "packaged" from a runner that reports it', () => {
+    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'packaged\n' }))).toBe(
+      'packaged',
+    );
+  });
+
+  it.skipIf(process.platform !== 'win32')('reads "none" from a runner that reports it', () => {
+    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'none' }))).toBe('none');
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'treats any other stdout as unknown rather than guessing',
+    () => {
+      expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'garbage' }))).toBe(
+        'unknown',
+      );
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')('maps a timed-out runner to unknown', () => {
+    expect(processPackageIdentity(123, ENV, runner({ ok: false, reason: 'timeout' }))).toBe(
+      'unknown',
+    );
+  });
+
+  it.skipIf(process.platform !== 'win32')('maps a failed runner to unknown', () => {
+    expect(
+      processPackageIdentity(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' })),
+    ).toBe('unknown');
+  });
+});
+
+describe('mainWindowVisible', () => {
+  const ENV = { SystemRoot: 'C:\\W' };
+
+  function runner(outcome: CommandOutcome): CommandRunner {
+    return () => outcome;
+  }
+
+  it.skipIf(process.platform !== 'win32')('reads "visible" from a runner that reports it', () => {
+    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'visible\n' }))).toBe(true);
+  });
+
+  it.skipIf(process.platform !== 'win32')('reads "hidden" from a runner that reports it', () => {
+    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'hidden' }))).toBe(false);
+  });
+
+  it.skipIf(process.platform !== 'win32')(
+    'treats any other stdout as undefined rather than guessing',
+    () => {
+      expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'garbage' }))).toBeUndefined();
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')('maps a timed-out runner to undefined', () => {
+    expect(mainWindowVisible(123, ENV, runner({ ok: false, reason: 'timeout' }))).toBeUndefined();
+  });
+
+  it.skipIf(process.platform !== 'win32')('maps a failed runner to undefined', () => {
+    expect(
+      mainWindowVisible(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' })),
+    ).toBeUndefined();
   });
 });
 
