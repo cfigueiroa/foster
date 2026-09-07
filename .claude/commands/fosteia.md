@@ -114,6 +114,7 @@ on rather than re-deriving it:
   empty, with their size; do not report them as an unreachable gap without saying what is in
   them. This is not hypothetical: one such session held 1.4 MB of finished work whose change
   had already been merged;
+
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
 - whether the restart happened or is waiting on them.
