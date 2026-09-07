@@ -97,6 +97,10 @@ import {
 } from '../ledger/project.js';
 import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
 import { readConfig } from '../store/config.js';
+import {
+  readNativeSwitcherAvailability,
+  type NativeSwitcherAvailability,
+} from '../store/fcache.js';
 import { freshIdentityOf, overviewAccounts, type AccountOverview } from '../store/accounts.js';
 import { listClients, type ClaudeClient } from '../store/clients.js';
 import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
@@ -433,6 +437,29 @@ function describeProcessTable(provenance: ProcessTableProvenance): string {
   }
 }
 
+/**
+ * The `native switch` line `doctor` prints. `fcache` is a private cache the
+ * app keeps for its own remote feature gates, not a format it documents or
+ * promises to keep — see src/store/fcache.ts, where every byte offset and the
+ * gate id itself are pinned to the one measurement they came from. `unknown`
+ * is therefore the answer to expect after any app update until that
+ * measurement is redone, and is printed plainly rather than as a warning: a
+ * reader for an undocumented format going quiet is normal, not alarming.
+ */
+function describeNativeSwitcher(availability: NativeSwitcherAvailability): string {
+  switch (availability) {
+    case 'available':
+      return pc.green('available');
+    case 'unavailable':
+      return (
+        pc.yellow('unavailable (gate absent)') +
+        pc.dim(' — adding a second account in-app still signs the first out')
+      );
+    case 'unknown':
+      return pc.dim("unknown (read from fcache, a format the app doesn't document)");
+  }
+}
+
 program
   .command('doctor')
   .helpGroup('Start here:')
@@ -464,6 +491,9 @@ program
         appId: packagedAppId(store) ?? null,
         // Populated by the inspectApp call above, so this costs no extra read.
         processTable: processTableProvenance(),
+        // Read from `fcache`, an undocumented cache the app can reshape at any
+        // update — 'unknown' here is the expected steady state, not an error.
+        nativeMultiAccountSwitcher: readNativeSwitcherAvailability(store),
       });
       return;
     }
@@ -516,6 +546,10 @@ program
     // Populated by the inspectApp call above, so this line costs no extra read
     // of the process table — it only reports how the one already taken went.
     console.log(`  process table ${describeProcessTable(processTableProvenance())}`);
+    // Read from `fcache`, a cache the app keeps for itself and documents
+    // nowhere — see src/store/fcache.ts. A blank or stale-looking answer after
+    // an app update is the expected failure mode, not a bug to chase here.
+    console.log(`  native switch ${describeNativeSwitcher(readNativeSwitcherAvailability(store))}`);
 
     // A profile started with the --user-data-dir switch is invisible to a process
     // that did not launch it, so the running instances are the only place to learn
