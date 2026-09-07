@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { selectByIds } from '../src/domain/filter.js';
+import { applyFilter, selectByIds, type ReachCheck } from '../src/domain/filter.js';
 import type { DiscoveredSession } from '../src/domain/types.js';
 import { OLD_ACCOUNT, session } from './helpers/store.js';
 
@@ -46,5 +46,37 @@ describe('selectByIds', () => {
     const { selected, unmatched } = selectByIds(sessions, ['00000000']);
     expect(selected).toHaveLength(2);
     expect(unmatched).toEqual([]);
+  });
+});
+
+describe('applyFilter', () => {
+  const copy = (isStranded: boolean): DiscoveredSession => ({
+    ...found(A),
+    isCopy: true,
+    isStranded,
+  });
+
+  it('refuses a copy that still has a card of its own, with no reach check to ask', () => {
+    expect(applyFilter([copy(false)], {})).toHaveLength(0);
+  });
+
+  it('offers the last card a conversation has left, copy or not', () => {
+    expect(applyFilter([copy(true)], {})).toHaveLength(1);
+  });
+
+  /**
+   * #49 first half: "is this the last card left?" missed a copy that carried on
+   * somewhere the destination cannot reach. `here.unreached` is asked instead —
+   * matching #69's correction to `resolveExisting` — and only a genuine gap
+   * lifts the refusal.
+   */
+  it('offers a copy back once it reaches records the destination cannot', () => {
+    const here: ReachCheck = { unreached: () => 3 };
+    expect(applyFilter([copy(false)], {}, here)).toHaveLength(1);
+  });
+
+  it('keeps refusing an ordinary copy that reaches nothing new', () => {
+    const here: ReachCheck = { unreached: () => 0 };
+    expect(applyFilter([copy(false)], {}, here)).toHaveLength(0);
   });
 });

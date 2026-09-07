@@ -187,6 +187,44 @@ export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined 
 }
 
 /**
+ * What each of a card's two candidate directories would let a copy reach — the
+ * count of records `Lineage.reachOf` finds under `cwd` and under `originCwd`.
+ *
+ * Built by the caller, never read from disk here: #41 found that the choice
+ * between the two used to be blind (`originCwd`, unconditionally), and fixing
+ * it needs a comparison this module has no business making itself. This stays
+ * pure, synchronous data-shaping — the reach counts are the one fact a caller
+ * with a `Lineage` has to hand in, not a door for this file to start reading
+ * transcripts. `undefined` means unmeasurable (no file matches that directory,
+ * or the conversation lives in one file and the question does not distinguish
+ * them), never "reaches nothing" — see `Lineage.reachOf`.
+ */
+export interface WorktreeReach {
+  atCwd: number | undefined;
+  atOriginCwd: number | undefined;
+}
+
+/**
+ * Between a card's own `cwd` and the `cwdTo` a worktree claim would move it to,
+ * the one that reaches more records — or `cwdTo` when neither `reach` nor the
+ * card's own `cwd` can settle it, which is the choice `buildFosterCopy` always
+ * made before #41.
+ */
+function fullerOf(card: CodeSessionData, cwdTo: string, reach: WorktreeReach | undefined): string {
+  if (reach && card.cwd !== undefined) {
+    const { atCwd, atOriginCwd } = reach;
+    // A measured count beats an unmeasurable one, and a higher count beats a
+    // lower one. Equal, or neither measurable, changes nothing — `cwdTo` is
+    // exactly what shipped before this comparison existed, and measured right
+    // on this store for 27 of the 93 cards it applies to.
+    if (atCwd !== undefined && (atOriginCwd === undefined || atCwd > atOriginCwd)) {
+      return card.cwd;
+    }
+  }
+  return cwdTo;
+}
+
+/**
  * The working directory a copy of this card would open in.
  *
  * Which matters beyond the copy itself: a `cliSessionId` can name more than one
@@ -196,9 +234,19 @@ export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined 
  * rather than the source's own `cwd`, or it promises records the copy will not
  * open. Reads the claim rather than restating it, so it cannot drift from what
  * `buildFosterCopy` does. See `transcripts.ts`.
+ *
+ * `reach` is optional so every existing caller that has not been taught to
+ * measure keeps the old answer — `originCwd` whenever the card sits in a
+ * worktree. Given it, this picks whichever of the card's two directories a copy
+ * would actually reach more of (#41): measured on a real store, sending every
+ * worktree card's copy to `originCwd` without looking left 32 rows open less of
+ * their conversation than they could, and 13 open nothing at all — the
+ * worktree's own file was the fuller one, or the only one.
  */
-export function copyCwd(card: CodeSessionData): string | undefined {
-  return worktreeClaim(card)?.cwdTo ?? card.cwd;
+export function copyCwd(card: CodeSessionData, reach?: WorktreeReach): string | undefined {
+  const cwdTo = worktreeClaim(card)?.cwdTo;
+  if (cwdTo === undefined) return card.cwd;
+  return fullerOf(card, cwdTo, reach);
 }
 
 export interface BuildCopyOptions {
@@ -220,6 +268,8 @@ export interface BuildCopyOptions {
    * branch that stopped goes to the archived view however its source is filed.
    */
   archived?: boolean;
+  /** See `copyCwd` — which of the source's two directories the copy should open in. */
+  reach?: WorktreeReach;
 }
 
 /**
@@ -263,15 +313,22 @@ export function buildFosterCopy(
   // wider test brought in no other kind of directory. `worktreeLazy` is a
   // worktree the app has promised but not yet cut, and it travels no better.
   //
-  // `originCwd` is the repository the worktree came from, and the copy opens
-  // there instead. A source without one keeps the directory it had — there is
+  // `originCwd` is the repository the worktree came from, and used to be where
+  // every such copy opened, unconditionally. #41 measured that blind as wrong
+  // more often than it looked: the worktree's own transcript can still be read
+  // by name from `~/.claude/projects` long after the directory itself is gone,
+  // and 45 of 93 cards on a real store opened less of their conversation, or
+  // none of it, by being sent to the repository regardless. `fullerOf` picks
+  // between the two by what `options.reach` says each would actually open — see
+  // `copyCwd`, which this mirrors so the two can never disagree. A source with
+  // no repository to compare against keeps the directory it had; there is
   // nowhere else to send it.
   const claim = worktreeClaim(copy);
   if (claim) {
     delete copy.worktreePath;
     delete copy.worktreeName;
     delete copy.worktreeLazy;
-    if (claim.cwdTo !== undefined) copy.cwd = claim.cwdTo;
+    if (claim.cwdTo !== undefined) copy.cwd = fullerOf(copy, claim.cwdTo, options.reach);
   }
 
   // What made the original invisible outside its own account, dropped so the copy

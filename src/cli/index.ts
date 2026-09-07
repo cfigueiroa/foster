@@ -14,6 +14,8 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
+import { lineage } from '../engine/lineage.js';
+import { sidebarOf } from '../engine/sidebar.js';
 import {
   canIdentify,
   identifyAccount,
@@ -1301,7 +1303,15 @@ sourceOptions(
     // The whole store is read even though only these accounts are offered: what
     // makes a copy the last card of its conversation is decided by the accounts
     // that are not on offer.
-    const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()));
+    //
+    // `here` is built from `store` — the local install — never `sourceStore`:
+    // `current`'s own cards live there regardless of which store the candidates
+    // are being read from. Undefined for a cross-store listing, which has no
+    // settled destination to compare reach against.
+    const here = current
+      ? sidebarOf(store, current, copySessionIds(ledger.read()), lineage())
+      : undefined;
+    const candidates = listFosterable(sourceStore, sources, ledger, filterFrom(this.opts()), here);
 
     if (opts.json) {
       print(
@@ -1389,7 +1399,12 @@ sourceOptions(
 
   // Sessions that can never appear in the sidebar are always excluded here:
   // offering them would only produce copies the app silently never lists.
-  let candidates = listFosterable(sourceStore, sources, ledger, filter);
+  //
+  // `here` reads `store`, not `sourceStore`: the copies are about to land in
+  // `target`'s directory under the local install, whichever store the
+  // candidates themselves are being read from.
+  const here = sidebarOf(store, target, copySessionIds(ledger.read()), lineage());
+  let candidates = listFosterable(sourceStore, sources, ledger, filter, here);
 
   if (opts.session?.length) {
     try {

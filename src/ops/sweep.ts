@@ -18,7 +18,7 @@ import {
   type Outcome,
   type OutcomeStatus,
 } from '../engine/executor.js';
-import { lineage, lineageAt, type Lineage } from '../engine/lineage.js';
+import { lineage, lineageAt, worktreeReachOf, type Lineage } from '../engine/lineage.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import { sidebarFrom } from '../engine/sidebar.js';
 import {
@@ -383,7 +383,11 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
   const { staleTemplate, divergedTemplate } = run;
   const here = sidebarFrom(hereCards, kin);
 
-  const candidates = fosterableFrom(run.fromSources, sources, { includeArchived: true });
+  // `here` is passed through so a copy that carried on past what this account
+  // can reach is offered as a source rather than refused as not the last card
+  // left (#49) — the same `Sidebar` the ordinary and branch passes below judge
+  // reach against, so a sweep cannot answer the question two different ways.
+  const candidates = fosterableFrom(run.fromSources, sources, { includeArchived: true }, here);
   const orphans = findRestorable(store, env, configDirs, [], {
     cards: [...run.fromSources, ...hereCards],
     transcripts: kin.transcripts(),
@@ -416,7 +420,10 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
    * brings a card when the account shows no row for that branch at all.
    */
   const opensMore = (session: DiscoveredSession): boolean =>
-    here.unreached(session.data.cliSessionId, copyCwd(session.data)) > 0;
+    here.unreached(
+      session.data.cliSessionId,
+      copyCwd(session.data, worktreeReachOf(kin, session.data)),
+    ) > 0;
 
   const fostered = fosterSessions(
     candidates.filter((session) => !inFork(session) || opensMore(session)),
