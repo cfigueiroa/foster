@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
@@ -20,6 +21,7 @@ import {
 } from '../engine/executor.js';
 import { lineage, lineageAt, type Lineage } from '../engine/lineage.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
+import { inspectApp } from '../engine/safety.js';
 import { sidebarFrom } from '../engine/sidebar.js';
 import {
   applyTitleSync,
@@ -35,8 +37,10 @@ import {
 } from '../engine/unclaim.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
+import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
 import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import { errorMessage } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
 
 /**
@@ -74,6 +78,14 @@ import { fosterableFrom, liveConversationIds } from './foster.js';
  * `buildFosterCopy` already drops the claim at the point of copying, but so
  * the pass sees the same, settled state of this account's own directory the
  * final report describes.
+ *
+ * Right after the branch pass, a pin check follows through on what it just
+ * wrote: pinning lives in the app's own IndexedDB, keyed on session id
+ * (`store/pinstate.ts`), so a row the branch pass just marked stale keeps
+ * whatever pin it had and the branch that carried on arrives unpinned. The
+ * check always reads — that costs one LevelDB read and is safe with the app
+ * open — and only writes when the store allows it, degrading to a message in
+ * `report.pinFixes` otherwise (#23).
  *
  * What is deliberately *not* here: `purge`, which destroys transcripts and is
  * part of no sweep. `consolidate` is not either, but for the opposite reason —
@@ -120,6 +132,12 @@ export interface SweepOptions {
    * of process inspection; production reads the real registry.
    */
   live?: ReadonlySet<string>;
+  /**
+   * The process table reader the pin pass asks before writing — see
+   * `restartPlan`'s own `list` parameter. Injected so a test can drive a
+   * synthetic table instead of the real machine deciding whether it passes.
+   */
+  list?: ProcessLister;
 }
 
 export interface SweepPhase {
@@ -159,6 +177,50 @@ export interface BranchesPhase extends BranchesResult {
   staleTemplate: string;
   /** The template the rows that went on were marked with. */
   divergedTemplate: string;
+}
+
+/**
+ * One pinned row the branch pass just left holding a mark it should not: the
+ * sidebar's pin is keyed on session id (`store/pinstate.ts`), the branch pass
+ * marks a row stale by rewriting its title in place rather than moving the
+ * pin, and the branch that carried on is often a fresh copy with an id the
+ * pinned list has never seen. Named here so the summary can say so even when
+ * nothing gets written — see `PinFixesReport`.
+ */
+export interface PinFix {
+  /** The pinned id the branch pass just marked stale. */
+  staleSessionId: string;
+  /** What that row was called before the mark, so the message can name it. */
+  staleTitle: string;
+  /** The branch that carried on — the row to pin instead. */
+  cleanTitle: string;
+  /**
+   * Its id in this account, when this pass could resolve one — see
+   * `ForkOutcome.tipCard`. Absent only for the rare row this pass cannot name,
+   * in which case there is something to say but nothing yet to move the pin
+   * onto.
+   */
+  cleanSessionId?: string;
+}
+
+/**
+ * What the branch pass found in the pin list, and what it could do about it.
+ *
+ * Reading is safe with Claude Desktop open — it is one LevelDB read, the same
+ * one `foster pin` makes to list what is pinned. Writing is not: the database
+ * is the app's own and is locked while it runs, so `moved` is only ever true
+ * once that write actually lands.
+ */
+export interface PinFixesReport {
+  fixes: PinFix[];
+  /** True once `writePinState` has actually repointed every movable fix. */
+  moved: boolean;
+  /**
+   * Why a move that had something to do did not happen: the app is running, or
+   * the write itself failed. Absent when there was nothing to move, or the
+   * move succeeded — this is a message, never a reason the sweep failed.
+   */
+  blocked?: string;
 }
 
 /**
@@ -249,6 +311,14 @@ export interface SweepReport {
    */
   liveWriters: string[];
   neverComes: NeverComes;
+  /**
+   * Pinned rows the branch pass just marked stale, and whether the pin could be
+   * moved onto the branch that carried on — see `PinFixesReport`. Always
+   * present, empty when nothing pinned was touched: unlike `confirmation`, the
+   * read behind this happens whether or not the run writes anything, so a dry
+   * run has just as much to say here as a real one.
+   */
+  pinFixes: PinFixesReport;
   /** Present only on a run that wrote: a dry run has nothing to confirm. */
   confirmation?: SweepConfirmation;
 }
@@ -337,6 +407,18 @@ export function runSweep(options: SweepOptions): SweepReport {
 
   const passes = runPasses(run, fromAccounts(scanned, [target]), dryRun);
 
+  // Right after the branch pass, so the pin list is asked about the same
+  // stale-marks and the same fresh copy this run just decided on — a later
+  // read would have to guess which of them were this run's doing.
+  const pinFixes = runPinPass(
+    store,
+    ledger,
+    passes.branches,
+    dryRun,
+    env,
+    options.list ?? readProcesses,
+  );
+
   // Last, and reading the ledger fresh: the three passes above may just have
   // appended fosterings of their own, and this plans against whatever the
   // ledger now says rather than the reading taken before any of them ran.
@@ -367,6 +449,7 @@ export function runSweep(options: SweepOptions): SweepReport {
       .map((outcome) => outcome.live)
       .filter((id): id is string => Boolean(id)),
     neverComes,
+    pinFixes,
   };
 
   // Nothing was written, so nothing has changed and a second pass would report
@@ -502,6 +585,128 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
 
 function phase(outcomes: Outcome[]): SweepPhase {
   return { outcomes, counts: summariseOutcomes(outcomes) };
+}
+
+/**
+ * The pin pass: say which pinned rows the branch pass just marked stale, and
+ * move the pin onto the branch that carried on when the store allows it — see
+ * issue #23.
+ *
+ * Reading the pin list is one LevelDB read, the same one `foster pin` makes to
+ * list what is pinned, and is safe with Claude Desktop open — so this runs on
+ * every sweep, dry run included. Writing is not safe with the app open, and is
+ * skipped rather than failing the run when it cannot be done: a pin that could
+ * not be moved is a line in the summary, never a reason the sweep errors out.
+ */
+function runPinPass(
+  store: StoreLayout,
+  ledger: Ledger,
+  branches: BranchesResult,
+  dryRun: boolean,
+  env: NodeJS.ProcessEnv,
+  list: ProcessLister,
+): PinFixesReport {
+  const pins = readPinsQuietly(store);
+  if (!pins) return { fixes: [], moved: false };
+
+  const fixes = planPinFixes(branches, pins);
+  // Nothing to move yet on a dry run: the branch pass wrote nothing, so a copy
+  // this pass would bring the tip in as does not exist for the pin to point at.
+  if (fixes.length === 0 || dryRun) return { fixes, moved: false };
+
+  return { fixes, ...applyPinFixes(store, ledger, pins, fixes, env, list) };
+}
+
+/**
+ * The database this asks about may not exist at all — a store the app has
+ * never opened, which is every fixture store this test suite builds, and
+ * plenty of real installations too. `readPinState` throws for that case (there
+ * is nothing to read or write) and for a database it cannot make sense of;
+ * either way the sweep has nothing to say about pins, not a reason to fail.
+ */
+function readPinsQuietly(store: StoreLayout): PinState | undefined {
+  try {
+    return readPinState(store);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Which pinned rows the branch pass marked stale this run, and what to pin
+ * instead. Only rows this very pass retitled to stale — a row already wearing
+ * an older sweep's mark is a gap `foster pin` closes by hand today, not one
+ * this pass claims to have just caused.
+ */
+function planPinFixes(branches: BranchesResult, pins: PinState): PinFix[] {
+  const fixes: PinFix[] = [];
+  for (const fork of branches.forks) {
+    // Nothing resolvable to recommend or move to. Rare: it means the tip
+    // arrived earlier through the ordinary pass rather than this one (see
+    // `ForkOutcome.tipCard`), and this pass has no record of that copy's id.
+    if (!fork.tipCard) continue;
+    for (const outcome of fork.retitled) {
+      if (outcome.status !== 'retitled' || outcome.as !== 'stale') continue;
+      if (!pins.ids.includes(outcome.sessionId)) continue;
+      fixes.push({
+        staleSessionId: outcome.sessionId,
+        // The row's own title before the mark went on, not the fork's shared
+        // title — a branch can have been renamed independently of its sibling.
+        staleTitle: outcome.from || outcome.to,
+        cleanTitle: fork.tipCard.title,
+        cleanSessionId: fork.tipCard.sessionId,
+      });
+    }
+  }
+  return fixes;
+}
+
+/**
+ * Move every fix in one write, the same append `writePinState` always makes.
+ * Guarded exactly the way `foster pin` guards its own write: the database is
+ * the app's own and holds unflushed writes in memory while it runs, so a
+ * write here would just be overwritten the moment the app flushes.
+ */
+function applyPinFixes(
+  store: StoreLayout,
+  ledger: Ledger,
+  pins: PinState,
+  fixes: PinFix[],
+  env: NodeJS.ProcessEnv,
+  list: ProcessLister,
+): { moved: boolean; blocked?: string } {
+  const app = inspectApp(store, env, list);
+  if (app.running) {
+    return {
+      moved: false,
+      blocked:
+        `Claude Desktop is running (${app.evidence.join('; ')}), so the pin could not be moved yet. ` +
+        'Its IndexedDB is locked while the app holds it open — re-run the sweep once it is closed, or ' +
+        'move it by hand with "foster pin".',
+    };
+  }
+
+  let next = pins.ids;
+  for (const fix of fixes) {
+    if (!fix.cleanSessionId) continue;
+    next = next.filter((id) => id !== fix.staleSessionId);
+    if (!next.includes(fix.cleanSessionId)) next = [...next, fix.cleanSessionId];
+  }
+  // Every movable fix turned out to be a no-op — the stale id was not actually
+  // pinned any more, or the clean id already was. Nothing written, same as any
+  // other pass that finds it has nothing to do.
+  if (next === pins.ids) return { moved: false };
+
+  try {
+    backupPinState(
+      store,
+      path.join(path.dirname(ledger.path), 'backups', `pin-state-${Date.now()}`),
+    );
+    writePinState(pins, next);
+    return { moved: true };
+  } catch (error) {
+    return { moved: false, blocked: `The pin list could not be updated: ${errorMessage(error)}.` };
+  }
 }
 
 /**

@@ -101,6 +101,16 @@ export interface ForkPlan {
   retitle: RetitleRequest[];
   /** Rows left as they are, and why. */
   skipped: { sessionId: string; title: string; detail: string }[];
+  /**
+   * The tip's own card, when this account already holds one for it — read
+   * before any write this pass makes, so the id is stable whether or not the
+   * card also needs its mark taken off. Absent when the tip has no row here
+   * yet; `applyBranchCards` fills that in from the copy it brings, if it brings
+   * one. The sweep's pin pass is why this is carried at all: a pin that follows
+   * a row the branch pass just marked stale has to be moved onto *something*,
+   * and this is where that something is named.
+   */
+  tipHeld?: { sessionId: string; title: string };
 }
 
 export interface BranchPlanInput {
@@ -181,6 +191,15 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
 
       if (held.length > 0) {
         row.action = 'keep';
+        if (isTip) {
+          // The first held card stands in for the row; a tip with more than one
+          // is the app having made a duplicate, which is not this pass's problem
+          // to resolve. Read now, before `retitle` below might rewrite its title.
+          plan.tipHeld = {
+            sessionId: held[0]!.data.sessionId,
+            title: stripMarks(held[0]!.data.title ?? '', templates),
+          };
+        }
         for (const card of held) {
           const decision = retitleFor(card, {
             kind,
@@ -384,6 +403,15 @@ export interface ForkOutcome {
   brought: Outcome[];
   retitled: RetitleOutcome[];
   skipped: ForkPlan['skipped'];
+  /**
+   * The tip's row in this account once this pass is done — carried from
+   * `ForkPlan.tipHeld` when the tip already had a card here, or read off the
+   * copy this pass just brought when it did not. Absent only when neither
+   * applies, which is the tip having arrived earlier through the ordinary pass
+   * under `opensMore` rather than through this one — this pass has no record
+   * of that copy's id to offer. The sweep's pin pass is the only reader.
+   */
+  tipCard?: { sessionId: string; title: string };
 }
 
 export interface BranchesResult {
@@ -409,6 +437,10 @@ export function applyBranchCards(plans: ForkPlan[], options: FosterOptions): Bra
 
   for (const plan of plans) {
     const brought: Outcome[] = [];
+    // Set from the plan when the tip already had a row; a bring for the tip
+    // below fills it in from the copy actually written, since that copy's id
+    // is minted only now and the plan could not have known it.
+    let tipCard = plan.tipHeld;
     for (const request of plan.bring) {
       const made = fosterSessions([request.session], {
         ...options,
@@ -421,6 +453,15 @@ export function applyBranchCards(plans: ForkPlan[], options: FosterOptions): Bra
       for (const outcome of made) {
         if (outcome.status === 'fostered' && (request.archive || request.session.data.isArchived)) {
           archived += 1;
+        }
+      }
+      if (request.tip && !tipCard) {
+        const fostered = made.find((outcome) => outcome.status === 'fostered');
+        if (fostered?.copySessionId) {
+          tipCard = {
+            sessionId: fostered.copySessionId,
+            title: fostered.copyTitle ?? fostered.title,
+          };
         }
       }
       brought.push(...made);
@@ -440,6 +481,7 @@ export function applyBranchCards(plans: ForkPlan[], options: FosterOptions): Bra
       brought,
       retitled: marks,
       skipped: plan.skipped,
+      ...(tipCard ? { tipCard } : {}),
     });
   }
 

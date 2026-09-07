@@ -14,6 +14,8 @@ import type { ProcessRow } from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listRetitled, project } from '../src/ledger/project.js';
 import { restartPlan, runSweep, type SweepOptions } from '../src/ops/sweep.js';
+import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
+import { indexedDbDir, PIN_STATE_KEY, readPinState, recordKey } from '../src/store/pinstate.js';
 import { scanAccount, SESSION_FILE_MAX_BYTES } from '../src/store/scanner.js';
 import { sweepEverything, WRITES_DISABLED } from '../src/agent/tools.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
@@ -99,6 +101,68 @@ function transcript(
     records.map((record) => JSON.stringify(record)).join('\n'),
     'utf8',
   );
+}
+
+/**
+ * Blink's envelope, byte for byte as the app writes it — see pinstate.test.ts,
+ * which reads these bytes from a real Claude Desktop database. Reused rather
+ * than reinvented, since the point of these fixtures is exercising the pin
+ * pass, not the LevelDB format a second time.
+ */
+const PIN_ENVELOPE = Buffer.from([
+  0xff, 0x15, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x0f, 0x22,
+]);
+const PIN_LOG_NUMBER = 4;
+
+/** A synthetic IndexedDB pin database holding exactly the given ids. */
+function pinDatabase(ids: string[]): void {
+  const dir = indexedDbDir(store);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'CURRENT'), 'MANIFEST-000001\n');
+
+  const edit = Buffer.concat([
+    encodeVarint32(1), // comparator name
+    encodeVarint32(8),
+    Buffer.from('idb_cmp1'),
+    encodeVarint32(2), // log number
+    encodeVarint32(PIN_LOG_NUMBER),
+  ]);
+  writeFileSync(path.join(dir, 'MANIFEST-000001'), frameRecords(edit, 0));
+
+  const document = { state: { starredIds: ids }, version: 0, updatedAt: 1 };
+  const payload = Buffer.from(JSON.stringify(document), 'latin1');
+  const value = Buffer.concat([
+    encodeVarint32(1),
+    PIN_ENVELOPE,
+    encodeVarint32(payload.length),
+    payload,
+  ]);
+
+  writeFileSync(
+    path.join(dir, `${String(PIN_LOG_NUMBER).padStart(6, '0')}.log`),
+    frameRecords(
+      encodeBatch(1n, [
+        { key: recordKey(1, PIN_STATE_KEY), value },
+        { key: recordKey(2, PIN_STATE_KEY), value: Buffer.from([1]) },
+      ]),
+      0,
+    ),
+  );
+}
+
+/** A process table reporting Claude Desktop as running on this store. */
+function desktopRunningOn(root: string): ProcessRow[] {
+  const exe =
+    'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+  return [
+    {
+      pid: 600,
+      parentPid: 9,
+      name: 'claude.exe',
+      path: exe,
+      commandLine: `"${exe}" --user-data-dir="${root}"`,
+    },
+  ];
 }
 
 describe('runSweep', () => {
@@ -670,6 +734,122 @@ describe('one row per branch', () => {
     sweep(false, { staleTemplate: '(defasada, parou {when}) ' });
 
     expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
+  });
+});
+
+/**
+ * Pinning lives in the app's own IndexedDB, keyed on session id — not in the
+ * session file the branch pass rewrites. #23: a row the branch pass marks
+ * stale keeps whatever pin it had, and the branch that carried on (here, a
+ * fresh copy of TIP, brought because the account did not have a row for it yet)
+ * arrives with no pin at all.
+ */
+describe('a pinned row the branch pass marks stale', () => {
+  function setUp(): void {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    pinDatabase([`local_${TRUNK_CARD}`]);
+  }
+
+  it('names the pinned row and the row to pin instead, and moves the pin', () => {
+    setUp();
+
+    const report = sweep();
+
+    // Said, whether or not the pin can be moved yet.
+    expect(report.pinFixes.fixes).toEqual([
+      {
+        staleSessionId: `local_${TRUNK_CARD}`,
+        staleTitle: 'Macs',
+        cleanTitle: 'Macs',
+        cleanSessionId: expect.any(String),
+      },
+    ]);
+
+    // The store was writable, so the write actually landed.
+    expect(report.pinFixes.moved).toBe(true);
+    expect(report.pinFixes.blocked).toBeUndefined();
+
+    const tip = copies().find((data) => data.cliSessionId === TIP)!;
+    expect(report.pinFixes.fixes[0]!.cleanSessionId).toBe(tip.sessionId);
+
+    const pins = readPinState(store)!;
+    expect(pins.ids).not.toContain(`local_${TRUNK_CARD}`);
+    expect(pins.ids).toContain(tip.sessionId);
+  });
+
+  it('writes nothing and still names the row when Claude Desktop is running', () => {
+    setUp();
+
+    const report = sweep(false, { list: () => desktopRunningOn(store.root) });
+
+    expect(report.pinFixes.fixes).toHaveLength(1);
+    expect(report.pinFixes.fixes[0]).toMatchObject({ staleSessionId: `local_${TRUNK_CARD}` });
+    expect(report.pinFixes.moved).toBe(false);
+    expect(report.pinFixes.blocked).toMatch(/running/);
+
+    // Nothing was written: the pin list is exactly what it was before the run.
+    expect(readPinState(store)!.ids).toEqual([`local_${TRUNK_CARD}`]);
+  });
+
+  it('has something to say but nothing to move on a dry run', () => {
+    setUp();
+
+    const report = sweep(true);
+
+    expect(report.pinFixes.fixes).toHaveLength(1);
+    expect(report.pinFixes.moved).toBe(false);
+    expect(readPinState(store)!.ids).toEqual([`local_${TRUNK_CARD}`]);
+  });
+
+  it('says nothing when the branch pass marked no pinned row', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    // A database that exists but never pinned this row.
+    pinDatabase([]);
+
+    const report = sweep();
+
+    expect(report.pinFixes.fixes).toEqual([]);
+    expect(report.pinFixes.moved).toBe(false);
+  });
+
+  it('does not fail the sweep when there is no pin database at all', () => {
+    fork();
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+    // No pinDatabase() call at all: every other test in this file runs this way,
+    // and none of them has ever had to know pins exist.
+
+    const report = sweep();
+
+    expect(report.pinFixes).toEqual({ fixes: [], moved: false });
   });
 });
 
