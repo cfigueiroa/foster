@@ -18,10 +18,20 @@ function writeFcache(bytes: Buffer): void {
   writeFileSync(fcachePath(store), bytes);
 }
 
-/** An `fcache` shaped the way the one measurement this reader is built from
- * describes: an 8-byte header, then a gzip member holding `{ gates: {...} }`. */
-function fcacheBytes(gates: Record<string, unknown>): Buffer {
-  return Buffer.concat([HEADER, gzipSync(JSON.stringify({ gates }))]);
+/**
+ * An `fcache` shaped the way the measurement this reader is built from
+ * describes: an 8-byte header, then a gzip member holding
+ * `{ timestamp, mode, features }`, where each feature is an object carrying
+ * `value` rather than a bare boolean.
+ */
+function fcacheBytes(features: Record<string, unknown>): Buffer {
+  return Buffer.concat([HEADER, gzipSync(JSON.stringify({ timestamp: 0, mode: '1p', features }))]);
+}
+
+/** One gate as the file holds it: the answer in `value`, with the siblings that
+ * say how the server got there sitting beside it and being ignored. */
+function gate(value: unknown): Record<string, unknown> {
+  return { value, on: false, off: false, source: 'defaultValue', ruleId: 'r' };
 }
 
 beforeEach(() => {
@@ -30,12 +40,12 @@ beforeEach(() => {
 
 describe('readNativeSwitcherAvailability', () => {
   it('is "available" when the gate is present and true', () => {
-    writeFcache(fcacheBytes({ [GATE_ID]: true }));
+    writeFcache(fcacheBytes({ [GATE_ID]: gate(true) }));
     expect(readNativeSwitcherAvailability(store)).toBe('available');
   });
 
   it('is "unavailable" when the gate is present and false', () => {
-    writeFcache(fcacheBytes({ [GATE_ID]: false }));
+    writeFcache(fcacheBytes({ [GATE_ID]: gate(false) }));
     expect(readNativeSwitcherAvailability(store)).toBe('unavailable');
   });
 
@@ -58,7 +68,7 @@ describe('readNativeSwitcherAvailability', () => {
   });
 
   it('is "unknown" when the gzip member is corrupt', () => {
-    const good = fcacheBytes({ [GATE_ID]: true });
+    const good = fcacheBytes({ [GATE_ID]: gate(true) });
     // Keep the gzip magic (so the header check passes) but mangle the member
     // that follows it, which is what a torn write leaves behind.
     const corrupt = Buffer.from(good);
@@ -72,23 +82,31 @@ describe('readNativeSwitcherAvailability', () => {
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 
-  it('is "unknown" when the JSON has no gates object at all', () => {
+  it('is "unknown" when the JSON has no features object at all', () => {
     writeFcache(Buffer.concat([HEADER, gzipSync(JSON.stringify({ other: 'stuff' }))]));
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 
-  it('is "unknown" when the gate key is absent from the gates object', () => {
-    writeFcache(fcacheBytes({ 'some-other-gate': true }));
+  it('is "unknown" when the gate key is absent from the features object', () => {
+    writeFcache(fcacheBytes({ 'some-other-gate': gate(true) }));
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 
   it('is "unknown" when the gate value is not a boolean', () => {
-    writeFcache(fcacheBytes({ [GATE_ID]: 'true' }));
+    writeFcache(fcacheBytes({ [GATE_ID]: gate('true') }));
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 
-  it('is "unknown" when the gate value is an object rather than a boolean', () => {
-    writeFcache(fcacheBytes({ [GATE_ID]: { value: true } }));
+  it('is "unknown" when the gate is a bare boolean rather than an object', () => {
+    // The shape a single early measurement assumed, before the file was read
+    // again: a map of bare booleans. Reading one now is proof the format moved,
+    // which is exactly what must not be answered with a confident yes.
+    writeFcache(fcacheBytes({ [GATE_ID]: true }));
+    expect(readNativeSwitcherAvailability(store)).toBe('unknown');
+  });
+
+  it('is "unknown" when the gate object carries no value at all', () => {
+    writeFcache(fcacheBytes({ [GATE_ID]: { on: true, source: 'force' } }));
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 

@@ -39,10 +39,28 @@ const FCACHE_LAYOUT = {
    */
   gzipMagic: [0x1f, 0x8b, 0x08],
   /**
+   * The map of gates, and the field inside one entry that holds its answer.
+   *
+   * Measured 07/09/2026 against a real `fcache`: the decompressed body is
+   * `{ timestamp, mode, features }`, and `features` holds 322 entries keyed by
+   * a numeric gate id, each an object of which `value` is the boolean. It is
+   * not a map of bare booleans, and it is not called `gates`.
+   */
+  featuresKey: 'features',
+  valueKey: 'value',
+  /**
    * Numeric id the server used for the native multi-account switcher's remote
    * feature gate on 05/09/2026. A renamed or renumbered gate is exactly the
    * drift this reader must not paper over — it reads as the key being absent,
    * which is `'unknown'`, not `'unavailable'`.
+   *
+   * **This is the one field here that has not been reproduced.** Measured again
+   * on 07/09/2026, it was not among the 322 gates the file held — and nothing
+   * in the file names a gate: the keys are numeric hashes, and the only other
+   * strings are `source` (`defaultValue`, `experiment`, `force`) and a `ruleId`
+   * uuid. So the file alone cannot say which gate the switcher is. Until the id
+   * is confirmed, `doctor` answers `'unknown'` on that machine — which is the
+   * honest answer, and the reason this reader was built to give one.
    */
   gateId: '96101707',
 } as const;
@@ -71,7 +89,7 @@ export function readNativeSwitcherAvailability(store: StoreLayout): NativeSwitch
     const bytes = readFileSync(file);
     if (bytes.length > MAX_FILE_BYTES) return 'unknown';
 
-    const { headerLength, gzipMagic, gateId } = FCACHE_LAYOUT;
+    const { headerLength, gzipMagic, gateId, featuresKey, valueKey } = FCACHE_LAYOUT;
     if (bytes.length < headerLength + gzipMagic.length) return 'unknown';
     for (let index = 0; index < gzipMagic.length; index++) {
       if (bytes[headerLength + index] !== gzipMagic[index]) return 'unknown';
@@ -88,10 +106,17 @@ export function readNativeSwitcherAvailability(store: StoreLayout): NativeSwitch
     }
 
     if (typeof parsed !== 'object' || parsed === null) return 'unknown';
-    const gates = (parsed as Record<string, unknown>).gates;
-    if (typeof gates !== 'object' || gates === null) return 'unknown';
+    const features = (parsed as Record<string, unknown>)[featuresKey];
+    if (typeof features !== 'object' || features === null) return 'unknown';
 
-    const value = (gates as Record<string, unknown>)[gateId];
+    // One gate is an object, not a bare boolean: `value` is the answer, and the
+    // siblings beside it (`on`, `off`, `source`, `ruleId`) say how the server
+    // arrived at it. Only `value` is read — the rest is the app's business, and
+    // a gate missing it is a shape this reader does not recognise.
+    const gate = (features as Record<string, unknown>)[gateId];
+    if (typeof gate !== 'object' || gate === null) return 'unknown';
+
+    const value = (gate as Record<string, unknown>)[valueKey];
     if (typeof value !== 'boolean') return 'unknown';
     return value ? 'available' : 'unavailable';
   } catch {
