@@ -335,7 +335,9 @@ export function runSweep(options: SweepOptions): SweepReport {
 
   // After the worktree pass, and reading the ledger fresh again: the branch pass
   // may have marked a card this one now has to preserve the mark of.
-  const titleSync = syncTitles ? runTitleSync(store, ledger, target, dryRun) : undefined;
+  const titleSync = syncTitles
+    ? runTitleSync(store, ledger, target, dryRun, [staleTemplate, divergedTemplate])
+    : undefined;
 
   const report: SweepReport = {
     store: store.root,
@@ -516,8 +518,9 @@ function runTitleSync(
   ledger: Ledger,
   target: AccountRef,
   dryRun: boolean,
+  runTemplates: readonly string[],
 ): TitleSyncPhase {
-  const plan = planTitleSync(store, ledger, target);
+  const plan = planTitleSync(store, ledger, target, undefined, runTemplates);
   const outcomes = dryRun ? [] : applyTitleSync(plan.items, { ledger });
   const counts = { synced: 0, skipped: 0, failed: 0 };
   for (const outcome of outcomes) {

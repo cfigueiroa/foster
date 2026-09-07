@@ -33,17 +33,25 @@ import { retitleCards, type RetitleOutcome } from './retitle.js';
  * a sweep reported it as "renamed here" when nobody had renamed anything. The
  * card records who named it (`titleSource`, see `namerOf`), so the second rule
  * is authorship: a name a person chose beats a name the app generated, and a
- * name chosen on both sides is a conflict this reports rather than settles.
- * Authorship is the only question that can be answered here — nothing records
- * *when* a title changed, so "the newer rename wins" is not available at all.
+ * name chosen on both sides is settled only where it can be proved.
+ *
+ * **Which rename is newer**, where both were chosen. No clock answers it: there
+ * is no `titleUpdatedAt`, and `lastActivityAt` moves when a conversation is
+ * merely opened. `previousTitles` does — the names a card used to wear. A side
+ * whose history already holds the name the other side is wearing has been
+ * through it and gone on, which orders the two without dating either. Both
+ * histories through the other's name, or neither, is a real tie and stays a
+ * reported conflict.
  *
  * **Marks are kept, and never copied.** The mark a branch wears is not part of
  * its name, so it survives the rewrite; and a mark the *origin* happens to wear
- * is not carried over, or the two would stack. Both are derived from the same
- * record rather than matched by prefix: `card_retitled` holds the title before
- * the mark and after it, so whatever precedes `from` inside `to` is the mark,
- * exactly. That is what keeps this clear of #35 — a run does not have to be told
- * the words a mark was written with in order to recognise it.
+ * is not carried over, or the two would stack. The mark comes from `markedTo`,
+ * the title left by the last write that could make one — never from subtracting
+ * anything out of the latest title, which reads a sync's own work as a mark and
+ * writes it in front again on the next run. Where the ledger names no such write
+ * — a mark made under another card's id, or reworded since — the words of #35
+ * answer instead: every template this log proves foster used, plus the ones this
+ * run was told to write, which are not in the log yet.
  *
  * **Cards are paired by card, never by conversation.** A title lives on a card;
  * one conversation becomes a card per account and another per branch. The ledger
@@ -124,6 +132,23 @@ function baselineOf(
   here: string,
   templates: readonly string[],
 ): { title: string; mark: string } | 'unknown-mark' | undefined {
+  // The copy wears a mark of its own over the very title foster last wrote:
+  // the words of the mark were changed — by hand, or by a run told a different
+  // `--branch-prefix` — while the conversation's own name stayed put. #35's
+  // rule is that a mark is recognised by the moment it carries and not by the
+  // words that wrote it; the same has to hold here, or every rewording reads as
+  // a rename and is reported as a conflict for ever. The mark that stays is the
+  // one on the card, never the one in the log: it is the later of the two.
+  const wearing = (title: string): string =>
+    title.slice(0, title.length - stripMarks(title, templates).length);
+  const reworded = (was: string): { title: string; mark: string } | undefined => {
+    const mark = wearing(here);
+    if (!mark) return undefined;
+    return stripMarks(here, templates) === stripMarks(was, templates)
+      ? { title: here, mark }
+      : undefined;
+  };
+
   if (retitled) {
     // The mark is read off the last write that could have made one, never off
     // the latest title. A sync's `to` is `mark + whatever the origin is called
@@ -131,13 +156,15 @@ function baselineOf(
     // origin's own new prefix and calls it a mark — which the next sync then
     // writes in front all over again. Nothing marked means no mark, whatever
     // the syncs since have made the title look like.
-    if (retitled.markedTo === undefined) return { title: retitled.to, mark: '' };
+    if (retitled.markedTo === undefined) {
+      return reworded(retitled.to) ?? { title: retitled.to, mark: '' };
+    }
     const made = fostering.originalTitle;
     if (made !== undefined && retitled.markedTo.endsWith(made)) {
       const mark = retitled.markedTo.slice(0, retitled.markedTo.length - made.length);
-      return { title: retitled.to, mark };
+      return reworded(retitled.to) ?? { title: retitled.to, mark };
     }
-    return 'unknown-mark';
+    return reworded(retitled.to) ?? 'unknown-mark';
   }
   const made = fostering.originalTitle;
   if (made === undefined) return undefined;
@@ -252,13 +279,23 @@ export function planTitleSync(
   ledger: Ledger,
   target: AccountRef,
   state: LedgerState = project(ledger.read()),
+  runTemplates: readonly string[] = [],
 ): PlanTitleSyncResult {
   const items: TitleSyncItem[] = [];
   const skipped: TitleSyncSkipped[] = [];
   // The words every mark this ledger proves foster wrote was made from — how a
   // mark left on a card before the ledger carried one is recognised, whatever
   // language the run that wrote it was speaking (#35).
-  const templates = templatesSeen(ledger.read());
+  //
+  // The run's own marks come first, and they are not in the log yet: a `{when}`
+  // this sweep was told to write, or one written by hand in the same shape, has
+  // no `card_retitled` behind it. Without them a row wearing this run's own
+  // wording reads as a name somebody chose, which is how a mark applied by hand
+  // turned into a reported conflict. `branchCards` has always mixed the two;
+  // this pass was reading the ledger alone.
+  const templates = [...new Set([...runTemplates, ...templatesSeen(ledger.read())])].filter(
+    (template) => template !== '',
+  );
 
   for (const fostering of listActive(state)) {
     if (

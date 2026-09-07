@@ -424,6 +424,26 @@ describe('planTitleSync', () => {
     expect(plan.skipped).toEqual([]);
   });
 
+  it("reads a mark in this run's own words, before the ledger holds any", () => {
+    // A wording a sweep is told to use for the first time — or a mark applied by
+    // hand in that same shape — has no `card_retitled` behind it yet. Read
+    // against the ledger alone it is a name somebody chose, which is how a mark
+    // written by hand turned into a reported conflict on a real store.
+    const f = fixture(
+      'Base Histórica de Proventos: plano-mestre e fases',
+      '(continuou, até 28/08 19:16) Base Histórica de Proventos: plano-mestre e fases',
+      { origin: 'tool', copy: 'tool' },
+    );
+    fostered(f, 'Base Histórica de Proventos: plano-mestre e fases');
+
+    const blind = planTitleSync(f.store, f.ledger, HERE);
+    expect(blind.skipped[0]?.reason).toBe('renamed-both');
+
+    const told = planTitleSync(f.store, f.ledger, HERE, undefined, ['(continuou, até {when}) ']);
+    expect(told.items).toEqual([]);
+    expect(told.skipped).toEqual([]);
+  });
+
   it('writes a name onto a copy of a conversation nobody had titled', () => {
     const f = fixture('A name at last', '');
     fostered(f, undefined);
