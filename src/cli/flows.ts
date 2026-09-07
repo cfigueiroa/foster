@@ -13,6 +13,8 @@ import {
 import { currentAccount } from '../engine/account.js';
 import { fosterSessions, returnFosterings, summariseOutcomes } from '../engine/executor.js';
 import { findDuplicates } from '../engine/duplicates.js';
+import { lineage } from '../engine/lineage.js';
+import { sidebarOf } from '../engine/sidebar.js';
 import { knownStores, resolveStoreArg } from '../engine/stores.js';
 import { AppRunningError } from '../engine/safety.js';
 import type { Ledger } from '../ledger/log.js';
@@ -27,7 +29,7 @@ import {
 import { describeWriters, sessionRegistryRoots } from '../store/liveSessions.js';
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, type KnownCopies } from '../store/scanner.js';
-import { applyFilter, byRecency, parseSince } from '../domain/filter.js';
+import { applyFilter, byRecency, parseSince, type ReachCheck } from '../domain/filter.js';
 import { liveConversationIds, scanFosterable } from '../ops/foster.js';
 import { partitionByStore } from '../ops/active.js';
 import { restartPlan, runSweep } from '../ops/sweep.js';
@@ -540,6 +542,7 @@ const PREVIEW_LIMIT = 10;
 async function chooseSessions(
   ui: Ui,
   sessions: DiscoveredSession[],
+  here?: ReachCheck,
 ): Promise<Maybe<{ sessions: DiscoveredSession[]; explicit: boolean }>> {
   const how = await selectOrBack(ui, `${sessions.length} session(s) available. Which ones?`, [
     { value: 'all', label: 'All of them' },
@@ -568,16 +571,20 @@ async function chooseSessions(
   const value = answer.trim();
   if (!value) return { sessions, explicit: false };
 
+  // `here` is threaded through this narrowing the same way it reached the list
+  // being narrowed: without it, re-filtering would drop a copy #49 had already
+  // qualified, since a fresh `applyFilter` call with no reach check answers the
+  // old "is this the last card left?" question again.
   if (how === 'since') {
     const since = parseSince(value);
     if (since === undefined) {
       ui.log.error(`Could not read "${value}". Try 30d, 12h or 2w.`);
       return BACK;
     }
-    return { sessions: applyFilter(sessions, { since }), explicit: false };
+    return { sessions: applyFilter(sessions, { since }, here), explicit: false };
   }
   return {
-    sessions: applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value }),
+    sessions: applyFilter(sessions, how === 'title' ? { title: value } : { cwd: value }, here),
     explicit: false,
   };
 }
@@ -623,8 +630,14 @@ function reportHidden(ui: Ui, all: DiscoveredSession[], offered: DiscoveredSessi
   const hidden = all.length - offered.length;
   if (hidden <= 0) return;
 
+  // Membership, not a restated predicate: since #49 a copy can be offered
+  // despite `isCopy && !isStranded` when it reaches records `here` cannot, and
+  // recomputing that guess here without the reach check would double-count it
+  // — present in `offered` and still called "already a copy" below.
+  const kept = new Set(offered.map((session) => session.path));
   const reasons = new Map<string, number>();
   for (const session of all) {
+    if (kept.has(session.path)) continue;
     const hiddenAsCopy = session.isCopy && !session.isStranded;
     if (session.reasons.length === 0 && !hiddenAsCopy) continue;
     const reason = hiddenAsCopy ? 'already a copy' : session.reasons.join(', ');
@@ -672,7 +685,11 @@ async function fosterFromSource(
   source: SourcePick,
 ): Promise<void> {
   const all = scanFosterable(source.store, source.refs, ledger);
-  const available = byRecency(applyFilter(all, {}));
+  // `here` is `current`'s own reach — see #49 — read from `store` (the local
+  // install `current` lives in), not `source.store`: they differ for a source
+  // picked from another installation.
+  const here = sidebarOf(store, current, copySessionIds(ledger.read()), lineage());
+  const available = byRecency(applyFilter(all, {}, here));
   reportHidden(ui, all, available);
 
   if (available.length === 0) {
@@ -684,7 +701,7 @@ async function fosterFromSource(
     ui.note(source.store.root, 'Reading from another installation');
   }
 
-  const choice = await chooseSessions(ui, available);
+  const choice = await chooseSessions(ui, available, here);
   if (aborted(choice)) return;
   const { sessions: selected, explicit } = choice;
   if (selected.length === 0) {

@@ -1,3 +1,5 @@
+import type { WorktreeReach } from '../domain/fostering.js';
+import type { CodeSessionData } from '../domain/types.js';
 import {
   conversationRoot,
   fileOpenedFrom,
@@ -265,4 +267,18 @@ export function lineageAt(projectsDirs: string[]): Lineage {
  */
 export function lineage(env: NodeJS.ProcessEnv = process.env, extra: string[] = []): Lineage {
   return lineageAt(installedRoots ?? transcriptRoots(env, extra));
+}
+
+/**
+ * What `copyCwd`/`buildFosterCopy` need to choose between a card's own `cwd`
+ * and its `originCwd` (#41) — read here, where a `Lineage` is available, and
+ * handed to `domain/fostering.ts` as plain numbers so that module never has to
+ * read a transcript itself.
+ */
+export function worktreeReachOf(kin: Lineage, data: CodeSessionData): WorktreeReach {
+  const id = data.cliSessionId;
+  return {
+    atCwd: kin.reachOf(id, data.cwd)?.uuids.size,
+    atOriginCwd: kin.reachOf(id, data.originCwd)?.uuids.size,
+  };
 }

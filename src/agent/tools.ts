@@ -10,8 +10,10 @@ import {
   summariseOutcomes,
   type Outcome,
 } from '../engine/executor.js';
+import { lineage } from '../engine/lineage.js';
 import { resumeConversation, type ResumeRunner } from '../engine/resume.js';
 import { AppRunningError, inspectApp, type RemovalGuard } from '../engine/safety.js';
+import { sidebarOf } from '../engine/sidebar.js';
 import { storeIdentity } from '../domain/paths.js';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
 import type { SessionFilter } from '../domain/filter.js';
@@ -125,7 +127,13 @@ export function listSessions(ctx: AgentToolContext, args: ListSessionsArgs): unk
   if (args.cwd) filter.cwd = args.cwd;
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
-  const all = listFosterable(store, sources, ledger, filter);
+  // `here` is the current account's own reach, so a copy that carried on past
+  // what it can already open is offered back rather than refused as not the
+  // last card left (#49) — matched by the same check `foster_sessions` makes.
+  const here = current
+    ? sidebarOf(store, current, copySessionIds(ledger.read()), lineage())
+    : undefined;
+  const all = listFosterable(store, sources, ledger, filter, here);
 
   const limit = Math.max(1, Math.min(args.limit ?? 100, 500));
   const shown = all.slice(0, limit);
@@ -288,7 +296,10 @@ export function fosterSessionsTool(ctx: AgentToolContext, args: FosterSessionsAr
   if (args.cwd) filter.cwd = args.cwd;
   if (args.sinceDays !== undefined) filter.since = Date.now() - args.sinceDays * 86_400_000;
 
-  let candidates = listFosterable(store, sources, ledger, filter);
+  // See `listSessions` — same reach check, against the account this tool is
+  // actually about to write into rather than whatever `current` happens to be.
+  const here = sidebarOf(store, target, copySessionIds(ledger.read()), lineage());
+  let candidates = listFosterable(store, sources, ledger, filter, here);
 
   if (args.sessionIds?.length) {
     try {

@@ -459,3 +459,121 @@ describe('#63: identity does not outrank reach', () => {
     expect(scanAccount(store, NEW_ACCOUNT)).toHaveLength(1);
   });
 });
+
+/**
+ * #41: `buildFosterCopy` used to send every worktree card's copy to `originCwd`
+ * without looking at what was there. Measured on a real store: of 93 cards
+ * sitting in a worktree whose conversation is held in more than one file, 32
+ * copies would open fewer records than the source and 13 would open none at
+ * all — the worktree's own file was the fuller one, or the only one findable
+ * from either directory.
+ */
+describe('#41: the fullest file wins', () => {
+  const CLI_ID = '00000000-0000-4000-8000-0000000000f1';
+  const SHARED = '00000000-0000-4000-8000-0000000000f2';
+  const TREE_ONLY_A = '00000000-0000-4000-8000-0000000000f3';
+  const TREE_ONLY_B = '00000000-0000-4000-8000-0000000000f4';
+  const REPO_ONLY = '00000000-0000-4000-8000-0000000000f5';
+  const ORIGIN_ID = '00000000-0000-4000-8000-0000000000f6';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+  const REPO = 'C:\\work\\project';
+
+  function rec(uuid: string) {
+    return { uuid, type: 'assistant' };
+  }
+
+  /** Writes one of the conversation's files, named the way the app names them. */
+  function transcript(configDir: string, project: string, uuids: string[]): void {
+    const dir = path.join(configDir, 'projects', project);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${CLI_ID}.jsonl`),
+      uuids.map((uuid) => JSON.stringify(rec(uuid))).join('\n'),
+      'utf8',
+    );
+  }
+
+  it('sends the copy to the worktree file when it holds more records than the repository', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-'));
+    // Both hold the shared history; the worktree's file also holds two records
+    // the repository's does not, so it is the fuller of the two.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [
+      SHARED,
+      TREE_ONLY_A,
+      TREE_ONLY_B,
+    ]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+
+    // The old, unconditional choice: dropping the worktree lease also sends the
+    // copy to `originCwd`. Sending it there here would open the two-record
+    // file and leave `TREE_ONLY_A`/`TREE_ONLY_B` behind.
+    expect(copy.cwd).toBe(TREE);
+    expect(copy.worktreePath).toBeUndefined();
+    expect(copy.worktreeName).toBeUndefined();
+  });
+
+  it('opens nothing from the repository at all when only the worktree can reach it', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-empty-'));
+    // Two files exist for this conversation — the worktree's, and one under a
+    // directory that is neither `cwd` nor `originCwd` (a second worktree the
+    // card no longer names) — so `originCwd` matches none of them. Sending the
+    // copy there unconditionally would have opened an empty row.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project--claude-worktrees-other', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORIGIN_ID, cliSessionId: CLI_ID, cwd: TREE, originCwd: REPO }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(TREE);
+  });
+
+  it('still sends the copy to the repository when its own file is the fuller one', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-repo-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(REPO);
+  });
+});
