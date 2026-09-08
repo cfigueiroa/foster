@@ -419,6 +419,107 @@ describe('quitDesktop', () => {
   });
 
   /**
+   * #87. `closingWindowQuits` predicts the tray from a preference, and measured
+   * on a real MSIX install the preference does not decide it: with
+   * `menuBarEnabled: false` in the config the app read at start-up, the close
+   * request still cancelled and hid the window. The polite path was then sent
+   * off on a request that could never be honoured, and nothing noticed until the
+   * timeout — thirty seconds later, with the window already gone.
+   */
+  it('says the tray is in the way as soon as the window goes and the app stays', async () => {
+    const store = storeWith({ menuBarEnabled: false });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 30_000,
+      windowCheckMs: 10,
+      alive: () => true,
+      windowVisible: () => false,
+    });
+
+    expect(result).toEqual({ outcome: 'hides-to-tray', mainPid: PID });
+  });
+
+  it('reads no window at all when the app quits the moment it is asked', async () => {
+    // The common case, and the one that must stay free: each read shells out to
+    // PowerShell, which on a machine whose PowerShell is wedged costs the full
+    // per-call timeout. The app is gone within a poll step, long before the
+    // first look would be due.
+    const store = storeWith({ menuBarEnabled: false });
+    let reads = 0;
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 30_000,
+      alive: () => false,
+      windowVisible: () => {
+        reads += 1;
+        return false;
+      },
+    });
+
+    expect(result).toEqual({ outcome: 'quit' });
+    expect(reads).toBe(0);
+  });
+
+  it('reads no window on the terminate path, which has nothing to observe', async () => {
+    // `/F` does not wait for a window to react, so there is no close request for
+    // a window to answer.
+    const store = storeWith({ menuBarEnabled: false });
+    let reads = 0;
+    await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+      terminate: true,
+      alive: () => true,
+      windowVisible: () => {
+        reads += 1;
+        return false;
+      },
+    });
+
+    expect(reads).toBe(0);
+  });
+
+  it('waits out an app that is closing, rather than calling a late window a tray', async () => {
+    // The window going and the process ending are one event when the app really
+    // is quitting. Reporting the tray for an app that had already left would
+    // send the user to terminate something that is not there.
+    const store = storeWith({ menuBarEnabled: false });
+    let alive = true;
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 30_000,
+      windowCheckMs: 10,
+      alive: () => alive,
+      windowVisible: () => {
+        // Hidden from the first look on — and by then the process has gone too.
+        alive = false;
+        return false;
+      },
+    });
+
+    expect(result).toEqual({ outcome: 'quit' });
+  });
+
+  it('waits, as it always did, when the window cannot be read at all', async () => {
+    // Not Windows, or a reader that failed. Absence of an answer is not an
+    // answer, so nothing here may shortcut the wait.
+    const store = storeWith({ menuBarEnabled: false });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+      alive: () => true,
+      windowVisible: () => undefined,
+    });
+
+    expect(result).toMatchObject({ outcome: 'still-running', mainPid: PID });
+  });
+
+  /**
    * The note said "Re-run with --terminate" wherever it appeared, but only two
    * commands have that flag. Printed after "foster foster --yes --restart", it
    * described an option that command has never had, so doing as it said answered

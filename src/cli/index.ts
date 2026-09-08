@@ -1254,7 +1254,7 @@ async function sweepRestart(store: StoreLayout, requested: boolean): Promise<Swe
   try {
     if (plan.running) {
       const quit = await quitDesktop(store);
-      if (quit.outcome === 'needs-terminate') {
+      if (quit.outcome === 'needs-terminate' || quit.outcome === 'hides-to-tray') {
         return {
           requested: true,
           done: false,
@@ -5127,9 +5127,15 @@ async function closeDesktop(
     console.log('Claude Desktop is closed.');
     return true;
   }
-  if (result.outcome === 'needs-terminate') {
+  if (result.outcome === 'needs-terminate' || result.outcome === 'hides-to-tray') {
     // Not an escalation this can make on its own: with the tray on there is no
     // way to ask, and ending the process skips the app's own shutdown.
+    //
+    // The same note either way. `needs-terminate` is the prediction, made before
+    // anything was tried; `hides-to-tray` is the observation, made because the
+    // prediction was wrong and the window went away for nothing (#87). What the
+    // user has to do next is identical, so saying it differently would only
+    // dress up an internal distinction as news.
     console.log(pc.yellow(trayNote(retry)));
     process.exitCode = 1;
     return false;

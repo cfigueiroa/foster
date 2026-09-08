@@ -482,6 +482,25 @@ export interface QuitOptions {
   list?: ProcessLister;
   /** Injectable for tests: the suite itself runs inside a hosted session. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Injectable: whether a pid's main window is currently visible — the same
+   * seam `startDesktop` takes, and `undefined` means the same thing here, that
+   * nothing could be established.
+   */
+  windowVisible?: (pid: number, env: NodeJS.ProcessEnv) => boolean | undefined;
+  /**
+   * Injectable: whether the pid is still there. Same reason `startDesktop` takes
+   * `lockfileHeld` — a test cannot hand this a pid that is genuinely alive
+   * without aiming the kill below at a real process, and the one process it
+   * could be sure of is the test runner itself.
+   */
+  alive?: (pid: number) => boolean;
+  /**
+   * How long between window looks. Injectable for the same reason
+   * `startDesktop` takes `windowCheckStepMs`: a test proving what the look
+   * decides should not have to wait out the interval that spaces them.
+   */
+  windowCheckMs?: number;
 }
 
 export type QuitResult =
@@ -503,7 +522,23 @@ export type QuitResult =
    * in "quit it from the tray icon" — whether the process had ignored the
    * request or `taskkill` had never been allowed to touch it.
    */
-  | { outcome: 'still-running'; mainPid: number; refused?: string };
+  | { outcome: 'still-running'; mainPid: number; refused?: string }
+  /**
+   * It was asked to close, the window went away, and the process stayed up.
+   *
+   * That pair is the tray answering for itself. `closingWindowQuits` reads a
+   * preference to predict this, and measured on a real MSIX install the
+   * preference does not decide it (#87): with `menuBarEnabled: false` written
+   * into the config the app read at start-up, the close request still cancelled
+   * and hid the window. So the prediction sends the polite path off on a request
+   * that can never be honoured, and the only thing that ever noticed was the
+   * timeout — thirty seconds later, with the user's window already gone.
+   *
+   * Observing it instead costs one window check and says the same thing
+   * `needs-terminate` says, at the moment it becomes true rather than at the end
+   * of the wait. Callers treat the two alike; only the moment differs.
+   */
+  | { outcome: 'hides-to-tray'; mainPid: number };
 
 /**
  * Close Claude Desktop.
@@ -529,7 +564,15 @@ export async function quitDesktop(
   store: StoreLayout,
   options: QuitOptions = {},
 ): Promise<QuitResult> {
-  const { timeoutMs = 30_000, terminate = false, list = readProcesses, env } = options;
+  const {
+    timeoutMs = 30_000,
+    terminate = false,
+    list = readProcesses,
+    env,
+    windowVisible = mainWindowVisible,
+    alive = processAlive,
+    windowCheckMs = WINDOW_CHECK_MS,
+  } = options;
   // Scoped to the installation being closed. With two profiles up, the global
   // question would happily quit whichever main process came first.
   const state = inspectDesktopFor(storeIdentity(store.root, env), list, env);
@@ -574,9 +617,75 @@ export async function quitDesktop(
 
   // The lockfile is held for as long as the app runs and is released on exit, so
   // it corroborates the pid check — a recycled pid cannot fake it.
-  const gone = await waitFor(() => !processAlive(pid) && !lockfileHeld(store), timeoutMs);
-  if (gone) return { outcome: 'quit' };
+  const settled = await waitForQuit(store, pid, timeoutMs, {
+    alive,
+    everyMs: windowCheckMs,
+    // Only the polite path has anything to observe: `/F` does not wait for a
+    // window to react. Nothing is read up front, either — the app that quits
+    // when asked is the common case, and it should cost no window read at all.
+    ...(terminate ? {} : { visible: () => windowVisible(pid, env ?? process.env) }),
+  });
+  if (settled === 'quit') return { outcome: 'quit' };
+  if (settled === 'hides-to-tray') return { outcome: 'hides-to-tray', mainPid: pid };
   return { outcome: 'still-running', mainPid: pid, ...(refused ? { refused } : {}) };
+}
+
+/** How often the window is looked at, and how many times at most. */
+const WINDOW_CHECK_MS = 2_000;
+const WINDOW_CHECKS = 3;
+
+/**
+ * Wait for the app to go — and, on the polite path, notice when it will not.
+ *
+ * The window check is deliberately rare and finite. It shells out to PowerShell
+ * once per look, which on a machine whose PowerShell is wedged costs the full
+ * per-call timeout (see `readProcesses`' fallbacks), so a check on every step of
+ * the poll would turn a thirty-second wait into something far worse. Three looks
+ * two seconds apart cover the case that actually happens — the window goes at
+ * once, because cancelling the close is synchronous — and then it stops asking
+ * and waits out the deadline exactly as before.
+ *
+ * Nothing is read before the request. An app that quits when asked is the common
+ * case and is gone within a poll step or two, long before the first look is due,
+ * so it pays nothing. And a window that was already hidden needs no special
+ * case: if it is still hidden and the app is still up, the tray is in the way
+ * just the same, which is exactly what the caller has to be told.
+ *
+ * `undefined` — off Windows, or a read that failed — is never read as an answer.
+ */
+async function waitForQuit(
+  store: StoreLayout,
+  pid: number,
+  timeoutMs: number,
+  options: {
+    alive: (pid: number) => boolean;
+    everyMs: number;
+    visible?: () => boolean | undefined;
+  },
+  stepMs = 250,
+): Promise<'quit' | 'hides-to-tray' | 'still-running'> {
+  const deadline = Date.now() + timeoutMs;
+  const gone = (): boolean => !options.alive(pid) && !lockfileHeld(store);
+  let looksLeft = options.visible ? WINDOW_CHECKS : 0;
+  let nextLook = Date.now() + options.everyMs;
+
+  for (;;) {
+    if (gone()) return 'quit';
+
+    if (looksLeft > 0 && Date.now() >= nextLook) {
+      looksLeft -= 1;
+      nextLook = Date.now() + options.everyMs;
+      // Whether it is gone is re-read after the look, not before: the window
+      // going and the process ending are the same event when the app really is
+      // quitting, and the check itself takes long enough for that to land in
+      // between. Reporting the tray for an app that had already left would send
+      // the user to terminate something that was not there.
+      if (options.visible?.() === false && !gone()) return 'hides-to-tray';
+    }
+
+    if (Date.now() >= deadline) return 'still-running';
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
 }
 
 /** Long enough to outlast the app's save debounce (1s idle, 3s while running). */
