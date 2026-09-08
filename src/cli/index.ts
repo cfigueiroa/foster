@@ -944,6 +944,10 @@ program
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
   .option(
+    '--dates',
+    "advance a card's date to its transcript's last answer, so a row stops sinking in the sidebar",
+  )
+  .option(
     '--undo-retitles',
     'put every marked card back to the title and archived flag the app had before the branch pass touched it',
   )
@@ -961,6 +965,7 @@ program
       stalePrefix: string;
       branchPrefix: string;
       syncTitles?: boolean;
+      dates?: boolean;
       undoRetitles?: boolean;
       restart?: boolean;
       json?: boolean;
@@ -986,6 +991,7 @@ program
       staleTemplate: opts.stalePrefix,
       divergedTemplate: opts.branchPrefix,
       syncTitles: Boolean(opts.syncTitles),
+      dates: Boolean(opts.dates),
       dryRun,
       configDirs: opts.configDir ?? [],
     });
@@ -1220,6 +1226,15 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
             items: report.titleSync.items,
             skipped: report.titleSync.skipped,
             outcomes: report.titleSync.outcomes,
+          },
+        }
+      : {}),
+    ...(report.dates
+      ? {
+          dates: {
+            counts: report.dates.counts,
+            items: report.dates.items,
+            outcomes: report.dates.outcomes,
           },
         }
       : {}),
