@@ -25,6 +25,9 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './he
 // enough on its own that a row is the app, independent of any helper process.
 const DESKTOP =
   'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude\\app\\Claude.exe';
+// Where an installed MSIX package's executable actually lives — a different
+// directory from the `\Packages\Claude...` one above, which holds its data.
+const PACKAGED = 'C:\\Program Files\\WindowsApps\\Claude_0.0.0.0_x64__test\\app\\Claude.exe';
 // Not under a C:\Users\<name> path: this repo is public, and CI rejects anything
 // that looks like somebody's home directory.
 const CLI = 'C:\\home\\AppData\\Roaming\\Claude\\claude-code\\1.0.0\\claude.exe';
@@ -81,6 +84,19 @@ describe('parseProcessCsv', () => {
 describe('inspectDesktop', () => {
   it('reports not running when no desktop process exists', () => {
     expect(inspectDesktop(() => [])).toMatchObject({ running: false, codeSessions: 0 });
+  });
+
+  /**
+   * #84. `\Packages\Claude...` is where the MSIX package keeps its data; the
+   * executable is installed under `\WindowsApps\Claude_<version>_x64__<hash>\`.
+   * Testing only the first meant the one proof written for the packaged app
+   * could never fire for it — and with no helper row to fall back on, the app
+   * read as a stranger.
+   */
+  it('knows the app by the directory its package is installed in', () => {
+    const table = rows({ pid: 500, parentPid: 9, path: PACKAGED, commandLine: `"${PACKAGED}"` });
+
+    expect(inspectDesktop(() => table, {})).toMatchObject({ running: true, mainPid: 500 });
   });
 
   it('picks the process nothing in the app spawned as the main one', () => {
@@ -960,6 +976,68 @@ describe('inspectDesktopFor', () => {
     const table = rows({ pid: 500, parentPid: 9, commandLine: '"Claude.exe"' });
     const installed = { roots: ['C:\\Roaming\\Claude'], isDefault: true };
     expect(inspectDesktopFor(installed, () => table, {}).running).toBe(true);
+  });
+
+  /**
+   * #84, the half the package directory does not cover. The instance filter is
+   * right for "which of two instances is this" and wrong for "is this the app at
+   * all": the helper rows that prove it is Electron were being filtered away
+   * before the proof could look at them, because they name a `--user-data-dir`
+   * this store is not.
+   */
+  it('proves the app by a helper the instance filter would have hidden', () => {
+    const anonymous = 'C:\\Apps\\Claude.exe';
+    const table = rows(
+      // Switchless, so the default installation keeps it; its own path says
+      // nothing about what it is.
+      { pid: 500, parentPid: 9, path: anonymous, commandLine: `"${anonymous}"` },
+      // Electron's own helper, naming a directory that is not this store's.
+      {
+        pid: 501,
+        parentPid: 500,
+        path: anonymous,
+        commandLine: `"${anonymous}" --type=renderer --user-data-dir="${TWO}"`,
+      },
+    );
+    const installed = { roots: [ONE], isDefault: true };
+
+    expect(inspectDesktopFor(installed, () => table, {})).toMatchObject({
+      running: true,
+      mainPid: 500,
+    });
+  });
+
+  /**
+   * The reported case, end to end: a packaged install seen from outside its own
+   * container. The executable sits under `\WindowsApps\Claude_...`, the main
+   * process carries no `--user-data-dir`, and every helper names the
+   * pre-virtualisation data directory rather than the package store being asked
+   * about. `foster doctor` said the app was running (it reads the lockfile) while
+   * `foster app status` said it was not.
+   */
+  it('sees a packaged app whose helpers name the pre-virtualisation directory', () => {
+    const legacy = 'C:\\home\\AppData\\Roaming\\Claude';
+    const packageStore =
+      'C:\\home\\AppData\\Local\\Packages\\Claude_0.0.0.0_x64__test\\LocalCache\\Roaming\\Claude';
+    const table = rows(
+      { pid: 500, parentPid: 9, path: PACKAGED, commandLine: `"${PACKAGED}"` },
+      {
+        pid: 501,
+        parentPid: 500,
+        path: PACKAGED,
+        commandLine: `"${PACKAGED}" --type=renderer --user-data-dir="${legacy}"`,
+      },
+      {
+        pid: 502,
+        parentPid: 500,
+        path: PACKAGED,
+        commandLine: `"${PACKAGED}" --type=gpu-process --user-data-dir="${legacy}"`,
+      },
+    );
+
+    expect(
+      inspectDesktopFor({ roots: [packageStore], isDefault: true }, () => table, {}),
+    ).toMatchObject({ running: true, mainPid: 500 });
   });
 
   it('keeps the processes the ancestry check needs', () => {

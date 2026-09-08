@@ -64,9 +64,10 @@ export { parseProcessCsv, readProcesses, type ProcessLister, type ProcessRow };
  * whichever was oldest. So absence of proof that a row is the CLI no longer
  * qualifies it; presence of proof that it is the app does. Two are cheap and
  * available without spawning anything new: its path sits under a store root
- * this environment already knows about (`candidateStoreRoots`, or the MSIX
- * package directory itself — a fresh install without a `claude-code-sessions`
- * folder yet still lives under `\Packages\Claude...`), or it has at least one
+ * this environment already knows about (`candidateStoreRoots`, or either of the
+ * MSIX package's own directories — a fresh install without a
+ * `claude-code-sessions` folder yet still lives under `\Packages\Claude...`, and
+ * the executable itself under `\WindowsApps\Claude_...`), or it has at least one
  * child carrying `--type=`, which only Electron's own helpers ever do. Without
  * either, the row is a stranger and stays out of `DesktopState` — same rule
  * `util/processes.ts` already argues in prose for the CLI side of this line.
@@ -78,6 +79,20 @@ function isDesktopProcess(row: ProcessRow, rows: ProcessRow[], env: NodeJS.Proce
   return hasProofOfBeingTheApp(row, rows, env);
 }
 
+/**
+ * Everything the machine is running, for the questions that must not be asked of
+ * a narrowed table.
+ *
+ * `inspectDesktopFor` filters to one installation before calling in, which is
+ * right for "which instance is this" and wrong for "is this the app at all" —
+ * see `hasTypedHelperChild`. Left unset, the rows themselves are the whole
+ * table, which is what `inspectDesktop` sees when nobody narrowed anything.
+ */
+export interface DesktopScope {
+  /** Every row read, before any per-instance filtering. */
+  all?: ProcessRow[];
+}
+
 /** A path under a store root this environment already knows about. */
 function underKnownStoreRoot(candidatePath: string, env: NodeJS.ProcessEnv): boolean {
   const candidate = comparableUserDataDir(candidatePath);
@@ -87,12 +102,33 @@ function underKnownStoreRoot(candidatePath: string, env: NodeJS.ProcessEnv): boo
   });
 }
 
-/** A path under the MSIX package directory, whoever's family folder it is. */
+/**
+ * A path under one of the MSIX package's two directories, whoever's family
+ * folder it is.
+ *
+ * `\Packages\Claude...` is where the package keeps its **data**; the executable
+ * itself is installed under `\WindowsApps\Claude_<version>_x64__<hash>\`, and
+ * testing only the first meant this proof could never fire for the very app it
+ * was written for (#84). Measured on a real MSIX install, the main process runs
+ * from `C:\Program Files\WindowsApps\Claude_<version>_x64__<hash>\app\Claude.exe`
+ * — under neither a store root nor `\Packages\Claude`.
+ */
 function underAppPackageDirectory(candidatePath: string): boolean {
-  return /[\\/]Packages[\\/]Claude/i.test(candidatePath);
+  return /[\\/](?:Packages|WindowsApps)[\\/]Claude/i.test(candidatePath);
 }
 
-/** Whether some other row is a child of this one and carries an Electron `--type=`. */
+/**
+ * Whether some other row is a child of this one and carries an Electron `--type=`.
+ *
+ * Asked of every row the machine has, never of the ones left after the instance
+ * filter. The link here is `parentPid === row.pid`, which is already specific to
+ * this one process, so narrowing the haystack first adds no precision and can
+ * only remove evidence — and on a packaged install it removed all of it (#84):
+ * the app's helpers name the pre-virtualisation `%APPDATA%\Claude` in their
+ * `--user-data-dir`, which outside the container is a different directory from
+ * the package store being asked about, so every one of them was filtered away
+ * before this could look.
+ */
 function hasTypedHelperChild(row: ProcessRow, rows: ProcessRow[]): boolean {
   return rows.some(
     (other) =>
@@ -220,7 +256,7 @@ export function inspectDesktopFor(
     ? { ...env, CLAUDE_CODE_HOST_SESSION_ID: undefined }
     : env;
 
-  return inspectDesktop(() => rows, scoped);
+  return inspectDesktop(() => rows, scoped, { all: allRows });
 }
 
 /**
@@ -259,9 +295,13 @@ function hostedElsewhere(
 export function inspectDesktop(
   list: ProcessLister = readProcesses,
   env: NodeJS.ProcessEnv = process.env,
+  scope: DesktopScope = {},
 ): DesktopState {
   const rows = list();
-  const desktop = rows.filter((row) => isDesktopProcess(row, rows, env));
+  // Identity is decided against every row there is; everything after this line
+  // reasons about the rows this caller was narrowed to.
+  const all = scope.all ?? rows;
+  const desktop = rows.filter((row) => isDesktopProcess(row, all, env));
 
   if (desktop.length === 0) {
     // isDesktopProcess demands a readable path, so a partial table (tasklist)
