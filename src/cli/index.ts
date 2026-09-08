@@ -1,4 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
@@ -16,6 +17,7 @@ import {
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
 import { lineage } from '../engine/lineage.js';
 import { registerAppPref } from './appPrefCommand.js';
+import { complainAboutLink } from '../engine/linkShape.js';
 import { sidebarOf } from '../engine/sidebar.js';
 import {
   canIdentify,
@@ -4879,6 +4881,35 @@ app
 
 registerAppPref(app, (command) => ({ store: context(command).store }));
 
+/**
+ * The link, read whole from stdin.
+ *
+ * Read synchronously and in full: the caller is a pipe that has already produced
+ * the URL, and reading it in one go keeps this out of the async plumbing the
+ * rest of the command has no need for. Trailing newline goes — `echo` adds one —
+ * and nothing else is touched, because a URL's own characters are none of this
+ * function's business.
+ */
+function readLinkFromStdin(): string {
+  let raw: string;
+  try {
+    raw = readFileSync(0, 'utf8');
+  } catch {
+    throw new Error('Could not read the link from stdin.');
+  }
+  const link = raw.trim();
+  if (!link) {
+    throw new Error(
+      'Nothing arrived on stdin. Pipe the link in, for example:\n' +
+        '  <command that prints the url> | foster app link -',
+    );
+  }
+  if (link.includes('\n')) {
+    throw new Error('More than one line arrived on stdin; expected a single link.');
+  }
+  return link;
+}
+
 app
   .command('link <url>')
   .summary('hand a claude:// link to this installation')
@@ -4887,12 +4918,29 @@ app
       'Windows registers the protocol for the installed package, so a sign-in callback always\n' +
       'lands there — which is why a second profile can sit on the sign-in screen for ever while\n' +
       'the default installation opens instead. This delivers the link to the profile itself.\n\n' +
+      'Pass `-` to read the link from stdin, and prefer that: the shim the installer writes is a\n' +
+      'batch file, and an `&` in a URL ends the argument when PowerShell calls a .cmd — so a link\n' +
+      'handed as an argument can arrive cut in half. stdin has no such seam.\n\n' +
       'The link is never printed or recorded. A sign-in code is single-use and short-lived, so\n' +
       'cancel the browser prompt that offers to open Claude, and do this promptly.',
   )
+  .option('--force', 'hand it over even if it looks like the shell cut it short')
   .action(function (this: Command, url: string) {
     const { store } = context(this);
-    deliverUrl(store, url);
+    const opts = this.opts<{ force?: boolean }>();
+    // `-` is the shell-proof spelling: nothing between whatever produced the URL
+    // and this process gets to re-parse it.
+    const link = url === '-' ? readLinkFromStdin() : url;
+
+    const complaint = complainAboutLink(link);
+    if (complaint && !opts.force) {
+      // Refused rather than delivered with a warning. A single-use code spent on
+      // a truncated link cannot be got back, and the cheerful confirmation this
+      // command prints is exactly what made that failure invisible.
+      throw new Error(`${complaint.message}\n\nTo hand it over anyway: --force`);
+    }
+
+    deliverUrl(store, link);
     console.log(`Handed to the installation at ${store.root}.`);
   });
 
