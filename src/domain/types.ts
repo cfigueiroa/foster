@@ -144,4 +144,11 @@ export interface StoreLayout {
   /** Present in the store but not fosterable — Cowork sandboxes are listed from the server. */
   agentSessionsDir: string;
   configFile: string;
+  /**
+   * The app's own settings file, `claude_desktop_config.json` — where the MCP
+   * server list lives, and where the app keeps the preferences its UI writes,
+   * under a top-level `preferences` object. A different file from `configFile`,
+   * which holds the account cache and the OAuth token (#92).
+   */
+  desktopConfigFile: string;
 }
