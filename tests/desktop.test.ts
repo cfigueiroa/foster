@@ -428,21 +428,58 @@ describe('quitDesktop', () => {
    */
   it('says the tray is in the way as soon as the window goes and the app stays', async () => {
     const store = storeWith({ menuBarEnabled: false });
-    let asked = false;
     const result = await quitDesktop(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 30_000,
+      windowCheckMs: 10,
       alive: () => true,
-      windowVisible: () => {
-        // Visible when read before the request, hidden on every look after it.
-        const answer = !asked;
-        asked = true;
-        return answer;
-      },
+      windowVisible: () => false,
     });
 
     expect(result).toEqual({ outcome: 'hides-to-tray', mainPid: PID });
+  });
+
+  it('reads no window at all when the app quits the moment it is asked', async () => {
+    // The common case, and the one that must stay free: each read shells out to
+    // PowerShell, which on a machine whose PowerShell is wedged costs the full
+    // per-call timeout. The app is gone within a poll step, long before the
+    // first look would be due.
+    const store = storeWith({ menuBarEnabled: false });
+    let reads = 0;
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 30_000,
+      alive: () => false,
+      windowVisible: () => {
+        reads += 1;
+        return false;
+      },
+    });
+
+    expect(result).toEqual({ outcome: 'quit' });
+    expect(reads).toBe(0);
+  });
+
+  it('reads no window on the terminate path, which has nothing to observe', async () => {
+    // `/F` does not wait for a window to react, so there is no close request for
+    // a window to answer.
+    const store = storeWith({ menuBarEnabled: false });
+    let reads = 0;
+    await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+      terminate: true,
+      alive: () => true,
+      windowVisible: () => {
+        reads += 1;
+        return false;
+      },
+    });
+
+    expect(reads).toBe(0);
   });
 
   it('waits out an app that is closing, rather than calling a late window a tray', async () => {
@@ -455,6 +492,7 @@ describe('quitDesktop', () => {
       list: table(store.root),
       env: outside,
       timeoutMs: 30_000,
+      windowCheckMs: 10,
       alive: () => alive,
       windowVisible: () => {
         // Hidden from the first look on — and by then the process has gone too.
@@ -476,21 +514,6 @@ describe('quitDesktop', () => {
       timeoutMs: 1,
       alive: () => true,
       windowVisible: () => undefined,
-    });
-
-    expect(result).toMatchObject({ outcome: 'still-running', mainPid: PID });
-  });
-
-  it('says nothing about the tray when the window was hidden before it was asked', async () => {
-    // The finding is a change. A window that was never on screen says nothing
-    // about what closing it did.
-    const store = storeWith({ menuBarEnabled: false });
-    const result = await quitDesktop(store, {
-      list: table(store.root),
-      env: outside,
-      timeoutMs: 1,
-      alive: () => true,
-      windowVisible: () => false,
     });
 
     expect(result).toMatchObject({ outcome: 'still-running', mainPid: PID });

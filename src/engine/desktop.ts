@@ -495,6 +495,12 @@ export interface QuitOptions {
    * could be sure of is the test runner itself.
    */
   alive?: (pid: number) => boolean;
+  /**
+   * How long between window looks. Injectable for the same reason
+   * `startDesktop` takes `windowCheckStepMs`: a test proving what the look
+   * decides should not have to wait out the interval that spaces them.
+   */
+  windowCheckMs?: number;
 }
 
 export type QuitResult =
@@ -565,6 +571,7 @@ export async function quitDesktop(
     env,
     windowVisible = mainWindowVisible,
     alive = processAlive,
+    windowCheckMs = WINDOW_CHECK_MS,
   } = options;
   // Scoped to the installation being closed. With two profiles up, the global
   // question would happily quit whichever main process came first.
@@ -593,12 +600,6 @@ export async function quitDesktop(
   const asking = closingWindowQuits(store);
   if (!asking && !terminate) return { outcome: 'needs-terminate', mainPid: pid };
 
-  // Read before the request, because the finding is a change: a window that was
-  // never visible says nothing about what closing it did. Only the polite path
-  // asks — `/F` does not wait for a window to react, so there is nothing to
-  // observe.
-  const wasVisible = terminate ? undefined : windowVisible(pid, env ?? process.env);
-
   let refused: string | undefined;
   if (terminate) {
     // The app saves on a trailing debounce of up to three seconds. Waiting that
@@ -618,7 +619,11 @@ export async function quitDesktop(
   // it corroborates the pid check — a recycled pid cannot fake it.
   const settled = await waitForQuit(store, pid, timeoutMs, {
     alive,
-    ...(wasVisible === true ? { visible: () => windowVisible(pid, env ?? process.env) } : {}),
+    everyMs: windowCheckMs,
+    // Only the polite path has anything to observe: `/F` does not wait for a
+    // window to react. Nothing is read up front, either — the app that quits
+    // when asked is the common case, and it should cost no window read at all.
+    ...(terminate ? {} : { visible: () => windowVisible(pid, env ?? process.env) }),
   });
   if (settled === 'quit') return { outcome: 'quit' };
   if (settled === 'hides-to-tray') return { outcome: 'hides-to-tray', mainPid: pid };
@@ -640,28 +645,36 @@ const WINDOW_CHECKS = 3;
  * once, because cancelling the close is synchronous — and then it stops asking
  * and waits out the deadline exactly as before.
  *
- * `visible` is absent whenever there is nothing to learn: the terminate path, a
- * window that was already hidden, and every platform where visibility cannot be
- * read at all. Absence of an answer is never read as an answer.
+ * Nothing is read before the request. An app that quits when asked is the common
+ * case and is gone within a poll step or two, long before the first look is due,
+ * so it pays nothing. And a window that was already hidden needs no special
+ * case: if it is still hidden and the app is still up, the tray is in the way
+ * just the same, which is exactly what the caller has to be told.
+ *
+ * `undefined` — off Windows, or a read that failed — is never read as an answer.
  */
 async function waitForQuit(
   store: StoreLayout,
   pid: number,
   timeoutMs: number,
-  options: { alive: (pid: number) => boolean; visible?: () => boolean | undefined },
+  options: {
+    alive: (pid: number) => boolean;
+    everyMs: number;
+    visible?: () => boolean | undefined;
+  },
   stepMs = 250,
 ): Promise<'quit' | 'hides-to-tray' | 'still-running'> {
   const deadline = Date.now() + timeoutMs;
   const gone = (): boolean => !options.alive(pid) && !lockfileHeld(store);
   let looksLeft = options.visible ? WINDOW_CHECKS : 0;
-  let nextLook = Date.now() + WINDOW_CHECK_MS;
+  let nextLook = Date.now() + options.everyMs;
 
   for (;;) {
     if (gone()) return 'quit';
 
     if (looksLeft > 0 && Date.now() >= nextLook) {
       looksLeft -= 1;
-      nextLook = Date.now() + WINDOW_CHECK_MS;
+      nextLook = Date.now() + options.everyMs;
       // Whether it is gone is re-read after the look, not before: the window
       // going and the process ending are the same event when the app really is
       // quitting, and the check itself takes long enough for that to land in
