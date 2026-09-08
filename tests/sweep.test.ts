@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -786,6 +786,40 @@ describe('a pinned row the branch pass marks stale', () => {
     const pins = readPinState(store)!;
     expect(pins.ids).not.toContain(`local_${TRUNK_CARD}`);
     expect(pins.ids).toContain(tip.sessionId);
+  });
+
+  /**
+   * #76. A pin list that cannot be read used to be silent, and silence there is
+   * read as "nothing was pinned" — so a run that marked a pinned row stale said
+   * nothing at all and left the pin on the archived row. Measured cause: with
+   * the app running, the manifest on disk names a log it has moved on from.
+   */
+  it('says the check could not run when the pin database is unreadable', () => {
+    setUp();
+    // The manifest names a log that is not there, which is exactly the shape of
+    // the failure a running app produces.
+    rmSync(path.join(indexedDbDir(store), `${String(PIN_LOG_NUMBER).padStart(6, '0')}.log`));
+
+    const report = sweep();
+
+    expect(report.pinFixes.fixes).toEqual([]);
+    expect(report.pinFixes.unreadable).toMatch(/which is not there/);
+  });
+
+  it('stays quiet about an unreadable pin list when nothing was marked stale', () => {
+    // No fork, so the branch pass marks nothing: there is no pin that could
+    // have been left behind, and a database foster cannot read is not news.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: ORDINARY, cliSessionId: ORDINARY, title: 'Ordinary' }),
+    );
+    pinDatabase([`local_${ORDINARY}`]);
+    rmSync(path.join(indexedDbDir(store), `${String(PIN_LOG_NUMBER).padStart(6, '0')}.log`));
+
+    const report = sweep();
+
+    expect(report.pinFixes.unreadable).toBeUndefined();
   });
 
   it('writes nothing and still names the row when Claude Desktop is running', () => {

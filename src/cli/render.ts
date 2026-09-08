@@ -828,6 +828,16 @@ function unknownMarkNames(forks: ForkOutcome[]): string {
  * pinned stays quiet.
  */
 function pinFixesLine(pinFixes: SweepReport['pinFixes']): string {
+  // The check that could not run (#76). Said only when this run marked a row
+  // stale, because that is the case where a pin may have been left pointing at
+  // the archived one — and silence there reads as "nothing was pinned".
+  if (pinFixes.unreadable) {
+    return (
+      'Rows were marked stale, and foster could not read the pin list to see whether one of\n' +
+      `them was pinned: ${pinFixes.unreadable}\n` +
+      'The app holds that database while it runs. Check with "foster pin" after the restart.'
+    );
+  }
   if (pinFixes.fixes.length === 0) return '';
   const one = pinFixes.fixes.length === 1;
   const named = pinFixes.fixes
