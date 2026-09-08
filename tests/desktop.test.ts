@@ -405,6 +405,37 @@ describe('quitDesktop', () => {
     expect(result).toEqual({ outcome: 'needs-terminate', mainPid: PID });
   });
 
+  /**
+   * #89. The app keeps this preference inside a `preferences` object and its own
+   * setter rewrites that whole object; nothing ever writes the top-level key.
+   * Reading the top level answered "tray on" for everyone — right for the
+   * default, and wrong for exactly the people who had turned the tray off, who
+   * were told to terminate an app that would have closed politely.
+   */
+  it('reads the tray setting from inside preferences, where the app keeps it', async () => {
+    const store = storeWith({ preferences: { menuBarEnabled: false } });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result.outcome).not.toBe('needs-terminate');
+  });
+
+  it('lets preferences overrule a top-level key that disagrees', async () => {
+    // The fallback is for a build that kept it at the top, not a second opinion:
+    // where the app's own home for the setting has an answer, that is the answer.
+    const store = storeWith({ menuBarEnabled: false, preferences: { menuBarEnabled: true } });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result).toEqual({ outcome: 'needs-terminate', mainPid: PID });
+  });
+
   it('treats the tray being switched off as permission to ask', async () => {
     // With the tray off the window's close handler really does quit the app, so a
     // polite route exists and this must not report needs-terminate.
