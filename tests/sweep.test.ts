@@ -17,6 +17,7 @@ import { restartPlan, runSweep, type SweepOptions } from '../src/ops/sweep.js';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import { indexedDbDir, PIN_STATE_KEY, readPinState, recordKey } from '../src/store/pinstate.js';
 import { scanAccount, SESSION_FILE_MAX_BYTES } from '../src/store/scanner.js';
+import { projectDirName } from '../src/store/transcripts.js';
 import { sweepEverything, WRITES_DISABLED } from '../src/agent/tools.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -1513,5 +1514,91 @@ describe('#35: a mark is recognised whatever words it was written with', () => {
       to: 'Macs',
       template: DEFAULT_STALE_TEMPLATE,
     });
+  });
+});
+
+/**
+ * #80. Two passes of one sweep were pulling the same copy in opposite
+ * directions: fostering writes it into whichever of the source's two
+ * directories opens more of the conversation (#41), and the worktree-claim pass
+ * moved `cwd` to `originCwd` regardless — the rule from before that choice
+ * existed. The released copy then reached less than the source offered, so the
+ * next run copied the whole conversation again, released it again, and the
+ * sweep never reported itself finished.
+ */
+describe('a copy that opens more in the worktree than in the repository', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000e9';
+  const CARD = '00000000-0000-4000-8000-0000000000ea';
+  const REPO = 'C:\\home\\repo';
+  const WORKTREE = 'C:\\home\\repo\\.claude\\worktrees\\wt-a';
+
+  /** One conversation on two files: the worktree's is the fuller one. */
+  function twoFiles(): void {
+    const shared = ['00000000-0000-4000-8000-0000000000f0'];
+    const write = (cwd: string, ids: string[]): void => {
+      const dir = path.join(configDir, 'projects', projectDirName(cwd));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        path.join(dir, `${CONVERSATION}.jsonl`),
+        `${ids
+          .map((id) =>
+            JSON.stringify({ uuid: id, type: 'user', timestamp: '2026-09-06T05:12:01.370Z' }),
+          )
+          .join('\n')}\n`,
+        'utf8',
+      );
+    };
+    write(REPO, shared);
+    write(WORKTREE, [
+      ...shared,
+      '00000000-0000-4000-8000-0000000000f1',
+      '00000000-0000-4000-8000-0000000000f2',
+    ]);
+  }
+
+  beforeEach(() => {
+    twoFiles();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: CARD,
+        cliSessionId: CONVERSATION,
+        title: 'Work',
+        cwd: WORKTREE,
+        originCwd: REPO,
+        worktreePath: WORKTREE,
+        worktreeName: 'wt-a',
+      }),
+    );
+  });
+
+  it('keeps the copy where it reaches the whole conversation, and finishes', () => {
+    const first = sweep();
+
+    expect(first.fostered.counts.fostered).toBe(1);
+    // Nothing to release: a copy minted today already comes without the claim
+    // fields, and the directory it was given is the one it should keep. The
+    // pass used to find work here on every run — moving `cwd` back — which is
+    // exactly what made the run after it copy the conversation again.
+    expect(first.worktreeClaims.counts.released).toBe(0);
+
+    const [copy] = copies();
+    // The claim itself is gone — that is what the release is for — but the
+    // directory the fostering chose is not undone with it.
+    expect(copy!.cwd).toBe(WORKTREE);
+    expect(copy!.worktreePath).toBeUndefined();
+    expect(copy!.worktreeName).toBeUndefined();
+
+    expect(first.confirmation?.fosterable).toBe(0);
+    expect(first.confirmation?.exhausted).toBe(true);
+  });
+
+  it('copies it once, not once per run', () => {
+    sweep();
+    const second = sweep();
+
+    expect(second.fostered.counts.fostered).toBe(0);
+    expect(copies()).toHaveLength(1);
   });
 });

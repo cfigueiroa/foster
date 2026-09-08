@@ -8,6 +8,7 @@ import type * as Desktop from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
 import { project } from '../src/ledger/project.js';
 import type { CodeSessionData } from '../src/domain/types.js';
+import type { Lineage } from '../src/engine/lineage.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 // A running app, fixed for the whole suite. This is not something `applyUnclaim`
@@ -68,6 +69,24 @@ const HELD = {
   worktreePath: 'C:\\home\\repo\\.claude\\worktrees\\wt-a',
   worktreeName: 'wt-a',
 };
+
+/**
+ * A `Lineage` that answers only the one question `worktreeReachOf` asks it: how
+ * many records each of the card's two directories opens. Nothing here reads a
+ * transcript, which is the point — the choice is made from those two counts.
+ */
+function reaching(atCwd: number, atOriginCwd: number): Lineage {
+  const scan = (n: number) => ({
+    uuids: new Set(Array.from({ length: n }, (_unused, i) => String(i))),
+  });
+  return {
+    reachOf(_cliSessionId: string | undefined, cwd: string | undefined) {
+      if (cwd === HELD.cwd) return scan(atCwd);
+      if (cwd === HELD.originCwd) return scan(atOriginCwd);
+      return undefined;
+    },
+  } as unknown as Lineage;
+}
 
 describe('planUnclaim', () => {
   it('offers only copies in this store that still carry a claim', () => {
@@ -208,6 +227,67 @@ describe('planUnclaim', () => {
 
     const events = ledger.read().filter((event) => event.kind === 'worktree_released');
     expect(events).toHaveLength(2);
+  });
+
+  /**
+   * #80. Since #41 a copy is minted in whichever of its two directories opens
+   * more of the conversation, so a release that sends `cwd` to `originCwd`
+   * regardless undoes that choice in the same sweep that made it — and the next
+   * run, seeing a row that cannot reach what the source offers, copies the whole
+   * conversation again. The claim fields still come off; only the move is
+   * conditional.
+   */
+  it('leaves cwd where it is when the worktree opens more of the conversation', () => {
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({
+      sessionId: '00000000-0000-4000-8000-0000000000e1',
+      cliSessionId: '00000000-0000-4000-8000-0000000000f1',
+      ...HELD,
+    });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+    foster(ledger, file, before.sessionId, 'local_origin-e1');
+
+    const plan = planUnclaim(store, project(ledger.read()), { kin: reaching(1482, 1375) });
+
+    expect(plan.items).toHaveLength(1);
+    expect(plan.items[0]!.cwdTo).toBeUndefined();
+    expect(plan.items[0]!.worktreePath).toBe(HELD.worktreePath);
+
+    applyUnclaim(plan.items, { ledger });
+    expect(read(file).cwd).toBe(HELD.cwd);
+    expect(read(file).worktreePath).toBeUndefined();
+    expect(read(file).worktreeName).toBeUndefined();
+  });
+
+  it('still moves cwd to the repository when that is the fuller side', () => {
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({
+      sessionId: '00000000-0000-4000-8000-0000000000e2',
+      cliSessionId: '00000000-0000-4000-8000-0000000000f2',
+      ...HELD,
+    });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+    foster(ledger, file, before.sessionId, 'local_origin-e2');
+
+    const plan = planUnclaim(store, project(ledger.read()), { kin: reaching(12, 1375) });
+
+    expect(plan.items[0]!.cwdTo).toBe(HELD.originCwd);
+    applyUnclaim(plan.items, { ledger });
+    expect(read(file).cwd).toBe(HELD.originCwd);
+  });
+
+  it('moves cwd to the repository when nothing measures the two, as it always did', () => {
+    const store = makeStore();
+    const ledger = ledgerIn();
+    const before = session({ sessionId: '00000000-0000-4000-8000-0000000000e3', ...HELD });
+    const file = writeSession(store, NEW_ACCOUNT, before);
+    foster(ledger, file, before.sessionId, 'local_origin-e3');
+
+    const plan = planUnclaim(store, project(ledger.read()));
+
+    expect(plan.items[0]!.cwdTo).toBe(HELD.originCwd);
   });
 });
 

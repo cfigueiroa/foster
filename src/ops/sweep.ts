@@ -422,7 +422,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   // Last, and reading the ledger fresh: the three passes above may just have
   // appended fosterings of their own, and this plans against whatever the
   // ledger now says rather than the reading taken before any of them ran.
-  const worktreeClaims = runWorktreeClaims(store, ledger, dryRun);
+  const worktreeClaims = runWorktreeClaims(store, ledger, dryRun, kin);
 
   // After the worktree pass, and reading the ledger fresh again: the branch pass
   // may have marked a card this one now has to preserve the mark of.
@@ -570,7 +570,7 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
     summariseOutcomes(again.branches.outcomes).fostered +
     again.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
   const restorable = summariseOutcomes(again.restored).fostered;
-  const worktreeClaims = planUnclaim(store, project(ledger.read())).items.length;
+  const worktreeClaims = planUnclaim(store, project(ledger.read()), { kin: run.kin }).items.length;
   const titlesOutOfStep = syncTitles
     ? planTitleSync(store, ledger, target).items.length
     : undefined;
@@ -739,8 +739,9 @@ function runWorktreeClaims(
   store: StoreLayout,
   ledger: Ledger,
   dryRun: boolean,
+  kin: Lineage,
 ): WorktreeClaimsPhase {
-  const plan = planUnclaim(store, project(ledger.read()));
+  const plan = planUnclaim(store, project(ledger.read()), { kin });
   const outcomes = dryRun ? [] : applyUnclaim(plan.items, { ledger });
   return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
 }

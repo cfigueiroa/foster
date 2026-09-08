@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { worktreeClaim } from '../domain/fostering.js';
+import { copyCwd, worktreeClaim } from '../domain/fostering.js';
 import { comparablePath, samePath, storeRootOfCopy } from '../domain/paths.js';
 import type { CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
@@ -7,6 +7,7 @@ import { listActive, listWorktreeReleased, project, type LedgerState } from '../
 import type { LedgerEvent } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
+import { worktreeReachOf, type Lineage } from './lineage.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
 
 /**
@@ -73,6 +74,13 @@ export interface PlanUnclaimResult {
 export interface PlanUnclaimOptions {
   /** Injectable for tests; defaults to reading the file straight off disk. */
   read?: (path: string) => CodeSessionData | undefined;
+  /**
+   * What each of the copy's two directories would open, so the release moves
+   * `cwd` the same way a copy minted today would choose it (#80). Without it
+   * every release still sends `cwd` to `originCwd`, which is what shipped before
+   * the reach was measurable at all.
+   */
+  kin?: Lineage;
 }
 
 /**
@@ -118,6 +126,34 @@ export function planUnclaim(
       continue;
     }
 
+    // Where the copy should open, asked the one way `buildFosterCopy` asks it.
+    // Moving `cwd` to `originCwd` unconditionally is what this pass did when a
+    // copy could only ever have been written to `originCwd` in the first place;
+    // since #41 a copy is minted in whichever of the two directories opens more
+    // of its conversation, and releasing the claim by the old rule undid that
+    // choice in the same sweep that made it. The next run then saw a row that
+    // could not reach what the source offered, copied it again, released it
+    // again, and the pair never settled (#80). What the release is *for* — the
+    // three claim fields, which are what makes two cards fight over one
+    // directory — comes off either way; only the move is now conditional.
+    const cwdTo = opts.kin ? copyCwd(data, worktreeReachOf(opts.kin, data)) : claim.cwdTo;
+    const moves = cwdTo !== undefined && !(data.cwd !== undefined && samePath(cwdTo, data.cwd));
+
+    // With the fields already gone and the directory already where it belongs
+    // there is nothing left to release. `worktreeClaim` still recognises the
+    // card — a `cwd` that is not its `originCwd` is its wider test, and a copy
+    // left in the worktree on purpose keeps that shape for ever — so without
+    // this the same copy is "released" on every run, rewriting a file that does
+    // not change and reporting work that was not done.
+    const fields =
+      claim.worktreePath !== undefined ||
+      claim.worktreeName !== undefined ||
+      claim.worktreeLazy !== undefined;
+    if (!fields && !moves) {
+      skipped.noClaim += 1;
+      continue;
+    }
+
     items.push({
       path: fostering.copyPath,
       sessionId: data.sessionId,
@@ -126,7 +162,7 @@ export function planUnclaim(
       ...(claim.worktreeName !== undefined ? { worktreeName: claim.worktreeName } : {}),
       ...(claim.worktreeLazy !== undefined ? { worktreeLazy: claim.worktreeLazy } : {}),
       cwdFrom: data.cwd,
-      ...(claim.cwdTo !== undefined ? { cwdTo: claim.cwdTo } : {}),
+      ...(moves ? { cwdTo } : {}),
     });
   }
 
