@@ -14,6 +14,7 @@ import {
   backupPinState,
   indexedDbDir,
   readPinState,
+  databaseIdIn,
   recordKey,
   writePinState,
 } from '../src/store/pinstate.js';
@@ -62,6 +63,8 @@ function makeDatabase(
     version?: number;
     extra?: Record<string, unknown>;
     sequence?: bigint;
+    /** The installation's database id; 1 unless a test is about #102. */
+    databaseId?: number;
   },
 ): string {
   const dir = indexedDbDir(store);
@@ -89,8 +92,14 @@ function makeDatabase(
     logPath,
     frameRecords(
       encodeBatch(record.sequence ?? 1n, [
-        { key: recordKey(1, PIN_STATE_KEY), value: pinValue(version, document) },
-        { key: recordKey(2, PIN_STATE_KEY), value: encodeExistsVersion(version) },
+        {
+          key: recordKey(1, PIN_STATE_KEY, record.databaseId ?? 1),
+          value: pinValue(version, document),
+        },
+        {
+          key: recordKey(2, PIN_STATE_KEY, record.databaseId ?? 1),
+          value: encodeExistsVersion(version),
+        },
       ]),
       0,
     ),
@@ -157,6 +166,46 @@ describe('pin state', () => {
     expect([...data.subarray(6, 10)]).toEqual([0x00, 0x73, 0x00, 0x74]);
   });
 
+  /**
+   * #102. The database id is not part of the format — it belongs to the
+   * installation — and fixing it at 1 left the reader looking for a key nothing
+   * had. Measured on a real profile: the records read `00 04 01 01 01 …` while
+   * this module built `00 01 01 01 01 …`, so every read said "nothing pinned",
+   * with the app open or closed.
+   */
+  it('puts the installation database id in the key, not always 1', () => {
+    expect([...recordKey(1, PIN_STATE_KEY, 4).subarray(0, 6)]).toEqual([
+      0x00, 0x04, 0x01, 0x01, 0x01, 0x23,
+    ]);
+    expect([...recordKey(2, PIN_STATE_KEY, 4).subarray(0, 6)]).toEqual([
+      0x00, 0x04, 0x01, 0x02, 0x01, 0x23,
+    ]);
+    // Unchanged when nobody says otherwise, so every existing caller and every
+    // database that really is id 1 keeps the key it had.
+    expect(recordKey(1, PIN_STATE_KEY)).toEqual(recordKey(1, PIN_STATE_KEY, 1));
+  });
+
+  it('finds the database id by looking for the record it already knows the name of', () => {
+    const bytes = Buffer.concat([
+      Buffer.from([0xaa, 0xbb]), // noise in front, as a log has plenty of
+      recordKey(1, PIN_STATE_KEY, 7),
+      Buffer.from([0xcc]),
+    ]);
+
+    expect(databaseIdIn(bytes)).toBe(7);
+  });
+
+  it('says nothing when no record of that name is anywhere in the bytes', () => {
+    // A database that has never pinned anything. Guessing an id here would be
+    // worse than the honest "nothing pinned" the callers already handle.
+    expect(databaseIdIn(Buffer.from('not a database at all'))).toBeUndefined();
+  });
+
+  it('refuses a database id the one-byte key encoding cannot hold', () => {
+    expect(() => recordKey(1, PIN_STATE_KEY, 0x100)).toThrow(PinStateError);
+    expect(() => recordKey(1, PIN_STATE_KEY, -1)).toThrow(PinStateError);
+  });
+
   it('refuses an index id that the one-byte key encoding cannot hold', () => {
     // The header packs each id as a single byte. A wider id means this encoding
     // no longer matches the app's format; writing on would append a record that
@@ -182,6 +231,35 @@ describe('pin state', () => {
     expect(state.ids).toEqual([ID_A, ID_B]);
     expect(state.version).toBe(25_585);
     expect(state.envelope.equals(ENVELOPE)).toBe(true);
+  });
+
+  /**
+   * The whole of #102, end to end: a database whose records carry an id other
+   * than 1. Before the discovery this read nothing at all — not an error, just a
+   * confident "nothing pinned" about a database full of pins.
+   */
+  it('reads a database whose records carry an id other than 1', () => {
+    const store = makeStore();
+    makeDatabase(store, { ids: [ID_A, ID_B], databaseId: 4 });
+
+    const state = readPinState(store)!;
+
+    expect(state.ids).toEqual([ID_A, ID_B]);
+    expect(state.databaseId).toBe(4);
+  });
+
+  it('writes back under the id it read, not under the default', () => {
+    // A write keyed differently from the read is a pin stored where the app
+    // never looks — it appears to stick and does nothing.
+    const store = makeStore();
+    makeDatabase(store, { ids: [ID_A], databaseId: 4 });
+    const state = readPinState(store)!;
+
+    writePinState(state, [ID_A, ID_B]);
+
+    const after = readPinState(store)!;
+    expect(after.ids).toEqual([ID_A, ID_B]);
+    expect(after.databaseId).toBe(4);
   });
 
   it('takes the newest record when the log holds several', () => {
