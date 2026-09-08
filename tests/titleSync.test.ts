@@ -235,6 +235,41 @@ describe('planTitleSync', () => {
     expect(plan.items[0]?.mark).toBe('(stale, stopped 01/09) ');
   });
 
+  /**
+   * The copy was made from a card the branch pass had already marked, so the
+   * mark is inside the title the ledger records the copy as having been made
+   * with. Comparing against that title raw finds no mark, reads it as part of
+   * the name, and rewrites the copy to the origin's clean title — the branch
+   * pass then marks it again on the next sweep, and the two never settle (#79).
+   */
+  it('knows a mark that is inside the very title the copy was made with', () => {
+    const MARK = '(stale, stopped 04/09 21:04) ';
+    const f = fixture(`${MARK}A conversation`, `${MARK}A conversation`);
+    fostered(f, `${MARK}A conversation`);
+    marked(f, 'local_origin', 'A conversation', `${MARK}A conversation`);
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toHaveLength(0);
+    expect(plan.skipped).toHaveLength(0);
+  });
+
+  it('leaves standing the mark the branch pass wrote back after a sync stripped it', () => {
+    const MARK = '(stale, stopped 04/09 21:04) ';
+    const f = fixture(`${MARK}A conversation`, `${MARK}A conversation`);
+    fostered(f, `${MARK}A conversation`);
+    marked(f, 'local_origin', 'A conversation', `${MARK}A conversation`);
+    // The run that started the loop: the sync took the mark off, and the branch
+    // pass of the next run put it back.
+    syncedBy(f, `${MARK}A conversation`, 'A conversation');
+    marked(f, 'local_copy', 'A conversation', `${MARK}A conversation`);
+
+    const plan = planTitleSync(f.store, f.ledger, HERE);
+
+    expect(plan.items).toHaveLength(0);
+    expect(plan.skipped).toHaveLength(0);
+  });
+
   it("never carries the original's own mark across, so marks cannot stack", () => {
     const f = fixture('(stale, stopped 02/09) The name it has now', 'The name it had then');
     fostered(f, 'The name it had then');

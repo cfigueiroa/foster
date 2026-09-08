@@ -223,7 +223,20 @@ export function project(events: LedgerEvent[]): LedgerState {
         const from = known?.from ?? event.from;
         const fromArchived = known ? known.fromArchived : event.fromArchived;
         const archivedNow = event.toArchived ?? known?.toArchived;
-        const back = event.to === from && (archivedNow ?? false) === (fromArchived ?? false);
+        // Only a write that *undoes* a mark can land the card back where it
+        // started. A write that puts one on lands on the same string whenever the
+        // card was already wearing that very mark when foster first saw it — a
+        // copy made from an already-marked card, whose `from` is therefore the
+        // marked title (#79). Reading that as "back to the original" deletes the
+        // record of the mark the branch pass just wrote, and the title sync that
+        // runs next in the same sweep then has nothing proving there is a mark to
+        // preserve: it strips it, the next sweep writes it again, and the two
+        // passes undo each other for ever.
+        // Written as "not a marking write" rather than as a list of the undoing
+        // ones, so an entry from before `as` was kept still counts as undoing.
+        const marks = event.as === 'stale' || event.as === 'diverged';
+        const back =
+          !marks && event.to === from && (archivedNow ?? false) === (fromArchived ?? false);
         // What this write did to the mark, taken from the write's own account of
         // itself rather than from the strings: a sync changes the title under the
         // mark and leaves the mark alone, `tip` is the write that takes one off,

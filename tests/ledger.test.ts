@@ -362,6 +362,26 @@ describe('card_retitled', () => {
     expect(project(ledger.read()).retitled.size).toBe(0);
   });
 
+  /**
+   * A copy made from a card that was already marked was recorded with the mark
+   * inside the title foster first saw, so the branch pass marking it again lands
+   * on exactly that string. Reading that as "back to what the app had" would drop
+   * the record of the mark just written, and the title sync running next in the
+   * same sweep would then strip a mark nothing proves is one — the loop of #79.
+   * Only a write that undoes a mark can put a card back.
+   */
+  it('keeps a marking write that lands on the title the card was first seen with', () => {
+    const ledger = makeLedger();
+    ledger.append({ ...marked, from: STALE, to: 'Work', as: 'synced' });
+    ledger.append({ ...marked, from: 'Work', to: STALE });
+
+    expect(project(ledger.read()).retitled.get('local_card-1')).toMatchObject({
+      from: STALE,
+      to: STALE,
+      markedTo: STALE,
+    });
+  });
+
   it('keeps the card while the title is back but the flag is not', () => {
     const ledger = makeLedger();
     ledger.append({ ...marked, from: 'Work', to: STALE, fromArchived: false, toArchived: true });
