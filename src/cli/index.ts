@@ -15,6 +15,7 @@ import {
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
 import { lineage } from '../engine/lineage.js';
+import { registerAppPref } from './appPrefCommand.js';
 import { sidebarOf } from '../engine/sidebar.js';
 import {
   canIdentify,
@@ -4875,6 +4876,8 @@ app
     }
     console.log(started ? 'Claude Desktop is up.' : 'Started it; it has not taken the store yet.');
   });
+
+registerAppPref(app, (command) => ({ store: context(command).store }));
 
 app
   .command('link <url>')
