@@ -2148,7 +2148,10 @@ program
       return;
     }
 
-    const plan = planUnclaim(store, project(ledger.read()));
+    // The reach decides where `cwd` lands, exactly as it does when a copy is
+    // minted (#80) — so releasing a claim by hand never undoes the directory a
+    // sweep chose for the fuller half of a conversation.
+    const plan = planUnclaim(store, project(ledger.read()), { kin: lineage() });
 
     if (opts.json) {
       // Same order as `sweep`: the write (if any) happens before the JSON is
