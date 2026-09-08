@@ -109,7 +109,11 @@ async function closeDesktop(ui: Ui, store: StoreLayout): Promise<boolean> {
       return true;
     }
 
-    if (result.outcome === 'needs-terminate' && !(await consentToTerminate(ui))) return false;
+    // `hides-to-tray` is the same situation found a moment later: the window was
+    // asked to close, went away, and the app stayed up (#87). Either way the
+    // only way on is to end the process, and that is the user's to allow.
+    const trayInTheWay = result.outcome === 'needs-terminate' || result.outcome === 'hides-to-tray';
+    if (trayInTheWay && !(await consentToTerminate(ui))) return false;
 
     const second = await quitDesktop(store, { terminate: true });
     if (second.outcome !== 'quit' && second.outcome !== 'not-running') {
