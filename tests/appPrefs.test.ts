@@ -8,6 +8,7 @@ import {
   writeAppPref,
 } from '../src/store/appPrefs.js';
 import type { StoreLayout } from '../src/domain/types.js';
+import { plannedChanges, resolve } from '../src/cli/appPrefCommand.js';
 import { makeStore } from './helpers/store.js';
 
 /**
@@ -173,5 +174,78 @@ describe('writeAppPref', () => {
 
     expect(writeAppPref(store, 'allowAllBrowserActions', true).write.guard).toBe(true);
     expect(writeAppPref(store, 'menuBarEnabled', false).write.guard).toBe(false);
+  });
+});
+
+describe('what a command line asks to change', () => {
+  it('takes the positional pair', () => {
+    expect(plannedChanges('sidebarMode', 'code', undefined, false)).toEqual([
+      { name: 'sidebarMode', value: 'code', unset: false },
+    ]);
+  });
+
+  it('takes several --set, so one stop of the app covers them all', () => {
+    expect(
+      plannedChanges(
+        undefined,
+        undefined,
+        ['keepAwakeEnabled=true', 'ccMaxWarmWorktrees=6'],
+        false,
+      ),
+    ).toEqual([
+      { name: 'keepAwakeEnabled', value: 'true', unset: false },
+      { name: 'ccMaxWarmWorktrees', value: '6', unset: false },
+    ]);
+  });
+
+  it('keeps everything after the first = as the value', () => {
+    // A branch prefix, a device name or a path can hold one.
+    expect(plannedChanges(undefined, undefined, ['ccBranchPrefix=team=a/b'], false)).toEqual([
+      { name: 'ccBranchPrefix', value: 'team=a/b', unset: false },
+    ]);
+  });
+
+  it('reads a bare name with --unset as a change, not a read', () => {
+    expect(plannedChanges('ccBranchPrefix', undefined, undefined, true)).toEqual([
+      { name: 'ccBranchPrefix', unset: true },
+    ]);
+  });
+
+  it('asks for nothing when the name is there to be read', () => {
+    expect(plannedChanges('sidebarMode', undefined, undefined, false)).toEqual([]);
+  });
+
+  it('refuses a --set that is not name=value', () => {
+    expect(() => plannedChanges(undefined, undefined, ['keepAwakeEnabled'], false)).toThrow(
+      /name=value/,
+    );
+    expect(() => plannedChanges(undefined, undefined, ['=true'], false)).toThrow(/name=value/);
+  });
+});
+
+describe('resolving a change before the app is touched', () => {
+  it('refuses an unknown preference', () => {
+    const store = storeWith({ preferences: {} });
+    expect(() => resolve(store, { name: 'notAThing', value: '1', unset: false })).toThrow(
+      /not a preference/,
+    );
+  });
+
+  it('refuses a value the app would reject, naming what it takes', () => {
+    // The reason this happens here rather than after the app is closed: a typo
+    // in the third of three values must not be found with the app already down.
+    const store = storeWith({ preferences: {} });
+    expect(() => resolve(store, { name: 'sidebarMode', value: 'sidebar', unset: false })).toThrow(
+      /chat/,
+    );
+  });
+
+  it('carries the current value and the one it would land on', () => {
+    const store = storeWith({ preferences: { ccMaxWarmWorktrees: 3 } });
+    expect(resolve(store, { name: 'ccMaxWarmWorktrees', value: '6', unset: false })).toMatchObject({
+      from: 3,
+      to: 6,
+      parsed: 6,
+    });
   });
 });
