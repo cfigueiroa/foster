@@ -482,6 +482,14 @@ function describeNativeSwitcher(availability: NativeSwitcherAvailability): strin
         pc.yellow('unavailable (gate absent)') +
         pc.dim(' — adding a second account in-app still signs the first out')
       );
+    case 'not-cached':
+      // Not a failure, and not the same as `unknown`: the file was read and its
+      // shape held. The server just did not send this gate to this installation
+      // — measured on one where 323 other gates were present and readable.
+      return (
+        pc.dim('not in the feature cache on this machine') +
+        pc.dim(" — the file reads fine, the server just doesn't send this gate here")
+      );
     case 'unknown':
       return pc.dim("unknown (read from fcache, a format the app doesn't document)");
   }
