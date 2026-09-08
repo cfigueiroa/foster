@@ -87,8 +87,22 @@ describe('readNativeSwitcherAvailability', () => {
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 
-  it('is "unknown" when the gate key is absent from the features object', () => {
+  /**
+   * #77. A gate that is not in the cache is a fact about the cache; a file the
+   * reader can no longer parse is a fact about the reader. Both were `unknown`,
+   * which made an app update indistinguishable from an ordinary Tuesday —
+   * measured on a real installation where 323 gates read fine and this one was
+   * simply not among them.
+   */
+  it('is "not-cached" when the shape held and the gate is not among the features', () => {
     writeFcache(fcacheBytes({ 'some-other-gate': gate(true) }));
+    expect(readNativeSwitcherAvailability(store)).toBe('not-cached');
+  });
+
+  it('is still "unknown" when the features object itself is missing', () => {
+    // The distinction only makes sense once the shape held. Without `features`
+    // there is nothing to be absent from.
+    writeFcache(Buffer.concat([HEADER, gzipSync(JSON.stringify({ timestamp: 1 }))]));
     expect(readNativeSwitcherAvailability(store)).toBe('unknown');
   });
 

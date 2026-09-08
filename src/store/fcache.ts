@@ -20,7 +20,21 @@ import type { StoreLayout } from '../domain/types.js';
  * never a guessed `'available'` or `'unavailable'`. `foster doctor` is the one
  * caller, and a wrong confident answer there is worse than no answer at all.
  */
-export type NativeSwitcherAvailability = 'available' | 'unavailable' | 'unknown';
+export type NativeSwitcherAvailability =
+  | 'available'
+  | 'unavailable'
+  /**
+   * The cache was read, its shape held, and the switcher's gate is simply not
+   * among the ones it carries.
+   *
+   * Distinct from `'unknown'` on purpose (#77). Both used to be the same word,
+   * which made "foster cannot read this file any more" — the answer an app
+   * update produces — indistinguishable from "foster read it fine and the server
+   * did not send this gate", which is an ordinary state of the cache and says
+   * nothing about the reader.
+   */
+  | 'not-cached'
+  | 'unknown';
 
 /**
  * The single measurement this reader is built from. Re-verify every field here
@@ -49,18 +63,24 @@ const FCACHE_LAYOUT = {
   featuresKey: 'features',
   valueKey: 'value',
   /**
-   * Numeric id the server used for the native multi-account switcher's remote
-   * feature gate on 05/09/2026. A renamed or renumbered gate is exactly the
-   * drift this reader must not paper over — it reads as the key being absent,
-   * which is `'unknown'`, not `'unavailable'`.
+   * Numeric id of the native multi-account switcher's remote feature gate.
    *
-   * **This is the one field here that has not been reproduced.** Measured again
-   * on 07/09/2026, it was not among the 322 gates the file held — and nothing
-   * in the file names a gate: the keys are numeric hashes, and the only other
-   * strings are `source` (`defaultValue`, `experiment`, `force`) and a `ruleId`
-   * uuid. So the file alone cannot say which gate the switcher is. Until the id
-   * is confirmed, `doctor` answers `'unknown'` on that machine — which is the
-   * honest answer, and the reason this reader was built to give one.
+   * **Confirmed against the app's own code on 08/09/2026** (#77), which settles
+   * what #43 asserted and 07/09 could not reproduce. The file itself can never
+   * confirm it — the keys are numeric hashes and nothing in it names a gate —
+   * but the bundle consults this id in exactly one place, and the context is
+   * unambiguous:
+   *
+   * ```
+   * multiAccount: !U().authentication.disableMultiAccount && mS("96101707") ? ... : { status: "unavailable" }
+   * ```
+   *
+   * What 07/09 actually measured was absence from the cache, not a wrong id: on
+   * 08/09 the file held 323 gates and this was not among them, while
+   * `1992087837` — the worktree pool's gate, identified the same way — was there
+   * and read correctly (`value: true`, `source: force`). So the reader works;
+   * the server simply does not send this gate to this installation. That is
+   * `'not-cached'`, and saying it plainly is the whole of #77.
    */
   gateId: '96101707',
 } as const;
@@ -113,7 +133,12 @@ export function readNativeSwitcherAvailability(store: StoreLayout): NativeSwitch
     // siblings beside it (`on`, `off`, `source`, `ruleId`) say how the server
     // arrived at it. Only `value` is read — the rest is the app's business, and
     // a gate missing it is a shape this reader does not recognise.
+    // Read this far means the shape held: header, gzip member, JSON, and a
+    // `features` map. A gate missing from it is a fact about the cache, not
+    // about the reader — so it gets its own answer rather than being folded in
+    // with "something did not parse".
     const gate = (features as Record<string, unknown>)[gateId];
+    if (gate === undefined) return 'not-cached';
     if (typeof gate !== 'object' || gate === null) return 'unknown';
 
     const value = (gate as Record<string, unknown>)[valueKey];
