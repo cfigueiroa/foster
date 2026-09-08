@@ -184,11 +184,20 @@ function baselineOf(
   // carries no moment, so no template is ever derived from it and `stripMarks`
   // leaves it standing. Two rows on the measured store wore one, and both were
   // reported as named on both sides over a prefix foster wrote itself.
+  //
+  // Both sides go through `stripMarks`, not just this one. A copy made from a
+  // card that was already marked was recorded with the mark inside its
+  // `originalTitle` — the branch pass had marked the original before the sweep
+  // that copied it — so comparing against `made` raw finds nothing when the copy
+  // wears exactly that same mark, and the mark is read as part of the name. The
+  // sync then rewrites the copy to the origin's clean title, the branch pass
+  // marks it again on the next run, and the two never settle (#79).
   const clean = stripMarks(here, templates);
   const marker = fostering.prefix ?? '';
   const beneath = marker && clean.startsWith(marker) ? clean.slice(marker.length) : clean;
-  if (here !== made && beneath === made) {
-    return { title: here, mark: here.slice(0, here.length - made.length) };
+  const madeClean = stripMarks(made, templates);
+  if (beneath === madeClean) {
+    return { title: here, mark: here.slice(0, here.length - madeClean.length) };
   }
   return { title: made, mark: '' };
 }
