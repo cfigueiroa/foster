@@ -65,23 +65,33 @@ export function indexedDbDir(store: StoreLayout): string {
  * endian — the opposite of everything else in the file — with a length counted in
  * characters rather than bytes.
  *
- * The first five bytes are hardcoded against the format the app writes today
- * (`[0x00, 0x01, 0x01, indexId, 0x01]`): a leading byte packing the byte-lengths
- * of the three ids that follow, all of which are a single byte here. This is the
- * one thing in this module that cannot be re-derived, and the exact bytes are
- * locked by `pinstate.test.ts` against values captured from a real database. If
- * an upgrade ever needs a wider id, this guard turns what would otherwise
- * *silently* append a record under a key the app never reads — a pin that looks
- * like it stuck and does not — into a clear refusal instead.
+ * The shape of the first five bytes is the app's format — a leading byte packing
+ * the byte-lengths of the three ids that follow, all of which are a single byte
+ * here — and it is locked by `pinstate.test.ts` against values captured from a
+ * real database. If an upgrade ever needs a wider id, the guard below turns what
+ * would otherwise *silently* append a record under a key the app never reads — a
+ * pin that looks like it stuck and does not — into a clear refusal instead.
+ *
+ * The **database id** is not part of the format, though, and was fixed at 1 for
+ * one release too long. Measured on a real installation (#102), it was 4: the
+ * records read `00 04 01 01 01 …` where this module was looking for
+ * `00 01 01 01 01 …`, so the key never matched and every read reported "nothing
+ * pinned" — with the app open or closed. An id belongs to an installation, not to
+ * a format, so it is discovered rather than assumed; see `databaseIdIn`.
  */
-export function recordKey(indexId: number, name: string): Buffer {
+export function recordKey(indexId: number, name: string, databaseId = 1): Buffer {
   // The header packs each of the three ids as a one-byte length. Any of them
   // exceeding a byte means this encoding no longer reflects the app's format,
   // and writing on would produce a record the app never looks at.
-  if (!Number.isInteger(indexId) || indexId < 0 || indexId > 0xff) {
-    throw new PinStateError(
-      `object-store index id ${indexId} cannot be encoded in the database's one-byte key ids.`,
-    );
+  for (const [what, id] of [
+    ['object-store index', indexId],
+    ['database', databaseId],
+  ] as const) {
+    if (!Number.isInteger(id) || id < 0 || id > 0xff) {
+      throw new PinStateError(
+        `${what} id ${id} cannot be encoded in the database's one-byte key ids.`,
+      );
+    }
   }
   const characters = Buffer.alloc(name.length * 2);
   for (let index = 0; index < name.length; index++) {
@@ -90,10 +100,49 @@ export function recordKey(indexId: number, name: string): Buffer {
   // The leading byte packs the byte-lengths of the three ids that follow; all
   // three are one byte here, which the app has never been observed to exceed.
   return Buffer.concat([
-    Buffer.from([0x00, 0x01, 0x01, indexId, 0x01]),
+    Buffer.from([0x00, databaseId, 0x01, indexId, 0x01]),
     encodeVarint32(name.length),
     characters,
   ]);
+}
+
+/**
+ * Which database id this installation's records carry.
+ *
+ * Found rather than assumed, and found the only way that cannot go stale: by
+ * looking for the key this module already knows the name of, and reading the id
+ * out of the record that holds it. The name is the app's (`PIN_STATE_KEY`); the
+ * id is the installation's, and a fresh profile, a re-created database or a
+ * future migration can all change it without changing anything about the format.
+ *
+ * `undefined` when no record with that name is anywhere in the bytes — which is
+ * the honest answer for a database that has never pinned anything, and leaves
+ * every caller on the same "nothing pinned" path it had before.
+ */
+export function databaseIdIn(bytes: Buffer): number | undefined {
+  const name = Buffer.alloc(PIN_STATE_KEY.length * 2);
+  for (let index = 0; index < PIN_STATE_KEY.length; index++) {
+    name.writeUInt16BE(PIN_STATE_KEY.charCodeAt(index), index * 2);
+  }
+
+  const length = encodeVarint32(PIN_STATE_KEY.length);
+  let at = bytes.indexOf(name);
+  while (at >= 0) {
+    // Behind the string: the varint length, then the five-byte header whose
+    // second byte is the database id.
+    const header = at - length.length - 5;
+    if (
+      header >= 0 &&
+      bytes.subarray(at - length.length, at).equals(length) &&
+      bytes[header] === 0x00 &&
+      bytes[header + 2] === 0x01 &&
+      bytes[header + 4] === 0x01
+    ) {
+      return bytes[header + 1];
+    }
+    at = bytes.indexOf(name, at + 1);
+  }
+  return undefined;
 }
 
 /** The exists entry stores its version little-endian, in as few bytes as it needs. */
@@ -112,6 +161,13 @@ export interface PinState {
   ids: string[];
   /** The log this was read out of, which is the one a write must append to. */
   logPath: string;
+  /**
+   * The database id these records carry, discovered from the record itself
+   * (#102). Carried on the state so a write cannot key its batch differently
+   * from the read that produced it — which is how a pin ends up stored where the
+   * app never looks.
+   */
+  databaseId: number;
   /** Bumped on every write; the app's own bookkeeping, carried forward. */
   version: number;
   /**
@@ -180,7 +236,27 @@ function locate(directory: string): { logPath: string; lastSequence: bigint } {
 export function readPinState(store: StoreLayout): PinState | undefined {
   const directory = indexedDbDir(store);
   const { logPath, lastSequence } = locate(directory);
-  const dataKey = recordKey(OBJECT_STORE_DATA, PIN_STATE_KEY);
+  const log = readFileSync(logPath);
+
+  // The id first, because every key below depends on it. Looked for in the log
+  // and then in the sorted tables, in that order: a record folded into a table
+  // is the older copy, and the log is where a recent pin lives.
+  let databaseId = databaseIdIn(log);
+  if (databaseId === undefined) {
+    for (const name of safeReaddir(directory)) {
+      if (!name.endsWith('.ldb')) continue;
+      try {
+        databaseId = databaseIdIn(readFileSync(path.join(directory, name)));
+      } catch {
+        // Same reasoning as the scan below: an unreadable table is skipped.
+      }
+      if (databaseId !== undefined) break;
+    }
+  }
+  // Nothing anywhere carrying that name means nothing has ever been pinned, and
+  // the reads below will say so on their own. The default keeps the shape of the
+  // key valid for that walk rather than standing in for a discovery.
+  const dataKey = recordKey(OBJECT_STORE_DATA, PIN_STATE_KEY, databaseId ?? 1);
 
   let highest = lastSequence;
   let newest: { sequence: bigint; value?: Buffer } | undefined;
@@ -216,7 +292,7 @@ export function readPinState(store: StoreLayout): PinState | undefined {
   // tolerant read gives up on is collected so the caller can say so instead of
   // quietly reporting a shorter list.
   const notices: string[] = [];
-  for (const batch of readLog(readFileSync(logPath), {
+  for (const batch of readLog(log, {
     tolerant: true,
     onNotice: (message) => notices.push(message),
   })) {
@@ -270,6 +346,9 @@ export function readPinState(store: StoreLayout): PinState | undefined {
   return {
     ids,
     logPath,
+    // Not `?? 1` here: reaching this point means a record was found, and it was
+    // found under the id the discovery returned.
+    databaseId: databaseId ?? 1,
     version: version.value,
     envelope: Buffer.from(record.subarray(version.next, tag + 1)),
     document,
@@ -301,7 +380,7 @@ export function writePinState(state: PinState, ids: string[]): void {
 
   const entries: BatchEntry[] = [
     {
-      key: recordKey(OBJECT_STORE_DATA, PIN_STATE_KEY),
+      key: recordKey(OBJECT_STORE_DATA, PIN_STATE_KEY, state.databaseId),
       value: Buffer.concat([
         encodeVarint32(version),
         state.envelope,
@@ -309,7 +388,10 @@ export function writePinState(state: PinState, ids: string[]): void {
         payload,
       ]),
     },
-    { key: recordKey(EXISTS_ENTRY, PIN_STATE_KEY), value: encodeVersion(version) },
+    {
+      key: recordKey(EXISTS_ENTRY, PIN_STATE_KEY, state.databaseId),
+      value: encodeVersion(version),
+    },
   ];
 
   const existing = readFileSync(state.logPath);
