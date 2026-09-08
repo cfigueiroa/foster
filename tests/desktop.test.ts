@@ -360,6 +360,13 @@ describe('quitDesktop', () => {
     return store;
   }
 
+  /** A store whose app settings file — where the UI writes — holds these. */
+  function settingsWith(settings: Record<string, unknown>, config: Record<string, unknown> = {}) {
+    const store = storeWith(config);
+    writeFileSync(store.desktopConfigFile, JSON.stringify(settings), 'utf8');
+    return store;
+  }
+
   it('says nothing to do when the app is not running', async () => {
     const result = await quitDesktop(storeWith({}), { list: () => [], env: outside });
     expect(result.outcome).toBe('not-running');
@@ -403,6 +410,56 @@ describe('quitDesktop', () => {
     });
 
     expect(result).toEqual({ outcome: 'needs-terminate', mainPid: PID });
+  });
+
+  /**
+   * #92, measured by switching the tray off in the app's own UI and watching
+   * which file changed: the preference is written to `claude_desktop_config.json`
+   * — the app's settings file, the one that also holds the MCP server list — not
+   * to the `config.json` that holds the account cache and the token. #89 had
+   * found the right key in the wrong file, so the reading was still answering
+   * "tray on" for everyone.
+   */
+  it('reads the tray setting from the app settings file, where the UI writes it', async () => {
+    const store = settingsWith({ preferences: { menuBarEnabled: false } });
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result.outcome).not.toBe('needs-terminate');
+  });
+
+  it('lets the app settings file overrule the other two readings', async () => {
+    const store = settingsWith(
+      { preferences: { menuBarEnabled: true } },
+      { menuBarEnabled: false, preferences: { menuBarEnabled: false } },
+    );
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result).toEqual({ outcome: 'needs-terminate', mainPid: PID });
+  });
+
+  it('still reads the tray setting when there is no config.json at all', async () => {
+    // The two files are independent, and the preference lives in the second.
+    const store = makeStore();
+    writeFileSync(
+      store.desktopConfigFile,
+      JSON.stringify({ preferences: { menuBarEnabled: false } }),
+      'utf8',
+    );
+    const result = await quitDesktop(store, {
+      list: table(store.root),
+      env: outside,
+      timeoutMs: 1,
+    });
+
+    expect(result.outcome).not.toBe('needs-terminate');
   });
 
   /**

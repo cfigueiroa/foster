@@ -72,6 +72,7 @@ export function layoutFor(root: string): StoreLayout {
     codeSessionsDir: path.join(resolved, CODE_SESSIONS),
     agentSessionsDir: path.join(resolved, AGENT_SESSIONS),
     configFile: path.join(resolved, 'config.json'),
+    desktopConfigFile: path.join(resolved, 'claude_desktop_config.json'),
   };
 }
 
