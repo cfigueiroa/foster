@@ -27,6 +27,15 @@ export interface StoreConfig {
    * the window's close handler quits the app only when the tray is off, and
    * otherwise cancels the close and hides the window instead. Absent means on,
    * which is the default and the case that matters — see engine/desktop.ts.
+   *
+   * Read from `preferences.menuBarEnabled`, which is where the app keeps it
+   * (#89). The top-level key this used to read is written by nobody: the app's
+   * own setter rewrites the whole `preferences` object, and every neighbour in
+   * that group — `legacyQuickEntryEnabled`, `chromeExtensionEnabled`,
+   * `quickEntryShortcut` — is likewise absent from the top of a real config. So
+   * the old reading answered "tray on" for everyone, which is right for the
+   * default and wrong for exactly the people who turned the tray off: they were
+   * told to `--terminate` an app that would have closed politely.
    */
   menuBarEnabled?: boolean;
   /**
@@ -60,7 +69,17 @@ export function readConfig(store: StoreLayout): StoreConfig {
     if (key === 'locale') out.locale = value;
     if (key === 'updaterLastSeenVersion') out.updaterLastSeenVersion = value;
   }
-  if (typeof parsed.menuBarEnabled === 'boolean') out.menuBarEnabled = parsed.menuBarEnabled;
+  // `preferences` first, the top level second. The fallback costs nothing and
+  // covers a build that kept it there — which is what the forensic read behind
+  // this key's first version appears to have found.
+  const preferences =
+    parsed.preferences &&
+    typeof parsed.preferences === 'object' &&
+    !Array.isArray(parsed.preferences)
+      ? (parsed.preferences as Record<string, unknown>)
+      : undefined;
+  const tray = preferences?.menuBarEnabled ?? parsed.menuBarEnabled;
+  if (typeof tray === 'boolean') out.menuBarEnabled = tray;
   // Presence only, checked directly against the parsed keys — the blob itself is
   // never assigned to `out` and never leaves this function, whichever of the two
   // names it is filed under.
