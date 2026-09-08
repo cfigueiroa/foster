@@ -643,6 +643,22 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  // The dates pass, when it was asked for. Native cards are called out on their
+  // own: they are the app's rows rather than foster's copies, and somebody who
+  // turned this on deserves to see how much of it landed there.
+  const dates = report.dates;
+  if (dates && dates.items.length > 0) {
+    const one = dates.items.length === 1;
+    const native = dates.counts.native > 0 ? `, ${dates.counts.native} of them native cards` : '';
+    lines.push(
+      report.dryRun
+        ? `${dates.items.length} card${one ? '' : 's'} would have ${one ? 'its' : 'their'} date advanced to the transcript${native}.`
+        : `${dates.counts.advanced} card date${dates.counts.advanced === 1 ? '' : 's'} advanced${native}` +
+            (dates.counts.failed > 0 ? ` (${dates.counts.failed} failed)` : '') +
+            '.',
+    );
+  }
+
   const confirmation = report.confirmation;
   if (confirmation) {
     lines.push(

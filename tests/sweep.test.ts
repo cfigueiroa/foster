@@ -1636,3 +1636,97 @@ describe('a copy that opens more in the worktree than in the repository', () => 
     expect(copies()).toHaveLength(1);
   });
 });
+
+/**
+ * The dates pass (#78), behind `--dates`.
+ *
+ * `foster dates` shipped as a command nobody called, so the defect it was
+ * written for — a row sinking in the sidebar because the card's date stopped
+ * while its transcript went on — kept happening to anyone who only runs the
+ * sweep, which is the normal path. It is opt-in rather than always-on because
+ * of volume: measured on a real store, one pass proposes over a thousand writes,
+ * hundreds of them on the app's own native cards.
+ */
+describe('the dates pass', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000d1';
+  const CARD = '00000000-0000-4000-8000-0000000000d2';
+  const ANSWERED_AT = '2026-09-05T10:00:00.000Z';
+
+  function cardBehindItsTranscript(): void {
+    transcript(CONVERSATION, [
+      rec('00000000-0000-4000-8000-0000000000d3', 'user', '2026-09-05T09:00:00.000Z'),
+      rec('00000000-0000-4000-8000-0000000000d4', 'assistant', ANSWERED_AT),
+    ]);
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: CARD,
+        cliSessionId: CONVERSATION,
+        title: 'Sinking',
+        // A day behind the last answer: the shape that sinks a row.
+        lastActivityAt: Date.parse('2026-09-04T10:00:00.000Z'),
+      }),
+    );
+  }
+
+  it('does nothing at all unless it is asked for', () => {
+    cardBehindItsTranscript();
+
+    const report = sweep();
+
+    expect(report.dates).toBeUndefined();
+    expect(card(CARD).lastActivityAt).toBe(Date.parse('2026-09-04T10:00:00.000Z'));
+  });
+
+  it('advances a card to its transcript last answer when asked', () => {
+    cardBehindItsTranscript();
+
+    const report = sweep(false, { dates: true });
+
+    expect(report.dates?.counts).toMatchObject({ advanced: 1, failed: 0 });
+    expect(card(CARD).lastActivityAt).toBe(Date.parse(ANSWERED_AT));
+  });
+
+  it('counts a native card as native, because it is the app own row', () => {
+    cardBehindItsTranscript();
+
+    const report = sweep(false, { dates: true });
+
+    // Written by the fixture rather than fostered, so nothing marks it a copy.
+    expect(report.dates?.counts.native).toBe(1);
+  });
+
+  it('writes nothing on a dry run, and still says what it would do', () => {
+    cardBehindItsTranscript();
+
+    const report = sweep(true, { dates: true });
+
+    expect(report.dates?.items).toHaveLength(1);
+    expect(card(CARD).lastActivityAt).toBe(Date.parse('2026-09-04T10:00:00.000Z'));
+  });
+
+  it('leaves a card that is already ahead of its transcript alone', () => {
+    // Never backwards: opening a row appends a user record, so a card ahead of
+    // its own last answer is ordinary and moving it back would be a regression.
+    transcript(CONVERSATION, [
+      rec('00000000-0000-4000-8000-0000000000d5', 'assistant', ANSWERED_AT),
+    ]);
+    const ahead = Date.parse('2026-09-06T10:00:00.000Z');
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: CARD,
+        cliSessionId: CONVERSATION,
+        title: 'Ahead',
+        lastActivityAt: ahead,
+      }),
+    );
+
+    const report = sweep(false, { dates: true });
+
+    expect(report.dates?.counts.advanced).toBe(0);
+    expect(card(CARD).lastActivityAt).toBe(ahead);
+  });
+});
