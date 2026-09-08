@@ -30,6 +30,13 @@ import {
   type TitleSyncSkipped,
 } from '../engine/titleSync.js';
 import {
+  candidatesFromStore,
+  dateCards,
+  planDates,
+  type DateOutcome,
+  type DatePlanItem,
+} from '../engine/dates.js';
+import {
   applyUnclaim,
   planUnclaim,
   type UnclaimItem,
@@ -120,6 +127,17 @@ export interface SweepOptions {
    * bulk, and a pass that changes a thousand sidebar rows should be asked for.
    */
   syncTitles?: boolean;
+  /**
+   * Advance a card's `lastActivityAt` to its transcript's last answer — the
+   * sixth pass, off by default. See `engine/dates.ts`.
+   *
+   * Behind a flag for the same reason `--sync-titles` is, only more so. Measured
+   * on a real store: one pass proposed 1,370 writes, 551 of them on native cards
+   * — the app's own rows, not foster's copies. That is an order of magnitude
+   * more than any other pass writes, and it moves rows in the sidebar, so it is
+   * asked for rather than assumed.
+   */
+  dates?: boolean;
   /** When true, plan everything and write nothing. */
   dryRun?: boolean;
   /** Extra Claude config directories to search for deleted conversations. */
@@ -163,6 +181,20 @@ export interface WorktreeClaimsPhase {
  * `outcomes` is empty on a dry run, the convention every other phase keeps, and
  * the whole phase is absent from a run that did not ask for it.
  */
+/**
+ * The dates pass: what it would advance, and what it did.
+ *
+ * `skipped` counts the candidates the plan looked at and left alone — a card at
+ * or ahead of its transcript, or a conversation with nothing on disk to compare
+ * against. Counted rather than listed, because on a real store they are the vast
+ * majority and naming them would bury the rows that moved.
+ */
+export interface DatesPhase {
+  items: DatePlanItem[];
+  outcomes: DateOutcome[];
+  counts: { advanced: number; native: number; skipped: number; failed: number };
+}
+
 export interface TitleSyncPhase {
   items: TitleSyncItem[];
   skipped: TitleSyncSkipped[];
@@ -310,6 +342,8 @@ export interface SweepReport {
   worktreeClaims: WorktreeClaimsPhase;
   /** The title pass, only on a run that asked for it — see `TitleSyncPhase`. */
   titleSync?: TitleSyncPhase;
+  /** The dates pass, when `--dates` asked for it. */
+  dates?: DatesPhase;
   /**
    * Rows that end up in the destination's archived view rather than in Recents:
    * copies of archived sessions, and the branches that stopped.
@@ -445,6 +479,12 @@ export function runSweep(options: SweepOptions): SweepReport {
     ? runTitleSync(store, ledger, target, dryRun, [staleTemplate, divergedTemplate])
     : undefined;
 
+  // Last of all, and only when asked. It reads every transcript the store's
+  // cards point at, and it is the one pass that writes to native cards in bulk
+  // — so it runs after everything else has settled, on the store as those
+  // passes left it.
+  const dates = options.dates ? runDates(store, ledger, dryRun, env) : undefined;
+
   const report: SweepReport = {
     store: store.root,
     target,
@@ -459,6 +499,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     restored: phase(passes.restored),
     worktreeClaims,
     ...(titleSync ? { titleSync } : {}),
+    ...(dates ? { dates } : {}),
     archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
     liveWriters: [...passes.fostered, ...passes.branches.outcomes, ...passes.restored]
       .map((outcome) => outcome.live)
@@ -790,6 +831,48 @@ function runWorktreeClaims(
   const plan = planUnclaim(store, project(ledger.read()), { kin });
   const outcomes = dryRun ? [] : applyUnclaim(plan.items, { ledger });
   return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
+}
+
+/**
+ * The dates pass, run over the whole store rather than one account.
+ *
+ * A card's date is compared with its own transcript, and that comparison does
+ * not care which account holds the card — a row sinking in the sidebar is
+ * sinking wherever it lives. `planDates` decides direction: never backwards, so
+ * a card ahead of its transcript is left alone.
+ */
+function runDates(
+  store: StoreLayout,
+  ledger: Ledger,
+  dryRun: boolean,
+  env: NodeJS.ProcessEnv,
+): DatesPhase {
+  const { candidates, scanOf } = candidatesFromStore(store, env);
+  const items = planDates(candidates, scanOf);
+  const advancing = items.filter((item) => item.status === 'advance');
+
+  const outcomes = dryRun
+    ? []
+    : dateCards(
+        advancing.map((item) => ({
+          path: item.path,
+          lastActivityAt: item.transcriptAt ?? 0,
+          native: item.native,
+          target: item.target,
+        })),
+        { ledger },
+      );
+
+  return {
+    items: advancing,
+    outcomes,
+    counts: {
+      advanced: dryRun ? advancing.length : outcomes.filter((o) => o.status === 'dated').length,
+      native: advancing.filter((item) => item.native).length,
+      skipped: items.length - advancing.length,
+      failed: outcomes.filter((o) => o.status === 'failed').length,
+    },
+  };
 }
 
 function runTitleSync(
