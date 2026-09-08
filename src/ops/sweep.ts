@@ -221,6 +221,21 @@ export interface PinFixesReport {
    * move succeeded — this is a message, never a reason the sweep failed.
    */
   blocked?: string;
+  /**
+   * Set when the pin list could not be read at all, so this pass had nothing to
+   * compare the branch pass's work against (#76).
+   *
+   * The common cause is the ordinary one: the app is open — which is the normal
+   * state during a sweep, and the reason `--restart` exists — and it holds its
+   * own database. Measured: the manifest on disk names a log that is not the one
+   * the app is writing to, and a copy taken while it runs is no better, because
+   * the copy inherits the same stale manifest.
+   *
+   * Before this, that case was indistinguishable from "nothing is pinned": both
+   * were silence. A run that marked a pinned row stale would say nothing about
+   * it, and the pin would sit on the archived row until somebody noticed.
+   */
+  unreadable?: string;
 }
 
 /**
@@ -604,13 +619,21 @@ function phase(outcomes: Outcome[]): SweepPhase {
  *
  * It usually fails. Measured with Claude Desktop open — the ordinary state
  * during a sweep, and the reason `--restart` exists — the read comes back
- * `MANIFEST-000001 names the log 000000.log, which is not there`: the app holds
- * its own database and does not share it. That is caught and read as "nothing
- * pinned", so the pass stays silent rather than wrong and the sweep never fails
- * for it. The practical consequence is that the naming half mostly runs once
- * the app has been closed, alongside the moving half. Reading a copy of a live
- * database instead would trade a clear refusal for a snapshot torn mid-write,
- * so that is left for a follow-up rather than guessed at here.
+ * `MANIFEST-000001 names the log 000000.log, which is not there`: the manifest
+ * on disk names a log the app has moved on from while it runs.
+ *
+ * **Copying does not help, which #76 left open and 08/09/2026 settled.** A copy
+ * taken while the app runs inherits that same stale manifest, so it fails
+ * identically; renaming the log inside the copy does get the reader open, which
+ * is how the far older defect underneath was found (#102). None of that is a
+ * snapshot worth trusting, so the pass still does not read a live database.
+ *
+ * What changed is the silence. A failed read used to be indistinguishable from
+ * "nothing is pinned", so a run that marked a pinned row stale said nothing and
+ * left the pin sitting on the archived row. Now the failure is carried out as
+ * `unreadable` and the summary says the check could not run — but only when this
+ * run marked something, because with no stale mark there is no pin that could
+ * have been left behind.
  *
  * Writing is not safe with the app open either, and is skipped rather than
  * failing the run: a pin that could not be moved is a line in the summary,
@@ -624,8 +647,18 @@ function runPinPass(
   env: NodeJS.ProcessEnv,
   list: ProcessLister,
 ): PinFixesReport {
-  const pins = readPinsQuietly(store);
-  if (!pins) return { fixes: [], moved: false };
+  const { pins, unreadable } = readPinsQuietly(store);
+  if (!pins) {
+    // Only worth saying when this run marked something: with no stale mark
+    // there is no pin that could have been left behind, and a database foster
+    // cannot read is not news on its own.
+    const marked = branches.retitled.some((outcome) => outcome.status === 'retitled');
+    return {
+      fixes: [],
+      moved: false,
+      ...(unreadable && marked ? { unreadable } : {}),
+    };
+  }
 
   const fixes = planPinFixes(branches, pins);
   // Nothing to move yet on a dry run: the branch pass wrote nothing, so a copy
@@ -642,11 +675,24 @@ function runPinPass(
  * is nothing to read or write) and for a database it cannot make sense of;
  * either way the sweep has nothing to say about pins, not a reason to fail.
  */
-function readPinsQuietly(store: StoreLayout): PinState | undefined {
+/** The first line of a message, which is the part that names the problem. */
+function firstLine(message: string): string {
+  const at = message.indexOf(String.fromCharCode(10));
+  return at === -1 ? message : message.slice(0, at);
+}
+
+function readPinsQuietly(store: StoreLayout): { pins?: PinState; unreadable?: string } {
   try {
-    return readPinState(store);
-  } catch {
-    return undefined;
+    const pins = readPinState(store);
+    return pins ? { pins } : {};
+  } catch (error) {
+    // The two cases are told apart by what the reader says, because they mean
+    // opposite things to the reader of the summary: a store the app has never
+    // opened has no pins to be wrong about, while a database that is there and
+    // unreadable is a check that did not run.
+    const message = error instanceof Error ? firstLine(error.message) : String(error);
+    if (/^No IndexedDB database/.test(message)) return {};
+    return { unreadable: message };
   }
 }
 
