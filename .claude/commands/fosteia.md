@@ -123,6 +123,32 @@ on rather than re-deriving it:
   already on disk that used to fight its original over a branch, now fixed rather than added;
 - whether the restart happened or is waiting on them.
 
+## Proving nothing was left behind
+
+If asked afterward to prove the sweep actually brought a specific conversation — "did it all come
+through?" — three things look like proof and are not:
+
+- **`foster list --json`** marks `fosterable: true` for a conversation that is already in the
+  destination under a _different_ card. It lists what exists elsewhere, not what is still
+  missing — a false negative, not a false positive.
+- **`originSessionId`** from `foster status --json` errs by design: the same conversation can
+  live in several accounts, and the copy on hand may trace to any of them. Matching on it reports
+  copies as missing that are already there.
+- **The `_foster` block on a card's own file.** It is not durable: the Desktop app rewrites a
+  card through a fixed field list, and the first time it resaves one it has loaded — a title
+  change, a focus, any activity — `_foster` is dropped and the copy looks native
+  (`KnownCopies` in `src/store/scanner.ts`; measured on a live store, 21 of 364 copies had lost
+  it, exactly the 21 that had been opened). This is why production dedup never trusts that field
+  alone — it cross-checks the ledger. An ad-hoc audit reading card files directly has no ledger
+  to cross-check against, so it will call a real copy native.
+
+The one field that survives all three: **`cliSessionId`**. Read every
+`claude-code-sessions/<accountUuid>/*/*.json` under the destination account and the source
+account(s) — `foster stores --json` gives the account uuids — and match on `cliSessionId`. Same
+id on both sides is the same conversation, same content, regardless of what `_foster` says or
+which card the title is attached to. Report matched / missing / diverged from that; never from
+re-running the sweep, and never from `foster list` alone.
+
 ## Never, in this command
 
 - **`foster purge`.** It destroys transcripts irreversibly and is not part of any sweep.
