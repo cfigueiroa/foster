@@ -1638,6 +1638,91 @@ describe('a copy that opens more in the worktree than in the repository', () => 
 });
 
 /**
+ * Which of a card's two files is the "fuller" one is measured against this
+ * account, not by size. Measured 15/09/2026: one conversation on two files,
+ * the repository's the bigger (4872 records to 4802) and already opened by the
+ * account's own card, the worktree's holding 2116 records — a night's work —
+ * that no row here could open. Counting size sent the would-be copy to the
+ * repository, `unreached` found nothing beyond, and the sweep passed the card
+ * over as already in this account, saying nothing about what it left behind.
+ */
+describe('a worktree file holding what this account cannot reach, behind a bigger repository file', () => {
+  const CONVERSATION = '00000000-0000-4000-8000-0000000000e5';
+  const SOURCE_CARD = '00000000-0000-4000-8000-0000000000e6';
+  const HERE_CARD = '00000000-0000-4000-8000-0000000000e7';
+  const REPO = 'C:\\home\\repo';
+  const WORKTREE = 'C:\\home\\repo\\.claude\\worktrees\\wt-b';
+
+  function write(cwd: string, ids: string[]): void {
+    const dir = path.join(configDir, 'projects', projectDirName(cwd));
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, `${CONVERSATION}.jsonl`),
+      `${ids
+        .map((id) =>
+          JSON.stringify({ uuid: id, type: 'user', timestamp: '2026-09-15T02:00:00.000Z' }),
+        )
+        .join('\n')}\n`,
+      'utf8',
+    );
+  }
+
+  beforeEach(() => {
+    const shared = ['00000000-0000-4000-8000-0000000000f3'];
+    // The repository's file is the bigger one, and this account opens it.
+    write(REPO, [
+      ...shared,
+      '00000000-0000-4000-8000-0000000000f4',
+      '00000000-0000-4000-8000-0000000000f5',
+    ]);
+    // The worktree's holds one record nothing here reaches.
+    write(WORKTREE, [...shared, '00000000-0000-4000-8000-0000000000f6']);
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: HERE_CARD,
+        cliSessionId: CONVERSATION,
+        title: 'Work',
+        cwd: REPO,
+        originCwd: REPO,
+      }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: SOURCE_CARD,
+        cliSessionId: CONVERSATION,
+        title: 'Work',
+        cwd: WORKTREE,
+        originCwd: REPO,
+        worktreePath: WORKTREE,
+        worktreeName: 'wt-b',
+      }),
+    );
+  });
+
+  it('brings a row that opens the worktree file, and finishes', () => {
+    const first = sweep();
+
+    expect(first.fostered.counts.fostered).toBe(1);
+    const [copy] = copies();
+    expect(copy!.cwd).toBe(WORKTREE);
+    expect(first.confirmation?.fosterable).toBe(0);
+    expect(first.confirmation?.exhausted).toBe(true);
+  });
+
+  it('copies it once, not once per run', () => {
+    sweep();
+    const second = sweep();
+
+    expect(second.fostered.counts.fostered).toBe(0);
+    expect(copies()).toHaveLength(1);
+  });
+});
+
+/**
  * The dates pass (#78), behind `--dates`.
  *
  * `foster dates` shipped as a command nobody called, so the defect it was

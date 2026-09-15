@@ -570,7 +570,7 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
   const opensMore = (session: DiscoveredSession): boolean =>
     here.unreached(
       session.data.cliSessionId,
-      copyCwd(session.data, worktreeReachOf(kin, session.data)),
+      copyCwd(session.data, worktreeReachOf(kin, session.data, here)),
     ) > 0;
 
   const fostered = fosterSessions(

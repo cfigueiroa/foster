@@ -1,4 +1,5 @@
 import type { WorktreeReach } from '../domain/fostering.js';
+import type { ReachCheck } from '../domain/filter.js';
 import type { CodeSessionData } from '../domain/types.js';
 import {
   conversationRoot,
@@ -274,11 +275,37 @@ export function lineage(env: NodeJS.ProcessEnv = process.env, extra: string[] = 
  * and its `originCwd` (#41) — read here, where a `Lineage` is available, and
  * handed to `domain/fostering.ts` as plain numbers so that module never has to
  * read a transcript itself.
+ *
+ * Given the destination (`here`), each directory is measured by what a copy
+ * opening there would reach that no row in the destination already can, not
+ * by how much its file holds. The two agree whenever the destination shows no
+ * card for the conversation — nothing is held, so everything is beyond — and
+ * disagree exactly when it matters: a destination holding the card that opens
+ * the bigger file, while the smaller file is the one with the work nothing here
+ * reaches. Measured on a real store, 15/09/2026: one conversation on two files,
+ * 4872 records in the repository's and 4802 in the worktree's, the destination
+ * already opening the repository's. Counting size sent the copy to the
+ * repository, where `unreached` found nothing beyond, and the card was skipped
+ * as already here — with 2116 records, a whole night's work, in the worktree's
+ * file that no row could open.
+ *
+ * Undefined keeps its meaning from `Lineage.reachOf`: no file for that
+ * directory, or one file for the whole conversation. Without `here`, the
+ * counts are the files' sizes, as before.
  */
-export function worktreeReachOf(kin: Lineage, data: CodeSessionData): WorktreeReach {
+export function worktreeReachOf(
+  kin: Lineage,
+  data: CodeSessionData,
+  here?: ReachCheck,
+): WorktreeReach {
   const id = data.cliSessionId;
-  return {
-    atCwd: kin.reachOf(id, data.cwd)?.uuids.size,
-    atOriginCwd: kin.reachOf(id, data.originCwd)?.uuids.size,
+  const measure = (cwd: string | undefined): number | undefined => {
+    const reach = kin.reachOf(id, cwd);
+    if (reach === undefined) return undefined;
+    // The card itself is left out of "held": a source card never sits in the
+    // destination, and a copy already there must not count as reaching what
+    // is only reached because it is there.
+    return here === undefined ? reach.uuids.size : here.unreached(id, cwd, data.sessionId);
   };
+  return { atCwd: measure(data.cwd), atOriginCwd: measure(data.originCwd) };
 }
