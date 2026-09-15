@@ -207,8 +207,10 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
     // Read once per session and reused everywhere `copyCwd` is asked below —
     // the existing-copy check, the "opens more than here can reach" check, and
     // the write itself — so all three agree on which of the source's two
-    // directories the copy would open in (#41).
-    const reach = worktreeReachOf(kin, session.data);
+    // directories the copy would open in (#41). Measured against `here`, so the
+    // directory chosen is the one whose file holds what this account cannot
+    // reach — not merely the bigger file, which can be the one it already opens.
+    const reach = worktreeReachOf(kin, session.data, here);
 
     // Judged the same way the filter judges it, so a session the caller was
     // shown as available cannot be refused here for the reason it was shown

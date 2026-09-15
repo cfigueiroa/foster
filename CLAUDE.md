@@ -184,7 +184,12 @@ the offered card opens records **no** row here can (`Sidebar.unreached`, `Lineag
 result is a second row for that conversation, one per working directory, and the line says why:
 `(a second file of a conversation already here: N record(s) no row here could open)`. It is asked
 of the directory the **copy** will open in (`copyCwd`), because a card cut from a worktree is
-rewritten to open in the repository it came from. The sweep needs it in two places: a fork held in
+rewritten to open in the repository it came from — unless its own worktree file is the one that
+reaches more. "More" is measured against this account, not by file size (`worktreeReachOf`):
+measured 15/09/2026, a worktree card whose repository file was the bigger one (4872 records
+against 4802) lost a whole night's work — 2116 records only the worktree file held — because
+the copy would have opened the repository file this account already showed, and the card was
+skipped as already here. The sweep needs it in two places: a fork held in
 two files went to the branch pass, which decides on the id alone, and was retitled rather than
 completed.
 
