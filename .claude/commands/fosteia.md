@@ -144,10 +144,27 @@ through?" — three things look like proof and are not:
 
 The one field that survives all three: **`cliSessionId`**. Read every
 `claude-code-sessions/<accountUuid>/*/*.json` under the destination account and the source
-account(s) — `foster stores --json` gives the account uuids — and match on `cliSessionId`. Same
-id on both sides is the same conversation, same content, regardless of what `_foster` says or
-which card the title is attached to. Report matched / missing / diverged from that; never from
-re-running the sweep, and never from `foster list` alone.
+account(s) — `foster stores --json` gives the account uuids — and match on `cliSessionId`,
+regardless of what `_foster` says or which card the title is attached to. An id with no card in
+the destination is missing.
+
+Same id on both sides is the same conversation, and **not yet the same content**. A
+`cliSessionId` names a conversation, not a file: a card opens `projects/<dir>/<cliSessionId>.jsonl`
+under the project directory its **own `cwd`** encodes to — every `\`, `/`, `:`, `.` and `_`
+becomes `-`, compared regardless of case (`projectDirName` and `fileOpenedFrom` in
+`src/store/transcripts.ts`). A conversation continued from a repository and from a worktree cut
+out of it is therefore two files under one id, each holding what its own card wrote. So for every
+matched id with more than one file under the CLI's `projects/` trees (`~/.claude` and any
+`~/.claude-*` sibling that has one), take the file each card opens and compare the `uuid`s of its
+records (lines with no `uuid` are the app's bookkeeping; skip them): a record in the file a source
+card opens that no destination card opens makes the id **diverged**, not matched. Measured on a
+real store on 15/09/2026: the same `cliSessionId` was in both accounts, and 2116 records — a whole
+night of one session's work — existed only in the worktree's file, which no destination row
+opened; matching on the id alone would have called it matched. A card whose `cwd` encodes to no
+file, or to more than one, cannot be told either way — say so rather than counting it as matched.
+
+Report matched / missing / diverged from that; never from re-running the sweep, and never from
+`foster list` alone.
 
 ## Never, in this command
 

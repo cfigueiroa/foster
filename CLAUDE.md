@@ -193,10 +193,13 @@ skipped as already here. The sweep needs it in two places: a fork held in
 two files went to the branch pass, which decides on the id alone, and was retitled rather than
 completed.
 
-Two things this does not do. It never repoints or rewrites a card the account already has — the
-existing row keeps opening what it opened. And it cannot reach past `already fostered`: a
-conversation the ledger has vouched for is skipped before the question is asked, so a store swept
-before this change keeps whatever short copies it already made.
+One thing this does not do: it never repoints or rewrites a card the account already has — the
+existing row keeps opening what it opened. What it does do is reach past `already fostered`: since
+#63, `resolveExisting` (`src/engine/executor.ts`) asks `unreached` of a copy the ledger vouches
+for and that is still on disk, too, and when the file the offered card would open holds records
+beyond what this account reaches, it makes a second row instead of skipping — once, not once per
+run. The test "brings the worktree file of a conversation whose earlier copy the ledger vouches
+for" (`tests/executor.test.ts`, added in #109) walks that path.
 
 **A mark written by an earlier run is recognised from the ledger, whatever words it used** (#35).
 `CardRetitledEvent`/`FosteredEvent` now carry the `template` a mark was made from, and
