@@ -8,6 +8,8 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { worktreeReachOf, type Lineage } from './lineage.js';
+import { sidebarOf, type Sidebar } from './sidebar.js';
+import type { AccountRef } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
 
 /**
@@ -103,6 +105,21 @@ export function planUnclaim(
   const items: UnclaimItem[] = [];
   const skipped: PlanUnclaimSkipped = { gone: 0, unreadable: 0, noClaim: 0 };
 
+  // One sidebar per destination account, read when first asked for: the copies
+  // this pass weighs all sit in accounts of this store, and "what does this
+  // account already reach" is a question about the account, not the copy.
+  const copies = new Set(listActive(state).map((fostering) => fostering.copySessionId));
+  const sidebars = new Map<string, Sidebar>();
+  const hereOf = (account: AccountRef, kin: Lineage): Sidebar => {
+    const key = `${account.accountUuid}/${account.organizationUuid}`;
+    let here = sidebars.get(key);
+    if (here === undefined) {
+      here = sidebarOf(store, account, copies, kin);
+      sidebars.set(key, here);
+    }
+    return here;
+  };
+
   for (const fostering of listActive(state)) {
     // Only the copies this store holds. The ledger tracks fosterings across
     // every installation foster has ever written into, and a copy sitting in
@@ -136,7 +153,13 @@ export function planUnclaim(
     // again, and the pair never settled (#80). What the release is *for* — the
     // three claim fields, which are what makes two cards fight over one
     // directory — comes off either way; only the move is now conditional.
-    const cwdTo = opts.kin ? copyCwd(data, worktreeReachOf(opts.kin, data)) : claim.cwdTo;
+    // Measured against the account the copy sits in, the copy itself left out:
+    // a copy minted in the worktree because that file held what nothing here
+    // reached would otherwise be moved to the bigger repository file by size
+    // alone, and the next sweep would bring the worktree file all over again.
+    const cwdTo = opts.kin
+      ? copyCwd(data, worktreeReachOf(opts.kin, data, hereOf(fostering.target, opts.kin)))
+      : claim.cwdTo;
     const moves = cwdTo !== undefined && !(data.cwd !== undefined && samePath(cwdTo, data.cwd));
 
     // With the fields already gone and the directory already where it belongs

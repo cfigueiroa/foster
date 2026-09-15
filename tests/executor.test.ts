@@ -474,6 +474,8 @@ describe('#41: the fullest file wins', () => {
   const TREE_ONLY_A = '00000000-0000-4000-8000-0000000000f3';
   const TREE_ONLY_B = '00000000-0000-4000-8000-0000000000f4';
   const REPO_ONLY = '00000000-0000-4000-8000-0000000000f5';
+  const REPO_ONLY_B = '00000000-0000-4000-8000-0000000000f7';
+  const HERE_ID = '00000000-0000-4000-8000-0000000000f8';
   const ORIGIN_ID = '00000000-0000-4000-8000-0000000000f6';
   const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
   const REPO = 'C:\\work\\project';
@@ -550,6 +552,89 @@ describe('#41: the fullest file wins', () => {
     expect(outcome!.status).toBe('fostered');
     const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
     expect(copy.cwd).toBe(TREE);
+  });
+
+  /**
+   * "Fuller" is measured against the destination, not by file size. Measured
+   * 15/09/2026: the repository's file was the bigger one (4872 records to
+   * 4802) and the destination already held the card that opens it; the
+   * worktree's file held 2116 records — a night's work — nothing there could
+   * open. Sending the copy to the bigger file found nothing beyond what was
+   * here, and the card was skipped as already in this account.
+   */
+  it('sends the copy to the smaller file when it holds what no row here opens', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-beyond-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+
+    // The destination's own card, opening the repository's — bigger — file.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: HERE_ID, cliSessionId: CLI_ID, cwd: REPO, originCwd: REPO }),
+    );
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const [outcome] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcome!.status).toBe('fostered');
+    // The one record only the worktree's file holds is what the copy is for.
+    expect(outcome!.beyond).toBe(1);
+    const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(copy.cwd).toBe(TREE);
+  });
+
+  it('brings the worktree file of a conversation whose earlier copy the ledger vouches for', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-vouched-'));
+    // Copied while the two files still agreed: the copy lands in the
+    // repository, and the ledger records it.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED]);
+    transcript(configDir, 'C--work-project', [SHARED]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+    const [first] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(first!.status).toBe('fostered');
+    expect((JSON.parse(readFileSync(first!.copyPath!, 'utf8')) as CodeSessionData).cwd).toBe(REPO);
+
+    // Then both went on: the copy here, in the repository's file, for longer;
+    // the source's own card, in the worktree's file, for a night.
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+
+    const [again] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    // Identity vouched for a copy that cannot show the night's work: a second
+    // row, opening the worktree's file, rather than "already in this account".
+    expect(again!.status).toBe('fostered');
+    expect(again!.beyond).toBe(1);
+    const second = JSON.parse(readFileSync(again!.copyPath!, 'utf8')) as CodeSessionData;
+    expect(second.cwd).toBe(TREE);
+    expect(second.sessionId).not.toBe(first!.copySessionId);
+
+    // And once, not once per run: the worktree's file is reached now.
+    const [third] = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(third!.status).toBe('skipped');
   });
 
   it('still sends the copy to the repository when its own file is the fuller one', () => {

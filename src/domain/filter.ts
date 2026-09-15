@@ -140,7 +140,7 @@ export function selectByIds(
  * necessarily built from reading transcripts, which stays the caller's job.
  */
 export interface ReachCheck {
-  unreached(cliSessionId: string | undefined, cwd: string | undefined): number;
+  unreached(cliSessionId: string | undefined, cwd: string | undefined, except?: string): number;
 }
 
 /**

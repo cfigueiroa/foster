@@ -60,8 +60,13 @@ export interface Sidebar {
    * Zero whenever the comparison cannot be made — a conversation on one file,
    * a working directory naming none of its files — so a caller that refuses on
    * zero keeps exactly the behaviour it had.
+   *
+   * `except` leaves one row out of what is held: the row being weighed, when
+   * it already sits in this account. A copy asked "where should you open?"
+   * must not count its own reach as already reached, or every directory
+   * answers zero and the release pass moves it by the old rule (#80).
    */
-  unreached(cliSessionId: string | undefined, cwd: string | undefined): number;
+  unreached(cliSessionId: string | undefined, cwd: string | undefined, except?: string): number;
   /**
    * How a conversation being offered compares with the branch of it this account
    * already shows. Undefined when the account shows no other branch of that work,
@@ -164,7 +169,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
       return cards.some((card) => card.cliSessionId.toLowerCase() === wanted);
     },
 
-    unreached(cliSessionId, cwd) {
+    unreached(cliSessionId, cwd, except) {
       if (cliSessionId === undefined) return 0;
       const offered = kin.reachOf(cliSessionId, cwd);
       if (offered === undefined) return 0;
@@ -172,6 +177,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
       const held = new Set<string>();
       for (const card of cards) {
         if (!sameId(card.cliSessionId, cliSessionId)) continue;
+        if (except !== undefined && card.sessionId === except) continue;
         // A row whose file cannot be told is not evidence of reaching nothing —
         // counting it as such would offer a copy on no evidence at all. The
         // conversation's whole record set is the conservative stand-in.

@@ -201,7 +201,9 @@ export function worktreeClaim(card: CodeSessionData): WorktreeClaim | undefined 
 
 /**
  * What each of a card's two candidate directories would let a copy reach — the
- * count of records `Lineage.reachOf` finds under `cwd` and under `originCwd`.
+ * count of records `Lineage.reachOf` finds under `cwd` and under `originCwd`,
+ * or, when the caller measured against the destination, how many of those no
+ * row there already opens (`worktreeReachOf`).
  *
  * Built by the caller, never read from disk here: #41 found that the choice
  * between the two used to be blind (`originCwd`, unconditionally), and fixing
@@ -221,7 +223,9 @@ export interface WorktreeReach {
  * Between a card's own `cwd` and the `cwdTo` a worktree claim would move it to,
  * the one that reaches more records — or `cwdTo` when neither `reach` nor the
  * card's own `cwd` can settle it, which is the choice `buildFosterCopy` always
- * made before #41.
+ * made before #41. "More" is whatever the caller counted: the file's size, or
+ * what a copy there would open that the destination cannot — the count that
+ * keeps a night's work in the smaller file from being skipped as already here.
  */
 function fullerOf(card: CodeSessionData, cwdTo: string, reach: WorktreeReach | undefined): string {
   if (reach && card.cwd !== undefined) {
