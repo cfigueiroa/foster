@@ -661,4 +661,67 @@ describe('#41: the fullest file wins', () => {
     const copy = JSON.parse(readFileSync(outcome!.copyPath!, 'utf8')) as CodeSessionData;
     expect(copy.cwd).toBe(REPO);
   });
+
+  /**
+   * #114: both files hold records the other lacks and the destination has
+   * nothing yet. One copy opens one file, so the first run used to bring the
+   * fuller one and leave the other to a second run.
+   */
+  it('brings both files of a worktree card in one run when each holds work of its own', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+    const cwds = outcomes.map(
+      (outcome) => (JSON.parse(readFileSync(outcome.copyPath!, 'utf8')) as CodeSessionData).cwd,
+    );
+    expect(cwds).toEqual([REPO, TREE]);
+    // The second row exists for the one record only the worktree's file holds.
+    expect(outcomes[1]!.beyond).toBe(1);
+
+    // And nothing is left for a second run.
+    const again = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(again.map((outcome) => outcome.status)).toEqual(['skipped']);
+  });
+
+  it('plans the second file in a dry run too', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-dry-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), {
+      ...opts(),
+      projectsDirs,
+      dryRun: true,
+    });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+  });
 });

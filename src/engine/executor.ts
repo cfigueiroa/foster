@@ -311,6 +311,60 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
+    // Carried on the outcome rather than acted on: the copy is sound either way,
+    // and what a live writer changes is only what the caller should be told.
+    const liveFlag =
+      cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
+
+    const first = bring(
+      session,
+      key,
+      reach,
+      shownHere !== undefined && beyond > 0 ? beyond : undefined,
+      liveFlag,
+    );
+
+    /**
+     * The other of the card's two directories, asked once the first copy is planned.
+     *
+     * A card cut from a worktree sits between two files — the worktree's and the
+     * repository's — and one copy opens only one of them. When both hold records
+     * nothing here reaches, the first copy takes whichever reaches more and the
+     * rest waited for the next run: measured on a real store (#114), 21 cards came
+     * in a second sweep, each from the same origin card as a copy the first sweep
+     * had just made, with between 6 and 2116 records only the other file held.
+     * Asked again now, against a sidebar that already counts the first copy, the
+     * same measurement that picked the first directory points at the other one.
+     */
+    if (first) {
+      const again = worktreeReachOf(kin, session.data, here);
+      const otherCwd = copyCwd(session.data, again);
+      if (otherCwd !== copyCwd(session.data, reach)) {
+        const more = here.unreached(cliSessionId, otherCwd);
+        if (more > 0) bring(session, key, again, more, liveFlag);
+      }
+    }
+  }
+
+  return outcomes;
+
+  /**
+   * Writes one copy of `session` and records it — or, in a dry run, only plans
+   * it. False when the write failed.
+   *
+   * `beyond` is only worth saying when the row was already here: everywhere else
+   * the whole conversation is new and "records nothing here reaches" is every
+   * record.
+   */
+  function bring(
+    session: DiscoveredSession,
+    key: string,
+    reach: ReturnType<typeof worktreeReachOf>,
+    beyond: number | undefined,
+    liveFlag: { live?: string },
+  ): boolean {
+    const originId = session.data.sessionId;
+    const title = session.data.title ?? '(untitled)';
     const copy = buildFosterCopy(session.data, {
       origin: session.account,
       ...(options.sourceStore && options.sourceStore !== store.root
@@ -321,13 +375,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       reach,
     });
     const copyPath = sessionPath(store, target, copy.sessionId);
-    // Carried on the outcome rather than acted on: the copy is sound either way,
-    // and what a live writer changes is only what the caller should be told.
-    const liveFlag =
-      cliSessionId && options.live?.has(cliSessionId.toLowerCase()) ? { live: cliSessionId } : {};
-    // Only worth saying when the row was already here: everywhere else the whole
-    // conversation is new and "records nothing here reaches" is every record.
-    const beyondFlag = shownHere !== undefined && beyond > 0 ? { beyond } : {};
+    const beyondFlag = beyond === undefined ? {} : { beyond };
 
     /**
      * What this batch has committed to bringing, whether or not bytes are being
@@ -362,7 +410,7 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       // had already planned to bring — listing one row per source card where the
       // write produces one row per conversation.
       recordPlanned();
-      continue;
+      return true;
     }
 
     try {
@@ -409,14 +457,14 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
         ...liveFlag,
         ...beyondFlag,
       });
+      return true;
     } catch (error) {
       const reason = errorMessage(error);
       ledger.append({ kind: 'failed', operation: 'foster', originSessionId: originId, reason });
       outcomes.push({ originSessionId: originId, title, status: 'failed', detail: reason });
+      return false;
     }
   }
-
-  return outcomes;
 }
 
 /**
