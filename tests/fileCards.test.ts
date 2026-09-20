@@ -32,6 +32,10 @@ const SHARED = '00000000-0000-4000-8000-0000000000e1';
 const REPO_ONLY = '00000000-0000-4000-8000-0000000000e2';
 const TREE_ONLY = '00000000-0000-4000-8000-0000000000e3';
 
+const FORK_SIBLING = '00000000-0000-4000-8000-0000000000d6';
+const SIBLING_CARD = '00000000-0000-4000-8000-0000000000d7';
+const SIBLING_ONLY = '00000000-0000-4000-8000-0000000000e4';
+
 const REPO = 'C:\\work\\project';
 const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
 const TREE_PROJECT = 'C--work-project--claude-worktrees-w';
@@ -74,11 +78,15 @@ function rec(uuid: string, type: 'user' | 'assistant', timestamp: string) {
   return { uuid, type, timestamp };
 }
 
-function transcript(records: Record<string, unknown>[], project = 'C--work-project'): void {
+function transcript(
+  records: Record<string, unknown>[],
+  project = 'C--work-project',
+  cliSessionId = CONVERSATION,
+): void {
   const dir = path.join(configDir, 'projects', project);
   mkdirSync(dir, { recursive: true });
   writeFileSync(
-    path.join(dir, `${CONVERSATION}.jsonl`),
+    path.join(dir, `${cliSessionId}.jsonl`),
     records.map((record) => JSON.stringify(record)).join('\n'),
     'utf8',
   );
@@ -303,5 +311,56 @@ describe('a conversation this account shows more than once', () => {
     expect(twin.working).toBe(false);
     expect(twin.action).toBe('none');
     expect(cards().find((data) => data.sessionId === `local_${TWIN_CARD}`)!.title).toBe('Macs');
+  });
+
+  it('does not flip against the branch pass when a row is the tip and the older file', () => {
+    // The row can lose both questions at once: it is the tip of a fork — so the
+    // branch pass wants no mark on it — and the older of two files of its own
+    // conversation, so this pass wants one. Each pass owning only its own marks
+    // is what stops that becoming a mark written and stripped on every run;
+    // measured on a real store, two rows flipped that way and the sweep never
+    // said it was finished (#79's shape, from the other side).
+    twoFiles();
+    rowsHere();
+    // A sibling branch of the same work: shares the history, stopped earlier, so
+    // the two-file conversation is the tip.
+    transcript(
+      [
+        { type: 'custom-title', customTitle: 'Macs' },
+        rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+        rec(SHARED, 'assistant', '2026-09-01T20:01:00.000Z'),
+        rec(SIBLING_ONLY, 'assistant', '2026-09-01T21:00:00.000Z'),
+      ],
+      'C--work-project',
+      FORK_SIBLING,
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: SIBLING_CARD,
+        cliSessionId: FORK_SIBLING,
+        title: 'Macs',
+        cwd: REPO,
+        originCwd: REPO,
+      }),
+    );
+
+    const first = sweep();
+    expect(first.files.retitled.filter((outcome) => outcome.status === 'retitled')).toHaveLength(1);
+    const marked = titled(mark(TREE_LAST_ANSWER))!;
+    expect(marked.sessionId).toBe(`local_${TREE_CARD}`);
+
+    // The run that used to undo it. The branch pass sees a tip wearing a mark
+    // and leaves it alone, because the mark is not its own.
+    const second = sweep();
+    expect(
+      second.branches.retitled.filter((outcome) => outcome.status === 'retitled'),
+    ).toHaveLength(0);
+    expect(second.files.retitled.filter((outcome) => outcome.status === 'retitled')).toHaveLength(
+      0,
+    );
+    expect(second.confirmation).toMatchObject({ branches: 0, secondFiles: 0, exhausted: true });
+    expect(titled(mark(TREE_LAST_ANSWER))?.sessionId).toBe(`local_${TREE_CARD}`);
   });
 });

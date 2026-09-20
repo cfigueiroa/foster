@@ -147,6 +147,15 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
     if (card.toArchived) archivedByFoster.add(card.sessionId);
   }
 
+  // Rows wearing the other marking pass's mark. A tip strips whatever mark it
+  // finds, and stripping one this pass did not write is a loop rather than a
+  // fix: `fileCards.ts` marks the row again on the same run, this pass takes it
+  // off on the next, and the sweep never says it is finished. Measured on a real
+  // store: two rows that are both the tip of a fork and the older file of one
+  // conversation flipped that way on every run. A row this pass has something of
+  // its own to say about — stale, diverged — is still marked; only the write that
+  // would merely erase someone else's mark is skipped.
+  const fileMarked = fileMarkedIds(events);
   const plans: ForkPlan[] = [];
 
   for (const fork of forks.all()) {
@@ -190,6 +199,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
           };
         }
         for (const card of held) {
+          if (kind === 'tip' && fileMarked.has(card.data.sessionId)) continue;
           const decision = retitleFor(card, {
             kind,
             mark,
@@ -261,6 +271,21 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
   }
 
   return plans;
+}
+
+/**
+ * Cards the second-file pass is responsible for, by the last thing the ledger
+ * says was written to them — the mirror of `fileCards.ts`'s own check, and the
+ * other half of keeping the two passes from undoing each other.
+ */
+function fileMarkedIds(events: readonly LedgerEvent[]): Set<string> {
+  const last = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind === 'card_retitled') last.set(event.sessionId, event.as);
+  }
+  const ids = new Set<string>();
+  for (const [id, as] of last) if (as === 'other-file') ids.add(id);
+  return ids;
 }
 
 /**
