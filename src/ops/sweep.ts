@@ -2,7 +2,11 @@ import path from 'node:path';
 import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
-import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
+import {
+  DEFAULT_DIVERGED_TEMPLATE,
+  DEFAULT_OTHER_FILE_TEMPLATE,
+  DEFAULT_STALE_TEMPLATE,
+} from '../domain/stale.js';
 import type { AccountRef, DiscoveredSession, StoreLayout, Unfosterable } from '../domain/types.js';
 import { requireCurrentAccount } from '../engine/account.js';
 import {
@@ -12,6 +16,7 @@ import {
   type ForkOutcome,
 } from '../engine/branchCards.js';
 import { forksOf } from '../engine/branches.js';
+import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import {
   fosterSessions,
@@ -121,6 +126,12 @@ export interface SweepOptions {
    */
   divergedTemplate?: string;
   /**
+   * What the row wears that is not the one to continue in, when one conversation
+   * occupies more than one file and this account shows a row for each. See
+   * `engine/fileCards.ts`.
+   */
+  otherFileTemplate?: string;
+  /**
    * Bring every copy's title back into step with the original's — the fifth
    * pass, off by default. See `engine/titleSync.ts`; the flag exists because
    * the first run on a store that has been fostered into for weeks rewrites in
@@ -209,6 +220,15 @@ export interface BranchesPhase extends BranchesResult {
   staleTemplate: string;
   /** The template the rows that went on were marked with. */
   divergedTemplate: string;
+}
+
+/**
+ * The second-file pass: which row of a twice-shown conversation is the one to
+ * continue in, and what the others were marked with — see `engine/fileCards.ts`.
+ */
+export interface FileCardsPhase extends FileCardsResult {
+  /** The template the rows that are not the one to continue in were marked with. */
+  otherFileTemplate: string;
 }
 
 /**
@@ -319,6 +339,8 @@ export interface SweepConfirmation {
   fosterable: number;
   /** Rows a second branch pass would still add or mark. */
   branches: number;
+  /** Rows a second second-file pass would still mark. */
+  secondFiles: number;
   restorable: number;
   /** Copies a second worktree-claim pass would still find. */
   worktreeClaims: number;
@@ -338,6 +360,11 @@ export interface SweepReport {
   fostered: SweepPhase;
   branches: BranchesPhase;
   restored: SweepPhase;
+  /**
+   * The second-file pass — see `FileCardsPhase`. Always present; empty on a
+   * store where no conversation is shown twice.
+   */
+  files: FileCardsPhase;
   /** The worktree-claim pass — see `WorktreeClaimsPhase`. */
   worktreeClaims: WorktreeClaimsPhase;
   /** The title pass, only on a run that asked for it — see `TitleSyncPhase`. */
@@ -399,6 +426,7 @@ interface SweepRun {
   prefix: string;
   staleTemplate: string;
   divergedTemplate: string;
+  otherFileTemplate: string;
   configDirs: string[];
   env: NodeJS.ProcessEnv;
   live: ReadonlySet<string>;
@@ -419,6 +447,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   const prefix = options.prefix ?? DEFAULT_PREFIX;
   const staleTemplate = options.staleTemplate ?? DEFAULT_STALE_TEMPLATE;
   const divergedTemplate = options.divergedTemplate ?? DEFAULT_DIVERGED_TEMPLATE;
+  const otherFileTemplate = options.otherFileTemplate ?? DEFAULT_OTHER_FILE_TEMPLATE;
   const configDirs = options.configDirs ?? [];
   const syncTitles = options.syncTitles ?? false;
   const accounts = listAccountDirs(store);
@@ -443,6 +472,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     prefix,
     staleTemplate,
     divergedTemplate,
+    otherFileTemplate,
     configDirs,
     env,
     live,
@@ -456,13 +486,21 @@ export function runSweep(options: SweepOptions): SweepReport {
 
   const passes = runPasses(run, fromAccounts(scanned, [target]), dryRun);
 
-  // Right after the branch pass, so the pin list is asked about the same
-  // stale-marks and the same fresh copy this run just decided on — a later
-  // read would have to guess which of them were this run's doing.
+  // After the copies, and reading the destination again rather than the cards
+  // this run started from: a pair is only a pair once both rows exist, and the
+  // second of them may have been written moments ago by the pass above. A dry
+  // run has no such write to find, so it speaks only about the pairs already on
+  // disk — which is the honest answer to "what would this run mark".
+  const files = runFileCards(run, dryRun);
+
+  // Right after both marking passes, so the pin list is asked about the same
+  // marks and the same fresh copy this run just decided on — a later read would
+  // have to guess which of them were this run's doing.
   const pinFixes = runPinPass(
     store,
     ledger,
     passes.branches,
+    files,
     dryRun,
     env,
     options.list ?? readProcesses,
@@ -497,10 +535,12 @@ export function runSweep(options: SweepOptions): SweepReport {
       divergedTemplate,
     },
     restored: phase(passes.restored),
+    files: { ...files, otherFileTemplate },
     worktreeClaims,
     ...(titleSync ? { titleSync } : {}),
     ...(dates ? { dates } : {}),
-    archived: countArchived(run.fromSources, passes.fostered) + passes.branches.archived,
+    archived:
+      countArchived(run.fromSources, passes.fostered) + passes.branches.archived + files.archived,
     liveWriters: [...passes.fostered, ...passes.branches.outcomes, ...passes.restored]
       .map((outcome) => outcome.live)
       .filter((id): id is string => Boolean(id)),
@@ -618,7 +658,8 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
  */
 function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
   const { store, ledger, target } = run;
-  const hereCards = scanAccount(store, target, copySessionIds(ledger.read()));
+  const events = ledger.read();
+  const hereCards = scanAccount(store, target, copySessionIds(events));
   const again = runPasses(run, hereCards, true);
 
   const fosterable = summariseOutcomes(again.fostered).fostered;
@@ -626,6 +667,17 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
     summariseOutcomes(again.branches.outcomes).fostered +
     again.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
   const restorable = summariseOutcomes(again.restored).fostered;
+  // Planned against the destination as it now stands, marks and all: a pass
+  // that has said its piece plans nothing the second time.
+  const secondFiles = planFileCards({
+    hereCards,
+    kin: run.kin,
+    otherFileTemplate: run.otherFileTemplate,
+    otherTemplates: [run.staleTemplate, run.divergedTemplate],
+    live: run.live,
+    state: project(events),
+    events,
+  }).reduce((count, plan) => count + plan.retitle.length, 0);
   const worktreeClaims = planUnclaim(store, project(ledger.read()), { kin: run.kin }).items.length;
   const titlesOutOfStep = syncTitles
     ? planTitleSync(store, ledger, target).items.length
@@ -634,12 +686,14 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
   return {
     fosterable,
     branches,
+    secondFiles,
     restorable,
     worktreeClaims,
     ...(titlesOutOfStep === undefined ? {} : { titlesOutOfStep }),
     exhausted:
       fosterable === 0 &&
       branches === 0 &&
+      secondFiles === 0 &&
       restorable === 0 &&
       worktreeClaims === 0 &&
       (titlesOutOfStep ?? 0) === 0,
@@ -648,6 +702,35 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
 
 function phase(outcomes: Outcome[]): SweepPhase {
   return { outcomes, counts: summariseOutcomes(outcomes) };
+}
+
+/**
+ * The second-file pass: one conversation, two rows here, and which of them is
+ * the one to continue in — see `engine/fileCards.ts` for the measurement and
+ * for what it refuses to touch.
+ *
+ * Reads the destination for itself rather than taking the cards the earlier
+ * passes started from: the pair it decides about often did not exist when this
+ * run began, because the row that completes it is a copy the fostering pass
+ * wrote minutes ago.
+ */
+function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
+  const { store, ledger, target, kin, live } = run;
+  const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
+  const events = ledger.read();
+  const hereCards = scanAccount(store, target, copySessionIds(events));
+  const plans = planFileCards({
+    hereCards,
+    kin,
+    otherFileTemplate,
+    // The other passes' marks, so a row already wearing one is recognised
+    // rather than given a second one in front of it (#35).
+    otherTemplates: [staleTemplate, divergedTemplate],
+    live,
+    state: project(events),
+    events,
+  });
+  return applyFileCards(plans, { ledger, dryRun });
 }
 
 /**
@@ -687,6 +770,7 @@ function runPinPass(
   store: StoreLayout,
   ledger: Ledger,
   branches: BranchesResult,
+  files: FileCardsResult,
   dryRun: boolean,
   env: NodeJS.ProcessEnv,
   list: ProcessLister,
@@ -696,7 +780,9 @@ function runPinPass(
     // Only worth saying when this run marked something: with no stale mark
     // there is no pin that could have been left behind, and a database foster
     // cannot read is not news on its own.
-    const marked = branches.retitled.some((outcome) => outcome.status === 'retitled');
+    const marked = [...branches.retitled, ...files.retitled].some(
+      (outcome) => outcome.status === 'retitled',
+    );
     return {
       fixes: [],
       moved: false,
@@ -704,7 +790,7 @@ function runPinPass(
     };
   }
 
-  const fixes = planPinFixes(branches, pins);
+  const fixes = planPinFixes(branches, files, pins);
   // Nothing to move yet on a dry run: the branch pass wrote nothing, so a copy
   // this pass would bring the tip in as does not exist for the pin to point at.
   if (fixes.length === 0 || dryRun) return { fixes, moved: false };
@@ -746,7 +832,7 @@ function readPinsQuietly(store: StoreLayout): { pins?: PinState; unreadable?: st
  * an older sweep's mark is a gap `foster pin` closes by hand today, not one
  * this pass claims to have just caused.
  */
-function planPinFixes(branches: BranchesResult, pins: PinState): PinFix[] {
+function planPinFixes(branches: BranchesResult, files: FileCardsResult, pins: PinState): PinFix[] {
   const fixes: PinFix[] = [];
   for (const fork of branches.forks) {
     // Nothing resolvable to recommend or move to. Rare: it means the tip
@@ -766,6 +852,25 @@ function planPinFixes(branches: BranchesResult, pins: PinState): PinFix[] {
       });
     }
   }
+
+  // The same follow-through for the other marking pass: a pin left sitting on
+  // the file of a conversation that is no longer the one to continue in is the
+  // very complaint this pass exists to answer.
+  for (const plan of files.plans) {
+    const marked = new Set(plan.retitle.map((request) => request.path));
+    for (const outcome of files.retitled) {
+      if (outcome.status !== 'retitled' || outcome.as !== 'other-file') continue;
+      if (!marked.has(outcome.path)) continue;
+      if (!pins.ids.includes(outcome.sessionId)) continue;
+      fixes.push({
+        staleSessionId: outcome.sessionId,
+        staleTitle: outcome.from || outcome.to,
+        cleanTitle: plan.working.title,
+        cleanSessionId: plan.working.sessionId,
+      });
+    }
+  }
+
   return fixes;
 }
 

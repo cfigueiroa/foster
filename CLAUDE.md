@@ -193,6 +193,18 @@ skipped as already here. The sweep needs it in two places: a fork held in
 two files went to the branch pass, which decides on the id alone, and was retitled rather than
 completed.
 
+Which of those two rows to continue in is no longer left to the reader. A pass of its own
+(`foster sweep`, `src/engine/fileCards.ts`) elects **the row whose last answer is the most
+recent** — where the work was left — leaves its title clean, and marks every other row of that
+conversation `(other file, stopped DD/MM HH:MM) ` (`--other-file-prefix`), filing it in the
+archived view. Measured 19/09/2026 on a real store: 12 such pairs in one account, the repository's
+file the fuller one in 7 of them and the worktree's in 5 — so "the worktree row is the fuller one"
+is not a rule, and nothing here guesses from the shape of a path. Two refusals hold it honest: a
+row the branch pass has already marked is left to that pass, since a row can be on the losing side
+of both questions and its branch is what decides whether it belongs in the sidebar at all; and a
+row opening the _same_ file as the elected one is a duplicate, not a second file, so it is left
+alone. Nothing is merged — `consolidate` still does not join two files of one conversation.
+
 One thing this does not do: it never repoints or rewrites a card the account already has — the
 existing row keeps opening what it opened. What it does do is reach past `already fostered`: since
 #63, `resolveExisting` (`src/engine/executor.ts`) asks `unreached` of a copy the ledger vouches

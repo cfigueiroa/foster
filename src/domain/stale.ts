@@ -40,6 +40,26 @@ export const DEFAULT_STALE_TEMPLATE = '(stale, stopped {when}) ';
  */
 export const DEFAULT_DIVERGED_TEMPLATE = '(other branch, went on {when}) ';
 
+/**
+ * What the other row of one conversation wears, when the conversation occupies
+ * more than one file.
+ *
+ * Not a fork: one `cliSessionId`, one piece of work, two transcripts — because
+ * the app opens the file under the project directory of the card's own working
+ * directory, and continuing from a repository and from a worktree cut out of it
+ * writes to two files. The sweep brings both rows on purpose, since each opens
+ * records the other cannot, and until now they arrived wearing the same title
+ * with nothing to say which one to continue in. Measured on a real store
+ * (19/09/2026): 12 such pairs in one account, the fuller file the repository's
+ * in 7 of them and the worktree's in 5 — so no rule of thumb about which side
+ * wins, and 4 pairs whose second row opened no file at all.
+ *
+ * The row to continue in is the one whose last answer is the most recent, and
+ * it keeps its title. The other wears this, and is filed away: still there,
+ * still opens, no longer competing for the click.
+ */
+export const DEFAULT_OTHER_FILE_TEMPLATE = '(other file, stopped {when}) ';
+
 /** The slot in a template that the moment fills. */
 export const WHEN = '{when}';
 
@@ -202,7 +222,12 @@ export function templatesSeen(events: readonly LedgerEvent[]): string[] {
   // by a derivation, however that derivation would have read it.
   for (const event of events) {
     if (event.kind === 'card_retitled') {
-      if (event.as === 'stale' || event.as === 'diverged' || event.as === 'tip')
+      if (
+        event.as === 'stale' ||
+        event.as === 'diverged' ||
+        event.as === 'other-file' ||
+        event.as === 'tip'
+      )
         add(event.template);
     } else if (event.kind === 'fostered') {
       add(event.template);
@@ -212,7 +237,7 @@ export function templatesSeen(events: readonly LedgerEvent[]): string[] {
   // Then the fallback, for entries written before the field existed.
   for (const event of events) {
     if (event.kind === 'card_retitled' && event.template === undefined) {
-      if (event.as === 'stale' || event.as === 'diverged') {
+      if (event.as === 'stale' || event.as === 'diverged' || event.as === 'other-file') {
         // `to` carries the mark; `from` is the clean title beneath it — even
         // when `from` itself already wears an older mark, the clean title is
         // still the suffix the two share.

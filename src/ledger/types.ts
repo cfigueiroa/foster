@@ -308,13 +308,14 @@ export interface CardRetitledEvent extends BaseEvent {
   /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
   native: boolean;
   /**
-   * Why: marked as the branch that stopped, restored to the branch that carried
-   * on, or brought back into step with the title its original wears now.
+   * Why: marked as the branch that stopped, marked as the other file of a
+   * conversation this account shows twice, restored to the row to continue in,
+   * or brought back into step with the title its original wears now.
    */
-  as: 'stale' | 'tip' | 'diverged' | 'synced';
+  as: 'stale' | 'tip' | 'diverged' | 'other-file' | 'synced';
   /**
-   * The template the mark was made from, `{when}` unfilled — set for `as: 'stale'`
-   * and `as: 'diverged'`, and for `as: 'tip'` the template that was REMOVED, when
+   * The template the mark was made from, `{when}` unfilled — set for `as: 'stale'`,
+   * `as: 'diverged'` and `as: 'other-file'`, and for `as: 'tip'` the one REMOVED, when
    * it could be told. Absent in entries written before this was kept and for
    * `as: 'synced'`, which never carries a mark of its own; `templatesSeen` derives
    * a fallback for those from `from`/`to` themselves — see `domain/stale.ts`.
