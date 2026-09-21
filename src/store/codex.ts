@@ -186,7 +186,7 @@ export interface CodexRecord {
  * tool-call counts (`codexImport.ts`) needs every record, and there is no
  * cheaper way to get them. Rollouts run tens of KB to low hundreds of MB in
  * practice, not the multi-GB range a streaming reader like
- * `transcripts.ts#streamRecords` earns its complexity for — the corpus this
+ * `transcripts.ts#streamLines` earns its complexity for — the corpus this
  * was measured against is 5.5 GB across 1,320 files, averaging ~4 MB each.
  */
 export function readRolloutRecords(file: string): CodexRecord[] {
