@@ -192,11 +192,16 @@ import {
   restartPlan,
   runSweep,
   type BranchesPhase,
+  type FileCardsPhase,
   type SweepReport,
   type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
-import { DEFAULT_DIVERGED_TEMPLATE, DEFAULT_STALE_TEMPLATE } from '../domain/stale.js';
+import {
+  DEFAULT_DIVERGED_TEMPLATE,
+  DEFAULT_OTHER_FILE_TEMPLATE,
+  DEFAULT_STALE_TEMPLATE,
+} from '../domain/stale.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf, manualLabelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -206,6 +211,7 @@ import {
   accountTree,
   dateOutcomeLine,
   datePlanLine,
+  filePlanLines,
   forkLines,
   formatAge,
   formatBytes,
@@ -941,6 +947,11 @@ program
     DEFAULT_DIVERGED_TEMPLATE,
   )
   .option(
+    '--other-file-prefix <template>',
+    'what the row wears that is not the one to continue in, when one conversation is shown twice here',
+    DEFAULT_OTHER_FILE_TEMPLATE,
+  )
+  .option(
     '--sync-titles',
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
@@ -965,6 +976,7 @@ program
       prefix: string;
       stalePrefix: string;
       branchPrefix: string;
+      otherFilePrefix: string;
       syncTitles?: boolean;
       dates?: boolean;
       undoRetitles?: boolean;
@@ -991,6 +1003,7 @@ program
       prefix: opts.prefix,
       staleTemplate: opts.stalePrefix,
       divergedTemplate: opts.branchPrefix,
+      otherFileTemplate: opts.otherFilePrefix,
       syncTitles: Boolean(opts.syncTitles),
       dates: Boolean(opts.dates),
       dryRun,
@@ -1012,6 +1025,7 @@ program
 
     printPhase('Fostering, archived included', report.fostered.outcomes);
     printBranches(report.branches);
+    printFileCards(report.files);
     printPhase('Restoring what the app deleted', report.restored.outcomes);
     printWorktreeClaims(report.worktreeClaims, dryRun);
     if (report.titleSync) printTitleSync(report.titleSync, dryRun);
@@ -1111,6 +1125,21 @@ function printBranches(phase: BranchesPhase): void {
     return;
   }
   for (const fork of phase.forks) for (const line of forkLines(fork)) console.log(line);
+}
+
+/**
+ * The second-file pass, one block per conversation shown here twice: which row
+ * is the one to continue in, and what the others now say.
+ */
+function printFileCards(phase: FileCardsPhase): void {
+  console.log(pc.bold('\nConversations shown here more than once'));
+  if (phase.plans.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+    return;
+  }
+  for (const plan of phase.plans) {
+    for (const line of filePlanLines(plan, phase.retitled)) console.log(line);
+  }
 }
 
 function printWorktreeClaims(phase: WorktreeClaimsPhase, dryRun: boolean): void {
@@ -1215,6 +1244,26 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
       })),
     },
     restored: phase(report.restored),
+    files: {
+      archived: report.files.archived,
+      otherFileTemplate: report.files.otherFileTemplate,
+      plans: report.files.plans.map((plan) => ({
+        cliSessionId: plan.cliSessionId,
+        working: plan.working,
+        rows: plan.rows,
+        skipped: plan.skipped,
+      })),
+      retitled: report.files.retitled.map((outcome) => ({
+        sessionId: outcome.sessionId,
+        path: outcome.path,
+        from: outcome.from,
+        to: outcome.to,
+        ...(outcome.archived ? { archived: outcome.archived } : {}),
+        status: outcome.status,
+        ...(outcome.detail ? { detail: outcome.detail } : {}),
+        as: outcome.as,
+      })),
+    },
     worktreeClaims: {
       counts: report.worktreeClaims.counts,
       items: report.worktreeClaims.items,

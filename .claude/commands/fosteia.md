@@ -26,11 +26,12 @@ One command, one tool call. What runs before the sweep is not decoration: those 
 the name this conversation gets at the end, measured rather than remembered.
 
 ```
-"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(continuou, até {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(continuou, até {when}) " --other-file-prefix "(outro arquivo, parou {when}) "
 ```
 
-Pass **both** prefixes, always. They are two different verdicts on a branch, and a run that
-names only one marks the other in English on a sidebar read in Portuguese.
+Pass **all three** prefixes, always. They are three different verdicts — two on a branch of a
+fork, one on the other file of a conversation shown here twice — and a run that names only some
+of them marks the rest in English on a sidebar read in Portuguese.
 
 `--sync-titles` is what keeps a row findable by name. A copy carries the title of the instant
 it was made, and every later sweep sees it as already fostered and walks past — so a
@@ -42,8 +43,9 @@ renamed is never touched, and the mark a branch wears is put back in front of th
 
 That is the whole sweep. It copies every fosterable session from the other accounts —
 **archived included**, which is where the volume is — gives every branch of a forked
-conversation a row of its own, brings back conversations the app deleted that nothing still
-points at, re-scans to say whether anything is left, and counts what can never come at all.
+conversation a row of its own, says which row to continue in when one conversation is shown
+here more than once, brings back conversations the app deleted that nothing still points at,
+re-scans to say whether anything is left, and counts what can never come at all.
 It takes about half a minute on a large store: it reads every transcript it can see once, to
 catch forks that began in the middle of a conversation.
 Do not run `foster doctor` first and do not run anything to confirm afterwards: the sweep
@@ -96,6 +98,13 @@ on rather than re-deriving it:
   at once — it is measured against the branch that carried on, not against the other branches — so
   never call it "the newest": it says what that branch did, not how it ranks. If a row they had
   pinned was archived as stale, the current row needs pinning again;
+- **how many conversations were shown here more than once, and which row to continue in.** One
+  conversation can occupy two files — continued from a repository and from a worktree cut out of
+  it — and the sweep brings a row for each on purpose, because each opens records the other
+  cannot. The row whose **last answer is the most recent** keeps its clean title and is the one to
+  open; the others now wear "(outro arquivo, parou DD/MM HH:MM)" and sit in the archived view.
+  Say it as one sentence, not as a defect: nothing is merged, and the marked row still opens its
+  own half of the work. `foster consolidate` does **not** join these two, so never offer it here;
 - how many titles were brought back into step with their original, when the run names any, and
   that a copy renamed by hand is left alone on purpose;
 - whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same

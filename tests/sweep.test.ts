@@ -218,6 +218,7 @@ describe('runSweep', () => {
     expect(report.confirmation).toEqual({
       fosterable: 0,
       branches: 0,
+      secondFiles: 0,
       restorable: 0,
       worktreeClaims: 0,
       exhausted: true,
@@ -599,6 +600,7 @@ describe('one row per branch', () => {
     expect(first.confirmation).toEqual({
       fosterable: 0,
       branches: 0,
+      secondFiles: 0,
       restorable: 0,
       worktreeClaims: 0,
       exhausted: true,
@@ -1367,6 +1369,11 @@ describe('a branch whose conversation is held in two files', () => {
     expect(card(TRUNK_CARD).title).toBe(
       `(stale, stopped ${formatStamp(Date.parse(SPLIT_LAST_ANSWER))}) Macs`,
     );
+    // And the second-file pass says nothing about the same rows. Both passes
+    // can see this conversation — one branch of a fork, held in two files — but
+    // the branch is what decides whether the row belongs in the sidebar at all,
+    // so "the other file" must not be written over "the branch that stopped".
+    expect(report.files.plans).toHaveLength(0);
   });
 
   it('does not bring a card that opens the file the row here already opens', () => {

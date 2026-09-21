@@ -81,19 +81,49 @@ export function weighBranches(cliSessionIds: string[], kin: Lineage): BranchWeig
     scans.set(cliSessionId, scan);
   }
 
-  // How many branches carry each record. One holder means the record is that
-  // branch's alone; more means it is history they share.
+  const weights: BranchWeight[] = [];
+  for (const [cliSessionId, weight] of weighScans(scans)) weights.push({ cliSessionId, ...weight });
+  return weights.sort(byAdvancement);
+}
+
+/** What one transcript holds, measured against the others it was weighed with. */
+export interface ScanWeight {
+  /** Records the transcript holds. */
+  total: number;
+  /** Records none of the others hold. */
+  only: number;
+  /** Records it has in common with at least one of them. */
+  shared: number;
+  lastMessageAt?: number;
+  lastAssistantAt?: number;
+}
+
+/**
+ * Set difference over several transcripts, keyed however the caller keys them.
+ *
+ * Shared between the two passes that need it, and they key it differently for a
+ * reason: `weighBranches` weighs the branches of a fork, one transcript per
+ * `cliSessionId`, while `fileCards.ts` weighs the files of a single conversation,
+ * one transcript per path. The measure is the same either way, and the reasons
+ * it is set difference rather than mtime or a common prefix are this module's
+ * own, above.
+ *
+ * The caller must hand each transcript in once. Two keys pointing at one file
+ * would each see the other as a holder and both come back holding nothing alone.
+ */
+export function weighScans<K>(scans: ReadonlyMap<K, ConversationScan>): Map<K, ScanWeight> {
+  // How many of them carry each record. One holder means the record is that
+  // transcript's alone; more means it is history they share.
   const holders = new Map<string, number>();
   for (const scan of scans.values()) {
     for (const uuid of scan.uuids) holders.set(uuid, (holders.get(uuid) ?? 0) + 1);
   }
 
-  const weights: BranchWeight[] = [];
-  for (const [cliSessionId, scan] of scans) {
+  const weights = new Map<K, ScanWeight>();
+  for (const [key, scan] of scans) {
     let only = 0;
     for (const uuid of scan.uuids) if (holders.get(uuid) === 1) only += 1;
-    weights.push({
-      cliSessionId,
+    weights.set(key, {
       total: scan.uuids.size,
       only,
       shared: scan.uuids.size - only,
@@ -102,7 +132,7 @@ export function weighBranches(cliSessionIds: string[], kin: Lineage): BranchWeig
     });
   }
 
-  return weights.sort(byAdvancement);
+  return weights;
 }
 
 /**

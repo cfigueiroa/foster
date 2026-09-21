@@ -2,6 +2,7 @@ import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import { describeUnfosterable } from '../domain/fostering.js';
 import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
+import type { FilePlan } from '../engine/fileCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
 import type { RetitleOutcome } from '../engine/retitle.js';
 import type { DateOutcome, DatePlanItem } from '../engine/dates.js';
@@ -543,6 +544,29 @@ export function forkLines(fork: ForkOutcome): string[] {
   return lines;
 }
 
+/**
+ * One conversation this account shows twice, and which row to continue in.
+ *
+ * The row to continue in is named first and named plainly: it is the answer the
+ * reader came for, and the marks below it only make sense once they know which
+ * row the marking was measured against.
+ */
+export function filePlanLines(plan: FilePlan, retitled: readonly RetitleOutcome[]): string[] {
+  const working = plan.rows.find((row) => row.working);
+  const holds = working ? ` — the row to continue in holds ${working.total} records` : '';
+  const lines = [
+    pc.dim(`  ${plan.working.title || '(untitled)'}: ${plan.rows.length} rows${holds}`),
+  ];
+  const mine = new Set(plan.retitle.map((request) => request.path));
+  for (const outcome of retitled) {
+    if (mine.has(outcome.path)) lines.push(retitleLine(outcome));
+  }
+  for (const row of plan.skipped) {
+    lines.push(`  ${pc.dim('·')} ${row.title}${pc.dim(` (${row.detail})`)}`);
+  }
+  return lines;
+}
+
 /** A row the branch pass added, named by the title the copy wears. */
 function broughtLine(outcome: Outcome): string {
   const marks: Record<OutcomeStatus, string> = {
@@ -665,7 +689,7 @@ export function sweepSummary(report: SweepReport): string[] {
       confirmation.exhausted
         ? pc.green(
             'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
-              'restore 0, and release 0 worktree claims' +
+              'mark 0 second files, restore 0, and release 0 worktree claims' +
               (confirmation.titlesOutOfStep === undefined
                 ? '.'
                 : ', and bring 0 titles into step.'),
@@ -673,6 +697,7 @@ export function sweepSummary(report: SweepReport): string[] {
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
               `${confirmation.branches} row(s) still to add or mark for branches, ` +
+              `${confirmation.secondFiles} row(s) still to mark as a second file, ` +
               `${confirmation.restorable} still to restore, ` +
               `${confirmation.worktreeClaims} worktree claim(s) still to release` +
               (confirmation.titlesOutOfStep
@@ -703,7 +728,24 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
-  const unknownMark = unknownMarkNames(branches.forks);
+  // Said in the same shape as the fork paragraph above, and for the same
+  // reason: the reader's next act is picking a row, and this is the sentence
+  // that tells them which one.
+  const files = report.files;
+  if (files.plans.length > 0) {
+    const pairs = files.plans.length;
+    const marked = files.retitled.filter((outcome) => outcome.status === 'retitled').length;
+    const filed = files.archived > 0 ? `, ${files.archived} filed in the archived view` : '';
+    lines.push(
+      `${pairs} conversation${pairs === 1 ? '' : 's'} shown here more than once, one row per file: ` +
+        `${marked} row${marked === 1 ? '' : 's'} marked${filed}.\n` +
+        'The row whose last answer is the most recent keeps its title and is the one to continue in; ' +
+        `the others wear "${files.otherFileTemplate.trim()}".\n` +
+        'Nothing is merged: each row still opens its own file, and foster consolidate does not join them.',
+    );
+  }
+
+  const unknownMark = unknownMarkNames(branches.forks, files.plans);
   if (unknownMark) lines.push(pc.yellow(unknownMark));
 
   const pinLine = pinFixesLine(report.pinFixes);
@@ -813,10 +855,11 @@ function strandedNames(never: NeverComes): string {
  *
  * Empty when nothing wears an unexplained mark, so a clean run stays quiet.
  */
-function unknownMarkNames(forks: ForkOutcome[]): string {
-  const rows = forks
-    .flatMap((fork) => fork.skipped)
-    .filter((row) => row.detail === UNKNOWN_MARK_DETAIL);
+function unknownMarkNames(forks: ForkOutcome[], plans: readonly FilePlan[]): string {
+  const rows = [
+    ...forks.flatMap((fork) => fork.skipped),
+    ...plans.flatMap((plan) => plan.skipped),
+  ].filter((row) => row.detail === UNKNOWN_MARK_DETAIL);
   if (rows.length === 0) return '';
   const shown = rows.slice(0, NAMED_LIMIT);
   const rest = rows.length - shown.length;
@@ -826,7 +869,7 @@ function unknownMarkNames(forks: ForkOutcome[]): string {
   const tail = rest > 0 ? `\n  ...and ${rest} more` : '';
   return (
     `${head}\n${titles.join('\n')}${tail}\n` +
-    'Fix the words by hand, or run with the --stale-prefix/--branch-prefix that matches them.'
+    'Fix the words by hand, or run with the --stale-prefix/--branch-prefix/--other-file-prefix that matches them.'
   );
 }
 

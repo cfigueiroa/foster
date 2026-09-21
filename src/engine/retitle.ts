@@ -44,7 +44,7 @@ export interface RetitleRequest {
    * Why: marked as the branch that stopped, restored as the one that carried on,
    * or brought back into step with its original — see `titleSync.ts`.
    */
-  as: 'stale' | 'tip' | 'diverged' | 'synced';
+  as: 'stale' | 'tip' | 'diverged' | 'other-file' | 'synced';
   /**
    * The template the mark was made from, or — for `as: 'tip'` — the template
    * the write is taking off, when `branchCards.ts` could tell which one it was.
@@ -65,7 +65,7 @@ export interface RetitleOutcome {
   archived?: { from: boolean; to: boolean };
   status: 'retitled' | 'skipped' | 'failed';
   detail?: string;
-  as: 'stale' | 'tip' | 'diverged' | 'synced';
+  as: 'stale' | 'tip' | 'diverged' | 'other-file' | 'synced';
 }
 
 export interface RetitleOptions {

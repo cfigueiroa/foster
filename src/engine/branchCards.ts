@@ -1,28 +1,17 @@
 import { UNTITLED } from '../domain/fostering.js';
-import {
-  looksMarked,
-  staleMark,
-  staleMatcher,
-  stampWithin,
-  stripMarks,
-  templatesSeen,
-} from '../domain/stale.js';
+import { looksMarked, staleMark, stripMarks, templatesSeen } from '../domain/stale.js';
 import type { DiscoveredSession } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import type { LedgerState } from '../ledger/project.js';
 import { divergedFrom, type BranchWeight, type Forks } from './branches.js';
 import { fosterSessions, type FosterOptions, type Outcome } from './executor.js';
+import { markFor, UNKNOWN_MARK_DETAIL, type MarkDecision } from './marks.js';
 import { retitleCards, type RetitleOutcome, type RetitleRequest } from './retitle.js';
 import type { Sidebar } from './sidebar.js';
 
-/**
- * What a row is left wearing when foster cannot account for its mark.
- *
- * Shared with `cli/render.ts`, which counts and names these rows in the sweep
- * summary, and with the tests that pin the shape down — a string typed once
- * cannot drift between the place that writes it and the place that reads it.
- */
-export const UNKNOWN_MARK_DETAIL = 'wears a mark foster cannot account for — left as it is';
+// The mark this pass writes is the same write `fileCards.ts` makes for its own
+// reason, so the rules that make it safe live in `marks.ts` rather than here.
+export { UNKNOWN_MARK_DETAIL } from './marks.js';
 
 /**
  * One row per branch, and the rows say which one carried on.
@@ -158,6 +147,15 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
     if (card.toArchived) archivedByFoster.add(card.sessionId);
   }
 
+  // Rows wearing the other marking pass's mark. A tip strips whatever mark it
+  // finds, and stripping one this pass did not write is a loop rather than a
+  // fix: `fileCards.ts` marks the row again on the same run, this pass takes it
+  // off on the next, and the sweep never says it is finished. Measured on a real
+  // store: two rows that are both the tip of a fork and the older file of one
+  // conversation flipped that way on every run. A row this pass has something of
+  // its own to say about — stale, diverged — is still marked; only the write that
+  // would merely erase someone else's mark is skipped.
+  const fileMarked = fileMarkedIds(events);
   const plans: ForkPlan[] = [];
 
   for (const fork of forks.all()) {
@@ -201,6 +199,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
           };
         }
         for (const card of held) {
+          if (kind === 'tip' && fileMarked.has(card.data.sessionId)) continue;
           const decision = retitleFor(card, {
             kind,
             mark,
@@ -275,6 +274,21 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
 }
 
 /**
+ * Cards the second-file pass is responsible for, by the last thing the ledger
+ * says was written to them — the mirror of `fileCards.ts`'s own check, and the
+ * other half of keeping the two passes from undoing each other.
+ */
+function fileMarkedIds(events: readonly LedgerEvent[]): Set<string> {
+  const last = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind === 'card_retitled') last.set(event.sessionId, event.as);
+  }
+  const ids = new Set<string>();
+  for (const [id, as] of last) if (as === 'other-file') ids.add(id);
+  return ids;
+}
+
+/**
  * Where the work on a branch was left: its last answer. The last record would
  * be wrong here — `transcripts.ts` explains the click that moves it.
  */
@@ -288,13 +302,10 @@ function sameId(a: string | undefined, b: string): boolean {
 }
 
 /**
- * What to do about one card of one branch — write a mark, leave it because
- * there is nothing to change, or leave it because it is already wearing a
- * mark this run cannot account for.
+ * What to do about one card of one branch, in the vocabulary of this pass:
+ * which branch it is decides the mark, whether the row is filed away, and
+ * which template the write records. Everything after that is `markFor`'s.
  */
-type RetitleDecision =
-  { kind: 'write'; request: RetitleRequest } | { kind: 'unknown-mark' } | { kind: 'none' };
-
 function retitleFor(
   card: DiscoveredSession,
   context: {
@@ -305,87 +316,24 @@ function retitleFor(
     staleTemplate: string;
     divergedTemplate: string;
   },
-): RetitleDecision {
+): MarkDecision {
   const { kind, mark, templates, archivedByFoster, staleTemplate, divergedTemplate } = context;
-  const current = card.data.title ?? '';
-  const clean = stripMarks(current, templates);
-
-  // Every template this run knows about is already off. A title that still
-  // looks marked wears one from a foster this run cannot explain, or a hand
-  // edit shaped like one — either way, guessing at it is how a mark this run
-  // does not recognise gets a second mark stacked in front of it.
-  if (looksMarked(clean)) return { kind: 'unknown-mark' };
-
-  const freshTitle = kind === 'tip' ? clean : `${mark}${clean.trim() ? clean : UNTITLED}`;
-
-  // What the card already wears, with the recognised mark taken off — the
-  // stripped-away prefix rather than the clean title left behind.
-  const existingMark = current.slice(0, current.length - clean.length);
-
-  // Recognising an old mark is only half of #35's fix. The other half: a row
-  // already wearing a mark for the very moment this run would stamp it with
-  // is left exactly as it is, whatever words that mark used — only a
-  // genuinely different moment (the branch's situation actually changed) or a
-  // kind that no longer wants a mark at all earns a rewrite. Comparing the
-  // moment rather than the string is what keeps a `--stale-prefix` chosen
-  // today from turning into a rewrite of every row an earlier run marked in
-  // different words.
-  const alreadyCurrent =
-    kind !== 'tip' &&
-    existingMark !== '' &&
-    stampWithin(existingMark) !== undefined &&
-    stampWithin(existingMark) === stampWithin(mark);
-  const title = alreadyCurrent ? current : freshTitle;
-
-  // Only a branch that stopped is filed away. A branch that went on comes back
-  // out of the archived view when foster is the one that put it there — an
-  // earlier sweep, ranking by weight alone, filed the half the user was working
-  // in; a flag the user set is still the user's.
-  let archived: boolean | undefined;
-  if (kind === 'stale') {
-    if (!card.data.isArchived) archived = true;
-  } else if (card.data.isArchived && archivedByFoster.has(card.data.sessionId)) {
-    archived = false;
-  }
-
-  if (title === current && archived === undefined) return { kind: 'none' };
-
-  // Stale and diverged write the template they were just given, unless the
-  // row's existing words are being kept as they are — then it is whichever
-  // known template those words came from. A tip strips a mark rather than
-  // adding one, so what it records is whichever known template explains the
-  // mark it just took off — undefined when none does.
-  const template =
-    kind === 'tip'
-      ? templateResponsibleFor(current, templates)
-      : alreadyCurrent
-        ? templateResponsibleFor(current, templates)
-        : kind === 'stale'
-          ? staleTemplate
-          : divergedTemplate;
-
-  return {
-    kind: 'write',
-    request: {
-      path: card.path,
-      target: card.account,
-      native: !card.isCopy,
-      title,
-      ...(archived === undefined ? {} : { archived }),
-      as: kind,
-      ...(template ? { template } : {}),
-    },
-  };
-}
-
-/**
- * Which known template explains the mark at the front of `title`, when one
- * does — the first that matches, since a mark this run is about to remove was
- * itself written by exactly one of them (or by none, if the title carries no
- * mark at all).
- */
-function templateResponsibleFor(title: string, templates: readonly string[]): string | undefined {
-  return templates.find((template) => template !== '' && staleMatcher(template).test(title));
+  return markFor(card, {
+    as: kind,
+    mark,
+    // A tip strips a mark rather than adding one, so it names no template of
+    // its own: `markFor` records whichever known one explains what it took off.
+    ...(kind === 'stale'
+      ? { template: staleTemplate }
+      : kind === 'diverged'
+        ? { template: divergedTemplate }
+        : {}),
+    templates,
+    archivedByFoster,
+    // Only a branch that stopped is filed away. A branch that went on comes
+    // back out of the archived view when foster is the one that put it there.
+    file: kind === 'stale',
+  });
 }
 
 function withTitle(session: DiscoveredSession, title: string): DiscoveredSession {
