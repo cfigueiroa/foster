@@ -214,12 +214,17 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
 
     // Judged the same way the filter judges it, so a session the caller was
     // shown as available cannot be refused here for the reason it was shown
-    // despite.
-    const blocking = blockingReasons(session, {
-      includeArchived: options.includeArchived,
-      includeScheduled: options.includeScheduled,
-      includeSpawned: options.includeSpawned,
-    });
+    // despite — reach included: a copy offered because it carried on past what
+    // this account can reach is not refused here as "already a copy" (#119).
+    const blocking = blockingReasons(
+      session,
+      {
+        includeArchived: options.includeArchived,
+        includeScheduled: options.includeScheduled,
+        includeSpawned: options.includeSpawned,
+      },
+      { here, cwd: copyCwd(session.data, reach) },
+    );
     if (blocking.length > 0) {
       outcomes.push({
         originSessionId: originId,
