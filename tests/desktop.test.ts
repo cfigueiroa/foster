@@ -13,6 +13,7 @@ import {
   desktopExecutable,
   deliverUrl,
   type ProcessRow,
+  type QuitOptions,
 } from '../src/engine/desktop.js';
 import { appHolds, heldInMemory, inspectApp } from '../src/engine/safety.js';
 import { storeExecutable } from '../src/engine/stores.js';
@@ -354,6 +355,15 @@ describe('quitDesktop', () => {
   // self-host refusal instead of the behaviour under test.
   const outside: NodeJS.ProcessEnv = {};
 
+  // The behaviour under test is the logic around the close, never the close
+  // itself: the terminate path sleeps SETTLE_MS (3.5 s) and every close that
+  // reaches taskkill spawns a real process — both the loaded machine's cost
+  // rather than the diff's, and together the reason these cases timed out at 5 s
+  // under load and read as a regression (#113, #118). Inject them out so the
+  // suite is deterministic; a case that needs the real timing overrides it.
+  const close = (store: StoreLayout, options: QuitOptions = {}) =>
+    quitDesktop(store, { settleMs: 0, kill: () => undefined, ...options });
+
   function storeWith(config: Record<string, unknown>): StoreLayout {
     const store = makeStore();
     writeFileSync(store.configFile, JSON.stringify(config), 'utf8');
@@ -368,7 +378,7 @@ describe('quitDesktop', () => {
   }
 
   it('says nothing to do when the app is not running', async () => {
-    const result = await quitDesktop(storeWith({}), { list: () => [], env: outside });
+    const result = await close(storeWith({}), { list: () => [], env: outside });
     expect(result.outcome).toBe('not-running');
   });
 
@@ -380,18 +390,16 @@ describe('quitDesktop', () => {
     const table: ProcessRow[] = [
       { pid: PID, parentPid: 0, name: 'claude.exe', path: '', commandLine: '', partial: true },
     ];
-    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
+    await expect(close(store, { list: () => table, env: outside })).rejects.toThrow(
       DesktopControlError,
     );
-    await expect(quitDesktop(store, { list: () => table, env: outside })).rejects.toThrow(
-      /cannot tell/,
-    );
+    await expect(close(store, { list: () => table, env: outside })).rejects.toThrow(/cannot tell/);
   });
 
   it('refuses to close the app it is running inside', async () => {
     const store = storeWith({});
     await expect(
-      quitDesktop(store, {
+      close(store, {
         list: table(store.root),
         terminate: true,
         env: { CLAUDE_CODE_HOST_SESSION_ID: 'local_x' },
@@ -404,7 +412,7 @@ describe('quitDesktop', () => {
     // make the user's window vanish and leave the process up — strictly worse
     // than doing nothing, which is why this reports instead of trying.
     const store = storeWith({ locale: 'en-US' });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
     });
@@ -422,7 +430,7 @@ describe('quitDesktop', () => {
    */
   it('reads the tray setting from the app settings file, where the UI writes it', async () => {
     const store = settingsWith({ preferences: { menuBarEnabled: false } });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -436,7 +444,7 @@ describe('quitDesktop', () => {
       { preferences: { menuBarEnabled: true } },
       { menuBarEnabled: false, preferences: { menuBarEnabled: false } },
     );
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -453,7 +461,7 @@ describe('quitDesktop', () => {
       JSON.stringify({ preferences: { menuBarEnabled: false } }),
       'utf8',
     );
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -471,7 +479,7 @@ describe('quitDesktop', () => {
    */
   it('reads the tray setting from inside preferences, where the app keeps it', async () => {
     const store = storeWith({ preferences: { menuBarEnabled: false } });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -484,7 +492,7 @@ describe('quitDesktop', () => {
     // The fallback is for a build that kept it at the top, not a second opinion:
     // where the app's own home for the setting has an answer, that is the answer.
     const store = storeWith({ menuBarEnabled: false, preferences: { menuBarEnabled: true } });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -497,7 +505,7 @@ describe('quitDesktop', () => {
     // With the tray off the window's close handler really does quit the app, so a
     // polite route exists and this must not report needs-terminate.
     const store = storeWith({ menuBarEnabled: false });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -516,7 +524,7 @@ describe('quitDesktop', () => {
    */
   it('says the tray is in the way as soon as the window goes and the app stays', async () => {
     const store = storeWith({ menuBarEnabled: false });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 30_000,
@@ -535,7 +543,7 @@ describe('quitDesktop', () => {
     // first look would be due.
     const store = storeWith({ menuBarEnabled: false });
     let reads = 0;
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 30_000,
@@ -555,7 +563,7 @@ describe('quitDesktop', () => {
     // a window to answer.
     const store = storeWith({ menuBarEnabled: false });
     let reads = 0;
-    await quitDesktop(store, {
+    await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,
@@ -576,7 +584,7 @@ describe('quitDesktop', () => {
     // send the user to terminate something that is not there.
     const store = storeWith({ menuBarEnabled: false });
     let alive = true;
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 30_000,
@@ -596,7 +604,7 @@ describe('quitDesktop', () => {
     // Not Windows, or a reader that failed. Absence of an answer is not an
     // answer, so nothing here may shortcut the wait.
     const store = storeWith({ menuBarEnabled: false });
-    const result = await quitDesktop(store, {
+    const result = await close(store, {
       list: table(store.root),
       env: outside,
       timeoutMs: 1,

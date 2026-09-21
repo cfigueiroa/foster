@@ -501,6 +501,22 @@ export interface QuitOptions {
    * decides should not have to wait out the interval that spaces them.
    */
   windowCheckMs?: number;
+  /**
+   * The debounce waited out before terminating, so a metadata write in the last
+   * few seconds is not lost — see the terminate branch of quitDesktop. Injectable
+   * for tests: it is a real timer no `timeoutMs` covers, and a case proving the
+   * terminate path reads no window should not sleep 3.5 s to do it (#113, #118).
+   */
+  settleMs?: number;
+  /**
+   * Ends the pid — `/F /T` when `force`, a polite `WM_CLOSE` otherwise — and
+   * returns what it said when it refused, or `undefined` when it was happy.
+   * Injectable for tests, the same reason `alive` is: the default shells out to
+   * a real `taskkill`, whose cost is the machine's and not the behaviour under
+   * test, so a suite under load must be able to prove the surrounding logic
+   * without spawning a process at all.
+   */
+  kill?: (pid: number, force: boolean) => string | undefined;
 }
 
 export type QuitResult =
@@ -572,6 +588,8 @@ export async function quitDesktop(
     windowVisible = mainWindowVisible,
     alive = processAlive,
     windowCheckMs = WINDOW_CHECK_MS,
+    settleMs = SETTLE_MS,
+    kill = defaultKill,
   } = options;
   // Scoped to the installation being closed. With two profiles up, the global
   // question would happily quit whichever main process came first.
@@ -605,14 +623,14 @@ export async function quitDesktop(
     // The app saves on a trailing debounce of up to three seconds. Waiting that
     // out first turns "probably lost the last edit" into "probably did not",
     // which is cheap at this point — the user has already decided to close it.
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
     // Kept, unlike the asking form's: `/F` does not fail for want of a window, so
     // a non-zero exit here means the process was not ended — access denied, or a
     // pid that had already gone. Discarding it spent the full timeout and then
     // blamed the app for still running.
-    refused = taskkill(['/F', '/T', '/PID', String(pid)]);
+    refused = kill(pid, true);
   } else {
-    taskkill(['/PID', String(pid)]);
+    kill(pid, false);
   }
 
   // The lockfile is held for as long as the app runs and is released on exit, so
@@ -742,6 +760,11 @@ function taskkill(args: string[]): string | undefined {
     const text = `${String(said.stderr ?? '')}${String(said.stdout ?? '')}`.trim();
     return text === '' ? undefined : text.split(/\r?\n/)[0];
   }
+}
+
+/** The `QuitOptions.kill` default: `/F /T` when forcing, a polite close otherwise. */
+function defaultKill(pid: number, force: boolean): string | undefined {
+  return force ? taskkill(['/F', '/T', '/PID', String(pid)]) : taskkill(['/PID', String(pid)]);
 }
 
 export interface StartOptions {
