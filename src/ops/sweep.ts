@@ -658,16 +658,19 @@ function phase(outcomes: Outcome[]): SweepPhase {
  * Reading the pin list is one LevelDB read, the same one `foster pin` makes to
  * list what is pinned, and it is attempted on every sweep, dry run included.
  *
- * It usually fails. Measured with Claude Desktop open — the ordinary state
- * during a sweep, and the reason `--restart` exists — the read comes back
- * `MANIFEST-000001 names the log 000000.log, which is not there`: the manifest
- * on disk names a log the app has moved on from while it runs.
+ * It used to fail almost always, with `MANIFEST-000001 names the log 000000.log,
+ * which is not there` — and the app being open was never the cause, however well
+ * the two correlated. Measured 21/09/2026: Chromium opens these databases reusing
+ * the log it recovers, and only appends a version edit naming a log when it has
+ * another reason to write one, so a manifest can say `log 0` for the life of the
+ * database while the log on disk is `000003.log`. The number is a floor for
+ * recovery, not an address, and `locate` now reads the newest log at or above it.
  *
- * **Copying does not help, which #76 left open and 08/09/2026 settled.** A copy
- * taken while the app runs inherits that same stale manifest, so it fails
- * identically; renaming the log inside the copy does get the reader open, which
- * is how the far older defect underneath was found (#102). None of that is a
- * snapshot worth trusting, so the pass still does not read a live database.
+ * That is also why copying never helped, which #76 left open and 08/09/2026
+ * settled: a copy inherits the same manifest and fails identically. Renaming the
+ * log inside the copy got the reader open, which is how the far older defect
+ * underneath was found (#102) — and, in hindsight, how close the diagnosis came
+ * to the real one.
  *
  * What changed is the silence. A failed read used to be indistinguishable from
  * "nothing is pinned", so a run that marked a pinned row stale said nothing and

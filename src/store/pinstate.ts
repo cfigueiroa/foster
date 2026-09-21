@@ -192,7 +192,26 @@ export interface PinState {
   notices: string[];
 }
 
-function locate(directory: string): { logPath: string; lastSequence: bigint } {
+/**
+ * The log files a LevelDB directory holds, newest number first.
+ *
+ * LevelDB names them `NNNNNN.log`, and the number orders them: a higher number
+ * was opened later, so it holds the later records.
+ */
+function logsIn(directory: string): { name: string; number: number }[] {
+  const logs: { name: string; number: number }[] = [];
+  for (const name of safeReaddir(directory)) {
+    const match = /^(\d+)\.log$/.exec(name);
+    if (match) logs.push({ name, number: Number(match[1]) });
+  }
+  return logs.sort((a, b) => b.number - a.number);
+}
+
+function locate(directory: string): {
+  logPath: string;
+  lastSequence: bigint;
+  notice?: string;
+} {
   const current = path.join(directory, 'CURRENT');
   if (!existsSync(current)) {
     throw new PinStateError(
@@ -213,11 +232,36 @@ function locate(directory: string): { logPath: string; lastSequence: bigint } {
   }
 
   const name = `${String(state.logNumber).padStart(6, '0')}.log`;
-  const logPath = path.join(directory, name);
-  if (!existsSync(logPath)) {
+
+  // The manifest's log number is a floor, not an address. LevelDB appends a new
+  // version edit naming its log only when it has a reason to write one, and
+  // Chromium opens these databases with log reuse: the LOG file for this store
+  // reads `Reusing MANIFEST ... Recovering log #3 ... Reusing old log`, and the
+  // manifest has said `log 0` since the database was created. Recovery is
+  // defined over every log from that number up, so the log to read — and the one
+  // a write must append to, since it is the one the app replays — is the
+  // highest-numbered of those actually on disk. Measured 21/09/2026 on a real
+  // install: `foster pin` refused a perfectly healthy database with
+  // `MANIFEST-000001 names the log 000000.log, which is not there`, because
+  // 000003.log was the only log there.
+  const floor = Number(state.logNumber);
+  const usable = logsIn(directory).filter((log) => log.number >= floor);
+  const chosen = usable[0];
+  if (!chosen) {
     throw new PinStateError(`${manifestName} names the log ${name}, which is not there.`);
   }
-  return { logPath, lastSequence: state.lastSequence ?? 0n };
+
+  return {
+    logPath: path.join(directory, chosen.name),
+    lastSequence: state.lastSequence ?? 0n,
+    ...(chosen.name === name
+      ? {}
+      : {
+          notice:
+            `${manifestName} names the log ${name}, which is not there; ` +
+            `read ${chosen.name} instead, the newest log at or above that number.`,
+        }),
+  };
 }
 
 /**
@@ -235,7 +279,7 @@ function locate(directory: string): { logPath: string; lastSequence: bigint } {
  */
 export function readPinState(store: StoreLayout): PinState | undefined {
   const directory = indexedDbDir(store);
-  const { logPath, lastSequence } = locate(directory);
+  const { logPath, lastSequence, notice: located } = locate(directory);
   const log = readFileSync(logPath);
 
   // The id first, because every key below depends on it. Looked for in the log
@@ -291,7 +335,7 @@ export function readPinState(store: StoreLayout): PinState | undefined {
   // record before the damage is still checksummed and still read. Anything the
   // tolerant read gives up on is collected so the caller can say so instead of
   // quietly reporting a shorter list.
-  const notices: string[] = [];
+  const notices: string[] = located ? [located] : [];
   for (const batch of readLog(log, {
     tolerant: true,
     onNotice: (message) => notices.push(message),

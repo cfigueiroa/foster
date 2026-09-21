@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -388,6 +388,33 @@ describe('pin state', () => {
     writeFileSync(path.join(indexedDbDir(store), '000099.ldb'), Buffer.alloc(2048, 0x41));
 
     expect(readPinState(store)!.ids).toEqual([ID_A]);
+  });
+
+  it('reads the newest log on disk when the manifest names one that is gone', () => {
+    const store = makeStore();
+    const logPath = makeDatabase(store, { ids: [ID_A] });
+    // Chromium opens these databases reusing the log it recovered, and only
+    // writes a version edit naming it when it has another reason to write one.
+    // Measured 21/09/2026 on a real install: the manifest still said log 0 while
+    // 000003.log was the only log there, and `foster pin` refused to read it.
+    const newer = path.join(indexedDbDir(store), '000009.log');
+    renameSync(logPath, newer);
+
+    const state = readPinState(store)!;
+    expect(state.ids).toEqual([ID_A]);
+    expect(state.logPath).toBe(newer);
+    expect(state.notices.join(' ')).toMatch(/000009\.log/);
+  });
+
+  it('will not fall back to a log older than the one the manifest names', () => {
+    const store = makeStore();
+    const logPath = makeDatabase(store, { ids: [ID_A] });
+    // A log below the manifest's number was already folded into a sorted table
+    // and left behind; recovery starts at that number, so reading it would
+    // report records the app itself replays past.
+    renameSync(logPath, path.join(indexedDbDir(store), '000001.log'));
+
+    expect(() => readPinState(store)).toThrow(/000004\.log/);
   });
 
   it('refuses a database it cannot find its way around', () => {
