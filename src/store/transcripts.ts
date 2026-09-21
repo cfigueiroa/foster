@@ -460,9 +460,16 @@ export function scanConversation(file: string): ConversationScan {
   let lastMessageAt: number | undefined;
   let lastAssistantAt: number | undefined;
 
-  for (const record of streamRecords(file)) {
-    if (typeof record.uuid === 'string' && record.uuid !== '') uuids.add(record.uuid);
-    if (typeof record.timestamp === 'string') {
+  // Read field by field rather than record by record: three strings out of each
+  // line, and none of the graph around them. See `recordFields` for why the
+  // whole-record parse this replaces was the cost, and `streamLines` for why the
+  // bytes are decoded as latin1 — a uuid, an ISO timestamp and a type tag are
+  // ASCII, and nothing here is shown to anybody.
+  for (const line of streamLines(file, 'latin1')) {
+    const record = recordFields(line);
+    if (!record) continue;
+    if (record.uuid !== undefined && record.uuid !== '') uuids.add(record.uuid);
+    if (record.timestamp !== undefined) {
       const at = Date.parse(record.timestamp);
       if (Number.isFinite(at)) {
         lastMessageAt = at;
@@ -524,10 +531,248 @@ function later(a: number | undefined, b: number | undefined): number | undefined
   return Math.max(a, b);
 }
 
+/**
+ * The three top-level fields a whole-file scan needs, read out of one JSONL line
+ * without building the record.
+ *
+ * `JSON.parse` is the obvious way and was the expensive one. These records carry
+ * the whole conversation — a `message` with every content block, a
+ * `toolUseResult` with whatever a tool returned — and a scan wants three short
+ * strings out of each. Measured 21/09/2026 by CPU-profiling a dry `foster sweep`
+ * on a real store: 105.8 s of wall clock, of which **57.3 s was the garbage
+ * collector** alone, collecting record graphs built and dropped one line at a
+ * time.
+ *
+ * Deliberately not `idsMentionedIn`'s trick. That one asks whether an id occurs
+ * *anywhere*, so a regex over the raw bytes is the whole answer; this one asks
+ * what the record's **own** `uuid` is, and a regex cannot tell a record's id from
+ * one quoted inside a tool result. The set difference between two branches is
+ * what decides which of them is stale, so a borrowed id is a wrong verdict on
+ * somebody's work, not a rounding error.
+ *
+ * So this walks the line instead — but structurally, never character by
+ * character: strings are stepped over with `indexOf`, which is the native scan,
+ * and the loop only turns over at a brace, a bracket or a quote. A key counts
+ * only at depth 1. The cost is the number of tokens, not the number of bytes,
+ * which is what makes a 10 KB text block free.
+ *
+ * `undefined` means the line is not one self-contained JSON object — a torn tail,
+ * a fragment, a blank — and the caller skips it exactly as it skipped a line
+ * `JSON.parse` threw on.
+ */
+export interface RecordFields {
+  uuid?: string;
+  timestamp?: string;
+  type?: string;
+}
+
+/** The only keys this reads; everything else is stepped over unexamined. */
+const SCANNED_KEYS = new Set(['uuid', 'timestamp', 'type']);
+
+const SPACE = 0x20;
+const TAB = 0x09;
+const NEWLINE = 0x0a;
+const RETURN = 0x0d;
+const QUOTE = 0x22;
+const COLON = 0x3a;
+const BACKSLASH = 0x5c;
+const OPEN_BRACE = 0x7b;
+const CLOSE_BRACE = 0x7d;
+const OPEN_BRACKET = 0x5b;
+const CLOSE_BRACKET = 0x5d;
+
+function isSpace(code: number): boolean {
+  return code === SPACE || code === TAB || code === NEWLINE || code === RETURN;
+}
+
+function skipSpace(line: string, from: number): number {
+  let at = from;
+  while (at < line.length && isSpace(line.charCodeAt(at))) at++;
+  return at;
+}
+
+/**
+ * Where the string opened at `quoteAt` ends, or -1 when it never does.
+ *
+ * A quote closes a string only when an even number of backslashes precedes it:
+ * `"a\\"` is a complete string ending in one backslash, while `"a\""` carries a
+ * quote. Counting them is the whole of JSON's escaping that matters here, since
+ * every other escape is a character this never inspects.
+ */
+function endOfString(line: string, quoteAt: number): number {
+  let from = quoteAt + 1;
+  for (;;) {
+    const at = line.indexOf('"', from);
+    if (at === -1) return -1;
+    let back = at - 1;
+    let slashes = 0;
+    while (back > quoteAt && line.charCodeAt(back) === BACKSLASH) {
+      slashes++;
+      back--;
+    }
+    if (slashes % 2 === 0) return at;
+    from = at + 1;
+  }
+}
+
+/**
+ * Characters copied out of a line, as a string that does not hold on to it.
+ *
+ * `line.slice(from, to)` is the obvious way and it leaks here. V8 answers a
+ * slice of 13 characters or more with a *sliced string*: a view that keeps the
+ * whole parent alive. A uuid is 36, so every id this hands back would pin the
+ * record it came from — and `scanConversation` keeps every id of the file in a
+ * Set. Measured 21/09/2026 on the first build of this change: a dry `foster
+ * sweep` died at `Ineffective mark-compacts near heap limit` with 3.8 GB of
+ * heap, where the parse it replaced had never come near it. The parse never had
+ * the problem because it builds every value fresh.
+ *
+ * `String.fromCharCode` over a reused buffer copies instead of viewing, and the
+ * buffer is reused because allocating one per record is the allocation this
+ * whole change exists to avoid. These three fields are a uuid, an ISO timestamp
+ * and a short tag; anything longer than the buffer is not one of them in a shape
+ * worth a fast path, so it falls back to the parse, which copies too.
+ */
+const COPY_LIMIT = 256;
+const copied: number[] = new Array<number>(COPY_LIMIT).fill(0);
+
+function detachedSlice(line: string, from: number, to: number): string | undefined {
+  const length = to - from;
+  // Under 13 characters V8 copies rather than views, so the slice is already
+  // independent — which covers the timestamps and the type tags.
+  if (length < 13) return line.slice(from, to);
+  if (length > COPY_LIMIT) return undefined;
+
+  copied.length = length;
+  for (let at = 0; at < length; at++) copied[at] = line.charCodeAt(from + at);
+  return String.fromCharCode(...copied);
+}
+
+/**
+ * The text of a string body, decoded only when it has an escape in it.
+ *
+ * These three fields are a uuid, an ISO timestamp and a short tag, so a copy of
+ * the characters is almost always the answer already. When it is not, `JSON.parse`
+ * on that one string is what makes this agree with a parse of the whole record
+ * rather than nearly agree — and it builds a string of its own, so it is safe in
+ * the same way `detachedSlice` is.
+ */
+function stringValue(line: string, from: number, to: number): string | undefined {
+  // Asked of the line rather than of a slice of it: taking the slice first would
+  // allocate the very view this is here to avoid, on every field of every record.
+  const escape = line.indexOf('\\', from);
+  if (escape === -1 || escape >= to) {
+    const copy = detachedSlice(line, from, to);
+    if (copy !== undefined) return copy;
+  }
+  try {
+    const text: unknown = JSON.parse(`"${line.slice(from, to)}"`);
+    return typeof text === 'string' ? text : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function recordFields(line: string): RecordFields | undefined {
+  const end = line.length;
+  let at = skipSpace(line, 0);
+  if (at >= end || line.charCodeAt(at) !== OPEN_BRACE) return undefined;
+  at++;
+
+  const fields: RecordFields = {};
+  let depth = 1;
+
+  while (at < end) {
+    const code = line.charCodeAt(at);
+
+    if (code === QUOTE) {
+      const close = endOfString(line, at);
+      if (close === -1) return undefined;
+
+      // At depth 1 a string followed by a colon is a key of the record itself.
+      // Nowhere else can a string be followed by one, so no other depth needs
+      // asking, and a nested `"uuid"` never reaches this branch.
+      if (depth === 1) {
+        const afterKey = skipSpace(line, close + 1);
+        if (line.charCodeAt(afterKey) === COLON) {
+          const key = line.slice(at + 1, close);
+          const valueAt = skipSpace(line, afterKey + 1);
+          if (SCANNED_KEYS.has(key)) {
+            const field = key as keyof RecordFields;
+            if (line.charCodeAt(valueAt) === QUOTE) {
+              const valueEnd = endOfString(line, valueAt);
+              if (valueEnd === -1) return undefined;
+              const text = stringValue(line, valueAt + 1, valueEnd);
+              // A value this cannot decode is one the caller would have rejected
+              // anyway; dropping the key keeps a repeated one from leaving the
+              // earlier reading in place, exactly as a parse would.
+              if (text === undefined) delete fields[field];
+              else fields[field] = text;
+              at = valueEnd + 1;
+              continue;
+            }
+            // Not a string, so not something the callers accept — and it still
+            // overrides an earlier key of the same name.
+            delete fields[field];
+          }
+          at = valueAt;
+          continue;
+        }
+      }
+
+      at = close + 1;
+      continue;
+    }
+
+    if (code === OPEN_BRACE || code === OPEN_BRACKET) {
+      depth++;
+      at++;
+      continue;
+    }
+
+    if (code === CLOSE_BRACE || code === CLOSE_BRACKET) {
+      depth--;
+      at++;
+      if (depth === 0) break;
+      if (depth < 0) return undefined;
+      continue;
+    }
+
+    at++;
+  }
+
+  // Anything but one closed object followed by nothing is a fragment. This is
+  // the line `JSON.parse` used to throw on, and skipping it here keeps a torn
+  // tail from being counted as a record.
+  if (depth !== 0) return undefined;
+  if (skipSpace(line, at) !== end) return undefined;
+  return fields;
+}
+
 /** How much of a transcript to hold in memory at once while streaming it. */
 const CHUNK_BYTES = 1024 * 1024;
 
-function* streamRecords(file: string): Generator<Record<string, unknown>> {
+/**
+ * A transcript's lines, a chunk of buffer at a time.
+ *
+ * Read in chunks rather than whole so a large transcript costs a buffer, not its
+ * own size in memory.
+ *
+ * The encoding is the caller's to choose because it is the second cost after the
+ * parse, the same trade `idsMentionedIn` makes. `latin1` is a byte-for-byte
+ * decode with nothing to validate, and it is safe for anything that only reads
+ * the structure and ASCII fields out of JSON: every byte of a multi-byte UTF-8
+ * character is 0x80 or above, so none of them can pass for a quote, a backslash,
+ * a brace or a bracket. It also removes a hazard `utf8` has here — a character
+ * split across two chunk reads decodes as replacement characters, because each
+ * chunk is decoded on its own. Measured 21/09/2026 over the 40 largest
+ * transcripts on this machine, 1381 MB: 10.4 s parsing utf8, 8.4 s scanning
+ * utf8, 5.0 s scanning latin1.
+ *
+ * What it is not safe for is handing text back. A caller that wants the words of
+ * a record wants `utf8`, and every caller that does asks for it.
+ */
+function* streamLines(file: string, encoding: BufferEncoding = 'utf8'): Generator<string> {
   let fd: number;
   try {
     fd = openSync(file, 'r');
@@ -545,17 +790,13 @@ function* streamRecords(file: string): Generator<Record<string, unknown>> {
       const read = readSync(fd, buffer, 0, CHUNK_BYTES, null);
       if (read === 0) break;
 
-      const lines = (pending + buffer.subarray(0, read).toString('utf8')).split('\n');
+      const lines = (pending + buffer.subarray(0, read).toString(encoding)).split('\n');
       pending = lines.pop() ?? '';
-      for (const line of lines) {
-        const record = parseRecord(line);
-        if (record) yield record;
-      }
+      for (const line of lines) yield line;
     }
 
     // The last line of a file that does not end in a newline is still a record.
-    const record = parseRecord(pending);
-    if (record) yield record;
+    if (pending !== '') yield pending;
   } catch {
     // A transcript that vanished or turned unreadable mid-read yields what it
     // gave. Callers treat a short answer as "no answer" rather than as a fork.
