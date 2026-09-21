@@ -54,10 +54,40 @@ export interface SessionFilter {
   includeSpawned?: boolean;
 }
 
-/** The reasons that still stand once the caller has said what it will accept. */
-export function blockingReasons(session: DiscoveredSession, filter: SessionFilter): Unfosterable[] {
+/**
+ * A copy whose conversation still has a card of its own, and which reaches
+ * records `here` cannot (#49).
+ *
+ * The one case `already-a-copy` does not describe. A copy that was opened and
+ * went on in a directory its origin never named holds work only it can reach,
+ * and refusing it as "already a copy" loses that work for good whenever the
+ * origin is itself held back — a spawned task never opened, say, whose copy is
+ * where the whole conversation happened (#119).
+ *
+ * `cwd` is the directory the copy would open in; left out, the source card's own.
+ */
+export function carriedOn(session: DiscoveredSession, here: ReachCheck, cwd?: string): boolean {
+  if (!session.isCopy || session.isStranded) return false;
+  return here.unreached(session.data.cliSessionId, cwd ?? session.data.cwd) > 0;
+}
+
+/**
+ * The reasons that still stand once the caller has said what it will accept.
+ *
+ * `reach` is what lifts `already-a-copy` from a copy that `carriedOn` — asked
+ * here rather than by each caller, so the filter that offers such a copy and
+ * the executor that writes it cannot answer the question two different ways.
+ * Before #119 only the filter asked: the sweep listed the copy as a source and
+ * the executor refused it right back, every run, while reporting nothing left.
+ */
+export function blockingReasons(
+  session: DiscoveredSession,
+  filter: SessionFilter,
+  reach?: { here: ReachCheck; cwd?: string },
+): Unfosterable[] {
   const excused = new Set<Unfosterable>();
   if (filter.includeArchived) excused.add('archived');
+  if (reach && carriedOn(session, reach.here, reach.cwd)) excused.add('already-a-copy');
   if (filter.includeScheduled && session.reasons.includes('scheduled-task')) {
     excused.add('scheduled-task');
     // Only alongside the one above, never on its own. A scheduled task that was
@@ -165,19 +195,13 @@ export function applyFilter(
     // back. Asking what it reaches beyond `here` catches that case without
     // reopening the ordinary one — ordinary copies answer zero and stay refused.
     const copyWithCard = session.isCopy && !session.isStranded;
-    if (copyWithCard) {
-      const beyond = here?.unreached(session.data.cliSessionId, session.data.cwd) ?? 0;
-      if (beyond === 0) return false;
-    }
+    if (copyWithCard && !(here && carriedOn(session, here))) return false;
 
     // `unfosterableReasons` marks every copy `already-a-copy`, and `markStranded`
     // already lifts that mark for the one case it used to recognise — the last
-    // card left. A copy passing only because of `beyond` above needs the same
-    // lift here, or this check would refuse right back what the one above just
-    // let through.
-    const blocking = blockingReasons(session, filter).filter(
-      (reason) => reason !== 'already-a-copy' || !copyWithCard,
-    );
+    // card left. Handing `here` on lifts it for a copy that carried on, the one
+    // the check above just let through — the same call the executor makes.
+    const blocking = blockingReasons(session, filter, here && { here });
     if (!filter.includeUnfosterable && blocking.length > 0) return false;
 
     if (filter.title) {
