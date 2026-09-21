@@ -1815,3 +1815,99 @@ describe('the dates pass', () => {
     expect(card(CARD).lastActivityAt).toBe(ahead);
   });
 });
+
+/**
+ * #119: #49 made a copy that carried on a *source* — `applyFilter` offers it —
+ * but the executor still refused it as `already-a-copy`, so the sweep listed it,
+ * skipped it, and reported nothing left. Measured on a real store: the origin a
+ * spawned task never opened, holding 10 records in its worktree; its copy, in
+ * another account, continued in a directory of its own to 1194 records that no
+ * card anywhere else could reach. Neither half ever came.
+ */
+describe('#119: a copy that carried on is written, not just offered', () => {
+  const THIRD_ACCOUNT = {
+    accountUuid: '22222222-2222-4222-8222-222222222221',
+    organizationUuid: '22222222-2222-4222-8222-222222222222',
+  };
+  const CLI_ID = '00000000-0000-4000-8000-0000000001a1';
+  const ORIGIN_ID = '00000000-0000-4000-8000-0000000001a2';
+  const COPY_ID = '00000000-0000-4000-8000-0000000001a3';
+  const SHARED = '00000000-0000-4000-8000-0000000001a4';
+  const CARRIED_ON = '00000000-0000-4000-8000-0000000001a5';
+  const REPO = 'C:\\work\\project';
+  const TREE = 'C:\\work\\project\\.claude\\worktrees\\w';
+  const ELSEWHERE = 'C:\\proof';
+
+  function seedCarriedOn(): void {
+    // The origin: spawned, never opened — held back as a spawned task, the gap
+    // `--include-spawned` is the way out of, and that way out brings only this.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        spawnedFrom: { sessionId: 'local_parent', taskId: 'task_1' },
+        lastFocusedAt: undefined,
+      }),
+    );
+    // The copy: fostered into a third account, opened there and continued in a
+    // directory the origin never named. Archived since, as it was on the store.
+    writeSession(
+      store,
+      THIRD_ACCOUNT,
+      session({
+        sessionId: COPY_ID,
+        cliSessionId: CLI_ID,
+        cwd: ELSEWHERE,
+        originCwd: ELSEWHERE,
+        isArchived: true,
+        _foster: {
+          originAccountUuid: OLD_ACCOUNT.accountUuid,
+          originOrganizationUuid: OLD_ACCOUNT.organizationUuid,
+          originSessionId: `local_${ORIGIN_ID}`,
+          fosteredAt: 1_700_000_000_000,
+          toolVersion: '0.0.0',
+        },
+      }),
+    );
+    transcript(CLI_ID, [{ uuid: SHARED, type: 'user' }], projectDirName(TREE));
+    transcript(
+      CLI_ID,
+      [
+        { uuid: SHARED, type: 'user' },
+        { uuid: CARRIED_ON, type: 'assistant' },
+      ],
+      projectDirName(ELSEWHERE),
+    );
+  }
+
+  it('brings the copy, opening the file only it reaches', () => {
+    seedCarriedOn();
+
+    const report = sweep();
+
+    const outcome = report.fostered.outcomes.find(
+      (entry) => entry.originSessionId === `local_${COPY_ID}`,
+    );
+    expect(outcome?.status).toBe('fostered');
+    const here = copies().filter((data) => data.cliSessionId === CLI_ID);
+    expect(here).toHaveLength(1);
+    expect(here[0]!.cwd).toBe(ELSEWHERE);
+    expect(here[0]!.isArchived).toBe(true);
+  });
+
+  it('reports itself finished once the copy is here, not before', () => {
+    seedCarriedOn();
+
+    const report = sweep();
+
+    expect(report.confirmation?.exhausted).toBe(true);
+    expect(report.confirmation?.fosterable).toBe(0);
+    // And a second run leaves the one row alone rather than adding another.
+    sweep();
+    expect(copies().filter((data) => data.cliSessionId === CLI_ID)).toHaveLength(1);
+  });
+});
