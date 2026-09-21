@@ -324,6 +324,17 @@ tasklist /fo csv /nh
 wmic process get ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate /format:list
 ```
 
+## Reviving what a usage limit stopped
+
+`foster revive [--since 24h] [--json]` lists the sessions in the current account whose
+conversation ends on the app's own limit record (`isApiErrorMessage: true`, `error:
+"rate_limit"`) — read from the file each card opens, never from the card, whose `error`
+fostering drops. One row per conversation and per repository branch, the latest stop kept;
+live writers and the duplicates it dropped are named in `passedOver`. It writes nothing and
+sends nothing: the `/retoma` skill, run inside Claude Desktop, delivers the "quota is back,
+carry on by highest return" message with `send_message`. A headless resume is not a substitute
+— it never reattaches the card (next section).
+
 ## Rescuing "cannot reach your computer" cards
 
 `foster rescue` lists them; `--open` opens a terminal tab per conversation, stopped at the

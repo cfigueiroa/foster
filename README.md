@@ -299,6 +299,33 @@ would produce a shorter list that looks complete. Siblings of `~/.claude` are pi
 actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
 `foster clients` is the map of those directories, and of who is signed into each.
 
+## After a sweep: sessions a usage limit stopped
+
+A sweep moves every conversation into the account signed in now, and the ones that were working
+when their old account ran out arrive exactly where they stopped — ending on the app's own
+"You've hit your limit" line, waiting for a turn nobody is going to give them. The card cannot
+tell you which ones they are: fostering drops the card's error so a copy does not show a stale
+warning. The transcript can. A conversation cut off by a limit ends on a record the app writes
+in the model's place, `isApiErrorMessage: true` with `error: "rate_limit"`, and `foster revive`
+lists the sessions whose conversation ends that way:
+
+```bash
+foster revive                 # stopped on a limit in the last 24 hours
+foster revive --since 3d      # a longer window; sessions you archived need --archived
+foster revive --json          # the work list the /retoma skill reads
+```
+
+It reads the file each card actually opens, keeps one row per conversation and one per git
+branch of a repository — the most recent stop, since two agents on one branch would commit over
+each other — and names what it left out: a session a live `claude` is writing, or a second row
+of work already on the list.
+
+Nothing here sends the message that revives them. Only Claude Desktop can deliver a turn to a
+session and keep its card attached; a headless `claude --resume` runs the turn and leaves the
+row showing the stop. The `/retoma` skill in this repository is the other half: run inside the
+app, it reads `foster revive --json` and tells each session that the quota is back and to carry
+on, highest return first.
+
 ## After a crash: cards that cannot reach the computer
 
 A session card with a remote-control mirror is a live link — the app shows the conversation

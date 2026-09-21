@@ -121,7 +121,11 @@ on rather than re-deriving it:
 
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
-- whether the restart happened or is waiting on them.
+- whether the restart happened or is waiting on them;
+- the next step, in one line: once the app has restarted, `/retoma` tells every session a
+  usage limit stopped in the last 24 hours that the quota is back and to carry on. Do not run
+  it yourself — it spends this account's quota on every one of them at once, and that is the
+  user's call.
 
 ## Proving nothing was left behind
 

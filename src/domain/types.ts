@@ -38,6 +38,12 @@ export interface CodeSessionData {
   worktreeName?: string;
   /** A worktree the app has promised the session but not yet cut. Same reasoning. */
   worktreeLazy?: unknown;
+  /**
+   * The git branch the session works on. Two rows on one branch of one
+   * repository would commit over each other, which is what `foster revive`
+   * reads it for.
+   */
+  branch?: string;
   title?: string;
   titleSource?: string;
   /**

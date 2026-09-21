@@ -298,22 +298,17 @@ export function firstPrompt(file: string): string | undefined {
 const TAIL_CWD_BYTES = 256 * 1024;
 
 /**
- * The working directory a conversation last ran in.
+ * The whole lines in a transcript's last `bytes`, oldest first.
  *
- * The head records a cwd too, and it is wrong for exactly the conversations
- * that need this read: a session that moves between worktrees writes its first
- * records in one directory and its last in another, and `claude --resume`
- * belongs in the last one — the directory whose project folder the transcript
- * is actually filed under. Measured on a live store: three of eleven
- * crash-stranded conversations had moved, and the head named a directory the
- * work had already left.
+ * Undefined when the file cannot be read. The first line of a truncated read
+ * starts mid-record and is dropped, so every line handed back is a whole one.
  */
-export function lastRecordedCwd(file: string): string | undefined {
+function tailLines(file: string, bytes = TAIL_CWD_BYTES): string[] | undefined {
   let text: string;
   let truncated: boolean;
   try {
     const size = statSync(file).size;
-    const length = Math.min(size, TAIL_CWD_BYTES);
+    const length = Math.min(size, bytes);
     truncated = length < size;
     const fd = openSync(file, 'r');
     try {
@@ -328,8 +323,84 @@ export function lastRecordedCwd(file: string): string | undefined {
   }
 
   const lines = text.split('\n');
-  // The first line of a truncated read starts mid-record.
   if (truncated) lines.shift();
+  return lines;
+}
+
+/** The last answer a transcript holds, as far as telling why the work stopped goes. */
+export interface LastAnswer {
+  /** When it was written. */
+  at: number;
+  /**
+   * The app's own error kind when the "answer" is one it wrote in the model's
+   * place — `rate_limit` for a usage limit — and undefined for a real answer.
+   */
+  error?: string;
+  /** The text shown, for an error: "You've hit your weekly limit · resets …". */
+  text?: string;
+}
+
+/**
+ * The last `assistant` record in a transcript's tail.
+ *
+ * A conversation cut off by a usage limit ends on a record the app writes
+ * itself: `model: "<synthetic>"`, `isApiErrorMessage: true`, `error:
+ * "rate_limit"`, and the limit's own sentence as its text. Measured on a real
+ * store, that record is the whole difference between a session that stopped
+ * because its account ran out and one that finished — the card says nothing,
+ * since fostering drops the card's `error` along with everything else the app
+ * would show as a stale warning.
+ *
+ * Records after it are the app's bookkeeping (`last-prompt`, queue operations)
+ * and are passed over. Undefined when the tail holds no answer at all.
+ */
+export function lastAnswer(file: string): LastAnswer | undefined {
+  const lines = tailLines(file);
+  if (lines === undefined) return undefined;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const record = parseRecord(lines[index]!);
+    if (!record || record.type !== 'assistant' || record.isSidechain === true) continue;
+    const at = Date.parse(typeof record.timestamp === 'string' ? record.timestamp : '');
+    if (Number.isNaN(at)) continue;
+    if (record.isApiErrorMessage !== true) return { at };
+    const error = typeof record.error === 'string' ? record.error : 'unknown';
+    const text = textOf(record.message);
+    return { at, error, ...(text === undefined ? {} : { text }) };
+  }
+  return undefined;
+}
+
+/** The text blocks of a message, joined — what the app showed for it. */
+function textOf(message: unknown): string | undefined {
+  if (typeof message !== 'object' || message === null) return undefined;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return undefined;
+  const parts = content
+    .map((block: unknown) =>
+      typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text'
+        ? (block as { text?: unknown }).text
+        : undefined,
+    )
+    .filter((text): text is string => typeof text === 'string');
+  return parts.length > 0 ? parts.join('\n') : undefined;
+}
+
+/**
+ * The working directory a conversation last ran in.
+ *
+ * The head records a cwd too, and it is wrong for exactly the conversations
+ * that need this read: a session that moves between worktrees writes its first
+ * records in one directory and its last in another, and `claude --resume`
+ * belongs in the last one — the directory whose project folder the transcript
+ * is actually filed under. Measured on a live store: three of eleven
+ * crash-stranded conversations had moved, and the head named a directory the
+ * work had already left.
+ */
+export function lastRecordedCwd(file: string): string | undefined {
+  const lines = tailLines(file);
+  if (lines === undefined) return undefined;
 
   let cwd: string | undefined;
   for (const line of lines) {
