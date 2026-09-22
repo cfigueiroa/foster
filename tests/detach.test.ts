@@ -37,7 +37,7 @@ function baseOptions(
     env,
     now: () => new Date('2026-09-22T15:30:00'),
     execPath: 'C:\\Program Files\\nodejs\\node.exe',
-    scriptPath: 'C:\\Users\\caio\\AppData\\Local\\foster\\foster.js',
+    scriptPath: 'C:\\tools\\foster\\foster.js',
     ...extra,
   };
 }
