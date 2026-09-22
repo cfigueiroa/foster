@@ -4,6 +4,7 @@ import { comparablePath } from '../domain/paths.js';
 import type {
   ActiveFostering,
   DatedCard,
+  ImportedConversation,
   LedgerEvent,
   RepointedCard,
   RetitledCard,
@@ -32,6 +33,11 @@ export interface LedgerState {
    * path — see `WorktreeReleasedEvent`.
    */
   worktreeReleased: Map<string, WorktreeReleasedCard>;
+  /**
+   * Codex rollouts imported and not yet undone, keyed by rollout id — see
+   * `ConversationImportedEvent`.
+   */
+  imported: Map<string, ImportedConversation>;
   /**
    * Named Desktop installations, keyed by name. Re-registering a name points it
    * at a new root — the fold keeps only the latest, which is the rename.
@@ -75,6 +81,7 @@ export function project(events: LedgerEvent[]): LedgerState {
   const retitled = new Map<string, RetitledCard>();
   const dated = new Map<string, DatedCard>();
   const worktreeReleased = new Map<string, WorktreeReleasedCard>();
+  const imported = new Map<string, ImportedConversation>();
   const profiles = new Map<string, string>();
   const clientRoots = new Map<string, 'client' | 'container'>();
   let handlerArmed: LedgerState['handlerArmed'];
@@ -307,6 +314,25 @@ export function project(events: LedgerEvent[]): LedgerState {
         worktreeReleased.delete(comparablePath(event.path));
         break;
 
+      case 'conversation_imported':
+        imported.set(event.rolloutId, {
+          rolloutId: event.rolloutId,
+          sourceRolloutPath: event.sourceRolloutPath,
+          contentHash: event.contentHash,
+          ...(event.cliVersion !== undefined ? { cliVersion: event.cliVersion } : {}),
+          target: event.target,
+          cardPath: event.cardPath,
+          transcriptPath: event.transcriptPath,
+          sessionId: event.sessionId,
+          ...(event.title !== undefined ? { title: event.title } : {}),
+          importedAt: event.ts,
+        });
+        break;
+
+      case 'conversation_import_undone':
+        imported.delete(event.rolloutId);
+        break;
+
       // Re-registering a known name is the rename: `set` replaces the root a
       // name pointed at rather than refusing, because a profile is the name,
       // not the path underneath it.
@@ -366,6 +392,7 @@ export function project(events: LedgerEvent[]): LedgerState {
     retitled,
     dated,
     worktreeReleased,
+    imported,
     profiles,
     clientRoots,
     ...(handlerArmed ? { handlerArmed } : {}),
@@ -390,6 +417,11 @@ export function listDated(state: LedgerState): DatedCard[] {
 /** Copies whose worktree claim is released and not yet put back, oldest first. */
 export function listWorktreeReleased(state: LedgerState): WorktreeReleasedCard[] {
   return [...state.worktreeReleased.values()].sort((a, b) => a.releasedAt - b.releasedAt);
+}
+
+/** Codex rollouts imported and not yet undone, oldest import first. */
+export function listImported(state: LedgerState): ImportedConversation[] {
+  return [...state.imported.values()].sort((a, b) => a.importedAt - b.importedAt);
 }
 
 /**

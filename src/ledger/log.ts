@@ -25,6 +25,8 @@ const EVENT_KINDS = new Set<string>([
   'handler_restored',
   'worktree_released',
   'worktree_release_undone',
+  'conversation_imported',
+  'conversation_import_undone',
 ]);
 
 /**
