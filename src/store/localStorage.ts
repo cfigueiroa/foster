@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, copyFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   decodeBatch,
@@ -12,6 +12,7 @@ import {
 } from './format/leveldb.js';
 import { safeReaddir } from '../util/fs.js';
 import { appendSynced } from '../util/fsatomic.js';
+import { backupDirectory, type BackupOptions } from '../util/backups.js';
 import type { StoreLayout } from '../domain/types.js';
 
 /**
@@ -38,6 +39,18 @@ const LOCAL_STORAGE_DIR = path.join('Local Storage', 'leveldb');
 
 export function localStorageDir(store: StoreLayout): string {
   return path.join(store.root, LOCAL_STORAGE_DIR);
+}
+
+/**
+ * Whether there is a Local Storage database here at all — cheap, and read-only.
+ * A store nothing has ever opened the Code sidebar's filter menu on has no
+ * `CURRENT` file yet, the same "never written" case `readPinState` treats as
+ * absence rather than failure. Callers that would otherwise write here (the
+ * groups triple-write in `engine/layout.ts`) use this to skip gracefully
+ * instead of failing a whole run over a database that simply is not there yet.
+ */
+export function localStoragePresent(store: StoreLayout): boolean {
+  return existsSync(path.join(localStorageDir(store), 'CURRENT'));
 }
 
 /** DOM Storage's one-byte-per-character string tag — Blink's `ONE_BYTE_STRING`, reused here. */
@@ -99,6 +112,18 @@ function locate(directory: string): { logPath: string; lastSequence: bigint } {
     throw new LocalStorageError(`${manifestName} names the log ${name}, which is not there.`);
   }
   return { logPath: path.join(directory, chosen.name), lastSequence: state.lastSequence ?? 0n };
+}
+
+/**
+ * The log to append to, and a floor for the sequence number to claim — usable
+ * for a key that has never been written at all, where `readLocalStorageValue`
+ * has nothing to return. The manifest's own `lastSequence` is always at least
+ * as high as any sequence a healthy database has actually used, which is the
+ * same floor `readLocalStorageValue` starts every per-key search from.
+ */
+export function currentLog(store: StoreLayout): { logPath: string; highestSequence: bigint } {
+  const { logPath, lastSequence } = locate(localStorageDir(store));
+  return { logPath, highestSequence: lastSequence };
 }
 
 export interface LocalStorageRecord {
@@ -178,6 +203,10 @@ export function readLocalStorageValue(
   return { document, logPath, highestSequence: highest, notices };
 }
 
+function encodeValue(document: Record<string, unknown>): Buffer {
+  return Buffer.concat([Buffer.from([ONE_BYTE_STRING]), Buffer.from(JSON.stringify(document), 'latin1')]);
+}
+
 /**
  * Replace one key's document by appending a write batch to the log — additive,
  * like `writePinState`: nothing already on disk is rewritten, so the worst an
@@ -188,11 +217,26 @@ export function writeLocalStorageValue(
   scriptKey: string,
   document: Record<string, unknown>,
 ): void {
-  const payload = Buffer.concat([
-    Buffer.from([ONE_BYTE_STRING]),
-    Buffer.from(JSON.stringify(document), 'latin1'),
-  ]);
-  const entries: BatchEntry[] = [{ key: localStorageKey(scriptKey), value: payload }];
+  writeLocalStorageEntries(record, [{ scriptKey, document }]);
+}
+
+/**
+ * Replace several keys in **one** write batch — one sequence number, one
+ * appended record, both keys advancing together. Used where two keys have to
+ * agree with each other the instant either becomes visible: the sidebar's
+ * groups are written to `LSS-persisted.dframe-group-scopes` and to
+ * `dframe-store`'s own `state.customGroupsByScope` at once
+ * (`engine/layout.ts`), and a reader that saw one updated and not the other
+ * would have two disagreeing answers for "what are this account's groups".
+ */
+export function writeLocalStorageEntries(
+  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'>,
+  writes: { scriptKey: string; document: Record<string, unknown> }[],
+): void {
+  const entries: BatchEntry[] = writes.map((write) => ({
+    key: localStorageKey(write.scriptKey),
+    value: encodeValue(write.document),
+  }));
 
   const existing = readFileSync(record.logPath);
   const inLog = nextSequence(readLog(existing));
@@ -200,20 +244,7 @@ export function writeLocalStorageValue(
   appendSynced(record.logPath, frameRecords(encodeBatch(sequence, entries), existing.length));
 }
 
-/** Copy the database aside before changing it — mirrors `backupPinState`. */
-export function backupLocalStorage(store: StoreLayout, destination: string): string {
-  const directory = localStorageDir(store);
-  mkdirSync(destination, { recursive: true });
-  for (const name of safeReaddir(directory)) {
-    const from = path.join(directory, name);
-    if (name === 'LOCK') continue;
-    try {
-      if (statSync(from).isFile()) copyFileSync(from, path.join(destination, name));
-    } catch (error) {
-      throw new LocalStorageError(
-        `Could not back up ${name}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-  return destination;
+/** Copy the database aside before changing it — mirrors `backupPinState`, under `~/.foster/backups`. */
+export function backupLocalStorage(store: StoreLayout, options: BackupOptions = {}): string {
+  return backupDirectory(localStorageDir(store), 'localStorage', options);
 }

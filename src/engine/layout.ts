@@ -27,6 +27,13 @@ import {
   type ScheduledTask,
   type ScheduledTasksFile,
 } from '../store/routines.js';
+import {
+  backupLocalStorage,
+  currentLog,
+  localStoragePresent,
+  readLocalStorageValue,
+  writeLocalStorageEntries,
+} from '../store/localStorage.js';
 import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
 import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
 import { AppRunningError, inspectApp } from './safety.js';
@@ -281,10 +288,22 @@ function planGroups(
     });
   }
 
-  // The manual, partial order: only for a card this very run resolved and
-  // assigned (or found already assigned) to the group the source's own order
-  // list names it under — a card this run skipped as missing or archived has
-  // no target id to place in an order at all.
+  // Which group a target card actually ends up in, after this run's own
+  // assignments — pre-existing assignments first, then this run's. A card the
+  // order pass maps to a *different* group than the one it is actually filed
+  // in must never be appended to that other group's order: the user's own
+  // filing (or a conflict this run resolved the other way) already answered
+  // "which group", and order is a view onto that answer, not a second vote
+  // (#A5 — appending local_t to group Y's order when it stays filed in X).
+  const finalGroupOf = new Map<string, string>(Object.entries(targetScope.assignments));
+  for (const item of groupItems.values()) {
+    for (const assign of item.assign) finalGroupOf.set(assign.cardId, item.groupId);
+  }
+
+  // The manual, partial order: only for a card that is actually assigned to
+  // *this* group in the target once the write lands — a card this run skipped
+  // as missing or archived has no target id to place in an order at all, and
+  // a card resolved for a different group is never listed here either.
   for (const [sourceKey, scope] of sourceEntries) {
     if (!scope.order) continue;
     const nameOf = new Map(scope.groups.map((group) => [group.id, group.name]));
@@ -297,6 +316,7 @@ function planGroups(
       for (const sourceCardId of cardIds) {
         const mapped = resolvedTargetCard.get(`${sourceKey}\u0000${sourceCardId}`);
         if (!mapped || item.order.includes(mapped)) continue;
+        if (finalGroupOf.get(mapped) !== item.groupId) continue;
         item.order.push(mapped);
         item.appendedOrder.push(mapped);
       }
@@ -323,7 +343,7 @@ export interface RoutineBringItem {
 export interface RoutineSkipped {
   id: string;
   displayName: string;
-  reason: 'already-here' | 'missing-skill' | 'missed-one-shot';
+  reason: 'already-here' | 'missing-skill' | 'missed-one-shot' | 'disabled';
   /** Set for `missed-one-shot`: the moment it was due. */
   firedAt?: number;
 }
@@ -344,21 +364,26 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
       ),
   );
 
-  const targetFile = readScheduledTasks(store, target);
-  const targetIds = new Set((targetFile?.scheduledTasks ?? []).map((task) => task.id));
+  const targetRead = readScheduledTasks(store, target);
+  const targetIds = new Set(
+    targetRead.status === 'ok' ? targetRead.file.scheduledTasks.map((task) => task.id) : [],
+  );
 
-  // Dedup by id across every source, keeping whichever copy is newest — the
-  // same routine can be enabled in several accounts at once, and the file it
-  // points at is shared, so there is nothing to gain from bringing it twice.
+  // Dedup by id across *every* source first, enabled or not — the newest
+  // `createdAt` wins the id regardless. Only once there is one candidate per
+  // id is "enabled" asked, and only of that winner. Asking it earlier, per
+  // source, let an older *enabled* copy win an id whose newest copy had since
+  // been disabled on purpose: a real case measured this run, a routine
+  // disabled in its newest account but still enabled in an older one, which
+  // the old order brought back to life in the target.
   const byId = new Map<string, ScheduledTask>();
   const sourceAccounts = new Set<string>();
   for (const account of others) {
-    const file = readScheduledTasks(store, account);
-    if (!file) continue;
+    const read = readScheduledTasks(store, account);
+    if (read.status !== 'ok') continue;
     sourceAccounts.add(`${account.accountUuid}/${account.organizationUuid}`);
 
-    for (const task of file.scheduledTasks) {
-      if (!task.enabled) continue;
+    for (const task of read.file.scheduledTasks) {
       const existing = byId.get(task.id);
       if (!existing || (task.createdAt ?? 0) > (existing.createdAt ?? 0)) byId.set(task.id, task);
     }
@@ -368,6 +393,10 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
   const skipped: RoutineSkipped[] = [];
 
   for (const task of byId.values()) {
+    if (!task.enabled) {
+      skipped.push({ id: task.id, displayName: task.displayName, reason: 'disabled' });
+      continue;
+    }
     // The user may have disabled this on purpose in the target already —
     // enabled or not, an id the target already has is left exactly as it is.
     if (targetIds.has(task.id)) {
@@ -460,13 +489,75 @@ export interface ApplyLayoutResult {
   viewPrefsCarried: boolean;
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
+  /**
+   * A label per file this run actually wrote, in the order it wrote them —
+   * `applyLayout` writes several distinct targets (the config scope, up to
+   * two Local Storage keys, the routines file, a second config write for the
+   * view carry) and cannot make all of them land as one atomic unit. If a
+   * later one fails, this is what already landed, named exactly, rather than
+   * left for the caller to guess from a bare exception.
+   */
+  written: string[];
+}
+
+export class LayoutWriteError extends Error {
+  constructor(written: readonly string[], failedAt: string, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    super(
+      written.length > 0
+        ? `Wrote: ${written.join(', ')}. Then failed writing ${failedAt}: ${reason}`
+        : `Failed writing ${failedAt}, before anything else was written: ${reason}`,
+    );
+    this.name = 'LayoutWriteError';
+  }
+}
+
+/**
+ * The three places a target's groups have to agree — see CLAUDE.md, "Groups
+ * live in three places". `undefined` when there is no Local Storage database
+ * to write into yet (a store the sidebar's filter menu has never touched),
+ * which is a gap to skip rather than a reason to fail the whole run — the
+ * config copy is still written, and is what the app reads to rebuild the
+ * other two the next time it does.
+ */
+function localStorageGroupWrites(
+  store: StoreLayout,
+  target: AccountRef,
+  nextScope: GroupScope,
+  nowMs: number,
+): { scriptKey: string; document: Record<string, unknown> }[] | undefined {
+  if (!localStoragePresent(store)) return undefined;
+  const key = scopeKey(target);
+
+  const lss = readLocalStorageValue(store, 'LSS-persisted.dframe-group-scopes');
+  const lssValue = (lss?.document.value as Record<string, unknown> | undefined) ?? {};
+  const nextLss = {
+    ...lss?.document,
+    value: { ...lssValue, [key]: nextScope },
+    tabId: (lss?.document.tabId as string | undefined) ?? '',
+    timestamp: nowMs,
+  };
+
+  const dframe = readLocalStorageValue(store, 'dframe-store');
+  const state = (dframe?.document.state as Record<string, unknown> | undefined) ?? {};
+  const customGroups = (state.customGroupsByScope as Record<string, unknown> | undefined) ?? {};
+  const nextDframe = {
+    ...dframe?.document,
+    state: { ...state, customGroupsByScope: { ...customGroups, [key]: nextScope } },
+  };
+
+  return [
+    { scriptKey: 'LSS-persisted.dframe-group-scopes', document: nextLss },
+    { scriptKey: 'dframe-store', document: nextDframe },
+  ];
 }
 
 /**
  * Write exactly what the plan says, and nothing else — refusing outright while
  * Claude Desktop is running, the same rule `store/pinstate.ts` and
- * `writeAppPref` both keep: the app owns both files and rewrites them from
- * memory, so a write here would simply be overwritten the next time it flushes.
+ * `writeAppPref` both keep: the app owns every file this touches and rewrites
+ * them from memory, so a write here would simply be overwritten the next time
+ * one of them flushes.
  *
  * The CLI checks the same thing first, for a message that names `--restart`;
  * this is the backstop for any other caller, sweep's own read-only planning
@@ -482,14 +573,21 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
   }
 
   const backups: string[] = [];
+  const written: string[] = [];
   let cardsAssigned = 0;
   let groupsTouched = 0;
   let routinesBrought = 0;
+  const nowMs = (options.now?.() ?? new Date()).getTime();
 
+  // Never create a group for nothing — see #9. A group whose only proposal
+  // this run has is a card that turned out missing or archived elsewhere gets
+  // an entry in `skipped`, and that is the whole record of it; nothing here
+  // mints an id or a name for a group with zero rows to show.
   const dirtyGroups = plan.groups.items.filter(
-    (item) => item.created || item.assign.length > 0 || item.appendedOrder.length > 0,
+    (item) => item.assign.length > 0 || item.appendedOrder.length > 0,
   );
 
+  let nextScope: GroupScope | undefined;
   if (dirtyGroups.length > 0) {
     const scopes = readGroupScopes(store);
     const key = scopeKey(plan.target);
@@ -510,21 +608,55 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       cardsAssigned += item.assign.length;
     }
 
-    const nextScope: GroupScope = {
-      groups,
-      assignments,
-      ...(Object.keys(order).length > 0 ? { order } : {}),
-    };
-    const written = writeGroupScope(store, plan.target, nextScope, { now: options.now });
-    backups.push(written.backup);
+    nextScope = { groups, assignments, ...(Object.keys(order).length > 0 ? { order } : {}) };
+
+    try {
+      const result = writeGroupScope(store, plan.target, nextScope, {
+        now: options.now,
+        env: options.env,
+      });
+      backups.push(result.backup);
+      written.push('groups (config)');
+    } catch (error) {
+      throw new LayoutWriteError(written, 'groups (config)', error);
+    }
+
+    try {
+      const entries = localStorageGroupWrites(store, plan.target, nextScope, nowMs);
+      if (entries) {
+        backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));
+        const record = readLocalStorageValue(store, 'dframe-store') ?? currentLog(store);
+        writeLocalStorageEntries(record, entries);
+        written.push('groups (Local Storage)');
+      }
+    } catch (error) {
+      // The config copy already landed; Local Storage is one of two more
+      // places the app can rebuild it from at startup (see CLAUDE.md) — a
+      // failure here is worth reporting, never worth undoing the config write
+      // for, so it does not throw.
+      written.push(
+        `groups (Local Storage) FAILED: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   if (plan.routines.bring.length > 0) {
-    const nowMs = (options.now?.() ?? new Date()).getTime();
-    const file: ScheduledTasksFile = readScheduledTasks(store, plan.target) ?? {
-      scheduledTasks: [],
-      recordedSkips: {},
-    };
+    const targetRead = readScheduledTasks(store, plan.target);
+    if (targetRead.status === 'unreadable') {
+      // Refused, never replaced wholesale (#A3, #5): the file is there and
+      // has content this cannot parse, which is not the same as nothing being
+      // there yet. Overwriting it on the strength of the plan alone would
+      // destroy whatever `recordedSkips` and existing tasks it held.
+      throw new LayoutWriteError(
+        written,
+        'routines',
+        new Error(
+          `the target's scheduled-tasks.json could not be parsed (${targetRead.reason}); refusing to replace it`,
+        ),
+      );
+    }
+    const file: ScheduledTasksFile =
+      targetRead.status === 'ok' ? targetRead.file : { scheduledTasks: [], recordedSkips: {} };
     const added: ScheduledTask[] = plan.routines.bring.map((item) => ({
       id: item.id,
       displayName: item.displayName,
@@ -540,20 +672,33 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       // session that does not exist here.
     }));
 
-    const written = writeScheduledTasks(
-      store,
-      plan.target,
-      { ...file, scheduledTasks: [...file.scheduledTasks, ...added] },
-      { now: options.now },
-    );
-    if (written.backup) backups.push(written.backup);
+    try {
+      const result = writeScheduledTasks(
+        store,
+        plan.target,
+        { ...file, scheduledTasks: [...file.scheduledTasks, ...added] },
+        { now: options.now, env: options.env },
+      );
+      if (result.backup) backups.push(result.backup);
+      written.push('routines');
+    } catch (error) {
+      throw new LayoutWriteError(written, 'routines', error);
+    }
     routinesBrought = added.length;
   }
 
   let viewPrefsCarried = false;
   if (Object.keys(plan.viewPrefs.account).length > 0) {
-    const written = writeEpitaxyPrefs(store, plan.viewPrefs.account, { now: options.now });
-    backups.push(written.backup);
+    try {
+      const result = writeEpitaxyPrefs(store, plan.viewPrefs.account, {
+        now: options.now,
+        env: options.env,
+      });
+      backups.push(result.backup);
+      written.push('view prefs');
+    } catch (error) {
+      throw new LayoutWriteError(written, 'view prefs', error);
+    }
     viewPrefsCarried = true;
   }
 
@@ -566,5 +711,5 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     });
   }
 
-  return { groupsTouched, cardsAssigned, routinesBrought, viewPrefsCarried, backups };
+  return { groupsTouched, cardsAssigned, routinesBrought, viewPrefsCarried, backups, written };
 }

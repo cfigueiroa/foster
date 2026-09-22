@@ -413,6 +413,16 @@ export interface SweepReport {
 export interface SweepLayoutPreview {
   groups: number;
   routines: number;
+  /**
+   * Set when `planLayout` itself threw. `groups`/`routines` are both `0` in
+   * that case — not because nothing was waiting, but because the sweep has no
+   * way to know. `planLayout` is written not to throw for the malformed data
+   * it already knows how to meet (see `store/groupScopes.ts`,
+   * `store/routines.ts`), but a sweep's own report must survive a layout
+   * problem this build has not seen yet too, so the call is wrapped rather
+   * than trusted outright.
+   */
+  error?: string;
 }
 
 /**
@@ -543,11 +553,21 @@ export function runSweep(options: SweepOptions): SweepReport {
   // rather than any transcript, so planning it alongside costs nothing worth
   // gating behind a flag. Never applied here — layout needs the app closed,
   // which a sweep run from inside the app can never be.
-  const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
-  const layout: SweepLayoutPreview = {
-    groups: layoutPlan.groups.items.reduce((count, item) => count + item.assign.length, 0),
-    routines: layoutPlan.routines.bring.length,
-  };
+  //
+  // Wrapped rather than trusted outright: a sweep's own report — everything
+  // the passes above already wrote — must survive a layout problem this
+  // build's own validation has not met yet, the same way one malformed
+  // scope or task must not cost `planLayout` the rest of what it could plan.
+  let layout: SweepLayoutPreview;
+  try {
+    const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
+    layout = {
+      groups: layoutPlan.groups.items.reduce((count, item) => count + item.assign.length, 0),
+      routines: layoutPlan.routines.bring.length,
+    };
+  } catch (error) {
+    layout = { groups: 0, routines: 0, error: errorMessage(error) };
+  }
 
   const report: SweepReport = {
     store: store.root,

@@ -1,8 +1,9 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { accountDir } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
+import { backupFile, type BackupOptions } from '../util/backups.js';
 
 /**
  * Scheduled tasks ("routines"), one file per account/org.
@@ -42,21 +43,74 @@ export function scheduledTasksPath(store: StoreLayout, account: AccountRef): str
   return path.join(accountDir(store, account), 'scheduled-tasks.json');
 }
 
-/** `undefined` when the file is missing or unreadable — not the same as an empty list. */
-export function readScheduledTasks(
-  store: StoreLayout,
-  account: AccountRef,
-): ScheduledTasksFile | undefined {
+/**
+ * The result of trying to read one account's routines — three shapes, because
+ * "missing" and "there but unreadable" call for opposite treatment. Missing is
+ * ordinary: `planLayout` treats it as an empty list, and a write creates the
+ * file fresh. Unreadable is not: a source file's routines are simply
+ * unavailable to a plan (reported, not fatal — see #A7), but a *target* file
+ * `applyLayout` cannot read must never be overwritten wholesale on the strength
+ * of what a plan alone would have written — that would destroy whatever tasks
+ * and bookkeeping (`recordedSkips` and the rest) the unreadable file held
+ * (#A3). It is refused instead, and named in the result so the run can say so.
+ */
+export type ScheduledTasksRead =
+  | { status: 'missing' }
+  | { status: 'unreadable'; reason: string }
+  | { status: 'ok'; file: ScheduledTasksFile; invalidTasks: number };
+
+function isScheduledTask(value: unknown): value is ScheduledTask {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const task = value as Record<string, unknown>;
+  return (
+    typeof task.id === 'string' &&
+    typeof task.displayName === 'string' &&
+    typeof task.enabled === 'boolean' &&
+    typeof task.filePath === 'string' &&
+    typeof task.cwd === 'string' &&
+    typeof task.createdAt === 'number'
+  );
+}
+
+/**
+ * Strip a leading UTF-8 BOM. Windows editors and some export tools still
+ * prepend one; Chromium and Node both write JSON without it, but `JSON.parse`
+ * treats a leading `\uFEFF` as a syntax error rather than whitespace, so a
+ * file the app itself would happily reopen looked unreadable here (#A3).
+ */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+export function readScheduledTasks(store: StoreLayout, account: AccountRef): ScheduledTasksRead {
+  const target = scheduledTasksPath(store, account);
+  let raw: string;
   try {
-    const parsed = JSON.parse(readFileSync(scheduledTasksPath(store, account), 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    const tasks = Array.isArray(parsed.scheduledTasks) ? parsed.scheduledTasks : [];
-    return { ...parsed, scheduledTasks: tasks as ScheduledTask[] };
+    raw = readFileSync(target, 'utf8');
   } catch {
-    return undefined;
+    return { status: 'missing' };
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripBom(raw));
+  } catch (error) {
+    return { status: 'unreadable', reason: error instanceof Error ? error.message : String(error) };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { status: 'unreadable', reason: 'not a JSON object' };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const rawTasks = Array.isArray(record.scheduledTasks) ? record.scheduledTasks : [];
+  const tasks: ScheduledTask[] = [];
+  let invalidTasks = 0;
+  for (const entry of rawTasks) {
+    if (isScheduledTask(entry)) tasks.push(entry);
+    else invalidTasks += 1;
+  }
+
+  return { status: 'ok', file: { ...record, scheduledTasks: tasks }, invalidTasks };
 }
 
 /**
@@ -73,7 +127,7 @@ export function writeScheduledTasks(
   store: StoreLayout,
   account: AccountRef,
   file: ScheduledTasksFile,
-  options: { now?: () => Date } = {},
+  options: BackupOptions = {},
 ): { backup: string | undefined } {
   const target = scheduledTasksPath(store, account);
   // An account with a session directory but no routine of its own yet has
@@ -81,12 +135,7 @@ export function writeScheduledTasks(
   // account/org pair's directory was only just resolved for. `writeFileAtomic`
   // needs somewhere to put its temp file, so the directory is made first.
   mkdirSync(path.dirname(target), { recursive: true });
-  let backup: string | undefined;
-  if (existsSync(target)) {
-    const stamp = (options.now?.() ?? new Date()).toISOString().replace(/[:.]/g, '').slice(0, 15);
-    backup = `${target}.bak-${stamp}`;
-    copyFileSync(target, backup);
-  }
+  const backup = existsSync(target) ? backupFile(target, 'scheduledTasks', options) : undefined;
   writeFileAtomic(target, JSON.stringify(file, null, 2));
   return { backup };
 }

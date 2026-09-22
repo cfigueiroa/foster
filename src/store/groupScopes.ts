@@ -1,6 +1,7 @@
-import { copyFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
+import { backupFile, type BackupOptions } from '../util/backups.js';
 
 /**
  * The sidebar's groups, and which card sits in which.
@@ -48,19 +49,66 @@ export function sessionIdOfCard(cardId: string): string | undefined {
   return cardId.startsWith('code:') ? cardId.slice('code:'.length) : undefined;
 }
 
-function isScope(value: unknown): value is GroupScope {
+function isGroupRecord(value: unknown): value is GroupRecord {
   return (
     Boolean(value) &&
     typeof value === 'object' &&
     !Array.isArray(value) &&
-    Array.isArray((value as { groups?: unknown }).groups)
+    typeof (value as { id?: unknown }).id === 'string' &&
+    typeof (value as { name?: unknown }).name === 'string'
   );
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.values(value as Record<string, unknown>).every((v) => typeof v === 'string');
+}
+
+/** A `order` map that is malformed is dropped rather than trusted partially — it is optional. */
+function validOrder(value: unknown): Record<string, string[]> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value as Record<string, unknown>);
+  const out: Record<string, string[]> = {};
+  for (const [key, list] of entries) {
+    if (!Array.isArray(list) || !list.every((id) => typeof id === 'string')) return undefined;
+    out[key] = list;
+  }
+  return out;
+}
+
+/**
+ * A scope well-formed enough to plan from: `groups` an array of `{id, name}`
+ * records, `assignments` a plain object of card id -> group id. Both are
+ * required — a scope missing either crashed `planLayout` with a bare
+ * `TypeError` the moment it tried `Object.entries(scope.assignments)` on
+ * `undefined` (#A6), which is not a failure one malformed source scope should
+ * be able to cause for the whole run. `order`, being optional in the first
+ * place, is dropped rather than refusing the scope when it is malformed.
+ */
+function isScope(value: unknown): value is GroupScope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as { groups?: unknown; assignments?: unknown };
+  return (
+    Array.isArray(candidate.groups) &&
+    candidate.groups.every(isGroupRecord) &&
+    isStringRecord(candidate.assignments)
+  );
+}
+
+function normaliseScope(value: GroupScope): GroupScope {
+  const order = validOrder((value as { order?: unknown }).order);
+  return { groups: value.groups, assignments: value.assignments, ...(order ? { order } : {}) };
 }
 
 /**
  * Every scope the file currently holds, or empty when the app has never
  * written one — a store nothing has ever grouped, which is every fixture store
  * this test suite builds and plenty of real installations too.
+ *
+ * A malformed scope (see `isScope`) is left out of the result rather than
+ * thrown over — `planLayout` treats the source it came from as having nothing
+ * to offer, the same as an account with an empty scope, and the gap is
+ * reportable rather than fatal.
  */
 export function readGroupScopes(store: StoreLayout): GroupScopes {
   let parsed: unknown;
@@ -82,7 +130,7 @@ export function readGroupScopes(store: StoreLayout): GroupScopes {
 
   const out: GroupScopes = {};
   for (const [key, value] of Object.entries(scopes as Record<string, unknown>)) {
-    if (isScope(value)) out[key] = value;
+    if (isScope(value)) out[key] = normaliseScope(value);
   }
   return out;
 }
@@ -96,15 +144,14 @@ export function readGroupScopes(store: StoreLayout): GroupScopes {
  * replace it. Anything else moved and the write is refused with the file
  * untouched.
  *
- * A backup is written first regardless, named with the moment — the same
- * convention `writeAppPref` uses, so a foster backup is recognisable by shape
- * wherever it turns up next to a file the app owns.
+ * A backup is written first regardless, under `~/.foster/backups` — see
+ * `util/backups.ts` — never next to the file it copies.
  */
 export function writeGroupScope(
   store: StoreLayout,
   account: AccountRef,
   scope: GroupScope,
-  options: { now?: () => Date } = {},
+  options: BackupOptions = {},
 ): { backup: string } {
   const key = scopeKey(account);
   const raw = readFileSync(store.desktopConfigFile, 'utf8');
@@ -119,9 +166,7 @@ export function writeGroupScope(
   preferences.epitaxyPrefs = epitaxy;
   after.preferences = preferences;
 
-  const stamp = (options.now?.() ?? new Date()).toISOString().replace(/[:.]/g, '').slice(0, 15);
-  const backup = `${store.desktopConfigFile}.bak-${stamp}`;
-  copyFileSync(store.desktopConfigFile, backup);
+  const backup = backupFile(store.desktopConfigFile, 'groupScope', options);
 
   const text = JSON.stringify(after, null, 2);
   const back = JSON.parse(text) as Record<string, unknown>;

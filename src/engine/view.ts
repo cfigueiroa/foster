@@ -1,21 +1,19 @@
-import path from 'node:path';
 import { listAccountDirs } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
   backupLocalStorage,
-  localStorageDir,
   readLocalStorageValue,
   writeLocalStorageValue,
   type LocalStorageRecord,
 } from '../store/localStorage.js';
 import {
-  ACTIVITY_DAYS_KEY,
+  activityDaysKey,
   emptyProjectsKey,
   environmentsKey,
   legacyViewKeysPresent,
   prStatusKey,
-  readActivityDays,
   readViewAccountPrefs,
+  statusKey,
   writeEpitaxyPrefs,
   type ViewAccountPrefs,
 } from '../store/viewPrefs.js';
@@ -25,10 +23,14 @@ import { readProcesses, type ProcessLister } from './desktop.js';
 /**
  * The Code sidebar's filter menu — reading and changing both halves at once.
  *
- * Seven settings, two stores: `store/localStorage.ts` for the three that are
- * machine-wide, `store/viewPrefs.ts` for the four that are per account. Both
- * are files the app owns and rewrites from memory, so — like `layout.ts` —
- * every write here refuses outright while Claude Desktop is running.
+ * Two settings are machine-wide (`store/localStorage.ts`); five are per
+ * account (`store/viewPrefs.ts`) — status and the activity window included,
+ * per the 22/09/2026 re-measurement via the app's own `set_view` tool: an
+ * earlier reading had both machine-wide or unsuffixed, which was wrong on
+ * both counts, and `dframe-store.state.recentsStatusFilter` is a different
+ * field that this module never reads or writes for status. Both stores are
+ * files the app owns and rewrites from memory, so — like `layout.ts` — every
+ * write here refuses outright while Claude Desktop is running.
  */
 
 const DFRAME_STORE_KEY = 'dframe-store';
@@ -69,14 +71,12 @@ export const ENV_STORED_TO_WORD: Record<string, string> = Object.fromEntries(
 );
 
 export interface ViewState {
-  /** `recentsStatusFilter`; undefined when the app has never written it. */
-  status?: string;
   /** `groupByByMode.code`; undefined when the app has never written it. */
   groupBy?: string;
   /** `sortByByMode.code`; the app treats absence as `recency`. */
   sort: string;
+  /** The five per-account settings, status and activity window included. */
   account: ViewAccountPrefs;
-  activityDays?: number;
   legacy: string[];
   /** Absent when Local Storage has never recorded this key at all. */
   machineRecord?: LocalStorageRecord;
@@ -89,13 +89,11 @@ export function readViewState(store: StoreLayout, account: AccountRef): ViewStat
   const sortByMode = state.sortByByMode as Record<string, unknown> | undefined;
 
   return {
-    ...(typeof state.recentsStatusFilter === 'string' ? { status: state.recentsStatusFilter } : {}),
     ...(typeof groupByMode?.code === 'string' ? { groupBy: groupByMode.code } : {}),
     // Measured: absence means `recency` — the app never writes the key for its
     // own default, so a store nothing has ever sorted still has an answer.
     sort: typeof sortByMode?.code === 'string' ? sortByMode.code : 'recency',
     account: readViewAccountPrefs(store, account),
-    ...(readActivityDays(store) !== undefined ? { activityDays: readActivityDays(store) } : {}),
     legacy: legacyViewKeysPresent(store),
     ...(machineRecord ? { machineRecord } : {}),
   };
@@ -132,7 +130,8 @@ export interface ViewSetRequest {
 export interface ViewSetPlan {
   target: AccountRef;
   changes: ViewChange[];
-  machine: { status?: string; groupBy?: string; sort?: string };
+  /** Only ever `groupBy`/`sort` now — status moved to the per-account `account` map. */
+  machine: { groupBy?: string; sort?: string };
   account: Record<string, unknown>;
   /** True when `--group-by state` forced `status` to `active` — the app's own rule. */
   impliedStatusActive: boolean;
@@ -150,15 +149,23 @@ export function planViewSet(
   let impliedStatusActive = false;
 
   let status = request.status;
-  if (request.groupBy === 'state' && current.status !== 'active') {
+  if (request.groupBy === 'state') {
     // The app's own rule: grouping by state only makes sense with the active
-    // filter, so it sets one when the other is asked for.
-    status = status ?? 'active';
+    // filter. An explicit --status that disagrees is a real conflict, not
+    // something to override quietly — refused rather than silently writing
+    // something other than what was asked for.
+    if (status !== undefined && status !== 'active') {
+      throw new Error(
+        `--group-by state requires status active (the app's own rule), but --status ${status} was also given. ` +
+          'Drop one of the two flags.',
+      );
+    }
+    status = 'active';
     impliedStatusActive = true;
   }
-  if (status !== undefined && status !== current.status) {
-    changes.push({ field: 'status', from: current.status, to: status });
-    machine.status = status;
+  if (status !== undefined && status !== current.account.status) {
+    changes.push({ field: 'status', from: current.account.status, to: status });
+    account[statusKey(target)] = status;
   }
 
   if (request.groupBy !== undefined) {
@@ -210,9 +217,13 @@ export function planViewSet(
     account[prStatusKey(target)] = request.prStatus;
   }
 
-  if (request.activityDays !== undefined && request.activityDays !== current.activityDays) {
-    changes.push({ field: 'activity-days', from: current.activityDays, to: request.activityDays });
-    account[ACTIVITY_DAYS_KEY] = request.activityDays;
+  if (request.activityDays !== undefined && request.activityDays !== current.account.activityDays) {
+    changes.push({
+      field: 'activity-days',
+      from: current.account.activityDays,
+      to: request.activityDays,
+    });
+    account[activityDaysKey(target)] = request.activityDays;
   }
 
   return { target, changes, machine, account, impliedStatusActive };
@@ -223,8 +234,6 @@ export interface ApplyViewOptions {
   env?: NodeJS.ProcessEnv;
   list?: ProcessLister;
   now?: () => Date;
-  /** Where to copy the Local Storage database before writing; a fresh directory per call by default. */
-  backupDir?: string;
 }
 
 function assertClosed(store: StoreLayout, options: ApplyViewOptions): void {
@@ -236,13 +245,32 @@ function assertClosed(store: StoreLayout, options: ApplyViewOptions): void {
   }
 }
 
+/**
+ * Both stores are validated and backed up before either is written.
+ *
+ * Config is written first. Its own write refuses (throws, nothing touched) if
+ * anything but the named keys moved since the read — a check the Local
+ * Storage append has no equivalent of — so writing config first means the
+ * write most likely to refuse is the one tried while neither store has been
+ * touched yet. If the Local Storage append fails afterward, only the
+ * machine-wide half is left unset; nothing here depends on the other half's
+ * value, so a retry of just that half is safe.
+ */
 export function applyViewSet(plan: ViewSetPlan, options: ApplyViewOptions): { backups: string[] } {
   const { store } = options;
   assertClosed(store, options);
   const backups: string[] = [];
 
-  const { status, groupBy, sort } = plan.machine;
-  if (status !== undefined || groupBy !== undefined || sort !== undefined) {
+  if (Object.keys(plan.account).length > 0) {
+    const { backup } = writeEpitaxyPrefs(store, plan.account, {
+      now: options.now,
+      env: options.env,
+    });
+    backups.push(backup);
+  }
+
+  const { groupBy, sort } = plan.machine;
+  if (groupBy !== undefined || sort !== undefined) {
     const record = readLocalStorageValue(store, DFRAME_STORE_KEY);
     if (!record) {
       throw new Error(
@@ -250,27 +278,18 @@ export function applyViewSet(plan: ViewSetPlan, options: ApplyViewOptions): { ba
           'Claude Desktop once, so there is a record for foster to change.',
       );
     }
+    // Backed up before the append, same as every other write-with-app-closed
+    // store here — see util/backups.ts.
+    backups.push(backupLocalStorage(store, options));
+
     const state = { ...((record.document.state as Record<string, unknown>) ?? {}) };
-    if (status !== undefined) state.recentsStatusFilter = status;
     if (groupBy !== undefined) {
       state.groupByByMode = { ...((state.groupByByMode as object) ?? {}), code: groupBy };
     }
     if (sort !== undefined) {
       state.sortByByMode = { ...((state.sortByByMode as object) ?? {}), code: sort };
     }
-
-    const backup = backupLocalStorage(
-      store,
-      options.backupDir ??
-        path.join(localStorageDir(store), '..', `leveldb-bak-foster-${Date.now()}`),
-    );
-    backups.push(backup);
     writeLocalStorageValue(record, DFRAME_STORE_KEY, { ...record.document, state });
-  }
-
-  if (Object.keys(plan.account).length > 0) {
-    const { backup } = writeEpitaxyPrefs(store, plan.account, { now: options.now });
-    backups.push(backup);
   }
 
   return { backups };
@@ -284,6 +303,41 @@ export interface ViewCopyPlan {
 }
 
 /**
+ * One field's diff, source vs target, both read against the same fallback the
+ * app itself would use when the key is absent (`false` for empty groups,
+ * `true` for PR status shown, `[]`/undefined for "every environment", and no
+ * assumed fallback for status or the activity window).
+ *
+ * The point of computing it this way, rather than only when both sides are
+ * set, is #A2: a source that has never set a key and a target that has is a
+ * real difference — the copy should put the target back to the default the
+ * source implies — and the old code reported that difference in `changes`
+ * without writing anything to match, so `foster view copy` printed a change
+ * `applyViewCopy` then silently declined to make. Writing `undefined` here
+ * deletes the target's key, which is exactly "restore the default", and the
+ * plan and the write now describe the same thing.
+ */
+function diff<T>(
+  field: ViewChange['field'],
+  key: string,
+  source: T | undefined,
+  target: T | undefined,
+  fallback: T | undefined,
+  changes: ViewChange[],
+  account: Record<string, unknown>,
+  equal: (a: T | undefined, b: T | undefined) => boolean = (a, b) => a === b,
+): void {
+  const effectiveSource = source ?? fallback;
+  const effectiveTarget = target ?? fallback;
+  if (equal(effectiveSource, effectiveTarget)) return;
+  changes.push({ field, from: effectiveTarget, to: effectiveSource });
+  account[key] = source;
+}
+
+const sameArray = (a: string[] | undefined, b: string[] | undefined): boolean =>
+  JSON.stringify([...(a ?? [])].sort()) === JSON.stringify([...(b ?? [])].sort());
+
+/**
  * The per-account half only — `store/localStorage.ts`'s half is machine-wide
  * and there is nothing to copy about it.
  */
@@ -293,32 +347,50 @@ export function planViewCopy(store: StoreLayout, from: AccountRef, to: AccountRe
   const changes: ViewChange[] = [];
   const account: Record<string, unknown> = {};
 
-  const sourceEnv = source.environments ?? [];
-  const targetEnv = target.environments ?? [];
-  if (JSON.stringify([...sourceEnv].sort()) !== JSON.stringify([...targetEnv].sort())) {
-    changes.push({ field: 'env', from: targetEnv, to: sourceEnv });
-    account[environmentsKey(to)] = sourceEnv.length > 0 ? sourceEnv : undefined;
-  }
+  diff(
+    'env',
+    environmentsKey(to),
+    source.environments,
+    target.environments,
+    [],
+    changes,
+    account,
+    sameArray,
+  );
+  diff(
+    'empty-groups',
+    emptyProjectsKey(to),
+    source.showEmptyProjects,
+    target.showEmptyProjects,
+    false,
+    changes,
+    account,
+  );
+  diff(
+    'pr-status',
+    prStatusKey(to),
+    source.showPrStatus,
+    target.showPrStatus,
+    true,
+    changes,
+    account,
+  );
+  diff('status', statusKey(to), source.status, target.status, undefined, changes, account);
+  diff(
+    'activity-days',
+    activityDaysKey(to),
+    source.activityDays,
+    target.activityDays,
+    undefined,
+    changes,
+    account,
+  );
 
-  if ((source.showEmptyProjects ?? false) !== (target.showEmptyProjects ?? false)) {
-    changes.push({
-      field: 'empty-groups',
-      from: target.showEmptyProjects ?? false,
-      to: source.showEmptyProjects ?? false,
-    });
-    if (source.showEmptyProjects !== undefined)
-      account[emptyProjectsKey(to)] = source.showEmptyProjects;
-  }
-
-  if ((source.showPrStatus ?? true) !== (target.showPrStatus ?? true)) {
-    changes.push({
-      field: 'pr-status',
-      from: target.showPrStatus ?? true,
-      to: source.showPrStatus ?? true,
-    });
-    if (source.showPrStatus !== undefined) account[prStatusKey(to)] = source.showPrStatus;
-  }
-
+  // `diff` writes `undefined` for "delete this key", and `account[key] =
+  // undefined` is indistinguishable from the key never having been set at
+  // all once spread — `writeEpitaxyPrefs` needs the key present (even as
+  // `undefined`) to know to delete it, so it is kept explicit here rather
+  // than filtered out.
   return { from, to, changes, account };
 }
 
@@ -328,14 +400,18 @@ export function applyViewCopy(
 ): { backups: string[] } {
   if (Object.keys(plan.account).length === 0) return { backups: [] };
   assertClosed(options.store, options);
-  const { backup } = writeEpitaxyPrefs(options.store, plan.account, { now: options.now });
+  const { backup } = writeEpitaxyPrefs(options.store, plan.account, {
+    now: options.now,
+    env: options.env,
+  });
   return { backups: [backup] };
 }
 
 // ---------------------------------------------------------------------------
 // Layout's own carry-over of the per-account half — see spec part 2, "layout
 // also carries the per-account half (B) from the source account when the
-// target has none of those keys set".
+// target has none of those keys set" — now five keys, status and the
+// activity window included (22/09/2026 re-measurement).
 // ---------------------------------------------------------------------------
 
 export interface LayoutViewCarry {
@@ -348,16 +424,19 @@ function hasAnyAccountPref(prefs: ViewAccountPrefs): boolean {
   return (
     prefs.environments !== undefined ||
     prefs.showEmptyProjects !== undefined ||
-    prefs.showPrStatus !== undefined
+    prefs.showPrStatus !== undefined ||
+    prefs.status !== undefined ||
+    prefs.activityDays !== undefined
   );
 }
 
 /**
  * The same "user's own choice wins" rule `engine/layout.ts` applies to groups,
  * applied to the sidebar filter menu: nothing is borrowed unless the target has
- * none of these three set at all, and then the whole set comes from one
+ * none of these five set at all, and then the whole set comes from one
  * account — the first other account that has any of them, in the order
- * `listAccountDirs` gives.
+ * `listAccountDirs` gives. Target starts with nothing, so there is never a
+ * default to restore here — only fields the source actually has are copied.
  */
 export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): LayoutViewCarry {
   const targetPrefs = readViewAccountPrefs(store, target);
@@ -389,6 +468,14 @@ export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): Lay
     if (prefs.showPrStatus !== undefined) {
       changes.push({ field: 'pr-status', from: undefined, to: prefs.showPrStatus });
       account[prStatusKey(target)] = prefs.showPrStatus;
+    }
+    if (prefs.status !== undefined) {
+      changes.push({ field: 'status', from: undefined, to: prefs.status });
+      account[statusKey(target)] = prefs.status;
+    }
+    if (prefs.activityDays !== undefined) {
+      changes.push({ field: 'activity-days', from: undefined, to: prefs.activityDays });
+      account[activityDaysKey(target)] = prefs.activityDays;
     }
     return { from: source, changes, account };
   }

@@ -1,23 +1,32 @@
-import { copyFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
+import { backupFile, type BackupOptions } from '../util/backups.js';
 
 /**
  * The Code sidebar's filter menu — the per-account half of it.
  *
- * Measured 22/09/2026, real MSIX store: four of the menu's seven settings live
- * in `claude_desktop_config.json`, the same file `store/groupScopes.ts` and
+ * Measured 22/09/2026, real MSIX store, via the app's own `set_view` tool (then
+ * restored): **five** of the menu's seven settings live in
+ * `claude_desktop_config.json`, the same file `store/groupScopes.ts` and
  * `store/appPrefs.ts` read, as top-level keys of `preferences.epitaxyPrefs` —
- * siblings of `dframe-group-scopes`, not nested under it. Three of the four
- * carry the account uuid as a suffix; the fourth, `code-sessions-state-activity-days`,
- * does not, because "last activity" applies to the account signed in, whichever
- * one that is, rather than to one particular account's own row.
+ * siblings of `dframe-group-scopes`, not nested under it. Every one of the
+ * five carries the account uuid as a suffix, status and the activity window
+ * included — an earlier reading of this file treated both as machine-wide or
+ * unsuffixed; measured again with the app's own tool, both
+ * `code-sessions-status-filter.<accountUuid>` and
+ * `code-sessions-state-activity-days.<accountUuid>` are per account, and
+ * `dframe-store.state.recentsStatusFilter` (Local Storage) is a different field
+ * entirely — never read or written for status.
  *
- * Three more keys, without the `-v2` suffix or the account uuid the app now
- * writes, are left over from an older build. The UI no longer reads them —
- * measured: `code-sessions-status-filter` said `all` while the sidebar showed
- * "Ativo" — so they are read-only here, surfaced as `legacy` rather than
- * mistaken for the setting currently in force, and never written.
+ * Two more keys, without the `-v2` suffix or the account uuid the app now
+ * writes, are left over from an older build, alongside the unsuffixed
+ * `code-sessions-status-filter` and `code-sessions-state-activity-days` this
+ * reading demoted from "the real key" to "legacy" — measured side by side on
+ * a real account: `code-sessions-status-filter` (unsuffixed) said `all` while
+ * `code-sessions-status-filter.<accountUuid>` said `active`, which is what the
+ * sidebar showed. The UI does not read any of the unsuffixed four; they are
+ * read-only here, surfaced as `legacy`, and never written.
  */
 
 export function environmentsKey(account: AccountRef): string {
@@ -32,14 +41,20 @@ export function prStatusKey(account: AccountRef): string {
   return `code-sessions-show-pr-status.${account.accountUuid}`;
 }
 
-/** Not suffixed by account — measured, and kept as a constant rather than a function for it. */
-export const ACTIVITY_DAYS_KEY = 'code-sessions-state-activity-days';
+export function statusKey(account: AccountRef): string {
+  return `code-sessions-status-filter.${account.accountUuid}`;
+}
 
-/** Left by an older build; the UI no longer reads any of these. Never written. */
+export function activityDaysKey(account: AccountRef): string {
+  return `code-sessions-state-activity-days.${account.accountUuid}`;
+}
+
+/** Left by an older build, or superseded by the per-account key above; the UI reads none of these. */
 export const LEGACY_VIEW_KEYS = [
   'code-sessions-status-filter',
   'code-sessions-selected-environments',
   'code-sessions-show-empty-projects',
+  'code-sessions-state-activity-days',
 ] as const;
 
 export interface ViewAccountPrefs {
@@ -47,20 +62,24 @@ export interface ViewAccountPrefs {
   environments?: string[];
   showEmptyProjects?: boolean;
   showPrStatus?: boolean;
+  status?: string;
+  activityDays?: number;
 }
 
-/** The four keys this account/installation carries, exactly as `writeEpitaxyPrefs` would set them. */
+/** The five keys this account carries, exactly as `writeEpitaxyPrefs` would set them. */
 export function accountPrefKeys(account: AccountRef): {
   environments: string;
   showEmptyProjects: string;
   showPrStatus: string;
+  status: string;
   activityDays: string;
 } {
   return {
     environments: environmentsKey(account),
     showEmptyProjects: emptyProjectsKey(account),
     showPrStatus: prStatusKey(account),
-    activityDays: ACTIVITY_DAYS_KEY,
+    status: statusKey(account),
+    activityDays: activityDaysKey(account),
   };
 }
 
@@ -92,18 +111,17 @@ export function readViewAccountPrefs(store: StoreLayout, account: AccountRef): V
   const environments = epitaxy[environmentsKey(account)];
   const showEmptyProjects = epitaxy[emptyProjectsKey(account)];
   const showPrStatus = epitaxy[prStatusKey(account)];
+  const status = epitaxy[statusKey(account)];
+  const activityDays = epitaxy[activityDaysKey(account)];
   return {
     ...(Array.isArray(environments)
       ? { environments: environments.filter((v): v is string => typeof v === 'string') }
       : {}),
     ...(typeof showEmptyProjects === 'boolean' ? { showEmptyProjects } : {}),
     ...(typeof showPrStatus === 'boolean' ? { showPrStatus } : {}),
+    ...(typeof status === 'string' ? { status } : {}),
+    ...(typeof activityDays === 'number' ? { activityDays } : {}),
   };
-}
-
-export function readActivityDays(store: StoreLayout): number | undefined {
-  const value = readEpitaxyPrefs(store)[ACTIVITY_DAYS_KEY];
-  return typeof value === 'number' ? value : undefined;
 }
 
 /** The legacy keys that are actually present, for `--json` to report as such. */
@@ -127,7 +145,7 @@ export function legacyViewKeysPresent(store: StoreLayout): string[] {
 export function writeEpitaxyPrefs(
   store: StoreLayout,
   changes: Record<string, unknown>,
-  options: { now?: () => Date } = {},
+  options: BackupOptions = {},
 ): { backup: string } {
   const raw = readFileSync(store.desktopConfigFile, 'utf8');
   const before = JSON.parse(raw) as Record<string, unknown>;
@@ -142,9 +160,11 @@ export function writeEpitaxyPrefs(
   preferences.epitaxyPrefs = epitaxy;
   after.preferences = preferences;
 
-  const stamp = (options.now?.() ?? new Date()).toISOString().replace(/[:.]/g, '').slice(0, 15);
-  const backup = `${store.desktopConfigFile}.bak-${stamp}`;
-  copyFileSync(store.desktopConfigFile, backup);
+  // Backed up under ~/.foster/backups, never next to the file it copies — see
+  // util/backups.ts. Taken before the write, whether or not the write below
+  // ends up refusing: a refusal still leaves a copy of what was there for
+  // whoever is looking at the "would have changed too" message.
+  const backup = backupFile(store.desktopConfigFile, 'epitaxyPrefs', options);
 
   const text = JSON.stringify(after, null, 2);
   const back = JSON.parse(text) as Record<string, unknown>;

@@ -20,12 +20,14 @@ import {
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import { localStorageDir, localStorageKey } from '../src/store/localStorage.js';
 import {
+  activityDaysKey,
   emptyProjectsKey,
   environmentsKey,
   legacyViewKeysPresent,
   prStatusKey,
   readEpitaxyPrefs,
   readViewAccountPrefs,
+  statusKey,
   writeEpitaxyPrefs,
 } from '../src/store/viewPrefs.js';
 import type { ProcessRow } from '../src/util/processes.js';
@@ -33,6 +35,19 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 const LOG_NUMBER = 4;
 const SCRIPT_KEY = 'dframe-store';
+
+/** No process ever reported running — the app is always "closed" to these tests. */
+const closed = (): ProcessRow[] => [];
+
+/** Redirects backups into the test's own temp tree, never the real `~/.foster`. */
+function testEnv(store: StoreLayout): NodeJS.ProcessEnv {
+  return { ...process.env, FOSTER_HOME: path.join(store.root, '.foster-home') };
+}
+
+/** The same, shaped for a direct `write*` call rather than an `Apply*Options`. */
+function backupOpts(store: StoreLayout): { env: NodeJS.ProcessEnv } {
+  return { env: testEnv(store) };
+}
 
 /** A synthetic Local Storage database carrying the sidebar filter menu's `state`. */
 function makeMachineStore(store: StoreLayout, state: Record<string, unknown> = {}): void {
@@ -109,40 +124,50 @@ describe('CLI word <-> stored value mapping', () => {
   });
 });
 
-describe('store/viewPrefs: the per-account half', () => {
-  it('reads and writes the three account-suffixed keys and the shared activity-days key', () => {
+describe('store/viewPrefs: the five per-account keys (22/09/2026 re-measurement)', () => {
+  it('reads and writes status and the activity window per account, not machine-wide', () => {
     const store = makeStore();
     writeDesktopConfig(store);
 
-    const { backup } = writeEpitaxyPrefs(store, {
-      [environmentsKey(NEW_ACCOUNT)]: ['local', 'ssh'],
-      [emptyProjectsKey(NEW_ACCOUNT)]: true,
-      [prStatusKey(NEW_ACCOUNT)]: false,
-      'code-sessions-state-activity-days': 7,
-    });
-    expect(backup).toMatch(/\.bak-/);
+    const { backup } = writeEpitaxyPrefs(
+      store,
+      {
+        [environmentsKey(NEW_ACCOUNT)]: ['local', 'ssh'],
+        [emptyProjectsKey(NEW_ACCOUNT)]: true,
+        [prStatusKey(NEW_ACCOUNT)]: false,
+        [statusKey(NEW_ACCOUNT)]: 'active',
+        [activityDaysKey(NEW_ACCOUNT)]: 7,
+      },
+      backupOpts(store),
+    );
+    expect(backup).toMatch(/backups/);
 
     const prefs = readViewAccountPrefs(store, NEW_ACCOUNT);
     expect(prefs).toEqual({
       environments: ['local', 'ssh'],
       showEmptyProjects: true,
       showPrStatus: false,
+      status: 'active',
+      activityDays: 7,
     });
-    expect(readEpitaxyPrefs(store)['code-sessions-state-activity-days']).toBe(7);
 
-    // A different account's keys are untouched by another account's write.
+    // A different account's keys — and the unsuffixed legacy ones — are untouched.
     expect(readViewAccountPrefs(store, OLD_ACCOUNT)).toEqual({});
   });
 
-  it('reports legacy keys without ever writing them', () => {
+  it('reports the unsuffixed status and activity-days keys as legacy, never as the real setting', () => {
     const store = makeStore();
     writeDesktopConfig(store, {
       'code-sessions-status-filter': 'all',
-      'code-sessions-selected-environments': ['local'],
+      'code-sessions-state-activity-days': 30,
+      [statusKey(NEW_ACCOUNT)]: 'active',
     });
+    // Measured on a real account: the two disagreed (unsuffixed said `all`,
+    // the per-account key said `active`, and the sidebar showed `active`).
     expect(legacyViewKeysPresent(store).sort()).toEqual(
-      ['code-sessions-selected-environments', 'code-sessions-status-filter'].sort(),
+      ['code-sessions-state-activity-days', 'code-sessions-status-filter'].sort(),
     );
+    expect(readViewAccountPrefs(store, NEW_ACCOUNT).status).toBe('active');
   });
 
   it('preserves unrelated epitaxyPrefs and preferences keys on write', () => {
@@ -155,7 +180,7 @@ describe('store/viewPrefs: the per-account half', () => {
       }),
       'utf8',
     );
-    writeEpitaxyPrefs(store, { [environmentsKey(NEW_ACCOUNT)]: ['local'] });
+    writeEpitaxyPrefs(store, { [environmentsKey(NEW_ACCOUNT)]: ['local'] }, backupOpts(store));
 
     const after = JSON.parse(readFileSync(store.desktopConfigFile, 'utf8')) as Record<
       string,
@@ -168,24 +193,39 @@ describe('store/viewPrefs: the per-account half', () => {
         .untouched,
     ).toBe('x');
   });
+
+  it('backs up under ~/.foster/backups (FOSTER_HOME-aware), never as a sibling of the file it copies (finding #4)', () => {
+    const store = makeStore();
+    writeDesktopConfig(store);
+    // FOSTER_HOME is nested under the store root here purely so the temp
+    // directory this test runs in cleans up in one piece — the backup still
+    // has to land under it, not next to `claude_desktop_config.json` the way
+    // the old `<file>.bak-<stamp>` convention did.
+    const env = testEnv(store);
+    const { backup } = writeEpitaxyPrefs(store, { [statusKey(NEW_ACCOUNT)]: 'active' }, { env });
+    expect(backup.startsWith(path.join(env.FOSTER_HOME!, 'backups'))).toBe(true);
+    expect(path.dirname(backup)).not.toBe(path.dirname(store.desktopConfigFile));
+    expect(path.basename(backup)).not.toMatch(/^claude_desktop_config\.json\.bak-/);
+    expect(readFileSync(backup, 'utf8')).not.toContain(statusKey(NEW_ACCOUNT));
+  });
 });
 
 describe('planViewSet / applyViewSet', () => {
-  it('group-by state also sets status to active, and says so', () => {
+  it('status is per-account: group-by state sets it in the account map, not machine', () => {
     const store = makeStore();
-    makeMachineStore(store, { recentsStatusFilter: 'archived' });
-    writeDesktopConfig(store);
+    makeMachineStore(store, {});
+    writeDesktopConfig(store, { [statusKey(NEW_ACCOUNT)]: 'archived' });
 
     const plan = planViewSet(store, NEW_ACCOUNT, { groupBy: 'state' });
     expect(plan.impliedStatusActive).toBe(true);
-    expect(plan.machine.status).toBe('active');
+    expect(plan.machine).not.toHaveProperty('status');
+    expect(plan.account[statusKey(NEW_ACCOUNT)]).toBe('active');
     expect(plan.changes.map((c) => c.field).sort()).toEqual(['group-by', 'status']);
   });
 
-  it('writes the machine half and the account half in one call, leaving neighbours alone', () => {
+  it('writes the machine half (group-by, sort) and the account half in one call, leaving neighbours alone', () => {
     const store = makeStore();
     makeMachineStore(store, {
-      recentsStatusFilter: 'active',
       sidebarWidth: 400,
       groupByByMode: { chat: 'date' },
     });
@@ -196,14 +236,16 @@ describe('planViewSet / applyViewSet', () => {
       sort: 'name',
       env: ['local', 'cloud'],
       prStatus: false,
+      activityDays: 7,
     });
-    applyViewSet(plan, { store });
+    applyViewSet(plan, { store, list: closed, env: testEnv(store) });
 
     const state = readViewState(store, NEW_ACCOUNT);
-    expect(state.status).toBe('archived');
+    expect(state.account.status).toBe('archived');
     expect(state.sort).toBe('alpha');
     expect(state.account.environments).toEqual(['local', 'remote']);
     expect(state.account.showPrStatus).toBe(false);
+    expect(state.account.activityDays).toBe(7);
 
     // Neighbours of the machine-wide state, and the code-only mode, survive.
     const record = state.machineRecord!;
@@ -212,6 +254,8 @@ describe('planViewSet / applyViewSet', () => {
       ((record.document.state as Record<string, unknown>).groupByByMode as Record<string, unknown>)
         .chat,
     ).toBe('date');
+    // dframe-store never carries status — see the 22/09/2026 re-measurement.
+    expect((record.document.state as Record<string, unknown>).recentsStatusFilter).toBeUndefined();
 
     const desktopConfig = JSON.parse(readFileSync(store.desktopConfigFile, 'utf8')) as Record<
       string,
@@ -230,50 +274,78 @@ describe('planViewSet / applyViewSet', () => {
     writeDesktopConfig(store);
     const plan = planViewSet(store, NEW_ACCOUNT, { status: 'archived' });
 
-    expect(() => applyViewSet(plan, { store, list: () => desktopRunningOn(store.root) })).toThrow(
-      AppRunningError,
-    );
+    expect(() =>
+      applyViewSet(plan, { store, list: () => desktopRunningOn(store.root) }),
+    ).toThrow(AppRunningError);
   });
 });
 
 describe('planViewCopy / applyViewCopy', () => {
-  it('copies only the per-account half, and is idempotent', () => {
+  it('copies only the per-account half (all five keys), and is idempotent', () => {
     const store = makeStore();
     writeDesktopConfig(store);
-    writeEpitaxyPrefs(store, {
-      [environmentsKey(OLD_ACCOUNT)]: ['local'],
-      [emptyProjectsKey(OLD_ACCOUNT)]: true,
-    });
+    writeEpitaxyPrefs(
+      store,
+      {
+        [environmentsKey(OLD_ACCOUNT)]: ['local'],
+        [emptyProjectsKey(OLD_ACCOUNT)]: true,
+        [statusKey(OLD_ACCOUNT)]: 'active',
+        [activityDaysKey(OLD_ACCOUNT)]: 30,
+      },
+      backupOpts(store),
+    );
 
     const first = planViewCopy(store, OLD_ACCOUNT, NEW_ACCOUNT);
     expect(first.changes.length).toBeGreaterThan(0);
-    applyViewCopy(first, { store });
+    const applied = applyViewCopy(first, { store, list: closed, env: testEnv(store) });
+    expect(applied.backups).toHaveLength(1);
 
     expect(readViewAccountPrefs(store, NEW_ACCOUNT)).toEqual({
       environments: ['local'],
       showEmptyProjects: true,
+      status: 'active',
+      activityDays: 30,
     });
 
+    // Idempotent: the second plan has nothing left to change, and applying it
+    // writes nothing — no backup, and the file's bytes are unchanged.
+    const before = readFileSync(store.desktopConfigFile, 'utf8');
     const second = planViewCopy(store, OLD_ACCOUNT, NEW_ACCOUNT);
     expect(second.changes).toEqual([]);
-    const result = applyViewCopy(second, { store });
+    const result = applyViewCopy(second, { store, list: closed, env: testEnv(store) });
     expect(result.backups).toEqual([]);
+    expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(before);
+  });
+
+  it('#A2 / finding #7: when the source has never set a key the target has, the copy deletes the target key and says so', () => {
+    const store = makeStore();
+    writeDesktopConfig(store, { [emptyProjectsKey(NEW_ACCOUNT)]: true });
+
+    const plan = planViewCopy(store, OLD_ACCOUNT, NEW_ACCOUNT);
+    expect(plan.changes).toEqual([{ field: 'empty-groups', from: true, to: false }]);
+
+    const result = applyViewCopy(plan, { store, list: closed, env: testEnv(store) });
+    // The old bug: the plan reported this change but applyViewCopy wrote
+    // nothing for it (guarded on `source !== undefined`), so the target kept
+    // showing `true` after a copy that claimed to have changed it.
+    expect(result.backups).toHaveLength(1);
+    expect(readViewAccountPrefs(store, NEW_ACCOUNT).showEmptyProjects).toBeUndefined();
   });
 
   it('refuses to write while Claude Desktop is running', () => {
     const store = makeStore();
     writeDesktopConfig(store);
-    writeEpitaxyPrefs(store, { [environmentsKey(OLD_ACCOUNT)]: ['local'] });
+    writeEpitaxyPrefs(store, { [environmentsKey(OLD_ACCOUNT)]: ['local'] }, backupOpts(store));
     const plan = planViewCopy(store, OLD_ACCOUNT, NEW_ACCOUNT);
 
-    expect(() => applyViewCopy(plan, { store, list: () => desktopRunningOn(store.root) })).toThrow(
-      AppRunningError,
-    );
+    expect(() =>
+      applyViewCopy(plan, { store, list: () => desktopRunningOn(store.root) }),
+    ).toThrow(AppRunningError);
   });
 });
 
-describe('planLayoutViewCarry', () => {
-  it('carries the whole per-account half from the only other account that has any of it', () => {
+describe('planLayoutViewCarry (finding #6: status and activity-days are carried too)', () => {
+  it('carries the whole per-account half, status and activity window included, from the only other account that has any of it', () => {
     const store = makeStore();
     // `listAccountDirs` walks the code-sessions directory, so every account it
     // is to consider needs a directory there — writing a session is the
@@ -284,30 +356,51 @@ describe('planLayoutViewCarry', () => {
       });
     }
     writeDesktopConfig(store);
-    writeEpitaxyPrefs(store, {
-      [emptyProjectsKey(OLD_ACCOUNT)]: true,
-      [environmentsKey(OLD_ACCOUNT)]: ['ssh'],
-    });
+    writeEpitaxyPrefs(
+      store,
+      {
+        [emptyProjectsKey(OLD_ACCOUNT)]: true,
+        [environmentsKey(OLD_ACCOUNT)]: ['ssh'],
+        [statusKey(OLD_ACCOUNT)]: 'archived',
+        [activityDaysKey(OLD_ACCOUNT)]: 1,
+      },
+      backupOpts(store),
+    );
 
     const carry = planLayoutViewCarry(store, NEW_ACCOUNT);
     expect(carry.from).toEqual(OLD_ACCOUNT);
     expect(carry.account).toEqual({
       [environmentsKey(NEW_ACCOUNT)]: ['ssh'],
       [emptyProjectsKey(NEW_ACCOUNT)]: true,
+      [statusKey(NEW_ACCOUNT)]: 'archived',
+      [activityDaysKey(NEW_ACCOUNT)]: 1,
     });
-    expect(carry.changes.map((c) => c.field).sort()).toEqual(['empty-groups', 'env']);
+    expect(carry.changes.map((c) => c.field).sort()).toEqual(
+      ['activity-days', 'empty-groups', 'env', 'status'].sort(),
+    );
   });
 
-  it('carries nothing when the target already has any of the three set', () => {
+  it('carries nothing when the target already has any of the five set', () => {
     const store = makeStore();
     writeDesktopConfig(store);
-    writeEpitaxyPrefs(store, {
-      [emptyProjectsKey(NEW_ACCOUNT)]: false,
-      [emptyProjectsKey(OLD_ACCOUNT)]: true,
-    });
+    writeEpitaxyPrefs(
+      store,
+      {
+        [activityDaysKey(NEW_ACCOUNT)]: 3,
+        [emptyProjectsKey(OLD_ACCOUNT)]: true,
+      },
+      backupOpts(store),
+    );
 
     const carry = planLayoutViewCarry(store, NEW_ACCOUNT);
     expect(carry.changes).toEqual([]);
     expect(carry.account).toEqual({});
+  });
+});
+
+describe('readEpitaxyPrefs (sanity: the config reader survives a missing file)', () => {
+  it('returns {} rather than throwing when the file does not exist', () => {
+    const store = makeStore();
+    expect(readEpitaxyPrefs(store)).toEqual({});
   });
 });

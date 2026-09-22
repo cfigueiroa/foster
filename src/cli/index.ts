@@ -196,7 +196,6 @@ import {
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
 import {
   RESTART_COMMAND,
-  restartPlan,
   runSweep,
   type BranchesPhase,
   type FileCardsPhase,
@@ -204,6 +203,7 @@ import {
   type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
+import { restartAround, type RestartAroundResult } from '../ops/restart.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
@@ -1346,85 +1346,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
  * error after writing everything would read as a failed run. Asked first, it ends
  * with the line to paste into a terminal outside the app instead.
  */
-interface SweepRestart {
-  requested: boolean;
-  done: boolean;
-  reason?: string;
-  command: string;
-}
-
-/**
- * Quit Claude Desktop, optionally do something while it is down, then start it
- * again — the restart machinery every write-with-app-closed command shares.
- *
- * `sweep --restart` has already written everything by the time it calls this,
- * so it passes no `duringGap`; `layout`/`view --restart` write files that are
- * only safe to touch while the app is closed, so they write from inside the
- * gap this opens, between the quit landing and the start going out. Either
- * way this is the one place that decides whether foster may restart the app
- * at all — see `RestartPlan`'s own reasoning about a session the app is
- * itself hosting.
- */
-async function restartAround(
-  store: StoreLayout,
-  requested: boolean,
-  command: string,
-  duringGap?: () => void | Promise<void>,
-): Promise<SweepRestart> {
-  // Asked for only when it matters: working out whether foster is inside the app
-  // means reading the process table, which is a second of PowerShell that a run
-  // nobody asked to restart has no use for.
-  if (!requested) return { requested: false, done: false, command };
-
-  const plan = restartPlan(store);
-  if (!plan.possible) {
-    return {
-      requested: true,
-      done: false,
-      reason: `${plan.reason}\nRun it from a terminal outside the app:`,
-      command,
-    };
-  }
-
-  try {
-    if (plan.running) {
-      const quit = await quitDesktop(store);
-      if (quit.outcome === 'needs-terminate' || quit.outcome === 'hides-to-tray') {
-        return {
-          requested: true,
-          done: false,
-          reason: trayNote('Finish it with'),
-          command: 'foster app restart --terminate',
-        };
-      }
-      if (quit.outcome !== 'quit' && quit.outcome !== 'not-running') {
-        return {
-          requested: true,
-          done: false,
-          reason: 'Claude Desktop is still running. Quit it from the tray icon.',
-          command,
-        };
-      }
-    }
-    if (duringGap) await duringGap();
-    const started = await startDesktop(store);
-    return started
-      ? { requested: true, done: true, command }
-      : {
-          requested: true,
-          done: false,
-          reason: 'Started it; it has not taken the store yet.',
-          command,
-        };
-  } catch (error) {
-    return {
-      requested: true,
-      done: false,
-      reason: error instanceof Error ? error.message : String(error),
-      command,
-    };
-  }
-}
+type SweepRestart = RestartAroundResult;
 
 async function sweepRestart(
   store: StoreLayout,
@@ -2722,13 +2644,13 @@ const view = program
     if (opts.json) {
       print({
         target,
-        status: state.status ?? null,
+        status: state.account.status ?? null,
         groupBy: state.groupBy ? (GROUP_BY_STORED_TO_WORD[state.groupBy] ?? state.groupBy) : null,
         sort: SORT_STORED_TO_WORD[state.sort] ?? state.sort,
         environments: state.account.environments?.map((v) => ENV_STORED_TO_WORD[v] ?? v) ?? [],
         showEmptyProjects: state.account.showEmptyProjects ?? null,
         showPrStatus: state.account.showPrStatus ?? true,
-        activityDays: state.activityDays ?? null,
+        activityDays: state.account.activityDays ?? null,
         legacy: state.legacy,
       });
       return;
@@ -2737,7 +2659,7 @@ const view = program
     console.log(pc.bold(`Sidebar filters for ${shortId(target.accountUuid)}`));
     const row = (label: string, where: 'machine' | 'account', value: string): void =>
       console.log(`  ${label.padEnd(14)} ${value}  ${pc.dim(`(${where})`)}`);
-    row('status', 'machine', state.status ?? pc.dim('(never set)'));
+    row('status', 'account', state.account.status ?? pc.dim('(never set)'));
     row(
       'group-by',
       'machine',
@@ -2758,7 +2680,7 @@ const view = program
     row(
       'activity-days',
       'account',
-      state.activityDays !== undefined ? String(state.activityDays) : pc.dim('(default)'),
+      state.account.activityDays !== undefined ? String(state.account.activityDays) : pc.dim('(default)'),
     );
 
     if (state.legacy.length > 0) {
