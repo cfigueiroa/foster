@@ -247,7 +247,7 @@ never refused for it. A card the app rewrites in the meantime simply keeps (or r
 on disk, which the next `foster unclaim` or sweep pass finds and releases again — the change itself
 only becomes visible at the app's next restart, the same as a retitle.
 
-## You cannot restart the app from a session the app started
+## You cannot restart the app from a session the app started — except through `--detach`
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the
 app**. `app quit` and `app restart` want the app closed, and closing it kills the session
@@ -257,6 +257,37 @@ what the app is actually holding — a native card, or a copy that already exist
 started — so the rule is **run them before the restart, not after**, and a card the app itself
 made waits either way. `sweep --restart` asks first and hands over the command instead of
 failing at the end of a run that already wrote everything.
+
+`--detach` (on `app restart`, `layout`, `view set`, `view copy` and `sweep`) is the one way
+around the refusal itself, not a way to skip asking. Measured end to end 22/09/2026:
+`Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments
+@{CommandLine='wscript.exe "<vbs>"'}` starts a process whose parent is `WmiPrvSE.exe` — outside
+the app's tree and its MSIX container — so it survives the app quitting. The `.vbs` runs
+`cmd.exe /c "ping -n <delay+1> 127.0.0.1 >nul & echo … & node "<foster.js>" <args> & echo …"`
+through `WScript.Shell.Run(cmd, 0, True)`: window style `0` is what actually hides it on this
+machine, where Windows Terminal is the default terminal and a console process pops a window
+even under `-WindowStyle Hidden`. What it launches is the same command again, minus `--detach`
+— so `foster layout --yes --restart --detach` writes nothing itself; the detached re-run of
+`foster layout --yes --restart`, outside the app a few seconds later, is what actually quits it,
+writes in the gap, and starts it again. `sweep --detach` is narrower still: the sweep's own
+writes happen now, in-process, as always — only the restart at the end is handed to the
+detached process, as `foster app restart` or `foster layout --yes --restart` (whichever `sweep`
+would otherwise have printed).
+
+The cost is not optional and is said before it is paid: **every session the app hosts ends when
+it quits, this one included**, with no way to warn one first and no undo. `--detach` reads the
+live-session registry the way `foster live` does and refuses outright, naming them, if it would
+end anything besides the session it is running in — `--detach-even-with-live` is the override,
+and nothing in this codebase adds it on its own initiative (see the `/fosteia` skill's own
+"Never" list). Pitfall measured writing the `.vbs` generator: `Log` is a VBScript built-in
+function, and a variable named `Log` kills the script with an error dialog before anything
+runs — `src/engine/detach.ts` never names one of its own variables after a VBScript built-in
+(`Log`, `Date`, `Time`, `Len`, …), and a test holds that promise.
+
+The session that launched a detached restart is gone by the time it lands — there is no way for
+it to say whether the write actually happened. `foster detached --last` is what reads that back,
+from `<FOSTER_HOME>/detached/<stamp>-<verb>.log`: pending (no `start` line yet), running (`start`
+with no `end`), or done. Read it in a **new** session, after the app is back.
 
 Check before promising anything:
 

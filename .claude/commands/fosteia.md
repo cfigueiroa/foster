@@ -51,14 +51,11 @@ catch forks that began in the middle of a conversation.
 Do not run `foster doctor` first and do not run anything to confirm afterwards: the sweep
 fails loudly on its own and confirms itself.
 
-`--restart` restarts Claude Desktop, which is what makes the copies visible. If this session is
-a child of the app, foster will not restart it — that would kill this session part-way through —
-and the output ends with the command to run in a terminal outside the app. Hand that line to the
-user and say plainly that it is the last step — **unless** the sweep's own output also names a
-pending `Layout:` line (sidebar groups and routines waiting from another account). In that case the
-last step is `foster layout --yes --restart` instead: it writes those two files in the same
-quit-write-start gap and restarts the app afterward, so there is still exactly one command to hand
-over, not two.
+`--restart` in the one-liner above is kept, but it is harmless rather than the thing that finishes
+the job: this session is a child of the app, so foster will not restart it in-process from here —
+that would kill this session part-way through — and the sweep says so rather than trying. The
+actual last step of this whole command is `foster layout --yes --restart --detach`, in "Finish
+it" below, run only after the rename and the report.
 
 ## Name this conversation
 
@@ -83,6 +80,10 @@ first block of the uuid, and the sweep's own **"Sweeping into"** line is still t
 Rename as soon as the sweep returns, before writing the report. If `set_session_title` is not
 among your tools — this command run outside Claude Desktop — skip the rename silently; it is a
 label on a sidebar row, never a reason to stop or to reach for another way.
+
+Write the report next, in full, **before** running the command in "Finish it" below — this
+session ends within about 20 seconds of that command launching, along with the app it restarts,
+and nothing said after it launches will be read.
 
 ## Report
 
@@ -134,14 +135,37 @@ on rather than re-deriving it:
 
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
-- whether the restart happened or is waiting on them;
-- if the sweep printed a `Layout:` line, say what is waiting (groups, routines, or both) and hand
-  over `foster layout --yes --restart` as the actual last step — it replaces the plain restart
-  command named above, since it restarts the app too;
+- if the sweep printed a `Layout:` line, say what is waiting (groups, routines, or both) — it is
+  about to be applied by the command in "Finish it" below, along with the restart;
+- say plainly, in this report, that the app is about to close and reopen (about 20 seconds after
+  the next command runs), that this session closes with it, and that once it is back the way to
+  confirm the restart actually landed is `foster detached --last` — in a new session, since this
+  one is gone by then;
 - the next step, in one line: once the app has restarted, `/retoma` tells every session a
   usage limit stopped in the last 24 hours that the quota is back and to carry on. Do not run
   it yourself — it spends this account's quota on every one of them at once, and that is the
   user's call.
+
+## Finish it
+
+The one command that actually restarts the app, run only after the rename and the report above
+are both done:
+
+```
+foster layout --yes --restart --detach
+```
+
+It applies whatever the sweep's `Layout:` line named (a no-op, harmlessly, when there was
+nothing pending) and restarts Claude Desktop from a process tree outside it — the one way to
+finish this from a session the app itself hosts, which this one is. About 20 seconds after it
+launches, the app closes and reopens, and this session closes with the app; nothing after this
+command is read by anyone.
+
+If it refuses instead of launching — because another live session, not this one, would be ended
+by the restart — it names them. **Do not add `--detach-even-with-live` on your own**: pass the
+list of sessions it named on to the user in the report, and hand over the same command,
+`foster layout --yes --restart --detach`, for them to run themselves once those are dealt with,
+exactly the way an earlier version of this command handed over a plain restart line.
 
 ## Proving nothing was left behind
 
@@ -199,7 +223,10 @@ Report matched / missing / diverged from that; never from re-running the sweep, 
   `foster client register|forget`, `foster client open`, and `app start` are not part of this
   command either. The account signed into right now is the whole target; naming or launching
   another one is a decision for the user to make, not this sweep.
-- **`foster layout --yes` without `--restart`, run from inside this session.** It refuses on its
-  own — the app it would need to write past is the one hosting this very session — so there is
-  nothing to gain by trying it here. Hand the `foster layout --yes --restart` line to the user
-  for a terminal outside the app, exactly like the plain restart command it replaces.
+- **`foster layout --yes` without `--restart --detach`, run from inside this session.** Plain
+  `--restart` refuses on its own — the app it would need to write past is the one hosting this
+  very session — so there is nothing to gain by trying it here without `--detach` too.
+- **`--detach-even-with-live`, unless the user explicitly asks for it.** When `foster layout
+--yes --restart --detach` refuses because of another live session, that refusal is the correct
+  answer — ending someone else's session without asking is not this command's call to make. Pass
+  the list on in the report and hand over the command; do not add the override yourself.
