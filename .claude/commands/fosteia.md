@@ -54,7 +54,11 @@ fails loudly on its own and confirms itself.
 `--restart` restarts Claude Desktop, which is what makes the copies visible. If this session is
 a child of the app, foster will not restart it — that would kill this session part-way through —
 and the output ends with the command to run in a terminal outside the app. Hand that line to the
-user and say plainly that it is the last step.
+user and say plainly that it is the last step — **unless** the sweep's own output also names a
+pending `Layout:` line (sidebar groups and routines waiting from another account). In that case the
+last step is `foster layout --yes --restart` instead: it writes those two files in the same
+quit-write-start gap and restarts the app afterward, so there is still exactly one command to hand
+over, not two.
 
 ## Name this conversation
 
@@ -131,6 +135,9 @@ on rather than re-deriving it:
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
 - whether the restart happened or is waiting on them;
+- if the sweep printed a `Layout:` line, say what is waiting (groups, routines, or both) and hand
+  over `foster layout --yes --restart` as the actual last step — it replaces the plain restart
+  command named above, since it restarts the app too;
 - the next step, in one line: once the app has restarted, `/retoma` tells every session a
   usage limit stopped in the last 24 hours that the quota is back and to carry on. Do not run
   it yourself — it spends this account's quota on every one of them at once, and that is the
@@ -192,3 +199,7 @@ Report matched / missing / diverged from that; never from re-running the sweep, 
   `foster client register|forget`, `foster client open`, and `app start` are not part of this
   command either. The account signed into right now is the whole target; naming or launching
   another one is a decision for the user to make, not this sweep.
+- **`foster layout --yes` without `--restart`, run from inside this session.** It refuses on its
+  own — the app it would need to write past is the one hosting this very session — so there is
+  nothing to gain by trying it here. Hand the `foster layout --yes --restart` line to the user
+  for a terminal outside the app, exactly like the plain restart command it replaces.

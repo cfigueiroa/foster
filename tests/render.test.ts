@@ -4,11 +4,13 @@ import {
   accountTree,
   formatAge,
   formatBytes,
+  formatRoutineFireAt,
   groupByAccount,
   neverComesLine,
   sweepSummary,
   unclaimOutcomeLine,
   unclaimPlanLine,
+  viewCopyRestartCommand,
 } from '../src/cli/render.js';
 import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
 import type { UnclaimItem, UnclaimOutcome } from '../src/engine/unclaim.js';
@@ -177,6 +179,40 @@ describe('formatAge', () => {
   });
 });
 
+describe('formatRoutineFireAt', () => {
+  const now = new Date('2026-09-22T12:00:00');
+
+  it('omits the year when fireAt falls in the current year', () => {
+    const fireAt = new Date(2026, 6, 1, 9, 0).getTime(); // 01/07/2026 09:00
+    expect(formatRoutineFireAt(fireAt, now)).toBe('01/07 09:00');
+  });
+
+  it('prints the year when fireAt falls in a different year', () => {
+    const fireAt = new Date(2027, 6, 1, 9, 0).getTime(); // 01/07/2027 09:00
+    expect(formatRoutineFireAt(fireAt, now)).toBe('01/07/2027 09:00');
+  });
+
+  it('prints the year for a year already past, too', () => {
+    const fireAt = new Date(2024, 11, 25, 18, 30).getTime(); // 25/12/2024 18:30
+    expect(formatRoutineFireAt(fireAt, now)).toBe('25/12/2024 18:30');
+  });
+
+  it('passes an undated moment straight through', () => {
+    expect(formatRoutineFireAt(undefined, now)).toBe('—');
+  });
+});
+
+describe('viewCopyRestartCommand', () => {
+  it('names both accounts by their real uuid — no <accountUuid> placeholder', () => {
+    const from = { accountUuid: ACCOUNT_A, organizationUuid: ORG_1 };
+    const to = { accountUuid: ACCOUNT_B, organizationUuid: ORG_2 };
+    const command = viewCopyRestartCommand(from, to);
+
+    expect(command).toBe(`foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --yes --restart`);
+    expect(command).not.toContain('<accountUuid>');
+  });
+});
+
 describe('sweepSummary', () => {
   const counts = { fostered: 0, skipped: 0, failed: 0, returned: 0 };
   const report = (overrides: Partial<SweepReport> = {}): SweepReport => ({
@@ -205,6 +241,13 @@ describe('sweepSummary', () => {
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },
     pinFixes: { fixes: [], moved: false },
+    layout: {
+      groupsCreated: 0,
+      cardsAssigned: 0,
+      orderEntriesAdded: 0,
+      routinesBrought: 0,
+      viewKeysCarried: 0,
+    },
     ...overrides,
   });
 
@@ -295,6 +338,94 @@ describe('sweepSummary', () => {
 
   it('says nothing about pins when the branch pass touched none', () => {
     expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/pin/i);
+  });
+
+  it('says nothing about layout when nothing is pending', () => {
+    expect(sweepSummary(report()).map(plain).join('\n')).not.toMatch(/Layout:/);
+  });
+
+  it('shows a "Layout:" line for a plan with only a pending order entry — nothing else pending', () => {
+    // The old check only asked about cards and routines, so a plan that would
+    // only reorder an existing group's rows fell through it silently.
+    const lines = sweepSummary(
+      report({
+        layout: {
+          groupsCreated: 0,
+          cardsAssigned: 0,
+          orderEntriesAdded: 3,
+          routinesBrought: 0,
+          viewKeysCarried: 0,
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain('Layout: 3 order entries to bring — foster layout --yes --restart');
+  });
+
+  it('shows a "Layout:" line for a plan with only the sidebar filter menu to carry', () => {
+    const lines = sweepSummary(
+      report({
+        layout: {
+          groupsCreated: 0,
+          cardsAssigned: 0,
+          orderEntriesAdded: 0,
+          routinesBrought: 0,
+          viewKeysCarried: 1,
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain('Layout: 1 filter setting to bring — foster layout --yes --restart');
+  });
+
+  it('names every kind of pending work together', () => {
+    const lines = sweepSummary(
+      report({
+        layout: {
+          groupsCreated: 1,
+          cardsAssigned: 2,
+          orderEntriesAdded: 3,
+          routinesBrought: 4,
+          viewKeysCarried: 5,
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      'Layout: 2 group rows, 1 new group, 3 order entries, 4 routines, 5 filter settings to bring — foster layout --yes --restart',
+    );
+  });
+
+  it('says a layout plan could not be made, rather than reading as nothing pending (R6)', () => {
+    // Every count is 0 here for a reason that has nothing to do with there
+    // being nothing to bring — `planLayout` itself threw while the sweep was
+    // planning it. The old check only asked `totalLayoutPending(layout) > 0`,
+    // so this read exactly like a clean run.
+    const lines = sweepSummary(
+      report({
+        layout: {
+          groupsCreated: 0,
+          cardsAssigned: 0,
+          orderEntriesAdded: 0,
+          routinesBrought: 0,
+          viewKeysCarried: 0,
+          error:
+            'claude_desktop_config.json holds a number literal a JSON round-trip would rewrite',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      'Layout: could not plan — claude_desktop_config.json holds a number literal a JSON round-trip would rewrite',
+    );
   });
 });
 

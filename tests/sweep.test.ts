@@ -328,6 +328,46 @@ describe('runSweep', () => {
   });
 });
 
+describe('runSweep — layout preview agrees with what layout --yes would do (finding #14/(e))', () => {
+  it('counts a pending routine the same way pendingLayoutCounts / applyLayout would', () => {
+    const skill = path.join(configDir, 'routine.md');
+    writeFileSync(skill, '# skill', 'utf8');
+    writeFileSync(
+      path.join(accountDir(store, OLD_ACCOUNT), 'scheduled-tasks.json'),
+      JSON.stringify({
+        scheduledTasks: [
+          {
+            id: 'r1',
+            displayName: 'r1',
+            enabled: true,
+            filePath: skill,
+            createdAt: 1,
+            cwd: store.root,
+          },
+        ],
+        recordedSkips: {},
+      }),
+      'utf8',
+    );
+
+    const report = sweep(true);
+
+    // No groups, no order entries, no view-prefs carry in this fixture — only
+    // the one routine — so every other count stays at zero, and this is
+    // exactly what a direct `pendingLayoutCounts(planLayout(...))` call
+    // against the same store would say (that path is unit-tested directly in
+    // tests/layout.test.ts; this proves `runSweep` is wired to it and not to
+    // some other, narrower count).
+    expect(report.layout).toEqual({
+      groupsCreated: 0,
+      cardsAssigned: 0,
+      orderEntriesAdded: 0,
+      routinesBrought: 1,
+      viewKeysCarried: 0,
+    });
+  });
+});
+
 /**
  * One conversation, forked: the row here is the branch that stopped, the branch
  * that carried on sits in another account. The sweep used to refuse the second
