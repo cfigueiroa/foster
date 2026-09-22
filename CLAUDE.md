@@ -467,6 +467,17 @@ the file and rewrites the scope within seconds of a group being created through 
 cannot be shown in a group — the app's own tool refuses it — so a target whose only matching card is
 archived is skipped and reported, never assigned.
 
+**Groups live in three places**, not just the config file above: the same scope also sits in Local
+Storage, once under its own key (`LSS-persisted.dframe-group-scopes`, keyed the same
+`<accountUuid>/<organizationUuid>` way, wrapped in a `{value, tabId, timestamp}` envelope) and again
+folded into `dframe-store`'s own `state.customGroupsByScope` — the same database the filter menu
+below lives in. Which of the three the app actually trusts at startup was not measured, so
+`applyLayout` (`localStorageGroupWrites`, `src/engine/layout.ts`) writes all three together in one
+batch (`writeLocalStorageEntries`, one sequence number for both Local Storage keys) whenever a Local
+Storage database exists at all — skipped, not failed, on a store the sidebar's filter menu has never
+touched yet, since the config copy is what the app would read to rebuild the other two the first
+time it does.
+
 **Routines** (scheduled tasks) live per account/org at
 `<store.root>/claude-code-sessions/<accountUuid>/<orgUuid>/scheduled-tasks.json`
 (`store/routines.ts`). Every account/org directory has one, often with an empty list. `filePath`
@@ -493,35 +504,42 @@ because a layout needs the app closed and a sweep run from inside the app can ne
 
 ## The sidebar's filter menu: two stores
 
-Measured 22/09/2026, same store/app. Seven settings in the Code sidebar's filter menu, split
-across two stores that do not line up with how the menu reads:
+Measured 22/09/2026, same store/app; re-measured the same day via the app's own `set_view` tool
+after an earlier pass over this file called two of the seven settings machine-wide or unsuffixed,
+which was wrong on both counts. Seven settings in the Code sidebar's filter menu, split across two
+stores that do not line up with how the menu reads:
 
 - **Machine-wide**, in Chromium's Local Storage (`<store.root>/Local Storage/leveldb/`, key
-  `dframe-store`) — `recentsStatusFilter`, `groupByByMode.code`, `sortByByMode.code`. A second,
-  sibling LevelDB database to the one `store/pinstate.ts` reads for pins, encoded more simply: no
-  Blink envelope, no separate "exists" entry, just a one-byte string tag in front of the value.
+  `dframe-store`) — only `groupByByMode.code` and `sortByByMode.code`. A second, sibling LevelDB
+  database to the one `store/pinstate.ts` reads for pins, encoded more simply: no Blink envelope,
+  no separate "exists" entry, just a one-byte string tag in front of the value.
   `store/localStorage.ts` reuses `store/format/leveldb.ts` for the read and the write; reading
-  checks both the log and any compacted sorted table, same as pinning.
-- **Per account**, in `claude_desktop_config.json`'s `preferences.epitaxyPrefs`, most keys suffixed
-  with the account uuid: `code-sessions-selected-environments-v2.<accountUuid>`,
+  checks both the log and any compacted sorted table, same as pinning. The same record also carries
+  `state.recentsStatusFilter` — a different list the app keeps for something else entirely; it is
+  never read or written for the status filter, and `foster view` never touches it.
+- **Per account**, in `claude_desktop_config.json`'s `preferences.epitaxyPrefs`, all five remaining
+  settings, every one suffixed with the account uuid:
+  `code-sessions-status-filter.<accountUuid>`, `code-sessions-state-activity-days.<accountUuid>`,
+  `code-sessions-selected-environments-v2.<accountUuid>`,
   `code-sessions-show-empty-projects.<accountUuid>`, `code-sessions-show-pr-status.<accountUuid>`.
-  One key, `code-sessions-state-activity-days`, is **not** suffixed — measured, not assumed — because
-  it applies to whichever account is signed in rather than to one account's own row.
-  `store/viewPrefs.ts` reads and writes these, sharing the same "verify nothing else moved" write as
-  `store/groupScopes.ts`. Three legacy, un-suffixed keys from an older build
-  (`code-sessions-status-filter`, `code-sessions-selected-environments`,
-  `code-sessions-show-empty-projects`) still sit in the file on an installation old enough to have
+  Status and the activity window are the two an earlier reading of this file got wrong — the app's
+  own `set_view` tool showed both suffixed the same as the other three. `store/viewPrefs.ts` reads
+  and writes these, sharing the same "verify nothing else moved" write as `store/groupScopes.ts`.
+  Four legacy, un-suffixed keys from an older build (`code-sessions-status-filter`,
+  `code-sessions-selected-environments`, `code-sessions-show-empty-projects`,
+  `code-sessions-state-activity-days`) still sit in the file on an installation old enough to have
   them; the UI no longer reads them, so `foster view` reports them as legacy and never writes them.
 
 `src/engine/view.ts` plans and applies both halves through one call (`planViewSet`/`applyViewSet`),
-and the per-account half alone through `planViewCopy`/`applyViewCopy` (`foster view copy`). Grouping
-by "Estado" forces `status: active` — the app's own rule, not foster's invention — so a request that
-sets `--group-by state` sets the status too when it is not already active. Both files need the app
-closed to write, guarded the same way `foster layout` is, and `--restart` shares the same
-`restartAround` helper. `foster layout` also carries the per-account half of this menu from the first
-other account that has any of it set, when the target has none — the same "target already has one,
-leave it" rule groups follow; the machine-wide half needs no copying, since one Local Storage record
-already covers every account on the installation.
+and the per-account half alone (all five keys) through `planViewCopy`/`applyViewCopy` (`foster view
+copy`). Grouping by "Estado" forces `status: active` — the app's own rule, not foster's invention —
+so a request that sets `--group-by state` sets the status too when it is not already active. Both
+files need the app closed to write, guarded the same way `foster layout` is, and `--restart` shares
+the same `restartAround` helper. `foster layout` also carries the per-account half of this menu —
+status and the activity window included — from the first other account that has any of it set, when
+the target has none — the same "target already has one, leave it" rule groups follow; the
+machine-wide half needs no copying, since one Local Storage record already covers every account on
+the installation.
 
 ## Before pushing
 

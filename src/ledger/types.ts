@@ -590,12 +590,27 @@ export interface ConversationImportUndoneEvent extends BaseEvent {
  * or a retitle can. Counts and the target are enough to say a run happened and
  * roughly what it did; `templatesSeen` and every other fold that reads marks
  * has no reason to look at this one.
+ *
+ * `groups` (cards newly assigned) and `routines` are the original two counts;
+ * `groupsCreated`, `orderEntriesAdded` and `viewKeysCarried` were added
+ * alongside them rather than replacing anything, so an event an older build
+ * wrote — missing all three — still parses and still folds: `project()` never
+ * reads a `layout_applied` event's fields at all (see the `case` below), and
+ * nothing else in the codebase reads this event back either, so there was
+ * nothing for a missing field to break.
  */
 export interface LayoutAppliedEvent extends BaseEvent {
   kind: 'layout_applied';
   target: AccountRef;
+  /** Cards newly assigned to a group. */
   groups: number;
+  /** Of those, how many groups did not exist in the target before this run. Absent on an older event. */
+  groupsCreated?: number;
+  /** Manual order entries appended to a group's order list. Absent on an older event. */
+  orderEntriesAdded?: number;
   routines: number;
+  /** Sidebar filter-menu (view) keys carried from another account. Absent on an older event. */
+  viewKeysCarried?: number;
 }
 
 /**

@@ -60,6 +60,22 @@ export async function restartAround(
     if (plan.running) {
       const quitResult = await quit(store);
       if (quitResult.outcome === 'needs-terminate' || quitResult.outcome === 'hides-to-tray') {
+        // With nothing to write, restarting is the whole job and `app restart
+        // --terminate` finishes it. With a write waiting for the gap, it does
+        // not: that command never runs `duringGap`, so handing it over would
+        // read as finishing a write that never happened. Say so, and hand back
+        // the caller's own command — run once the app is closed, it finds
+        // nothing to quit and writes straight away.
+        if (duringGap) {
+          return {
+            requested: true,
+            done: false,
+            reason:
+              `${trayNote('Close it with "foster app quit --terminate"')}\n` +
+              'Nothing was written. Once it is closed, run:',
+            command,
+          };
+        }
         return {
           requested: true,
           done: false,
@@ -92,19 +108,29 @@ export async function restartAround(
       }
     }
 
-    const started = await start(store);
-
     if (gapError !== undefined) {
       const reason = gapError instanceof Error ? gapError.message : String(gapError);
+      // Its own try: a start that throws must not replace the write's failure
+      // in what the user reads — both happened, and the write's is the one
+      // that says what is missing.
+      let started = false;
+      let startError: string | undefined;
+      try {
+        started = await start(store);
+      } catch (error) {
+        startError = error instanceof Error ? error.message : String(error);
+      }
       return {
         requested: true,
         done: false,
         reason: started
           ? `${reason}\n(Claude Desktop was restarted anyway, with whatever landed before the failure.)`
-          : `${reason}\n(Claude Desktop could not be started again either.)`,
+          : `${reason}\n(Claude Desktop could not be started again either${startError ? `: ${startError}` : ''}.)`,
         command,
       };
     }
+
+    const started = await start(store);
 
     return started
       ? { requested: true, done: true, command }

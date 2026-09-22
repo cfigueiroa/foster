@@ -18,7 +18,7 @@ import {
 import { forksOf } from '../engine/branches.js';
 import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
-import { planLayout } from '../engine/layout.js';
+import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -409,15 +409,20 @@ export interface SweepReport {
   confirmation?: SweepConfirmation;
 }
 
-/** The counts `sweepSummary` needs to say a layout run is waiting — see `SweepReport.layout`. */
-export interface SweepLayoutPreview {
-  groups: number;
-  routines: number;
+/**
+ * The counts `sweepSummary` needs to say a layout run is waiting — see
+ * `SweepReport.layout`. Mirrors `engine/layout.ts`'s `LayoutPendingCounts`
+ * exactly (groups created, cards assigned, order entries added, routines
+ * brought, view keys carried) rather than just the two counts an earlier cut
+ * of this preview showed — a plan with only new order entries, or only a
+ * view-prefs carry and nothing else, used to report nothing pending at all.
+ */
+export interface SweepLayoutPreview extends LayoutPendingCounts {
   /**
-   * Set when `planLayout` itself threw. `groups`/`routines` are both `0` in
-   * that case — not because nothing was waiting, but because the sweep has no
-   * way to know. `planLayout` is written not to throw for the malformed data
-   * it already knows how to meet (see `store/groupScopes.ts`,
+   * Set when `planLayout` itself threw. Every count above is `0` in that
+   * case — not because nothing was waiting, but because the sweep has no way
+   * to know. `planLayout` is written not to throw for the malformed data it
+   * already knows how to meet (see `store/groupScopes.ts`,
    * `store/routines.ts`), but a sweep's own report must survive a layout
    * problem this build has not seen yet too, so the call is wrapped rather
    * than trusted outright.
@@ -561,12 +566,16 @@ export function runSweep(options: SweepOptions): SweepReport {
   let layout: SweepLayoutPreview;
   try {
     const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
-    layout = {
-      groups: layoutPlan.groups.items.reduce((count, item) => count + item.assign.length, 0),
-      routines: layoutPlan.routines.bring.length,
-    };
+    layout = pendingLayoutCounts(layoutPlan);
   } catch (error) {
-    layout = { groups: 0, routines: 0, error: errorMessage(error) };
+    layout = {
+      groupsCreated: 0,
+      cardsAssigned: 0,
+      orderEntriesAdded: 0,
+      routinesBrought: 0,
+      viewKeysCarried: 0,
+      error: errorMessage(error),
+    };
   }
 
   const report: SweepReport = {

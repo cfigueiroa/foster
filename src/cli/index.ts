@@ -208,11 +208,11 @@ import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
   DEFAULT_STALE_TEMPLATE,
-  formatStamp,
 } from '../domain/stale.js';
 import {
   applyLayout,
   planLayout,
+  totalLayoutPending,
   type ApplyLayoutResult,
   type LayoutPlan,
 } from '../engine/layout.js';
@@ -248,6 +248,7 @@ import {
   formatAge,
   formatBytes,
   formatDate,
+  formatRoutineFireAt,
   groupByAccount,
   outcomeLine,
   purgeLine,
@@ -260,6 +261,7 @@ import {
   unclaimOutcomeLine,
   unclaimPlanLine,
   updateLine,
+  viewCopyRestartCommand,
 } from './render.js';
 
 interface GlobalOptions {
@@ -1046,10 +1048,14 @@ program
     // applied by the sweep, so the command handed over on a restart has to be
     // the one that actually finishes the job — `foster layout` restarts the
     // app too, so there is still only one command to run outside it.
+    //
+    // `totalLayoutPending` reads every count the preview carries — groups
+    // created, cards assigned, order entries added, routines brought, view
+    // keys carried — not just the two an earlier cut checked here, which let
+    // a plan with only a pending order entry or only a view-prefs carry print
+    // the generic restart line instead of pointing at `foster layout`.
     const restartCommand =
-      report.layout.groups > 0 || report.layout.routines > 0
-        ? 'foster layout --yes --restart'
-        : RESTART_COMMAND;
+      totalLayoutPending(report.layout) > 0 ? 'foster layout --yes --restart' : RESTART_COMMAND;
 
     if (opts.json) {
       // The one output that has to wait: it is a single object, so the restart
@@ -2463,6 +2469,7 @@ program
   .option('--to-org <organizationUuid>', 'write into this organization')
   .option('--no-groups', 'skip the sidebar groups')
   .option('--no-routines', 'skip the scheduled tasks')
+  .option('--no-view', "skip the sidebar filter menu's account settings")
   .option('--json', 'machine-readable output')
   .option(
     '--restart',
@@ -2477,6 +2484,7 @@ program
       toOrg?: string;
       groups: boolean;
       routines: boolean;
+      view: boolean;
       json?: boolean;
       restart?: boolean;
       yes?: boolean;
@@ -2488,6 +2496,12 @@ program
     const plan = planLayout({ store, target, ledgerEvents: ledger.read() });
     if (opts.groups === false) plan.groups.items = [];
     if (opts.routines === false) plan.routines = { ...plan.routines, bring: [] };
+    // Cleared to the same empty shape `planLayoutViewCarry` itself returns
+    // when there is nothing to carry, so `--no-groups --no-routines
+    // --no-view` leaves every count `applyLayout` checks at zero and appends
+    // no ledger event — the same "wrote nothing, said nothing" rule the other
+    // two flags already followed.
+    if (opts.view === false) plan.viewPrefs = { changes: [], account: {} };
 
     if (dryRun) {
       if (opts.json) {
@@ -2588,7 +2602,7 @@ function printLayoutPlan(plan: LayoutPlan): void {
     for (const item of routines.bring) {
       const when =
         item.cronExpression ??
-        (item.fireAt !== undefined ? `once ${formatStamp(item.fireAt)}` : '');
+        (item.fireAt !== undefined ? `once ${formatRoutineFireAt(item.fireAt)}` : '');
       console.log(`  ${pc.green('+')} ${item.id}  ${pc.dim(when)}`);
     }
     for (const skip of routines.skipped) {
@@ -2598,7 +2612,7 @@ function printLayoutPlan(plan: LayoutPlan): void {
       if (skip.reason === 'already-here') continue;
       const detail =
         skip.reason === 'missed-one-shot'
-          ? `missed one-shot (${formatStamp(skip.firedAt)}), not brought`
+          ? `missed one-shot (${formatRoutineFireAt(skip.firedAt)}), not brought`
           : 'SKILL.md missing, not brought';
       console.log(`  ${pc.dim('·')} ${skip.id} — ${detail}`);
     }
@@ -2803,7 +2817,7 @@ view
       return;
     }
 
-    const restartCommand = 'foster view copy --from <accountUuid> --yes --restart';
+    const restartCommand = viewCopyRestartCommand(from, to);
     if (!opts.restart) {
       const app = inspectApp(store);
       if (app.running) {

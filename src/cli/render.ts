@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { bareSessionId } from '../domain/naming.js';
 import { describeUnfosterable } from '../domain/fostering.js';
+import { formatStamp } from '../domain/stale.js';
 import { UNKNOWN_MARK_DETAIL, type ForkOutcome } from '../engine/branchCards.js';
 import type { FilePlan } from '../engine/fileCards.js';
 import type { Outcome, OutcomeStatus } from '../engine/executor.js';
@@ -9,8 +10,9 @@ import type { DateOutcome, DatePlanItem } from '../engine/dates.js';
 import type { UnclaimItem, UnclaimOutcome } from '../engine/unclaim.js';
 import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
-import type { DiscoveredSession, Unfosterable } from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, Unfosterable } from '../domain/types.js';
 import type { NeverComes, SweepReport } from '../ops/sweep.js';
+import { totalLayoutPending } from '../engine/layout.js';
 import type { AccountOverview } from '../store/accounts.js';
 import type { AccountProfile } from '../store/profile.js';
 import type { UsageReport } from '../engine/anthropicApi.js';
@@ -24,6 +26,38 @@ export function formatDate(ms: number | undefined): string {
 
 export function shortId(id: string): string {
   return bareSessionId(id).slice(0, SHORT_ID_LENGTH);
+}
+
+/**
+ * A one-shot routine's `fireAt`, in `formatStamp`'s own `DD/MM HH:MM` shape
+ * with the year spliced in after the month when `fireAt` falls outside the
+ * machine's current year.
+ *
+ * `formatStamp` is deliberately short for a stale mark, which sits only days
+ * from `now` — but a routine's own moment can be more than a year off in
+ * either direction (brought back from an account that has sat untouched, or
+ * scheduled well into the future), and `01/07 09:00` printed in September
+ * does not say which July. Reuses `formatStamp` rather than reimplementing
+ * its two-digit padding, so the two stay in step if that shape ever changes.
+ */
+export function formatRoutineFireAt(ms: number | undefined, now: Date = new Date()): string {
+  const stamp = formatStamp(ms);
+  if (ms === undefined || !Number.isFinite(ms)) return stamp;
+  const year = new Date(ms).getFullYear();
+  if (year === now.getFullYear()) return stamp;
+  const [datePart, timePart] = stamp.split(' ');
+  return `${datePart}/${year} ${timePart}`;
+}
+
+/**
+ * `foster view copy`'s own restart-command advice, named by the two accounts
+ * this run actually resolved rather than a bare `--from <accountUuid>`
+ * placeholder nobody could run — see finding #14/(f). `--to` is spelled out
+ * too, not left to default: a restart that runs later, after whatever is
+ * signed in has changed, must still land on the same target this run was for.
+ */
+export function viewCopyRestartCommand(from: AccountRef, to: AccountRef): string {
+  return `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} --yes --restart`;
 }
 
 /**
@@ -709,15 +743,29 @@ export function sweepSummary(report: SweepReport): string[] {
   }
 
   const layout = report.layout;
-  if (layout.groups > 0 || layout.routines > 0) {
+  // Every count `applyLayout` would actually write, not just cards and
+  // routines — a plan with only a pending manual order entry, or only a
+  // sidebar filter-menu carry and nothing else, used to fall through this
+  // check entirely and print no "Layout:" line at all.
+  if (totalLayoutPending(layout) > 0) {
     const parts: string[] = [];
-    if (layout.groups > 0)
-      parts.push(`${layout.groups} group row${layout.groups === 1 ? '' : 's'}`);
-    if (layout.routines > 0)
-      parts.push(`${layout.routines} routine${layout.routines === 1 ? '' : 's'}`);
+    if (layout.cardsAssigned > 0)
+      parts.push(`${layout.cardsAssigned} group row${layout.cardsAssigned === 1 ? '' : 's'}`);
+    if (layout.groupsCreated > 0)
+      parts.push(`${layout.groupsCreated} new group${layout.groupsCreated === 1 ? '' : 's'}`);
+    if (layout.orderEntriesAdded > 0)
+      parts.push(
+        `${layout.orderEntriesAdded} order entr${layout.orderEntriesAdded === 1 ? 'y' : 'ies'}`,
+      );
+    if (layout.routinesBrought > 0)
+      parts.push(`${layout.routinesBrought} routine${layout.routinesBrought === 1 ? '' : 's'}`);
+    if (layout.viewKeysCarried > 0)
+      parts.push(
+        `${layout.viewKeysCarried} filter setting${layout.viewKeysCarried === 1 ? '' : 's'}`,
+      );
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
-    lines.push(`Layout: ${parts.join(' and ')} to bring — foster layout --yes --restart`);
+    lines.push(`Layout: ${parts.join(', ')} to bring — foster layout --yes --restart`);
   }
 
   const never = neverComesLine(report.neverComes);

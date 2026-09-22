@@ -136,6 +136,72 @@ export function writeScheduledTasks(
   // needs somewhere to put its temp file, so the directory is made first.
   mkdirSync(path.dirname(target), { recursive: true });
   const backup = existsSync(target) ? backupFile(target, 'scheduledTasks', options) : undefined;
-  writeFileAtomic(target, JSON.stringify(file, null, 2));
+  writeFileAtomic(
+    target,
+    JSON.stringify({ ...file, scheduledTasks: keepingUnrecognised(target, file.scheduledTasks) }, null, 2),
+  );
   return { backup };
+}
+
+/**
+ * The list to write, with every entry this module could not validate put back
+ * where it was.
+ *
+ * `readScheduledTasks` hands callers only the tasks it recognises, which is the
+ * right thing to plan from and the wrong thing to write from: an entry with a
+ * `cwd` of `null`, or one a later build shaped differently, is still a routine
+ * the app runs, and writing back the filtered list deleted it for good. So the
+ * file on disk is read again here and its unrecognised entries survive in
+ * place; a recognised one is replaced by the caller's version of the same id
+ * (or dropped, if the caller dropped it), and whatever the caller added that
+ * the file never held goes at the end.
+ */
+function keepingUnrecognised(target: string, tasks: ScheduledTask[]): unknown[] {
+  let onDisk: unknown[] = [];
+  try {
+    const parsed = JSON.parse(stripBom(readFileSync(target, 'utf8'))) as { scheduledTasks?: unknown };
+    if (Array.isArray(parsed.scheduledTasks)) onDisk = parsed.scheduledTasks;
+  } catch {
+    // Missing or unreadable: nothing to preserve. An unreadable file never
+    // reaches here — the caller refuses it before writing (#A3).
+  }
+
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const placed = new Set<string>();
+  const out: unknown[] = [];
+  for (const entry of onDisk) {
+    if (!isScheduledTask(entry)) {
+      out.push(entry);
+      continue;
+    }
+    const next = byId.get(entry.id);
+    if (next && !placed.has(entry.id)) {
+      out.push(next);
+      placed.add(entry.id);
+    }
+  }
+  for (const task of tasks) if (!placed.has(task.id)) out.push(task);
+  return out;
+}
+
+/**
+ * The ids of every entry in the file, recognised or not — what "this account
+ * already has that routine" has to be asked against. An entry this module
+ * cannot validate still claims its id in the app, and bringing a second
+ * routine under the same id would shadow it.
+ */
+export function idsOnDisk(store: StoreLayout, account: AccountRef): string[] {
+  try {
+    const parsed = JSON.parse(stripBom(readFileSync(scheduledTasksPath(store, account), 'utf8'))) as {
+      scheduledTasks?: unknown;
+    };
+    if (!Array.isArray(parsed.scheduledTasks)) return [];
+    return parsed.scheduledTasks.flatMap((entry) =>
+      entry && typeof entry === 'object' && typeof (entry as { id?: unknown }).id === 'string'
+        ? [(entry as { id: string }).id]
+        : [],
+    );
+  } catch {
+    return [];
+  }
 }

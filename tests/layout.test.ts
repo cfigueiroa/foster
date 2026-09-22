@@ -4,8 +4,15 @@ import { describe, expect, it } from 'vitest';
 import { accountDir } from '../src/domain/paths.js';
 import type { AccountRef, StoreLayout } from '../src/domain/types.js';
 import { AppRunningError } from '../src/engine/safety.js';
-import { applyLayout, LayoutWriteError, planLayout } from '../src/engine/layout.js';
+import {
+  applyLayout,
+  LayoutWriteError,
+  pendingLayoutCounts,
+  planLayout,
+  totalLayoutPending,
+} from '../src/engine/layout.js';
 import { Ledger } from '../src/ledger/log.js';
+import { project } from '../src/ledger/project.js';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import { groupCardId, scopeKey, type GroupScopes } from '../src/store/groupScopes.js';
 import { localStorageDir, localStorageKey, readLocalStorageValue } from '../src/store/localStorage.js';
@@ -16,6 +23,12 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './he
 const THIRD_ACCOUNT: AccountRef = {
   accountUuid: '22222222-2222-4222-8222-222222222222',
   organizationUuid: '22222222-2222-4222-8222-222222222223',
+};
+
+/** A second organization of `OLD_ACCOUNT` — same account uuid, different org. */
+const OLD_ACCOUNT_SECOND_ORG: AccountRef = {
+  accountUuid: OLD_ACCOUNT.accountUuid,
+  organizationUuid: '00000000-0000-4000-8000-000000000099',
 };
 
 /** No process ever reported running — the app is always "closed" to these tests. */
@@ -439,6 +452,27 @@ describe('planLayout / applyLayout — groups', () => {
     expect(plan.groups.items).toEqual([]);
     expect(plan.groups.sources).toBe(0);
   });
+
+  it('finding #14/(a): "Groups (from N other accounts)" counts distinct account uuids, not account/org directories', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s1', cliSessionId: 'c1' }));
+    writeDesktopConfig(store, {
+      // Two organizations of the *same* account, each offering a group.
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-a', name: 'A' }],
+        assignments: { [groupCardId('local_s1')]: 'cg-a' },
+      },
+      [scopeKey(OLD_ACCOUNT_SECOND_ORG)]: {
+        groups: [{ id: 'cg-b', name: 'B' }],
+        assignments: {},
+      },
+    });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    // One account offered these, from two of its organizations — the header
+    // must say "1 other account", not 2.
+    expect(plan.groups.sources).toBe(1);
+  });
 });
 
 describe('planLayout / applyLayout — groups written to all three places (finding #2)', () => {
@@ -507,6 +541,38 @@ describe('planLayout / applyLayout — routines', () => {
     writeFileSync(file, '# skill', 'utf8');
     return file;
   }
+
+  it('finding #14/(a): "Routines (from N other accounts)" counts distinct account uuids, not account/org directories', () => {
+    const store = makeStore();
+    const skill = skillFile(store, 'routine');
+    // Two organizations of the *same* account, each offering a routine.
+    writeTasksFile(store, OLD_ACCOUNT, [
+      {
+        id: 'r1',
+        displayName: 'From org 1',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
+    ]);
+    writeTasksFile(store, OLD_ACCOUNT_SECOND_ORG, [
+      {
+        id: 'r2',
+        displayName: 'From org 2',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
+    ]);
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+    // The old bug keyed sources on `accountUuid/organizationUuid`, so this
+    // counted 2 — one account, wearing two organizations, must count as 1.
+    expect(plan.routines.sources).toBe(1);
+    expect(plan.routines.bring.map((item) => item.id).sort()).toEqual(['r1', 'r2']);
+  });
 
   it('dedups by id, keeping the copy with the latest createdAt', () => {
     const store = makeStore();
@@ -914,5 +980,136 @@ describe('applyLayout — backups (findings #3 and #4)', () => {
     expect(message).toContain('routines');
     // The groups write really did land, even though the run as a whole failed.
     expect(readTargetScope(store, NEW_ACCOUNT)).toBeDefined();
+  });
+});
+
+describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied ledger event (finding #14/(c) and (e))', () => {
+  it('a run mixing every kind of write matches pendingLayoutCounts exactly and the ledger records all five counts', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src2', cliSessionId: 'conv-2' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt2', cliSessionId: 'conv-2' }));
+    writeDesktopConfig(
+      store,
+      {
+        [scopeKey(OLD_ACCOUNT)]: {
+          groups: [{ id: 'cg-src', name: 'Ordered' }],
+          assignments: {
+            [groupCardId('local_src1')]: 'cg-src',
+            [groupCardId('local_src2')]: 'cg-src',
+          },
+          order: { 'cg-src': [groupCardId('local_src2'), groupCardId('local_src1')] },
+        },
+      },
+      // A view-prefs key OLD_ACCOUNT has and NEW_ACCOUNT does not — carried.
+      { epitaxy: { [`code-sessions-show-empty-projects.${OLD_ACCOUNT.accountUuid}`]: true } },
+    );
+    const skill = path.join(store.root, 'routine.md');
+    writeFileSync(skill, '# skill', 'utf8');
+    writeTasksFile(store, OLD_ACCOUNT, [
+      { id: 'r1', displayName: 'r1', enabled: true, filePath: skill, createdAt: 1, cwd: store.root },
+    ]);
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 9_999 });
+    const preview = pendingLayoutCounts(plan);
+    // One new group ("Ordered"), both its cards assigned, both order entries
+    // appended, one routine, one view-prefs key — every kind of write at once.
+    expect(preview).toEqual({
+      groupsCreated: 1,
+      cardsAssigned: 2,
+      orderEntriesAdded: 2,
+      routinesBrought: 1,
+      viewKeysCarried: 1,
+    });
+    expect(totalLayoutPending(preview)).toBe(7);
+
+    const now = () => new Date(9_999);
+    const ledger = ledgerAt(store);
+    const result = applyLayout(plan, applyOpts(store, ledger, { now }));
+
+    // What `layout --yes` actually wrote matches what the preview promised —
+    // the "pending" line and the real run never disagree.
+    expect(result.groupsCreated).toBe(preview.groupsCreated);
+    expect(result.cardsAssigned).toBe(preview.cardsAssigned);
+    expect(result.orderEntriesAdded).toBe(preview.orderEntriesAdded);
+    expect(result.routinesBrought).toBe(preview.routinesBrought);
+    expect(result.viewKeysCarried).toBe(preview.viewKeysCarried);
+
+    const applied = ledger.read().find((event) => event.kind === 'layout_applied');
+    expect(applied).toMatchObject({
+      target: NEW_ACCOUNT,
+      groups: 2, // cards assigned, the original field's own meaning
+      groupsCreated: 1,
+      orderEntriesAdded: 2,
+      routines: 1,
+      viewKeysCarried: 1,
+    });
+  });
+
+  it('an event written before groupsCreated/orderEntriesAdded/viewKeysCarried existed still reads and projects', () => {
+    const store = makeStore();
+    const ledgerPath = path.join(store.root, 'old-ledger.jsonl');
+    // Shaped exactly like an event an older build wrote: only the original
+    // two fields, none of the three added alongside them.
+    writeFileSync(
+      ledgerPath,
+      `${JSON.stringify({
+        v: 1,
+        ts: 1,
+        toolVersion: '0.0.0',
+        kind: 'layout_applied',
+        target: NEW_ACCOUNT,
+        groups: 3,
+        routines: 2,
+      })}\n`,
+      'utf8',
+    );
+
+    const ledger = new Ledger(ledgerPath);
+    const events = ledger.read();
+    expect(events).toHaveLength(1);
+    expect(() => project(events)).not.toThrow();
+  });
+});
+
+describe('applyLayout — clearing every section leaves nothing to write (finding #14/(d), "foster layout --no-groups --no-routines --no-view")', () => {
+  it('writes nothing and appends no ledger event once every section is cleared the way the CLI flags do', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s', cliSessionId: 'c1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t', cliSessionId: 'c1' }));
+    writeDesktopConfig(
+      store,
+      {
+        [scopeKey(OLD_ACCOUNT)]: {
+          groups: [{ id: 'cg-a', name: 'G' }],
+          assignments: { [groupCardId('local_s')]: 'cg-a' },
+        },
+      },
+      { epitaxy: { [`code-sessions-show-empty-projects.${OLD_ACCOUNT.accountUuid}`]: true } },
+    );
+    const skill = path.join(store.root, 'r.md');
+    writeFileSync(skill, '# skill', 'utf8');
+    writeTasksFile(store, OLD_ACCOUNT, [
+      { id: 'r1', displayName: 'r1', enabled: true, filePath: skill, createdAt: 1, cwd: store.root },
+    ]);
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+    // Sanity: there really was something pending before clearing anything.
+    expect(totalLayoutPending(pendingLayoutCounts(plan))).toBeGreaterThan(0);
+
+    // What `foster layout --no-groups --no-routines --no-view` does to the
+    // plan before handing it to applyLayout — see src/cli/index.ts.
+    plan.groups.items = [];
+    plan.routines = { ...plan.routines, bring: [] };
+    plan.viewPrefs = { changes: [], account: {} };
+    expect(totalLayoutPending(pendingLayoutCounts(plan))).toBe(0);
+
+    const ledger = ledgerAt(store);
+    const result = applyLayout(plan, applyOpts(store, ledger));
+
+    expect(result.written).toEqual([]);
+    expect(result.backups).toEqual([]);
+    expect(ledger.read()).toEqual([]);
   });
 });

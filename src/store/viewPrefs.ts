@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
 import { backupFile, type BackupOptions } from '../util/backups.js';
+import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 
 /**
  * The Code sidebar's filter menu — the per-account half of it.
@@ -141,6 +142,10 @@ export function legacyViewKeysPresent(store: StoreLayout): string[] {
  * Same discipline as `writeGroupScope`, one level shallower: read twice,
  * change only the named keys, verify nothing else at any level moved, back up
  * first regardless.
+ *
+ * Refused up front, before any of that, if the raw file holds a number
+ * literal that `JSON.parse` / `JSON.stringify` would silently rewrite — see
+ * `util/jsonNumbers.ts` and the matching note on `writeGroupScope`.
  */
 export function writeEpitaxyPrefs(
   store: StoreLayout,
@@ -148,6 +153,12 @@ export function writeEpitaxyPrefs(
   options: BackupOptions = {},
 ): { backup: string } {
   const raw = readFileSync(store.desktopConfigFile, 'utf8');
+  const lossy = nonCanonicalNumbers(raw)[0];
+  if (lossy) {
+    throw new Error(
+      `refusing to write: ${store.desktopConfigFile} holds a number literal that a JSON round-trip would rewrite (\`${lossy.literal}\`, at offset ${lossy.index}). Nothing was written.`,
+    );
+  }
   const before = JSON.parse(raw) as Record<string, unknown>;
   const after = JSON.parse(raw) as Record<string, unknown>;
 

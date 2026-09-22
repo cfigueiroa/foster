@@ -55,6 +55,17 @@ export function localStoragePresent(store: StoreLayout): boolean {
 
 /** DOM Storage's one-byte-per-character string tag — Blink's `ONE_BYTE_STRING`, reused here. */
 const ONE_BYTE_STRING = 0x01;
+/**
+ * DOM Storage's UTF-16LE string tag — Blink's `TWO_BYTES_STRING`. Chromium writes this instead of
+ * `ONE_BYTE_STRING` whenever the value holds a character Latin-1 cannot carry; before this, a
+ * record tagged this way was refused outright (`record[0] !== ONE_BYTE_STRING`), which is
+ * indistinguishable from "never written" to a caller like `view` that reads quietly and treats
+ * every error as absence.
+ */
+const TWO_BYTE_STRING = 0x00;
+
+/** Which of DOM Storage's two string tags a record was read under, and is written back under. */
+export type LocalStorageEncoding = 'latin1' | 'utf16le';
 
 /**
  * A Local Storage record key: `_` + the origin, then `\x00\x01`, then the
@@ -90,8 +101,13 @@ function logsIn(directory: string): { name: string; number: number }[] {
  * own floor, the same reasoning `pinstate.ts`'s `locate` documents at length:
  * the manifest names a log only when it has had a reason to write one, and
  * Chromium opens these databases reusing whichever log recovery finds.
+ *
+ * When the chosen log is not the one the manifest names, `pinstate.ts`'s
+ * `locate` keeps a notice about it rather than reading the substitute silently
+ * — the same thing applies here, word for word, since it is the same
+ * "manifest's number is a floor, not an address" reasoning.
  */
-function locate(directory: string): { logPath: string; lastSequence: bigint } {
+function locate(directory: string): { logPath: string; lastSequence: bigint; notice?: string } {
   const current = path.join(directory, 'CURRENT');
   if (!existsSync(current)) {
     throw new LocalStorageError(`No Local Storage database at ${directory}.`);
@@ -106,12 +122,22 @@ function locate(directory: string): { logPath: string; lastSequence: bigint } {
     throw new LocalStorageError(`Could not tell which log ${manifestName} is writing to.`);
   }
   const floor = Number(state.logNumber);
+  const name = `${String(state.logNumber).padStart(6, '0')}.log`;
   const chosen = logsIn(directory).filter((log) => log.number >= floor)[0];
   if (!chosen) {
-    const name = `${String(state.logNumber).padStart(6, '0')}.log`;
     throw new LocalStorageError(`${manifestName} names the log ${name}, which is not there.`);
   }
-  return { logPath: path.join(directory, chosen.name), lastSequence: state.lastSequence ?? 0n };
+  return {
+    logPath: path.join(directory, chosen.name),
+    lastSequence: state.lastSequence ?? 0n,
+    ...(chosen.name === name
+      ? {}
+      : {
+          notice:
+            `${manifestName} names the log ${name}, which is not there; ` +
+            `read ${chosen.name} instead, the newest log at or above that number.`,
+        }),
+  };
 }
 
 /**
@@ -131,6 +157,8 @@ export interface LocalStorageRecord {
   logPath: string;
   highestSequence: bigint;
   notices: string[];
+  /** The tag the record was actually read under — `writeLocalStorageEntries` writes this back. */
+  encoding: LocalStorageEncoding;
 }
 
 /**
@@ -145,7 +173,7 @@ export function readLocalStorageValue(
   scriptKey: string,
 ): LocalStorageRecord | undefined {
   const directory = localStorageDir(store);
-  const { logPath, lastSequence } = locate(directory);
+  const { logPath, lastSequence, notice: located } = locate(directory);
   const log = readFileSync(logPath);
   const key = localStorageKey(scriptKey);
 
@@ -168,7 +196,10 @@ export function readLocalStorageValue(
     }
   }
 
-  const notices: string[] = [];
+  // Seeded with `locate`'s own notice, exactly as `readPinState` seeds it from
+  // `pinstate.ts`'s `locate` — lost otherwise, since nothing else carries it
+  // forward.
+  const notices: string[] = located ? [located] : [];
   for (const batch of readLog(log, {
     tolerant: true,
     onNotice: (message) => notices.push(message),
@@ -185,26 +216,61 @@ export function readLocalStorageValue(
 
   if (!newest?.value) return undefined;
   const record = newest.value;
-  if (record[0] !== ONE_BYTE_STRING) {
+
+  // Chromium tags a DOM Storage value with which of its two string encodings
+  // the bytes that follow are: `ONE_BYTE_STRING` when every character fits in
+  // Latin-1, `TWO_BYTES_STRING` (UTF-16LE) otherwise. A `\x00`-tagged record
+  // used to be refused outright here — indistinguishable, to a quiet reader
+  // like `view`, from a key nothing has ever written.
+  let encoding: LocalStorageEncoding;
+  let text: string;
+  if (record[0] === ONE_BYTE_STRING) {
+    encoding = 'latin1';
+    text = record.subarray(1).toString('latin1');
+  } else if (record[0] === TWO_BYTE_STRING) {
+    encoding = 'utf16le';
+    text = record.subarray(1).toString('utf16le');
+  } else {
     throw new LocalStorageError(
-      `${scriptKey} does not carry the one-byte string tag foster expects.`,
+      `${scriptKey} does not carry a string tag foster recognises (saw byte ${record[0]}).`,
     );
   }
 
   let document: Record<string, unknown>;
   try {
-    document = JSON.parse(record.subarray(1).toString('latin1')) as Record<string, unknown>;
+    document = JSON.parse(text) as Record<string, unknown>;
   } catch (error) {
     throw new LocalStorageError(
       `${scriptKey}'s payload is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
-  return { document, logPath, highestSequence: highest, notices };
+  return { document, logPath, highestSequence: highest, notices, encoding };
 }
 
-function encodeValue(document: Record<string, unknown>): Buffer {
-  return Buffer.concat([Buffer.from([ONE_BYTE_STRING]), Buffer.from(JSON.stringify(document), 'latin1')]);
+/** Whether every character of `text` fits in one Latin-1 byte — Chromium's own test for which tag to write. */
+function fitsInLatin1(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    if (text.charCodeAt(index) > 0xff) return false;
+  }
+  return true;
+}
+
+/**
+ * Tags and encodes a value the way Chromium itself decides between its two
+ * string encodings: stay one-byte-per-character only while `encoding` says the
+ * record was read that way *and* the new content still fits — otherwise (new
+ * content needs a wider character, or the record already carried the wider
+ * tag) it is written UTF-16LE. A record read as UTF-16LE is never written back
+ * as Latin-1, even when the new content would fit — that would just be
+ * guessing at an encoding Chromium itself did not choose.
+ */
+function encodeValue(document: Record<string, unknown>, encoding: LocalStorageEncoding): Buffer {
+  const json = JSON.stringify(document);
+  if (encoding === 'latin1' && fitsInLatin1(json)) {
+    return Buffer.concat([Buffer.from([ONE_BYTE_STRING]), Buffer.from(json, 'latin1')]);
+  }
+  return Buffer.concat([Buffer.from([TWO_BYTE_STRING]), Buffer.from(json, 'utf16le')]);
 }
 
 /**
@@ -213,7 +279,8 @@ function encodeValue(document: Record<string, unknown>): Buffer {
  * interrupted write leaves behind is a trailing partial record.
  */
 export function writeLocalStorageValue(
-  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'>,
+  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'> &
+    Partial<Pick<LocalStorageRecord, 'encoding'>>,
   scriptKey: string,
   document: Record<string, unknown>,
 ): void {
@@ -228,14 +295,19 @@ export function writeLocalStorageValue(
  * `dframe-store`'s own `state.customGroupsByScope` at once
  * (`engine/layout.ts`), and a reader that saw one updated and not the other
  * would have two disagreeing answers for "what are this account's groups".
+ *
+ * `encoding` is the tag every entry in the batch is written under — absent
+ * (a fresh key `currentLog` supplied the write target for, never read) means
+ * `'latin1'`, the only tag a value that has never existed could need.
  */
 export function writeLocalStorageEntries(
-  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'>,
+  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'> &
+    Partial<Pick<LocalStorageRecord, 'encoding'>>,
   writes: { scriptKey: string; document: Record<string, unknown> }[],
 ): void {
   const entries: BatchEntry[] = writes.map((write) => ({
     key: localStorageKey(write.scriptKey),
-    value: encodeValue(write.document),
+    value: encodeValue(write.document, record.encoding ?? 'latin1'),
   }));
 
   const existing = readFileSync(record.logPath);

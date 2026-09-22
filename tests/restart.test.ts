@@ -102,3 +102,56 @@ describe('restartAround — finding #3: the app is always started back up', () =
     expect(result.done).toBe(false);
   });
 });
+
+describe('restartAround — code review follow-ups', () => {
+  it('keeps the write failure when start then throws too', async () => {
+    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'quit' }));
+    const start = vi.fn(async (): Promise<boolean> => {
+      throw new Error('start blew up');
+    });
+    const duringGap = vi.fn(async () => {
+      throw new Error('write failed');
+    });
+
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
+
+    // Before: the outer catch reported only "start blew up", and the user
+    // never learned the write had failed.
+    expect(result.done).toBe(false);
+    expect(result.reason).toContain('write failed');
+    expect(result.reason).toContain('start blew up');
+  });
+
+  it('with a write waiting, a tray-hidden app hands back the caller command and says nothing was written', async () => {
+    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult);
+    const start = vi.fn(async () => true);
+    const duringGap = vi.fn(async () => {});
+
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
+
+    // Before: it handed over `foster app restart --terminate`, which restarts
+    // the app but never runs the write.
+    expect(duringGap).not.toHaveBeenCalled();
+    expect(result.done).toBe(false);
+    expect(result.command).toBe('foster layout --yes --restart');
+    expect(result.reason).toContain('Nothing was written');
+  });
+
+  it('with nothing to write, a tray-hidden app still hands over app restart --terminate', async () => {
+    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult);
+    const result = await restartAround(store, true, 'foster app restart', undefined, {
+      plan: () => possiblePlan(true),
+      quit,
+      start: vi.fn(async () => true),
+    });
+    expect(result.command).toBe('foster app restart --terminate');
+  });
+});

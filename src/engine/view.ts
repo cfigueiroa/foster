@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { listAccountDirs } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import {
@@ -17,6 +18,7 @@ import {
   writeEpitaxyPrefs,
   type ViewAccountPrefs,
 } from '../store/viewPrefs.js';
+import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
 
@@ -156,8 +158,8 @@ export function planViewSet(
     // something other than what was asked for.
     if (status !== undefined && status !== 'active') {
       throw new Error(
-        `--group-by state requires status active (the app's own rule), but --status ${status} was also given. ` +
-          'Drop one of the two flags.',
+        'grouping by state only shows active sessions; drop --status or use --status active ' +
+          `(the app's own rule — --group-by state was given together with --status ${status}).`,
       );
     }
     status = 'active';
@@ -246,22 +248,61 @@ function assertClosed(store: StoreLayout, options: ApplyViewOptions): void {
 }
 
 /**
- * Both stores are validated and backed up before either is written.
+ * Everything both halves need is checked before either is written — #8: this
+ * used to check the Local Storage record only after already having written
+ * the config half, so `view set --pr-status off --sort name --yes` against a
+ * store with no `dframe-store` record landed the per-account write and only
+ * then threw, with nothing in the message saying the first half had already
+ * happened.
  *
- * Config is written first. Its own write refuses (throws, nothing touched) if
- * anything but the named keys moved since the read — a check the Local
- * Storage append has no equivalent of — so writing config first means the
- * write most likely to refuse is the one tried while neither store has been
- * touched yet. If the Local Storage append fails afterward, only the
- * machine-wide half is left unset; nothing here depends on the other half's
- * value, so a retry of just that half is safe.
+ * The checks run up front, before any write, are exactly the ones that can be
+ * without writing anything: that the Local Storage record exists at all (the
+ * same read `readLocalStorageValue` always does, so a corrupt encoding or an
+ * unparsable payload is caught here too, not mid-write), and that the config
+ * file carries no number literal a JSON round trip would silently rewrite —
+ * the same check `writeEpitaxyPrefs` itself refuses on, run here first so a
+ * store that would fail it never gets a Local Storage write it cannot be
+ * paired with.
+ *
+ * Config is still written first once both checks pass: its own write refuses
+ * (throws, nothing touched) if anything but the named keys moved since the
+ * read — a concurrent-modification check the up-front checks above cannot
+ * substitute for, since it can only be run against the post-write shape, and
+ * the Local Storage append has no equivalent of it at all. If the Local
+ * Storage append then fails — the one failure the up-front checks cannot rule
+ * out — the error names the per-account half as already written, backup path
+ * included, rather than leaving the caller to guess which half landed.
  */
 export function applyViewSet(plan: ViewSetPlan, options: ApplyViewOptions): { backups: string[] } {
   const { store } = options;
   assertClosed(store, options);
   const backups: string[] = [];
 
-  if (Object.keys(plan.account).length > 0) {
+  const hasAccountChanges = Object.keys(plan.account).length > 0;
+  const { groupBy, sort } = plan.machine;
+  const hasMachineChanges = groupBy !== undefined || sort !== undefined;
+
+  let machineRecord: LocalStorageRecord | undefined;
+  if (hasMachineChanges) {
+    machineRecord = readLocalStorageValue(store, DFRAME_STORE_KEY);
+    if (!machineRecord) {
+      throw new Error(
+        'Local Storage has never recorded the sidebar filters — open the Code sidebar in ' +
+          'Claude Desktop once, so there is a record for foster to change.',
+      );
+    }
+  }
+  if (hasAccountChanges) {
+    const raw = readFileSync(store.desktopConfigFile, 'utf8');
+    const lossy = nonCanonicalNumbers(raw)[0];
+    if (lossy) {
+      throw new Error(
+        `refusing to write: ${store.desktopConfigFile} holds a number literal that a JSON round-trip would rewrite (\`${lossy.literal}\`, at offset ${lossy.index}). Nothing was written.`,
+      );
+    }
+  }
+
+  if (hasAccountChanges) {
     const { backup } = writeEpitaxyPrefs(store, plan.account, {
       now: options.now,
       env: options.env,
@@ -269,27 +310,32 @@ export function applyViewSet(plan: ViewSetPlan, options: ApplyViewOptions): { ba
     backups.push(backup);
   }
 
-  const { groupBy, sort } = plan.machine;
-  if (groupBy !== undefined || sort !== undefined) {
-    const record = readLocalStorageValue(store, DFRAME_STORE_KEY);
-    if (!record) {
-      throw new Error(
-        'Local Storage has never recorded the sidebar filters — open the Code sidebar in ' +
-          'Claude Desktop once, so there is a record for foster to change.',
-      );
-    }
-    // Backed up before the append, same as every other write-with-app-closed
-    // store here — see util/backups.ts.
-    backups.push(backupLocalStorage(store, options));
+  if (hasMachineChanges) {
+    try {
+      // Backed up before the append, same as every other write-with-app-closed
+      // store here — see util/backups.ts.
+      backups.push(backupLocalStorage(store, options));
 
-    const state = { ...((record.document.state as Record<string, unknown>) ?? {}) };
-    if (groupBy !== undefined) {
-      state.groupByByMode = { ...((state.groupByByMode as object) ?? {}), code: groupBy };
+      const state = { ...((machineRecord!.document.state as Record<string, unknown>) ?? {}) };
+      if (groupBy !== undefined) {
+        state.groupByByMode = { ...((state.groupByByMode as object) ?? {}), code: groupBy };
+      }
+      if (sort !== undefined) {
+        state.sortByByMode = { ...((state.sortByByMode as object) ?? {}), code: sort };
+      }
+      writeLocalStorageValue(machineRecord!, DFRAME_STORE_KEY, {
+        ...machineRecord!.document,
+        state,
+      });
+    } catch (error) {
+      if (hasAccountChanges) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `the per-account half was already written (backup at ${backups[0]}); the machine-wide half failed: ${message}`,
+        );
+      }
+      throw error;
     }
-    if (sort !== undefined) {
-      state.sortByByMode = { ...((state.sortByByMode as object) ?? {}), code: sort };
-    }
-    writeLocalStorageValue(record, DFRAME_STORE_KEY, { ...record.document, state });
   }
 
   return { backups };
@@ -456,10 +502,18 @@ export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): Lay
 
     const changes: ViewChange[] = [];
     const account: Record<string, unknown> = {};
-    if (prefs.environments !== undefined) {
+    // #9c: an explicitly empty `environments: []` means exactly what an unset
+    // key means — `ViewAccountPrefs`'s own "`[]` or absent, both mean every
+    // environment" — and the target here always starts with none of the five
+    // set, so carrying an empty array changes nothing. This used to still
+    // push a change and an `account[envKey] = undefined` entry, so a source
+    // whose only account pref was an empty environments array looked like it
+    // had something to carry: every later `foster layout` repeated the
+    // no-op write, backup and ledger event against a target that never
+    // actually gained a fourth key.
+    if (prefs.environments !== undefined && prefs.environments.length > 0) {
       changes.push({ field: 'env', from: undefined, to: prefs.environments });
-      account[environmentsKey(target)] =
-        prefs.environments.length > 0 ? prefs.environments : undefined;
+      account[environmentsKey(target)] = prefs.environments;
     }
     if (prefs.showEmptyProjects !== undefined) {
       changes.push({ field: 'empty-groups', from: undefined, to: prefs.showEmptyProjects });
@@ -477,6 +531,11 @@ export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): Lay
       changes.push({ field: 'activity-days', from: undefined, to: prefs.activityDays });
       account[activityDaysKey(target)] = prefs.activityDays;
     }
+    // A source whose only account pref was the empty-environments no-op above
+    // has nothing left to carry — move on to the next candidate rather than
+    // reporting nothing-to-do as the run's final answer when another account
+    // might have something real.
+    if (changes.length === 0) continue;
     return { from: source, changes, account };
   }
 

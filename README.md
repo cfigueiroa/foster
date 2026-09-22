@@ -612,6 +612,12 @@ account that never scheduled it is worse than one left behind. The copy also dro
 `lastScheduledFor` and `notifySessionId` — another account's history, a count that could make the app
 believe a run was missed here, and a session id that names nothing in this account.
 
+A group is not just that one config scope, either — the same scope sits in Local Storage too, once
+under its own key and again folded into the filter menu's own `dframe-store` record below. Which of
+the three the app actually trusts at startup was not measured, so `foster layout` writes all three
+together whenever a Local Storage database exists at all, and skips the Local Storage pair (writing
+only the config copy) on a store the sidebar's filter menu has never touched yet.
+
 Both files are the app's own, and it rewrites them from memory the same way it does the pin database
 and its other preferences — so, like `foster pin`, a write needs the app **closed**, and `foster
 layout --yes` refuses outright while it is running rather than writing something the next flush would
@@ -624,38 +630,41 @@ waiting.
 
 The Code sidebar's filter menu — status, group by, sort, environment, empty groups, PR status,
 activity window — is seven settings split across two stores, and the split is not the one you would
-guess from the menu itself:
+guess from the menu itself. Re-measured 22/09/2026 via the app's own `set_view` tool: an earlier
+reading of this section put status and the activity window in the wrong column — both are per
+account, not machine-wide or shared — and `dframe-store`'s own `recentsStatusFilter` is a different
+list the app keeps for something else, never this menu's status filter.
 
 | Setting                                    | Where                       | Key                                                    |
 | ------------------------------------------ | --------------------------- | ------------------------------------------------------ |
-| Status (Ativo/Arquivado/Todos)             | machine-wide, Local Storage | `recentsStatusFilter`                                  |
 | Group by (Data/Pasta/Estado/Custom/Nenhum) | machine-wide, Local Storage | `groupByByMode.code`                                   |
 | Sort by (Recência/Nome/Recém-criados)      | machine-wide, Local Storage | `sortByByMode.code`                                    |
+| Status (Ativo/Arquivado/Todos)             | per account                 | `code-sessions-status-filter.<accountUuid>`            |
+| Activity window (only with group-by state) | per account                 | `code-sessions-state-activity-days.<accountUuid>`      |
 | Environment                                | per account                 | `code-sessions-selected-environments-v2.<accountUuid>` |
 | Show empty groups                          | per account                 | `code-sessions-show-empty-projects.<accountUuid>`      |
 | Show PR status                             | per account                 | `code-sessions-show-pr-status.<accountUuid>`           |
-| Activity window (only with group-by state) | shared, not suffixed        | `code-sessions-state-activity-days`                    |
 
-The first three live in Chromium's Local Storage for the app's own origin — a second LevelDB
-database next to the one `foster pin` reads, encoded more simply (no Blink envelope, no separate
-"exists" record). The other four are ordinary keys under `preferences.epitaxyPrefs` in
-`claude_desktop_config.json`, most of them carrying the account uuid as a suffix because the filter
-they hold belongs to one account's own view of the sidebar. Three more keys without the account
-suffix or the `-v2` are left over from an older build; the app no longer reads them, so `foster view`
-only ever reports them as legacy, never writes them.
+The first two live in Chromium's Local Storage for the app's own origin — a second LevelDB database
+next to the one `foster pin` reads, encoded more simply (no Blink envelope, no separate "exists"
+record). The other five are ordinary keys under `preferences.epitaxyPrefs` in
+`claude_desktop_config.json`, every one of them carrying the account uuid as a suffix because the
+filter they hold belongs to one account's own view of the sidebar. Four more keys without the
+account suffix or the `-v2` are left over from an older build; the app no longer reads them, so
+`foster view` only ever reports them as legacy, never writes them.
 
 ```bash
 foster view                 # all seven, this account's value, and where each lives
 foster view set --status archived --sort name --env local,ssh --yes
-foster view copy --from <accountUuid> --yes    # per-account half only; the machine-wide half needs no copying
+foster view copy --from <accountUuid> --yes    # per-account half (all five) only; the machine-wide half needs no copying
 ```
 
 Grouping by "Estado" only makes sense with the active filter, and the app enforces that itself —
 `foster view set --group-by state` sets `status active` along with it, and says so. Both files are
 the app's own, so both need it closed to write, and `--restart` does the same quit-write-start `foster
-layout` does. `foster layout` also carries the per-account half of this menu from another account when
-the target has none of it set yet — the machine-wide half needs no copying, since it already applies
-to every account on the installation.
+layout` does. `foster layout` also carries the per-account half of this menu — status and the
+activity window included — from another account when the target has none of it set yet — the
+machine-wide half needs no copying, since it already applies to every account on the installation.
 
 ## What about switching accounts?
 

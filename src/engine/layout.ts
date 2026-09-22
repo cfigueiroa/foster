@@ -377,11 +377,17 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
   // disabled in its newest account but still enabled in an older one, which
   // the old order brought back to life in the target.
   const byId = new Map<string, ScheduledTask>();
+  // Distinct account uuids, not account/org directories — two orgs of the same
+  // account both offering routines must still count as one source, the same
+  // way `planGroups`' own `sourceAccounts` already did (`key.split('/')[0]`).
+  // Keying this one on the full `accountUuid/organizationUuid` pair inflated
+  // "Routines (from N other accounts)" whenever a single account held more
+  // than one organization.
   const sourceAccounts = new Set<string>();
   for (const account of others) {
     const read = readScheduledTasks(store, account);
     if (read.status !== 'ok') continue;
-    sourceAccounts.add(`${account.accountUuid}/${account.organizationUuid}`);
+    sourceAccounts.add(account.accountUuid);
 
     for (const task of read.file.scheduledTasks) {
       const existing = byId.get(task.id);
@@ -472,6 +478,54 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
   };
 }
 
+export interface LayoutPendingCounts {
+  /** Groups that do not exist in the target yet and would be minted. */
+  groupsCreated: number;
+  /** Cards that would be newly assigned to a group. */
+  cardsAssigned: number;
+  /** Manual order entries that would be appended to a group's order list. */
+  orderEntriesAdded: number;
+  routinesBrought: number;
+  /** Sidebar filter-menu (view) keys that would be carried from another account. */
+  viewKeysCarried: number;
+}
+
+/**
+ * What `applyLayout` would write for this plan, without writing anything.
+ *
+ * Uses the same "dirty group" predicate `applyLayout` itself writes under — a
+ * new assignment or a new manual order entry (see finding #9: a group with
+ * neither gets no id and no row, so it counts as nothing pending either) — so
+ * this and a real `applyLayout` run always agree on what is left to bring.
+ * `foster sweep`'s preview line and the CLI's own restart-command choice both
+ * read this rather than re-deriving their own notion of "pending", which is
+ * what used to let a plan with only new order entries, or only a view-prefs
+ * carry, go unmentioned.
+ */
+export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
+  const dirtyGroups = plan.groups.items.filter(
+    (item) => item.assign.length > 0 || item.appendedOrder.length > 0,
+  );
+  return {
+    groupsCreated: dirtyGroups.filter((item) => item.created).length,
+    cardsAssigned: dirtyGroups.reduce((sum, item) => sum + item.assign.length, 0),
+    orderEntriesAdded: dirtyGroups.reduce((sum, item) => sum + item.appendedOrder.length, 0),
+    routinesBrought: plan.routines.bring.length,
+    viewKeysCarried: Object.keys(plan.viewPrefs.account).length,
+  };
+}
+
+/** The sum of every `LayoutPendingCounts` field — 0 means nothing is pending. */
+export function totalLayoutPending(counts: LayoutPendingCounts): number {
+  return (
+    counts.groupsCreated +
+    counts.cardsAssigned +
+    counts.orderEntriesAdded +
+    counts.routinesBrought +
+    counts.viewKeysCarried
+  );
+}
+
 export interface ApplyLayoutOptions {
   store: StoreLayout;
   ledger: Ledger;
@@ -483,10 +537,16 @@ export interface ApplyLayoutOptions {
 export interface ApplyLayoutResult {
   /** Groups created or given a new assignment or order entry. */
   groupsTouched: number;
+  /** Of `groupsTouched`, how many did not exist in the target before this run. */
+  groupsCreated: number;
   cardsAssigned: number;
+  /** Manual order entries appended to a group's order list this run. */
+  orderEntriesAdded: number;
   routinesBrought: number;
   /** True when the per-account view prefs were carried from another account. */
   viewPrefsCarried: boolean;
+  /** Sidebar filter-menu (view) keys carried this run — 0 when `viewPrefsCarried` is false. */
+  viewKeysCarried: number;
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
   /**
@@ -576,6 +636,8 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
   const written: string[] = [];
   let cardsAssigned = 0;
   let groupsTouched = 0;
+  let groupsCreated = 0;
+  let orderEntriesAdded = 0;
   let routinesBrought = 0;
   const nowMs = (options.now?.() ?? new Date()).getTime();
 
@@ -599,10 +661,12 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     for (const item of dirtyGroups) {
       if (item.created && !groups.some((group) => group.id === item.groupId)) {
         groups.push({ id: item.groupId, name: item.name });
+        groupsCreated += 1;
       }
       for (const assign of item.assign) assignments[assign.cardId] = item.groupId;
       if (item.appendedOrder.length > 0) {
         order[item.groupId] = [...(order[item.groupId] ?? []), ...item.appendedOrder];
+        orderEntriesAdded += item.appendedOrder.length;
       }
       groupsTouched += 1;
       cardsAssigned += item.assign.length;
@@ -688,7 +752,8 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
   }
 
   let viewPrefsCarried = false;
-  if (Object.keys(plan.viewPrefs.account).length > 0) {
+  const viewKeysCarried = Object.keys(plan.viewPrefs.account).length;
+  if (viewKeysCarried > 0) {
     try {
       const result = writeEpitaxyPrefs(store, plan.viewPrefs.account, {
         now: options.now,
@@ -707,9 +772,22 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       kind: 'layout_applied',
       target: plan.target,
       groups: cardsAssigned,
+      groupsCreated,
+      orderEntriesAdded,
       routines: routinesBrought,
+      viewKeysCarried,
     });
   }
 
-  return { groupsTouched, cardsAssigned, routinesBrought, viewPrefsCarried, backups, written };
+  return {
+    groupsTouched,
+    groupsCreated,
+    cardsAssigned,
+    orderEntriesAdded,
+    routinesBrought,
+    viewPrefsCarried,
+    viewKeysCarried,
+    backups,
+    written,
+  };
 }

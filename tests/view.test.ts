@@ -1,22 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as FsAtomic from '../src/util/fsatomic.js';
 import type { AccountRef, StoreLayout } from '../src/domain/types.js';
 import { AppRunningError } from '../src/engine/safety.js';
-import {
-  applyViewCopy,
-  applyViewSet,
-  ENV_STORED_TO_WORD,
-  ENV_WORDS,
-  GROUP_BY_STORED_TO_WORD,
-  GROUP_BY_WORDS,
-  planLayoutViewCarry,
-  planViewCopy,
-  planViewSet,
-  readViewState,
-  SORT_STORED_TO_WORD,
-  SORT_WORDS,
-} from '../src/engine/view.js';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import { localStorageDir, localStorageKey } from '../src/store/localStorage.js';
 import {
@@ -36,6 +23,44 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 const LOG_NUMBER = 4;
 const SCRIPT_KEY = 'dframe-store';
 
+/**
+ * Flipped per test to make the next Local Storage append fail, without
+ * touching the real implementation — same pattern as `failed-write.test.ts`,
+ * one level lower: `writeLocalStorageValue` appends through `appendSynced`,
+ * never `writeFileAtomic`, so that is the call this test file needs to hook.
+ */
+let failNextAppend = false;
+
+vi.mock('../src/util/fsatomic.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof FsAtomic>();
+  return {
+    ...actual,
+    appendSynced: (target: string, contents: Buffer) => {
+      if (failNextAppend) throw new Error('simulated disk failure');
+      return actual.appendSynced(target, contents);
+    },
+  };
+});
+
+const {
+  applyViewCopy,
+  applyViewSet,
+  ENV_STORED_TO_WORD,
+  ENV_WORDS,
+  GROUP_BY_STORED_TO_WORD,
+  GROUP_BY_WORDS,
+  planLayoutViewCarry,
+  planViewCopy,
+  planViewSet,
+  readViewState,
+  SORT_STORED_TO_WORD,
+  SORT_WORDS,
+} = await import('../src/engine/view.js');
+
+beforeEach(() => {
+  failNextAppend = false;
+});
+
 /** No process ever reported running — the app is always "closed" to these tests. */
 const closed = (): ProcessRow[] => [];
 
@@ -49,8 +74,17 @@ function backupOpts(store: StoreLayout): { env: NodeJS.ProcessEnv } {
   return { env: testEnv(store) };
 }
 
-/** A synthetic Local Storage database carrying the sidebar filter menu's `state`. */
-function makeMachineStore(store: StoreLayout, state: Record<string, unknown> = {}): void {
+/**
+ * A synthetic Local Storage database carrying the sidebar filter menu's
+ * `state`. `scriptKey` defaults to `dframe-store` itself; a caller that wants
+ * a database that exists but has never recorded that key at all — the #8
+ * precondition `applyViewSet` now checks up front — passes a different one.
+ */
+function makeMachineStore(
+  store: StoreLayout,
+  state: Record<string, unknown> = {},
+  scriptKey: string = SCRIPT_KEY,
+): void {
   const dir = localStorageDir(store);
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, 'CURRENT'), 'MANIFEST-000001\n');
@@ -70,7 +104,7 @@ function makeMachineStore(store: StoreLayout, state: Record<string, unknown> = {
   ]);
   writeFileSync(
     path.join(dir, `${String(LOG_NUMBER).padStart(6, '0')}.log`),
-    frameRecords(encodeBatch(1n, [{ key: localStorageKey(SCRIPT_KEY), value }]), 0),
+    frameRecords(encodeBatch(1n, [{ key: localStorageKey(scriptKey), value }]), 0),
   );
 }
 
@@ -278,6 +312,101 @@ describe('planViewSet / applyViewSet', () => {
       applyViewSet(plan, { store, list: () => desktopRunningOn(store.root) }),
     ).toThrow(AppRunningError);
   });
+
+  it('#13: refuses --group-by state together with an explicit --status other than active, with a clear message', () => {
+    const store = makeStore();
+    makeMachineStore(store, {});
+    writeDesktopConfig(store);
+
+    for (const status of ['all', 'archived'] as const) {
+      expect(() => planViewSet(store, NEW_ACCOUNT, { groupBy: 'state', status })).toThrow(
+        /grouping by state only shows active sessions; drop --status or use --status active/,
+      );
+    }
+
+    // --status active paired explicitly with --group-by state agrees with the
+    // implied value, so it is not a conflict.
+    const plan = planViewSet(store, NEW_ACCOUNT, { groupBy: 'state', status: 'active' });
+    expect(plan.impliedStatusActive).toBe(true);
+  });
+
+  it('#8: checks the Local Storage record exists before writing the per-account half, not after', () => {
+    const store = makeStore();
+    // A Local Storage database that exists but has never recorded the
+    // `dframe-store` key — the same shape as an installation whose sidebar
+    // filter menu was never opened. `readLocalStorageValue` returns
+    // `undefined` for this, rather than throwing the way a missing database
+    // entirely would.
+    makeMachineStore(store, {}, 'some-other-key');
+    writeDesktopConfig(store);
+
+    const plan = planViewSet(store, NEW_ACCOUNT, { prStatus: false, sort: 'name' });
+    expect(plan.account[prStatusKey(NEW_ACCOUNT)]).toBe(false);
+
+    expect(() => applyViewSet(plan, { store, list: closed, env: testEnv(store) })).toThrow(
+      /Local Storage has never recorded the sidebar filters/,
+    );
+
+    // The bug: this used to write the per-account half before checking the
+    // machine-wide half's own precondition, so by the time the error above
+    // was thrown the config file already carried pr-status off.
+    expect(readEpitaxyPrefs(store)[prStatusKey(NEW_ACCOUNT)]).toBeUndefined();
+  });
+
+  it('#8: names the per-account half as already written when the machine-wide append fails afterward', () => {
+    const store = makeStore();
+    makeMachineStore(store, {});
+    writeDesktopConfig(store);
+
+    const plan = planViewSet(store, NEW_ACCOUNT, { prStatus: false, sort: 'name' });
+
+    failNextAppend = true;
+    expect(() => applyViewSet(plan, { store, list: closed, env: testEnv(store) })).toThrow(
+      /the per-account half was already written \(backup at .*\); the machine-wide half failed: simulated disk failure/,
+    );
+
+    // The per-account half really did land — only the Local Storage append
+    // (a real, unpredictable failure the up-front checks cannot rule out)
+    // failed afterward, and the error above has to say so.
+    expect(readEpitaxyPrefs(store)[prStatusKey(NEW_ACCOUNT)]).toBe(false);
+  });
+});
+
+describe('#15: view surfaces localStorage.ts\'s "read a different log" notice as a dim line', () => {
+  it('carries the notice through readViewState on state.machineRecord.notices', () => {
+    const store = makeStore();
+    const dir = localStorageDir(store);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, 'CURRENT'), 'MANIFEST-000001\n');
+    const edit = Buffer.concat([
+      encodeVarint32(1),
+      encodeVarint32(8),
+      Buffer.from('idb_cmp1'),
+      encodeVarint32(2),
+      encodeVarint32(LOG_NUMBER),
+    ]);
+    writeFileSync(path.join(dir, 'MANIFEST-000001'), frameRecords(edit, 0));
+
+    const document = { state: {}, version: 1 };
+    const value = Buffer.concat([
+      Buffer.from([0x01]),
+      Buffer.from(JSON.stringify(document), 'latin1'),
+    ]);
+    const namedLogPath = path.join(dir, `${String(LOG_NUMBER).padStart(6, '0')}.log`);
+    writeFileSync(
+      namedLogPath,
+      frameRecords(encodeBatch(1n, [{ key: localStorageKey(SCRIPT_KEY), value }]), 0),
+    );
+    // Same "manifest's log number is a floor, not an address" case
+    // `localStorage.test.ts` covers directly — here the point is only that
+    // `readViewState` does not drop the notice on the way through.
+    const newer = path.join(dir, '000009.log');
+    renameSync(namedLogPath, newer);
+
+    const state = readViewState(store, NEW_ACCOUNT);
+    expect(state.machineRecord?.notices).toHaveLength(1);
+    expect(state.machineRecord?.notices[0]).toMatch(/read 000009\.log instead/);
+  });
 });
 
 describe('planViewCopy / applyViewCopy', () => {
@@ -395,6 +524,54 @@ describe('planLayoutViewCarry (finding #6: status and activity-days are carried 
     const carry = planLayoutViewCarry(store, NEW_ACCOUNT);
     expect(carry.changes).toEqual([]);
     expect(carry.account).toEqual({});
+  });
+
+  it('#9c: reports nothing-to-do when the only other account\'s sole account pref is an empty environments array', () => {
+    const store = makeStore();
+    for (const account of [NEW_ACCOUNT, OLD_ACCOUNT]) {
+      mkdirSync(path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid), {
+        recursive: true,
+      });
+    }
+    writeDesktopConfig(store);
+    // `environments: []` reads back as `environments !== undefined` (an
+    // empty array, not absence), so `hasAnyAccountPref` still treats this
+    // account as having something set — but `[]` and "never set" mean the
+    // same thing per `ViewAccountPrefs`'s own contract, and the target here
+    // starts with nothing, so carrying it changes nothing at all.
+    writeEpitaxyPrefs(store, { [environmentsKey(OLD_ACCOUNT)]: [] }, backupOpts(store));
+
+    const carry = planLayoutViewCarry(store, NEW_ACCOUNT);
+    // The bug (#9c): this used to return `{ from: OLD_ACCOUNT, changes: [{field: 'env', ...}], account: { [envKey]: undefined } }`
+    // — a plan `layout.ts` read as "one key to carry" (`Object.keys(...).length`
+    // counts a key present with value `undefined`), so every run wrote,
+    // backed up and logged a no-op.
+    expect(carry.changes).toEqual([]);
+    expect(carry.account).toEqual({});
+    expect(carry.from).toBeUndefined();
+  });
+
+  it('#9c: skips a source whose only pref is the empty-environments no-op and carries a later source\'s real setting', () => {
+    const store = makeStore();
+    for (const account of [NEW_ACCOUNT, OLD_ACCOUNT, THIRD_ACCOUNT]) {
+      mkdirSync(path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid), {
+        recursive: true,
+      });
+    }
+    writeDesktopConfig(store);
+    writeEpitaxyPrefs(
+      store,
+      {
+        [environmentsKey(OLD_ACCOUNT)]: [],
+        [statusKey(THIRD_ACCOUNT)]: 'archived',
+      },
+      backupOpts(store),
+    );
+
+    const carry = planLayoutViewCarry(store, NEW_ACCOUNT);
+    expect(carry.from).toEqual(THIRD_ACCOUNT);
+    expect(carry.changes).toEqual([{ field: 'status', from: undefined, to: 'archived' }]);
+    expect(carry.account).toEqual({ [statusKey(NEW_ACCOUNT)]: 'archived' });
   });
 });
 
