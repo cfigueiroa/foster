@@ -453,6 +453,76 @@ transcript could keep it. `foster app login --restore --yes` is the way out of a
 by a crash or a stray Ctrl+C; `foster doctor` reports the ProgID found and warns when `Parameters`
 is still routed to a profile.
 
+## Groups and routines: `foster layout`
+
+Measured 22/09/2026, real MSIX store, app 2.2553.1.0.
+
+Sidebar **groups** live in `<store.root>/claude_desktop_config.json`, at
+`preferences.epitaxyPrefs["dframe-group-scopes"]["<accountUuid>/<organizationUuid>"]` — one scope per
+account/org, holding `groups` (`{id, name}[]`, array order is sidebar order), `assignments` (card id
+`code:local_<uuid>` -> group id) and an optional, partial `order` (group id -> card ids). The app owns
+the file and rewrites the scope within seconds of a group being created through the UI — same rule as
+`store/pinstate.ts`: write only while the app is closed, back up first (`store/groupScopes.ts`,
+`writeGroupScope`, same "verify nothing else moved" discipline as `writeAppPref`). An archived card
+cannot be shown in a group — the app's own tool refuses it — so a target whose only matching card is
+archived is skipped and reported, never assigned.
+
+**Routines** (scheduled tasks) live per account/org at
+`<store.root>/claude-code-sessions/<accountUuid>/<orgUuid>/scheduled-tasks.json`
+(`store/routines.ts`). Every account/org directory has one, often with an empty list. `filePath`
+points at a `SKILL.md` under the shared CLI config dir, so the same path is valid from any account —
+nothing here is Desktop-store-specific except the enable flag and the schedule. Same closed-app rule,
+same backup-first convention.
+
+`src/engine/layout.ts` (`planLayout`/`applyLayout`) does the planning and the write. A target card
+already carrying any assignment is left alone regardless of which group a source proposes — the
+user's own filing always wins, which is what makes a second `foster layout` plan nothing. A
+conversation named for two different group names across sources is a conflict, resolved by the
+source card with the latest `lastActivityAt`, and reported rather than silently picked. A routine
+already known to the target (enabled or not) is left alone too, and a one-shot already overdue
+(`fireAt <= now`, no `cronExpression`) is never brought — the app fires an overdue task at its next
+launch, and a stale one firing unasked in an account that never scheduled it is worse than a gap.
+
+`foster layout --yes --restart` shares its quit-write-start machinery with `foster sweep --restart`
+(`restartAround` in `src/cli/index.ts`) but runs the write **inside** the gap between quit and start,
+since these two files are only safe to touch while the app is down — `sweep` writes everything
+_before_ asking to restart, so it passes no callback into the same helper. `foster sweep` plans a
+layout read-only alongside its own passes (`ops/sweep.ts`, never applied there) and mentions it in
+`sweepSummary` when anything is pending; that line never counts toward "nothing is left to sweep",
+because a layout needs the app closed and a sweep run from inside the app can never close it.
+
+## The sidebar's filter menu: two stores
+
+Measured 22/09/2026, same store/app. Seven settings in the Code sidebar's filter menu, split
+across two stores that do not line up with how the menu reads:
+
+- **Machine-wide**, in Chromium's Local Storage (`<store.root>/Local Storage/leveldb/`, key
+  `dframe-store`) — `recentsStatusFilter`, `groupByByMode.code`, `sortByByMode.code`. A second,
+  sibling LevelDB database to the one `store/pinstate.ts` reads for pins, encoded more simply: no
+  Blink envelope, no separate "exists" entry, just a one-byte string tag in front of the value.
+  `store/localStorage.ts` reuses `store/format/leveldb.ts` for the read and the write; reading
+  checks both the log and any compacted sorted table, same as pinning.
+- **Per account**, in `claude_desktop_config.json`'s `preferences.epitaxyPrefs`, most keys suffixed
+  with the account uuid: `code-sessions-selected-environments-v2.<accountUuid>`,
+  `code-sessions-show-empty-projects.<accountUuid>`, `code-sessions-show-pr-status.<accountUuid>`.
+  One key, `code-sessions-state-activity-days`, is **not** suffixed — measured, not assumed — because
+  it applies to whichever account is signed in rather than to one account's own row.
+  `store/viewPrefs.ts` reads and writes these, sharing the same "verify nothing else moved" write as
+  `store/groupScopes.ts`. Three legacy, un-suffixed keys from an older build
+  (`code-sessions-status-filter`, `code-sessions-selected-environments`,
+  `code-sessions-show-empty-projects`) still sit in the file on an installation old enough to have
+  them; the UI no longer reads them, so `foster view` reports them as legacy and never writes them.
+
+`src/engine/view.ts` plans and applies both halves through one call (`planViewSet`/`applyViewSet`),
+and the per-account half alone through `planViewCopy`/`applyViewCopy` (`foster view copy`). Grouping
+by "Estado" forces `status: active` — the app's own rule, not foster's invention — so a request that
+sets `--group-by state` sets the status too when it is not already active. Both files need the app
+closed to write, guarded the same way `foster layout` is, and `--restart` shares the same
+`restartAround` helper. `foster layout` also carries the per-account half of this menu from the first
+other account that has any of it set, when the target has none — the same "target already has one,
+leave it" rule groups follow; the machine-wide half needs no copying, since one Local Storage record
+already covers every account on the installation.
+
 ## Before pushing
 
 ```bash

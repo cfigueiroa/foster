@@ -378,8 +378,11 @@ export function project(events: LedgerEvent[]): LedgerState {
       case 'account_switched':
       case 'conversation_purged':
       case 'failed':
-        // History, not state. A switch, a purge and a failure are recorded so
-        // the log can say what happened; none of them change the fold.
+      case 'layout_applied':
+        // History, not state. A switch, a purge, a failure and a layout run are
+        // recorded so the log can say what happened; none of them change the
+        // fold — the app owns both files a layout run writes, so there is
+        // nothing here for a later command to read back as current state.
         break;
     }
   }

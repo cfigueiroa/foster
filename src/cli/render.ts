@@ -708,6 +708,18 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  const layout = report.layout;
+  if (layout.groups > 0 || layout.routines > 0) {
+    const parts: string[] = [];
+    if (layout.groups > 0)
+      parts.push(`${layout.groups} group row${layout.groups === 1 ? '' : 's'}`);
+    if (layout.routines > 0)
+      parts.push(`${layout.routines} routine${layout.routines === 1 ? '' : 's'}`);
+    // Never written by the sweep itself — see `SweepReport.layout` — so this is
+    // always phrased as waiting, dry run or not.
+    lines.push(`Layout: ${parts.join(' and ')} to bring — foster layout --yes --restart`);
+  }
+
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
 

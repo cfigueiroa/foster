@@ -205,6 +205,7 @@ describe('sweepSummary', () => {
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },
     pinFixes: { fixes: [], moved: false },
+    layout: { groups: 0, routines: 0 },
     ...overrides,
   });
 

@@ -208,7 +208,32 @@ import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
   DEFAULT_STALE_TEMPLATE,
+  formatStamp,
 } from '../domain/stale.js';
+import {
+  applyLayout,
+  planLayout,
+  type ApplyLayoutResult,
+  type LayoutPlan,
+} from '../engine/layout.js';
+import {
+  applyViewCopy,
+  applyViewSet,
+  ENV_STORED_TO_WORD,
+  ENV_WORDS,
+  GROUP_BY_STORED_TO_WORD,
+  GROUP_BY_WORDS,
+  planViewCopy,
+  planViewSet,
+  readViewState,
+  SORT_STORED_TO_WORD,
+  SORT_WORDS,
+  STATUS_WORDS,
+  type StatusWord,
+  type ViewChange,
+  type ViewCopyPlan,
+  type ViewSetRequest,
+} from '../engine/view.js';
 import { applyLabel } from '../ops/label.js';
 import { labelsOf, manualLabelsOf } from './names.js';
 // Imported statically on purpose: a dynamic import makes the bundler emit a
@@ -1017,10 +1042,19 @@ program
       configDirs: opts.configDir ?? [],
     });
 
+    // Named here, not in `sweepRestart` itself: a layout is planned but never
+    // applied by the sweep, so the command handed over on a restart has to be
+    // the one that actually finishes the job — `foster layout` restarts the
+    // app too, so there is still only one command to run outside it.
+    const restartCommand =
+      report.layout.groups > 0 || report.layout.routines > 0
+        ? 'foster layout --yes --restart'
+        : RESTART_COMMAND;
+
     if (opts.json) {
       // The one output that has to wait: it is a single object, so the restart
       // has to have happened before any of it can be written.
-      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun);
+      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun, restartCommand);
       print({ ...sweepJson(report), restart });
       return;
     }
@@ -1050,7 +1084,7 @@ program
     // before the report meant a sweep that had already written a few hundred
     // files sat silent for the whole of it — with nothing on screen naming them
     // if the wait was mistaken for a hang and interrupted.
-    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart)));
+    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart), restartCommand));
   });
 
 /**
@@ -1298,6 +1332,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     archived: report.archived,
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,
+    layout: report.layout,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
   };
 }
@@ -1318,11 +1353,28 @@ interface SweepRestart {
   command: string;
 }
 
-async function sweepRestart(store: StoreLayout, requested: boolean): Promise<SweepRestart> {
+/**
+ * Quit Claude Desktop, optionally do something while it is down, then start it
+ * again — the restart machinery every write-with-app-closed command shares.
+ *
+ * `sweep --restart` has already written everything by the time it calls this,
+ * so it passes no `duringGap`; `layout`/`view --restart` write files that are
+ * only safe to touch while the app is closed, so they write from inside the
+ * gap this opens, between the quit landing and the start going out. Either
+ * way this is the one place that decides whether foster may restart the app
+ * at all — see `RestartPlan`'s own reasoning about a session the app is
+ * itself hosting.
+ */
+async function restartAround(
+  store: StoreLayout,
+  requested: boolean,
+  command: string,
+  duringGap?: () => void | Promise<void>,
+): Promise<SweepRestart> {
   // Asked for only when it matters: working out whether foster is inside the app
   // means reading the process table, which is a second of PowerShell that a run
   // nobody asked to restart has no use for.
-  if (!requested) return { requested: false, done: false, command: RESTART_COMMAND };
+  if (!requested) return { requested: false, done: false, command };
 
   const plan = restartPlan(store);
   if (!plan.possible) {
@@ -1330,7 +1382,7 @@ async function sweepRestart(store: StoreLayout, requested: boolean): Promise<Swe
       requested: true,
       done: false,
       reason: `${plan.reason}\nRun it from a terminal outside the app:`,
-      command: plan.command,
+      command,
     };
   }
 
@@ -1350,27 +1402,36 @@ async function sweepRestart(store: StoreLayout, requested: boolean): Promise<Swe
           requested: true,
           done: false,
           reason: 'Claude Desktop is still running. Quit it from the tray icon.',
-          command: plan.command,
+          command,
         };
       }
     }
+    if (duringGap) await duringGap();
     const started = await startDesktop(store);
     return started
-      ? { requested: true, done: true, command: plan.command }
+      ? { requested: true, done: true, command }
       : {
           requested: true,
           done: false,
           reason: 'Started it; it has not taken the store yet.',
-          command: plan.command,
+          command,
         };
   } catch (error) {
     return {
       requested: true,
       done: false,
       reason: error instanceof Error ? error.message : String(error),
-      command: plan.command,
+      command,
     };
   }
+}
+
+async function sweepRestart(
+  store: StoreLayout,
+  requested: boolean,
+  command: string = RESTART_COMMAND,
+): Promise<SweepRestart> {
+  return restartAround(store, requested, command);
 }
 
 function reportSweepRestart(restart: SweepRestart): void {
@@ -2458,6 +2519,465 @@ function undoDatesCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bool
     return;
   }
   console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+}
+
+program
+  .command('layout')
+  .helpGroup('After the sweep:')
+  .summary('bring sidebar groups and routines into this account')
+  .description(
+    "Bring the sidebar's groups and its scheduled tasks (routines) from every other\n" +
+      'account into the one signed in now — matched by name for a group, by its own id\n' +
+      'for a routine, so bringing either twice is a no-op rather than a duplicate.\n\n' +
+      "A target card already filed in a group is left alone — it is the user's own\n" +
+      'filing, and it wins. A routine the target already has, enabled or not, is left\n' +
+      'alone too: it may have been disabled on purpose. A one-shot routine that is\n' +
+      'already overdue is not brought at all — the app runs an overdue task at its next\n' +
+      'launch, and a stale one firing unasked is worse than one left behind.\n\n' +
+      "Both files are the app's own and it rewrites them from memory, so — like\n" +
+      '"foster pin" — a write here needs the app closed.',
+  )
+  .option('--to <accountUuid>', 'write into this account instead')
+  .option('--to-org <organizationUuid>', 'write into this organization')
+  .option('--no-groups', 'skip the sidebar groups')
+  .option('--no-routines', 'skip the scheduled tasks')
+  .option('--json', 'machine-readable output')
+  .option(
+    '--restart',
+    'quit Claude Desktop, write, then start it again — the write happens in the gap',
+  )
+  .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
+  .action(async function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{
+      to?: string;
+      toOrg?: string;
+      groups: boolean;
+      routines: boolean;
+      json?: boolean;
+      restart?: boolean;
+      yes?: boolean;
+      dryRun?: boolean;
+    }>();
+    const dryRun = opts.dryRun || !opts.yes;
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+
+    const plan = planLayout({ store, target, ledgerEvents: ledger.read() });
+    if (opts.groups === false) plan.groups.items = [];
+    if (opts.routines === false) plan.routines = { ...plan.routines, bring: [] };
+
+    if (dryRun) {
+      if (opts.json) {
+        print({ target, dryRun: true, plan });
+        return;
+      }
+      printLayoutPlan(plan);
+      console.log(pc.dim('\nRe-run with --yes to write.'));
+      return;
+    }
+
+    // Named here rather than in `restartAround`: the command that finishes the
+    // job restarts the app too, so there is still only one line to hand over.
+    const restartCommand = 'foster layout --yes --restart';
+
+    if (!opts.restart) {
+      // Checked here rather than at the top, the same as `foster pin`: reading
+      // and a dry run keep working while the app is up, and it is only the
+      // write that cannot share the files with it.
+      const app = inspectApp(store);
+      if (app.running) {
+        throw new Error(
+          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
+        );
+      }
+      const result = applyLayout(plan, { store, ledger });
+      if (opts.json) {
+        print({ target, dryRun: false, plan, result });
+        return;
+      }
+      printLayoutPlan(plan);
+      printLayoutResult(result);
+      console.log(
+        pc.dim(
+          `\nInvisible until the app re-reads its files: restart Claude Desktop, or ${restartCommand}.`,
+        ),
+      );
+      return;
+    }
+
+    let result: ApplyLayoutResult | undefined;
+    const restart = await restartAround(store, true, restartCommand, async () => {
+      result = applyLayout(plan, { store, ledger });
+    });
+
+    if (opts.json) {
+      print({ target, dryRun: false, plan, result, restart });
+      if (!restart.done) process.exitCode = 1;
+      return;
+    }
+
+    printLayoutPlan(plan);
+    if (result) printLayoutResult(result);
+    if (restart.done) {
+      console.log(pc.bold('\nClaude Desktop is up, with the layout applied.'));
+    } else {
+      console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));
+      console.log(`  ${restart.command}`);
+      process.exitCode = 1;
+    }
+  });
+
+/** `foster layout`'s plan, in the shape both the dry run and a written run print. */
+function printLayoutPlan(plan: LayoutPlan): void {
+  const { groups, routines } = plan;
+  const sourceWord = (n: number): string => `${n} other account${n === 1 ? '' : 's'}`;
+
+  console.log(pc.bold(`Groups (from ${sourceWord(groups.sources)})`));
+  if (groups.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else {
+    for (const item of groups.items) {
+      if (item.created || item.assign.length > 0) {
+        const rows = item.assign.length;
+        console.log(
+          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}`,
+        );
+      }
+      for (const skip of item.skipped) {
+        const reason = skip.reason === 'archived' ? 'archived here' : 'no matching card here';
+        console.log(`  ${pc.dim('·')} ${skip.title} — ${reason}`);
+      }
+    }
+  }
+  if (groups.conflicts.length > 0) {
+    const count = groups.conflicts.length;
+    console.log(
+      pc.dim(
+        `  ${count} conversation${count === 1 ? '' : 's'} named for two different groups — the source with the latest activity won.`,
+      ),
+    );
+  }
+
+  console.log(pc.bold(`\nRoutines (from ${sourceWord(routines.sources)})`));
+  if (routines.bring.length === 0 && routines.skipped.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else {
+    for (const item of routines.bring) {
+      const when =
+        item.cronExpression ??
+        (item.fireAt !== undefined ? `once ${formatStamp(item.fireAt)}` : '');
+      console.log(`  ${pc.green('+')} ${item.id}  ${pc.dim(when)}`);
+    }
+    for (const skip of routines.skipped) {
+      // Already-here is the ordinary, idempotent case on a second run — not
+      // worth a line every time, the same restraint `sweep`'s title pass takes
+      // for a copy renamed on purpose.
+      if (skip.reason === 'already-here') continue;
+      const detail =
+        skip.reason === 'missed-one-shot'
+          ? `missed one-shot (${formatStamp(skip.firedAt)}), not brought`
+          : 'SKILL.md missing, not brought';
+      console.log(`  ${pc.dim('·')} ${skip.id} — ${detail}`);
+    }
+  }
+
+  if (Object.keys(plan.viewPrefs.account).length > 0) {
+    console.log(
+      pc.dim(
+        `\nAlso carrying the sidebar filter menu's account settings${plan.viewPrefs.from ? ` from ${shortId(plan.viewPrefs.from.accountUuid)}` : ''}.`,
+      ),
+    );
+  }
+}
+
+function printLayoutResult(result: ApplyLayoutResult): void {
+  console.log(
+    pc.bold(
+      `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
+        `${result.viewPrefsCarried ? ', filter menu carried' : ''}.`,
+    ),
+  );
+}
+
+const view = program
+  .command('view')
+  .helpGroup('After the sweep:')
+  .summary("the Code sidebar's filter menu — show it, or change it")
+  .description(
+    'Seven settings, two stores: three live machine-wide in Local Storage, four live\n' +
+      'per account in claude_desktop_config.json. Bare, this shows all seven, this\n' +
+      "account's value for each, and where it lives.\n\n" +
+      "Both files are the app's own and it rewrites them from memory, so — like\n" +
+      '"foster layout" — a write needs the app closed.',
+  )
+  .option('--to <accountUuid>', 'read this account instead of the one signed in')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store } = context(this);
+    const opts = this.opts<{ to?: string; json?: boolean }>();
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const state = readViewState(store, target);
+
+    if (opts.json) {
+      print({
+        target,
+        status: state.status ?? null,
+        groupBy: state.groupBy ? (GROUP_BY_STORED_TO_WORD[state.groupBy] ?? state.groupBy) : null,
+        sort: SORT_STORED_TO_WORD[state.sort] ?? state.sort,
+        environments: state.account.environments?.map((v) => ENV_STORED_TO_WORD[v] ?? v) ?? [],
+        showEmptyProjects: state.account.showEmptyProjects ?? null,
+        showPrStatus: state.account.showPrStatus ?? true,
+        activityDays: state.activityDays ?? null,
+        legacy: state.legacy,
+      });
+      return;
+    }
+
+    console.log(pc.bold(`Sidebar filters for ${shortId(target.accountUuid)}`));
+    const row = (label: string, where: 'machine' | 'account', value: string): void =>
+      console.log(`  ${label.padEnd(14)} ${value}  ${pc.dim(`(${where})`)}`);
+    row('status', 'machine', state.status ?? pc.dim('(never set)'));
+    row(
+      'group-by',
+      'machine',
+      state.groupBy
+        ? (GROUP_BY_STORED_TO_WORD[state.groupBy] ?? state.groupBy)
+        : pc.dim('(never set)'),
+    );
+    row('sort', 'machine', SORT_STORED_TO_WORD[state.sort] ?? state.sort);
+    row(
+      'env',
+      'account',
+      state.account.environments && state.account.environments.length > 0
+        ? state.account.environments.map((v) => ENV_STORED_TO_WORD[v] ?? v).join(',')
+        : 'all',
+    );
+    row('empty-groups', 'account', String(state.account.showEmptyProjects ?? false));
+    row('pr-status', 'account', String(state.account.showPrStatus ?? true));
+    row(
+      'activity-days',
+      'account',
+      state.activityDays !== undefined ? String(state.activityDays) : pc.dim('(default)'),
+    );
+
+    if (state.legacy.length > 0) {
+      console.log(
+        pc.dim(
+          `\n${state.legacy.length} legacy key(s) still on disk, unread by the app: ${state.legacy.join(', ')}`,
+        ),
+      );
+    }
+  });
+
+view
+  .command('set')
+  .summary('change one or more of the seven filters')
+  .option('--status <value>', `${STATUS_WORDS.join('|')}`)
+  .option('--group-by <value>', `${Object.keys(GROUP_BY_WORDS).join('|')}`)
+  .option('--sort <value>', `${Object.keys(SORT_WORDS).join('|')}`)
+  .option('--env <values>', `comma-separated ${Object.keys(ENV_WORDS).join(',')}, or "all"`)
+  .option('--empty-groups <value>', 'on|off')
+  .option('--pr-status <value>', 'on|off')
+  .option('--activity-days <value>', '0|1|3|7|30')
+  .option('--to <accountUuid>', 'write into this account instead')
+  .option('--to-org <organizationUuid>', 'write into this organization')
+  .option('--restart', 'quit Claude Desktop, write, then start it again')
+  .option('--yes', 'actually write; without it nothing is written')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    const opts = this.opts<{
+      status?: string;
+      groupBy?: string;
+      sort?: string;
+      env?: string;
+      emptyGroups?: string;
+      prStatus?: string;
+      activityDays?: string;
+      to?: string;
+      toOrg?: string;
+      restart?: boolean;
+      yes?: boolean;
+    }>();
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const request = parseViewSetRequest(opts);
+    const plan = planViewSet(store, target, request);
+
+    if (plan.changes.length === 0) {
+      console.log('Nothing to change.');
+      return;
+    }
+
+    printViewChanges(plan.changes, plan.impliedStatusActive);
+
+    if (!opts.yes) {
+      console.log(pc.dim('\nRe-run with --yes to write.'));
+      return;
+    }
+
+    const restartCommand = 'foster view set --yes --restart';
+
+    if (!opts.restart) {
+      const app = inspectApp(store);
+      if (app.running) {
+        throw new Error(
+          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
+        );
+      }
+      applyViewSet(plan, { store });
+      console.log(pc.bold('\nWritten.'));
+      console.log(
+        pc.dim('Invisible until the app re-reads its files: restart Claude Desktop, or --restart.'),
+      );
+      return;
+    }
+
+    const restart = await restartAround(store, true, restartCommand, async () => {
+      applyViewSet(plan, { store });
+    });
+    if (restart.done) {
+      console.log(pc.bold('\nClaude Desktop is up, with the filters applied.'));
+    } else {
+      console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));
+      console.log(`  ${restart.command}`);
+      process.exitCode = 1;
+    }
+  });
+
+view
+  .command('copy')
+  .summary("copy another account's per-account filters (env, empty groups, PR status)")
+  .requiredOption('--from <accountUuid>', 'the account to copy from')
+  .option('--to <accountUuid>', 'write into this account instead')
+  .option('--to-org <organizationUuid>', 'write into this organization')
+  .option('--restart', 'quit Claude Desktop, write, then start it again')
+  .option('--yes', 'actually write; without it nothing is written')
+  .action(async function (this: Command) {
+    const { store } = context(this);
+    const opts = this.opts<{
+      from: string;
+      to?: string;
+      toOrg?: string;
+      restart?: boolean;
+      yes?: boolean;
+    }>();
+    const accounts = listAccountDirs(store);
+    const from = resolveSources(accounts, opts.from, undefined, {
+      account: '--from',
+      organization: '--from-org',
+    })[0];
+    if (!from) throw new Error(`No account here matches --from "${opts.from}".`);
+    const to = resolveDestination(store, accounts, opts);
+
+    const plan: ViewCopyPlan = planViewCopy(store, from, to);
+    if (plan.changes.length === 0) {
+      console.log('Nothing to copy: already the same.');
+      return;
+    }
+    printViewChanges(plan.changes, false);
+
+    if (!opts.yes) {
+      console.log(pc.dim('\nRe-run with --yes to write.'));
+      return;
+    }
+
+    const restartCommand = 'foster view copy --from <accountUuid> --yes --restart';
+    if (!opts.restart) {
+      const app = inspectApp(store);
+      if (app.running) {
+        throw new Error(
+          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
+        );
+      }
+      applyViewCopy(plan, { store });
+      console.log(pc.bold('\nWritten.'));
+      return;
+    }
+
+    const restart = await restartAround(store, true, restartCommand, async () => {
+      applyViewCopy(plan, { store });
+    });
+    if (restart.done) {
+      console.log(pc.bold('\nClaude Desktop is up, with the filters copied.'));
+    } else {
+      console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));
+      console.log(`  ${restart.command}`);
+      process.exitCode = 1;
+    }
+  });
+
+function parseViewSetRequest(opts: {
+  status?: string;
+  groupBy?: string;
+  sort?: string;
+  env?: string;
+  emptyGroups?: string;
+  prStatus?: string;
+  activityDays?: string;
+}): ViewSetRequest {
+  const onOff = (name: string, value: string | undefined): boolean | undefined => {
+    if (value === undefined) return undefined;
+    if (value === 'on') return true;
+    if (value === 'off') return false;
+    throw new Error(`--${name} expects on or off, got "${value}"`);
+  };
+
+  if (opts.status !== undefined && !(STATUS_WORDS as readonly string[]).includes(opts.status)) {
+    throw new Error(`--status expects one of: ${STATUS_WORDS.join(', ')}`);
+  }
+  if (opts.groupBy !== undefined && !(opts.groupBy in GROUP_BY_WORDS)) {
+    throw new Error(`--group-by expects one of: ${Object.keys(GROUP_BY_WORDS).join(', ')}`);
+  }
+  if (opts.sort !== undefined && !(opts.sort in SORT_WORDS)) {
+    throw new Error(`--sort expects one of: ${Object.keys(SORT_WORDS).join(', ')}`);
+  }
+  let env: ViewSetRequest['env'];
+  if (opts.env !== undefined) {
+    if (opts.env === 'all') env = 'all';
+    else {
+      const words = opts.env.split(',').map((w) => w.trim());
+      for (const word of words) {
+        if (!(word in ENV_WORDS)) {
+          throw new Error(
+            `--env expects a comma-separated list of ${Object.keys(ENV_WORDS).join(',')}, or "all"`,
+          );
+        }
+      }
+      env = words as ViewSetRequest['env'];
+    }
+  }
+  let activityDays: ViewSetRequest['activityDays'];
+  if (opts.activityDays !== undefined) {
+    const n = Number(opts.activityDays);
+    if (![0, 1, 3, 7, 30].includes(n))
+      throw new Error('--activity-days expects one of: 0, 1, 3, 7, 30');
+    activityDays = n as ViewSetRequest['activityDays'];
+  }
+
+  return {
+    ...(opts.status !== undefined ? { status: opts.status as StatusWord } : {}),
+    ...(opts.groupBy !== undefined ? { groupBy: opts.groupBy as ViewSetRequest['groupBy'] } : {}),
+    ...(opts.sort !== undefined ? { sort: opts.sort as ViewSetRequest['sort'] } : {}),
+    ...(env !== undefined ? { env } : {}),
+    ...(onOff('empty-groups', opts.emptyGroups) !== undefined
+      ? { emptyGroups: onOff('empty-groups', opts.emptyGroups) }
+      : {}),
+    ...(onOff('pr-status', opts.prStatus) !== undefined
+      ? { prStatus: onOff('pr-status', opts.prStatus) }
+      : {}),
+    ...(activityDays !== undefined ? { activityDays } : {}),
+  };
+}
+
+function printViewChanges(changes: ViewChange[], impliedStatusActive: boolean): void {
+  for (const change of changes) {
+    console.log(
+      `  ${change.field}: ${pc.dim(String(change.from))} ${pc.dim('->')} ${String(change.to)}`,
+    );
+  }
+  if (impliedStatusActive) {
+    console.log(pc.dim('  (group-by state also sets status to active — the app requires it)'));
+  }
 }
 
 program

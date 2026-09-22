@@ -28,7 +28,8 @@ export type LedgerEvent =
   | WorktreeReleasedEvent
   | WorktreeReleaseUndoneEvent
   | ConversationImportedEvent
-  | ConversationImportUndoneEvent;
+  | ConversationImportUndoneEvent
+  | LayoutAppliedEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -581,6 +582,23 @@ export interface ConversationImportUndoneEvent extends BaseEvent {
 }
 
 /**
+ * Groups and routines brought from every other account into the target — see
+ * `engine/layout.ts`. Thin on purpose, like the other write-passes' events: what
+ * changed is sitting in the two files themselves (a scope in
+ * `claude_desktop_config.json`, a `scheduledTasks` array), and the app owns
+ * both, so there is nothing here to undo by replaying fields the way a repoint
+ * or a retitle can. Counts and the target are enough to say a run happened and
+ * roughly what it did; `templatesSeen` and every other fold that reads marks
+ * has no reason to look at this one.
+ */
+export interface LayoutAppliedEvent extends BaseEvent {
+  kind: 'layout_applied';
+  target: AccountRef;
+  groups: number;
+  routines: number;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -612,7 +630,8 @@ export type LedgerEventInput =
   | Draft<WorktreeReleasedEvent>
   | Draft<WorktreeReleaseUndoneEvent>
   | Draft<ConversationImportedEvent>
-  | Draft<ConversationImportUndoneEvent>;
+  | Draft<ConversationImportUndoneEvent>
+  | Draft<LayoutAppliedEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.

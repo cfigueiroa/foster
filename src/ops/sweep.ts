@@ -18,6 +18,7 @@ import {
 import { forksOf } from '../engine/branches.js';
 import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
+import { planLayout } from '../engine/layout.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -395,8 +396,23 @@ export interface SweepReport {
    * run has just as much to say here as a real one.
    */
   pinFixes: PinFixesReport;
+  /**
+   * What `foster layout` would bring — groups and routines from every other
+   * account — planned read-only alongside the sweep, never written by it. The
+   * app has to be closed for a layout write to land, which a sweep run from
+   * inside the app can never be; counted here only so the summary can say a
+   * layout is waiting, not folded into `confirmation.exhausted`, which is
+   * about conversations.
+   */
+  layout: SweepLayoutPreview;
   /** Present only on a run that wrote: a dry run has nothing to confirm. */
   confirmation?: SweepConfirmation;
+}
+
+/** The counts `sweepSummary` needs to say a layout run is waiting — see `SweepReport.layout`. */
+export interface SweepLayoutPreview {
+  groups: number;
+  routines: number;
 }
 
 /**
@@ -523,6 +539,16 @@ export function runSweep(options: SweepOptions): SweepReport {
   // passes left it.
   const dates = options.dates ? runDates(store, ledger, dryRun, env) : undefined;
 
+  // Read-only and cheap: `foster layout` reads two small files per account
+  // rather than any transcript, so planning it alongside costs nothing worth
+  // gating behind a flag. Never applied here — layout needs the app closed,
+  // which a sweep run from inside the app can never be.
+  const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
+  const layout: SweepLayoutPreview = {
+    groups: layoutPlan.groups.items.reduce((count, item) => count + item.assign.length, 0),
+    routines: layoutPlan.routines.bring.length,
+  };
+
   const report: SweepReport = {
     store: store.root,
     target,
@@ -546,6 +572,7 @@ export function runSweep(options: SweepOptions): SweepReport {
       .filter((id): id is string => Boolean(id)),
     neverComes,
     pinFixes,
+    layout,
   };
 
   // Nothing was written, so nothing has changed and a second pass would report

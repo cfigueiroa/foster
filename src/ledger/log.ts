@@ -27,6 +27,7 @@ const EVENT_KINDS = new Set<string>([
   'worktree_release_undone',
   'conversation_imported',
   'conversation_import_undone',
+  'layout_applied',
 ]);
 
 /**
