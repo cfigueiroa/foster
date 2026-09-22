@@ -18,7 +18,13 @@ import { backupFile, type BackupOptions } from '../util/backups.js';
 
 export interface ScheduledTask {
   id: string;
-  displayName: string;
+  /**
+   * Absent on routines an older build created — measured 22/09/2026: four
+   * accounts' routines carry no `displayName` at all, and the app shows the id
+   * in their place. Required here, it silently disqualified every one of them
+   * as a source.
+   */
+  displayName?: string;
   cronExpression?: string;
   /** Epoch ms — a one-shot task, mutually exclusive with `cronExpression`. */
   fireAt?: number;
@@ -64,7 +70,7 @@ function isScheduledTask(value: unknown): value is ScheduledTask {
   const task = value as Record<string, unknown>;
   return (
     typeof task.id === 'string' &&
-    typeof task.displayName === 'string' &&
+    (task.displayName === undefined || typeof task.displayName === 'string') &&
     typeof task.enabled === 'boolean' &&
     typeof task.filePath === 'string' &&
     typeof task.cwd === 'string' &&

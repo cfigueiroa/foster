@@ -337,7 +337,8 @@ function planGroups(
 
 export interface RoutineBringItem {
   id: string;
-  displayName: string;
+  /** Absent when the source never had one (an older build); carried as absent. */
+  displayName?: string;
   cronExpression?: string;
   fireAt?: number;
   filePath: string;
@@ -408,17 +409,25 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
 
   for (const task of byId.values()) {
     if (!task.enabled) {
-      skipped.push({ id: task.id, displayName: task.displayName, reason: 'disabled' });
+      skipped.push({ id: task.id, displayName: task.displayName ?? task.id, reason: 'disabled' });
       continue;
     }
     // The user may have disabled this on purpose in the target already —
     // enabled or not, an id the target already has is left exactly as it is.
     if (targetIds.has(task.id)) {
-      skipped.push({ id: task.id, displayName: task.displayName, reason: 'already-here' });
+      skipped.push({
+        id: task.id,
+        displayName: task.displayName ?? task.id,
+        reason: 'already-here',
+      });
       continue;
     }
     if (!existsSync(task.filePath)) {
-      skipped.push({ id: task.id, displayName: task.displayName, reason: 'missing-skill' });
+      skipped.push({
+        id: task.id,
+        displayName: task.displayName ?? task.id,
+        reason: 'missing-skill',
+      });
       continue;
     }
     // A one-shot the app never fired is overdue, and the app runs an overdue
@@ -428,7 +437,7 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
     if (task.fireAt !== undefined && task.cronExpression === undefined && task.fireAt <= now) {
       skipped.push({
         id: task.id,
-        displayName: task.displayName,
+        displayName: task.displayName ?? task.id,
         reason: 'missed-one-shot',
         firedAt: task.fireAt,
       });
@@ -437,7 +446,7 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
 
     bring.push({
       id: task.id,
-      displayName: task.displayName,
+      ...(task.displayName !== undefined ? { displayName: task.displayName } : {}),
       ...(task.cronExpression !== undefined ? { cronExpression: task.cronExpression } : {}),
       ...(task.fireAt !== undefined ? { fireAt: task.fireAt } : {}),
       filePath: task.filePath,
@@ -975,7 +984,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         : { scheduledTasks: [], recordedSkips: {} };
     const added: ScheduledTask[] = toBringRoutines.map((item) => ({
       id: item.id,
-      displayName: item.displayName,
+      ...(item.displayName !== undefined ? { displayName: item.displayName } : {}),
       ...(item.cronExpression !== undefined ? { cronExpression: item.cronExpression } : {}),
       ...(item.fireAt !== undefined ? { fireAt: item.fireAt } : {}),
       enabled: true,

@@ -9,7 +9,8 @@ import {
   writeScheduledTasks,
   type ScheduledTask,
 } from '../src/store/routines.js';
-import { makeStore, NEW_ACCOUNT } from './helpers/store.js';
+import { planLayout } from '../src/engine/layout.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
 const env = { FOSTER_HOME: mkdtempSync(path.join(tmpdir(), 'foster-home-')) };
 
@@ -63,5 +64,38 @@ describe('writeScheduledTasks — entries it cannot validate survive a write', (
     expect(after.scheduledTasks.map((entry) => entry.id)).toEqual(['odd-one', 'mine', 'brought']);
     expect(after.recordedSkips).toEqual({ a: 1 });
     expect(idsOnDisk(store, NEW_ACCOUNT)).toEqual(['odd-one', 'mine', 'brought']);
+  });
+});
+
+describe('a routine an older build wrote, with no displayName', () => {
+  it('is still a source, and is brought without inventing a name', () => {
+    const store = makeStore();
+    const skill = path.join(env.FOSTER_HOME, 'SKILL.md');
+    writeFileSync(skill, 'x');
+    const source = scheduledTasksPath(store, OLD_ACCOUNT);
+    mkdirSync(path.dirname(source), { recursive: true });
+    // Measured 22/09/2026: four accounts' routines carry no displayName at all.
+    // The validator used to require it, and every one of them was silently
+    // dropped as a source — not brought, not even listed as skipped.
+    writeFileSync(
+      source,
+      JSON.stringify({
+        scheduledTasks: [
+          {
+            id: 'legacy-monthly',
+            cronExpression: '47 5 1 * *',
+            enabled: true,
+            filePath: skill,
+            createdAt: 5,
+            cwd: 'C:\\work',
+            lastRunAt: '2026-09-01T05:47:00.000Z',
+          },
+        ],
+      }),
+    );
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    expect(plan.routines.bring.map((item) => item.id)).toEqual(['legacy-monthly']);
+    expect(plan.routines.bring[0]).not.toHaveProperty('displayName');
   });
 });
