@@ -177,6 +177,14 @@ function firstLineOf(file: string, maxBytes = META_MAX_BYTES): string | undefine
 export interface CodexRecord {
   type: string;
   payload?: Record<string, unknown>;
+  /**
+   * The record's own wall-clock time, as the rollout wrote it at the top level
+   * (ISO 8601). The inventory parser has no use for it, but the transcript
+   * writer does — a Claude record carries a `timestamp`, and a real one read
+   * from the rollout beats a moment invented at import time. Optional because a
+   * malformed or older record may not carry one.
+   */
+  timestamp?: string;
 }
 
 /**
@@ -216,6 +224,7 @@ export function readRolloutRecords(file: string): CodexRecord[] {
       ...(typeof payload === 'object' && payload !== null
         ? { payload: payload as Record<string, unknown> }
         : {}),
+      ...(typeof record.timestamp === 'string' ? { timestamp: record.timestamp } : {}),
     });
   }
   return records;

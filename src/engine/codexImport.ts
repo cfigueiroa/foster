@@ -82,16 +82,30 @@ const LEADING_PREAMBLE = /^<([a-zA-Z][\w-]*)(?:\s[^>]*)?>[\s\S]*?<\/\1>\s*/;
  * source="goal">`, which a tag pattern allowing none of them walked straight
  * past.
  *
- * One injected shape is deliberately left alone. 167 of the same 1,497 threads
- * open `# AGENTS.md instructions for <path>` — markdown, not an element, and
- * telling it from a person who genuinely pasted a heading means matching that
- * one sentence rather than a structure. It is named here so the next reader
- * knows it was measured and passed over, not missed.
+ * One injected shape is not an element at all. 182 of the same 1,497 threads
+ * open `# AGENTS.md instructions for <path>` — markdown Codex injects, and on
+ * this machine it is the *dominant* opener: the plugin and environment blocks
+ * around it are stripped as elements, but the AGENTS.md block between them was
+ * left, so it became the title and opened a turn the person never took (measured
+ * on the write half — the first real message, `Automation: Resumo matinal...`,
+ * sat behind 36 KB of it). It is peeled here too, structurally: from the exact
+ * injected heading to the next preamble element or the end. Distinguishing it
+ * from a person who genuinely pasted that exact heading is the risk the note
+ * warned of, and it is negligible — nobody types `# AGENTS.md instructions for`
+ * to open a message — so the gain of a real title is taken over that risk.
  */
+const LEADING_AGENTS_MD = /^# AGENTS\.md instructions for /;
+
 export function withoutPreamble(text: string): string {
   let out = text.trim();
   for (;;) {
-    const next = out.replace(LEADING_PREAMBLE, '').trim();
+    let next = out.replace(LEADING_PREAMBLE, '').trim();
+    if (next === out && LEADING_AGENTS_MD.test(out)) {
+      // The block runs to the next preamble element (a line opening with a tag),
+      // or to the end when it is the last thing in the message.
+      const boundary = out.search(/\n<[a-zA-Z]/);
+      next = (boundary === -1 ? '' : out.slice(boundary)).trim();
+    }
     if (next === out) return out;
     out = next;
   }
@@ -122,7 +136,7 @@ function blockText(payload: Record<string, unknown>): string {
   return parts.join('\n');
 }
 
-type TurnOpener = 'response_item/message' | 'event_msg/user_message';
+export type TurnOpener = 'response_item/message' | 'event_msg/user_message';
 
 /**
  * Which record shape this rollout uses to open a turn.
@@ -133,7 +147,7 @@ type TurnOpener = 'response_item/message' | 'event_msg/user_message';
  * settles it for the whole read. Its absence falls back to the older
  * `event_msg/user_message` shape.
  */
-function detectOpener(records: readonly CodexRecord[]): TurnOpener {
+export function detectOpener(records: readonly CodexRecord[]): TurnOpener {
   for (const record of records) {
     if (record.type !== 'response_item') continue;
     const payload = record.payload;

@@ -102,6 +102,7 @@ import {
   listActive,
   listDated,
   listRepointed,
+  listImported,
   listRetitled,
   listWorktreeReleased,
   project,
@@ -161,6 +162,7 @@ import {
   findRollouts,
   readRolloutMeta,
   readRolloutRecords,
+  type CodexRolloutMeta,
 } from '../store/codex.js';
 import {
   FIDELITY_NOTE,
@@ -168,6 +170,11 @@ import {
   parseCodexRollout,
   type CodexInventoryEntry,
 } from '../engine/codexImport.js';
+import {
+  importCodexRollouts,
+  undoCodexImports,
+  type ImportOutcome,
+} from '../engine/codexImportWrite.js';
 import {
   firstPrompt,
   indexTranscripts,
@@ -4758,41 +4765,120 @@ function indented(text: string): string {
     .join('\n');
 }
 
+/** Select rollouts or imports by exact id or unique-prefix, reporting misses. */
+function matchCodexIds<T>(
+  items: readonly T[],
+  idOf: (item: T) => string,
+  wanted: readonly string[],
+): { matched: T[]; unmatched: string[] } {
+  const matched = new Set<T>();
+  const unmatched: string[] = [];
+  for (const want of wanted) {
+    const hits = items.filter((item) => {
+      const id = idOf(item);
+      return id === want || id.startsWith(want);
+    });
+    if (hits.length === 0) unmatched.push(want);
+    else for (const hit of hits) matched.add(hit);
+  }
+  return { matched: [...matched], unmatched };
+}
+
+/** Print the outcome of an import run — one line per conversation, then a summary. */
+function reportImport(outcomes: readonly ImportOutcome[], dryRun: boolean): void {
+  const imported = outcomes.filter((o) => o.status === 'imported');
+  const skipped = outcomes.filter((o) => o.status === 'skipped');
+  const failed = outcomes.filter((o) => o.status === 'failed');
+
+  for (const o of imported) {
+    const detail =
+      `${o.turns ?? 0} turn(s), ${o.toolCalls ?? 0} tool call(s), ` +
+      `${o.reasoning ?? 0} reasoning item(s)` +
+      (o.unpairedToolCalls ? `, ${o.unpairedToolCalls} unpaired` : '');
+    console.log(`  ${dryRun ? 'would import' : 'imported'}: ${o.title ?? o.rolloutId}`);
+    console.log(pc.dim(`    ${detail}`));
+  }
+  for (const o of failed) {
+    console.log(pc.red(`  failed: ${o.title ?? o.rolloutId} — ${o.reason ?? 'unknown error'}`));
+  }
+
+  const summary = dryRun
+    ? pc.bold(`\nDry run: ${imported.length} would be imported`)
+    : pc.bold(`\n${imported.length} imported`) + (failed.length ? `, ${failed.length} failed` : '');
+  console.log(summary + (skipped.length ? pc.dim(`, ${skipped.length} skipped`) : '') + '.');
+
+  // The skipped are quiet per-row, but their reasons are the answer to "why did
+  // nothing come in", so they are always tallied.
+  const reasons = new Map<string, number>();
+  for (const o of skipped) {
+    const reason = o.reason ?? 'skipped';
+    reasons.set(reason, (reasons.get(reason) ?? 0) + 1);
+  }
+  for (const [reason, count] of reasons) console.log(pc.dim(`  ${count} skipped: ${reason}`));
+
+  if (imported.length > 0) {
+    console.log(
+      pc.dim(
+        '\nEach is a readable record, not a replayable one; the app opens it on ' +
+          '"Continue from where you left off." with no live process behind it.',
+      ),
+    );
+  }
+  if (dryRun && imported.length > 0) console.log(pc.dim('Re-run with --yes to write.'));
+  if (!dryRun && imported.length > 0) {
+    console.log(pc.dim('The copies become visible after Claude Desktop restarts.'));
+  }
+}
+
 /**
- * `foster import-codex --list` — the first, read-only slice of issue #19.
+ * `foster import-codex` — issue #19, both halves.
  *
- * Discovery (`src/store/codex.ts`) plus the parser (`src/engine/codexImport.ts`)
- * are enough to answer "what is here", and that is deliberately all this
- * build answers. Every other write foster makes points at something Claude
- * Desktop itself created; a Codex import would put a conversation into
- * `~/.claude/projects` and a card in the sidebar that no Claude session ever
- * produced. The owner has not decided that is worth doing yet, so there is no
- * --yes here, no card, no ledger event — only counting.
+ * `--list` is the read-only inventory: discovery (`src/store/codex.ts`) plus the
+ * parser (`src/engine/codexImport.ts`) answering "what is here". The default and
+ * `--yes` are the write half: each rollout becomes a Claude transcript under
+ * `~/.claude/projects` and a sidebar card beside it (`src/engine/codexImportWrite.ts`),
+ * so a conversation that only ever ran in Codex can be opened and continued in the
+ * app. It is a deliberate widening of what foster writes — every other write points
+ * at something Claude Desktop made, this one does not — so it is dry-run by default,
+ * reversible (`--undo`, `_fosterImport` marker + `conversation_imported` ledger event),
+ * and honest about being a readable record rather than a replayable one (FIDELITY_NOTE).
  */
 program
   .command('import-codex')
-  .helpGroup('Codex CLI (read-only):')
-  .summary('inventory Codex CLI threads on this machine — reads only, writes nothing')
+  .helpGroup('Codex CLI:')
+  .summary('bring Codex CLI threads in as Claude conversations, or list what is here')
   .description(
-    'Finds Codex CLI rollouts under ~/.codex/sessions (CODEX_HOME overrides it), parses each\n' +
-      'one into turns, and prints what would be importable. This is the whole of what this\n' +
-      'build does: it writes no transcript, no card, and no ledger event, so there is nothing\n' +
-      'here to undo. The write half of issue #19 — actually minting a card from one of these —\n' +
-      'stays blocked on a scope question the issue raises and does not settle: every other\n' +
-      'write foster makes points at something Claude Desktop itself created, and this would\n' +
-      'not.\n\n' +
-      FIDELITY_NOTE,
+    'Finds Codex CLI rollouts under ~/.codex/sessions (CODEX_HOME overrides it) and brings\n' +
+      'them in as Claude conversations — a transcript under ~/.claude/projects and a sidebar\n' +
+      'card — so a thread that only ever ran in Codex becomes one you can open and continue.\n\n' +
+      'Dry run by default: nothing is written until --yes. --list gives the raw inventory of\n' +
+      'every thread and its counts and never writes; --undo removes what an import wrote.\n\n' +
+      'What comes in is a readable record, not a replayable one:\n' +
+      FIDELITY_NOTE +
+      '\nAnd the app greets an imported card with "Continue from where you left off." — there is\n' +
+      'no live Codex process behind it, so nothing resumes until you type.',
   )
-  .option('--list', 'list the Codex threads found on this machine (the only mode this build has)')
+  .option('--list', 'list every Codex thread and its counts — reads only, writes nothing')
   .option('--json', 'machine-readable output')
-  .action(function (this: Command) {
-    const opts = this.opts<{ list?: boolean; json?: boolean }>();
-    if (!opts.list) {
-      throw new Error(
-        'foster import-codex only supports --list in this build. Writing an imported\n' +
-          'conversation is not implemented yet — see issue #19.',
-      );
-    }
+  .option('--yes', 'actually write; without it nothing is written')
+  .option('--undo', 'remove conversations a previous import wrote')
+  .option('--to <accountUuid>', 'import into this account instead of the one signed in')
+  .option('--to-org <organizationUuid>', 'import into this organization')
+  .option('--session <id...>', 'only these rollouts, by id or unique prefix')
+  .option('--since <age>', 'only rollouts touched within this window, e.g. 30d')
+  .option('--restart', 'restart Claude Desktop afterwards')
+  .action(async function (this: Command) {
+    const opts = this.opts<{
+      list?: boolean;
+      json?: boolean;
+      yes?: boolean;
+      undo?: boolean;
+      to?: string;
+      toOrg?: string;
+      session?: string[];
+      since?: string;
+      restart?: boolean;
+    }>();
 
     const sessionsDir = codexSessionsDir();
     if (!isDirectory(sessionsDir)) {
@@ -4802,48 +4888,125 @@ program
       return;
     }
 
-    const entries: CodexInventoryEntry[] = [];
-    let unreadable = 0;
-    for (const file of findRollouts(sessionsDir)) {
-      const meta = readRolloutMeta(file);
-      if (!meta) {
-        unreadable++;
-        continue;
+    // --list: the read-only inventory, exactly as the first slice shipped it.
+    if (opts.list) {
+      const entries: CodexInventoryEntry[] = [];
+      let unreadable = 0;
+      for (const file of findRollouts(sessionsDir)) {
+        const meta = readRolloutMeta(file);
+        if (!meta) {
+          unreadable++;
+          continue;
+        }
+        const thread = parseCodexRollout(readRolloutRecords(file));
+        entries.push(inventoryEntry(meta, thread));
       }
-      const thread = parseCodexRollout(readRolloutRecords(file));
-      entries.push(inventoryEntry(meta, thread));
-    }
-    entries.sort((a, b) => b.updatedAt - a.updatedAt);
+      entries.sort((a, b) => b.updatedAt - a.updatedAt);
 
-    if (opts.json) {
-      print({ readOnly: true, sessionsDir, entries, unreadable });
+      if (opts.json) {
+        print({ readOnly: true, sessionsDir, entries, unreadable });
+        return;
+      }
+
+      console.log(
+        pc.bold(`Codex CLI threads under ${sessionsDir} — read-only, nothing is written.\n`),
+      );
+      if (entries.length === 0) {
+        console.log('No Codex rollouts found.');
+      } else {
+        for (const entry of entries) {
+          console.log(`  ${entry.title ?? pc.dim('(untitled)')}`);
+          console.log(
+            pc.dim(
+              `    ${entry.cwd ?? '(unknown cwd)'}  ·  ${entry.turnCount} turn(s)  ·  ` +
+                `${entry.toolCallCount} tool call(s)  ·  ${entry.reasoningCount} reasoning item(s)`,
+            ),
+          );
+        }
+      }
+      if (unreadable > 0) {
+        console.log(pc.yellow(`\n${unreadable} rollout(s) could not be read and are not listed.`));
+      }
+      console.log(
+        pc.bold(`\n${entries.length} Codex thread(s) found. `) +
+          pc.dim('--list only counts; run without it to import (dry run first).'),
+      );
+      console.log(pc.dim(`\n${FIDELITY_NOTE}`));
       return;
     }
 
-    console.log(
-      pc.bold(`Codex CLI threads under ${sessionsDir} — read-only, nothing is written.\n`),
-    );
-    if (entries.length === 0) {
-      console.log('No Codex rollouts found.');
-    } else {
-      for (const entry of entries) {
-        console.log(`  ${entry.title ?? pc.dim('(untitled)')}`);
-        console.log(
-          pc.dim(
-            `    ${entry.cwd ?? '(unknown cwd)'}  ·  ${entry.turnCount} turn(s)  ·  ` +
-              `${entry.toolCallCount} tool call(s)  ·  ${entry.reasoningCount} reasoning item(s)`,
-          ),
-        );
+    const { store, ledger } = context(this);
+    const state = project(ledger.read());
+    const dryRun = !opts.yes;
+
+    // --undo: remove what an import wrote.
+    if (opts.undo) {
+      let imports = listImported(state);
+      if (opts.session?.length) {
+        const { matched, unmatched } = matchCodexIds(imports, (i) => i.rolloutId, opts.session);
+        if (unmatched.length > 0) {
+          throw new Error(`No imported conversation matches ${unmatched.join(', ')}.`);
+        }
+        imports = matched;
+      }
+      if (imports.length === 0) {
+        console.log('Nothing imported to undo.');
+        return;
+      }
+      const outcomes = undoCodexImports(imports, { ledger, dryRun });
+      for (const o of outcomes) {
+        const label = o.title ?? o.rolloutId;
+        if (o.status === 'failed') console.log(pc.red(`  failed: ${label} — ${o.reason}`));
+        else console.log(`  ${dryRun ? 'would remove' : 'removed'}: ${label}`);
+      }
+      if (dryRun) {
+        console.log(pc.bold(`\nDry run: ${imports.length} would be removed.`));
+        console.log(pc.dim('Re-run with --yes to remove.'));
+        return;
+      }
+      console.log(pc.bold(`\n${outcomes.filter((o) => o.status === 'undone').length} removed.`));
+      await finish(store, Boolean(opts.restart));
+      return;
+    }
+
+    // Default and --yes: import (dry run unless --yes).
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+
+    let since: number | undefined;
+    if (opts.since !== undefined) {
+      since = parseSince(opts.since);
+      if (since === undefined) {
+        throw new Error(`Could not read --since "${opts.since}". Try 30d, 12h or 2w.`);
       }
     }
-    if (unreadable > 0) {
-      console.log(pc.yellow(`\n${unreadable} rollout(s) could not be read and are not listed.`));
+
+    let metas: CodexRolloutMeta[] = [];
+    for (const file of findRollouts(sessionsDir)) {
+      const meta = readRolloutMeta(file);
+      if (meta) metas.push(meta);
     }
-    console.log(
-      pc.bold(`\n${entries.length} Codex thread(s) found. `) +
-        pc.dim('Nothing is written — this only lists what would be importable.'),
-    );
-    console.log(pc.dim(`\n${FIDELITY_NOTE}`));
+    if (since !== undefined) metas = metas.filter((m) => m.mtimeMs >= since);
+    if (opts.session?.length) {
+      const { matched, unmatched } = matchCodexIds(metas, (m) => m.id, opts.session);
+      if (unmatched.length > 0) {
+        throw new Error(
+          `No Codex rollout matches ${unmatched.join(', ')}.\n` +
+            'Run "foster import-codex --list" to see what is available.',
+        );
+      }
+      metas = matched;
+    }
+    metas.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+    const outcomes = importCodexRollouts(metas, { store, ledger, state, target, dryRun });
+
+    if (opts.json) {
+      print({ dryRun, target, outcomes });
+      return;
+    }
+
+    reportImport(outcomes, dryRun);
+    if (!dryRun) await finish(store, Boolean(opts.restart));
   });
 
 program

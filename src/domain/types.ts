@@ -20,6 +20,30 @@ export interface FosterMark {
 }
 
 /**
+ * The marker foster writes into a card it minted from a Codex CLI rollout, so
+ * the card describes where it came from and a second import of the same rollout
+ * is a no-op.
+ *
+ * Mirrors `FosterMark`, and for the same reasons: it survives on the card
+ * because the app tolerates unknown keys, and — because the app may drop it on
+ * the first save it makes — it is backed by a `conversation_imported` ledger
+ * event, exactly as `_foster` is backed by `fostered`. Unlike `FosterMark` it
+ * names no Claude account of origin: a Codex rollout has none.
+ */
+export interface FosterImportMark {
+  /** The rollout under ~/.codex/sessions this card was minted from. */
+  sourceRolloutPath: string;
+  /** The Codex thread's own id — also the transcript's `cliSessionId`. */
+  rolloutId: string;
+  /** A hash of the rollout's bytes, so a changed rollout can be told from an unchanged one. */
+  contentHash: string;
+  /** The Codex `cli_version` that wrote the rollout, when it recorded one. */
+  cliVersion?: string;
+  importedAt: number;
+  toolVersion: string;
+}
+
+/**
  * The fields of a Code session file that foster reasons about. The real file
  * carries more keys; they are preserved verbatim when copying.
  */
@@ -90,6 +114,8 @@ export interface CodeSessionData {
   error?: string;
   errorAt?: number;
   _foster?: FosterMark;
+  /** Present on a card foster minted from a Codex rollout — see FosterImportMark. */
+  _fosterImport?: FosterImportMark;
   [key: string]: unknown;
 }
 

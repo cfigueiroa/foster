@@ -83,6 +83,22 @@ describe('isSyntheticPreamble', () => {
     expect(isSyntheticPreamble('Please fix the <Button> component')).toBe(false);
     expect(isSyntheticPreamble('Rewrite src/foo.ts')).toBe(false);
   });
+
+  it('peels an injected AGENTS.md block, between elements or as the whole message', () => {
+    // The dominant opener on a real machine: a plugin block, an AGENTS.md
+    // markdown block, then an environment block — all injected, no human text.
+    const stacked =
+      '<recommended_plugins>list</recommended_plugins>\n' +
+      '# AGENTS.md instructions for /repo\ncontents here\n' +
+      '<environment_context>cwd: /repo</environment_context>';
+    expect(isSyntheticPreamble(stacked)).toBe(true);
+    // But a real message behind the AGENTS.md block survives.
+    expect(
+      isSyntheticPreamble(
+        '# AGENTS.md instructions for /repo\ndocs\n<environment_context>x</environment_context>\nreal ask',
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('parseCodexRollout', () => {
