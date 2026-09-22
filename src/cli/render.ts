@@ -12,7 +12,14 @@ import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { AccountRef, DiscoveredSession, Unfosterable } from '../domain/types.js';
 import type { NeverComes, SweepReport } from '../ops/sweep.js';
-import { totalLayoutPending } from '../engine/layout.js';
+import {
+  LayoutWriteError,
+  totalLayoutPending,
+  type ApplyLayoutResult,
+  type LayoutPendingCounts,
+  type LayoutPlan,
+} from '../engine/layout.js';
+import type { ViewState } from '../engine/view.js';
 import type { AccountOverview } from '../store/accounts.js';
 import type { AccountProfile } from '../store/profile.js';
 import type { UsageReport } from '../engine/anthropicApi.js';
@@ -58,6 +65,185 @@ export function formatRoutineFireAt(ms: number | undefined, now: Date = new Date
  */
 export function viewCopyRestartCommand(from: AccountRef, to: AccountRef): string {
   return `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} --yes --restart`;
+}
+
+/**
+ * `foster layout`'s plan, in the shape both the dry run and a written run print —
+ * lines rather than a direct `console.log`, so the CLI action and a test can
+ * both drive the same rendering.
+ *
+ * `groupScopesSkipped` is `readGroupScopesReport(store).skippedEntries` for the
+ * target's own scope key (see `store/groupScopes.ts`) — how many entries in this
+ * account's own groups were malformed and left untouched. Named here, not
+ * folded into `groups`, because it is a fact about the target's *current* file,
+ * not about what this run would bring.
+ */
+export function layoutPlanLines(
+  plan: LayoutPlan,
+  options: { groupScopesSkipped?: number } = {},
+): string[] {
+  const { groups, routines } = plan;
+  const sourceWord = (n: number): string => `${n} other account${n === 1 ? '' : 's'}`;
+  const lines: string[] = [];
+
+  lines.push(pc.bold(`Groups (from ${sourceWord(groups.sources)})`));
+  if (groups.items.length === 0) {
+    lines.push(pc.dim('  nothing to do'));
+  } else {
+    for (const item of groups.items) {
+      if (item.created || item.assign.length > 0) {
+        const rows = item.assign.length;
+        lines.push(
+          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}`,
+        );
+      }
+      for (const skip of item.skipped) {
+        const reason = skip.reason === 'archived' ? 'archived here' : 'no matching card here';
+        lines.push(`  ${pc.dim('·')} ${skip.title} — ${reason}`);
+      }
+    }
+  }
+  if (groups.conflicts.length > 0) {
+    const count = groups.conflicts.length;
+    lines.push(
+      pc.dim(
+        `  ${count} conversation${count === 1 ? '' : 's'} named for two different groups — the source with the latest activity won.`,
+      ),
+    );
+  }
+  if (options.groupScopesSkipped) {
+    const n = options.groupScopesSkipped;
+    lines.push(
+      pc.dim(
+        `  ${n} unrecognised entr${n === 1 ? 'y' : 'ies'} in this account's groups were left untouched.`,
+      ),
+    );
+  }
+
+  lines.push(pc.bold(`\nRoutines (from ${sourceWord(routines.sources)})`));
+  if (routines.bring.length === 0 && routines.skipped.length === 0) {
+    lines.push(pc.dim('  nothing to do'));
+  } else {
+    for (const item of routines.bring) {
+      const when =
+        item.cronExpression ??
+        (item.fireAt !== undefined ? `once ${formatRoutineFireAt(item.fireAt)}` : '');
+      lines.push(`  ${pc.green('+')} ${item.id}  ${pc.dim(when)}`);
+    }
+    for (const skip of routines.skipped) {
+      // Already-here is the ordinary, idempotent case on a second run — not
+      // worth a line every time, the same restraint `sweep`'s title pass takes
+      // for a copy renamed on purpose.
+      if (skip.reason === 'already-here') continue;
+      // Every remaining reason gets its own words — a `disabled` routine used
+      // to fall into the `else` branch below and print "SKILL.md missing",
+      // which was simply wrong: nothing about a disabled routine's skill file
+      // is missing, it is disabled in whichever account holds its newest copy.
+      const detail =
+        skip.reason === 'missed-one-shot'
+          ? `missed one-shot (${formatRoutineFireAt(skip.firedAt)}), not brought`
+          : skip.reason === 'disabled'
+            ? 'disabled in its newest account, not brought'
+            : 'SKILL.md missing, not brought';
+      lines.push(`  ${pc.dim('·')} ${skip.id} — ${detail}`);
+    }
+  }
+
+  if (Object.keys(plan.viewPrefs.account).length > 0) {
+    lines.push(
+      pc.dim(
+        `\nAlso carrying the sidebar filter menu's account settings${plan.viewPrefs.from ? ` from ${shortId(plan.viewPrefs.from.accountUuid)}` : ''}.`,
+      ),
+    );
+  }
+
+  return lines;
+}
+
+/**
+ * What `applyLayout` actually wrote, once it has returned successfully.
+ *
+ * `result.written` is printed here too (not only buried in a thrown
+ * `LayoutWriteError`'s message) — a successful run wrote just as many distinct
+ * files as a partly-failed one, and naming them is not only a failure's story
+ * to tell.
+ */
+export function layoutResultLines(result: ApplyLayoutResult): string[] {
+  const lines = [
+    pc.bold(
+      `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
+        `${result.viewPrefsCarried ? ', filter menu carried' : ''}.`,
+    ),
+  ];
+  if (result.written.length > 0) {
+    lines.push(pc.dim(`  wrote: ${result.written.join(', ')}`));
+  }
+  return lines;
+}
+
+/**
+ * `error.written`, read structurally rather than through `LayoutWriteError`'s
+ * own declared shape: this milestone's other, concurrent change is adding a
+ * `written: string[]` field to that class, and reading it this way means this
+ * code already picks it up the moment it lands, without a compile-time
+ * dependency on the exact shape landing first — see `writtenOf`'s own callers.
+ * Today, before that field exists, this simply returns `undefined`, the same
+ * as it would for an error that never wrote anything.
+ */
+export function writtenOf(error: unknown): string[] | undefined {
+  if (!(error instanceof LayoutWriteError)) return undefined;
+  const written = (error as unknown as { written?: unknown }).written;
+  return Array.isArray(written) && written.every((entry) => typeof entry === 'string')
+    ? written
+    : undefined;
+}
+
+/**
+ * `applyLayout` threw — a `LayoutWriteError` naming exactly what landed before
+ * it failed, or anything else. Either way this says what was written (from
+ * `writtenOf(error)`, when the error carries one, rather than only whatever the
+ * message text happens to mention) and what failed, so a caller never has to
+ * choose between showing the plan and showing the damage.
+ */
+export function layoutFailureLines(error: unknown): string[] {
+  const message = error instanceof Error ? error.message : String(error);
+  const lines = [pc.red(`\n${message}`)];
+  const written = writtenOf(error);
+  if (written && written.length > 0) {
+    lines.push(pc.dim(`  wrote: ${written.join(', ')}`));
+  }
+  return lines;
+}
+
+/**
+ * Whether a fresh `planLayout` — read again once the app has actually closed —
+ * would write a different amount than the plan shown before the restart gap
+ * opened. Compared on exactly the counts `applyLayout` would act on: a plan
+ * that only re-orders a group's existing rows, or only rewords a skip reason,
+ * is not "different" in the sense that matters here.
+ */
+export function layoutPendingCountsChanged(
+  before: LayoutPendingCounts,
+  after: LayoutPendingCounts,
+): boolean {
+  return (
+    before.groupsCreated !== after.groupsCreated ||
+    before.cardsAssigned !== after.cardsAssigned ||
+    before.routinesBrought !== after.routinesBrought ||
+    before.viewKeysCarried !== after.viewKeysCarried
+  );
+}
+
+/**
+ * `state.machineRecord.notices` — the notices `readLocalStorageValue` surfaced
+ * while reading the sidebar filter menu's machine-wide half (a recovered log,
+ * a tolerant skip over a record it could not parse) — as dim lines. There is
+ * no other read notice `readViewState` carries today, but this is named for
+ * what it reports rather than for the one field that happens to hold it, so a
+ * later notice source needs no second line at the call site.
+ */
+export function viewNoticeLines(state: ViewState): string[] {
+  return (state.machineRecord?.notices ?? []).map((note) => pc.dim(note));
 }
 
 /**
@@ -743,11 +929,14 @@ export function sweepSummary(report: SweepReport): string[] {
   }
 
   const layout = report.layout;
-  // Every count `applyLayout` would actually write, not just cards and
-  // routines — a plan with only a pending manual order entry, or only a
-  // sidebar filter-menu carry and nothing else, used to fall through this
-  // check entirely and print no "Layout:" line at all.
-  if (totalLayoutPending(layout) > 0) {
+  // `planLayout` itself threw while the sweep was being planned — every count
+  // above is `0` for a reason that has nothing to do with there being nothing
+  // pending, and `totalLayoutPending(layout) > 0` below would stay silent about
+  // it. Said on its own line, ahead of that check, so a failed plan never
+  // quietly reads as a clean one.
+  if (layout.error) {
+    lines.push(pc.yellow(`Layout: could not plan — ${layout.error}`));
+  } else if (totalLayoutPending(layout) > 0) {
     const parts: string[] = [];
     if (layout.cardsAssigned > 0)
       parts.push(`${layout.cardsAssigned} group row${layout.cardsAssigned === 1 ? '' : 's'}`);

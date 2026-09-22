@@ -208,9 +208,7 @@ describe('viewCopyRestartCommand', () => {
     const to = { accountUuid: ACCOUNT_B, organizationUuid: ORG_2 };
     const command = viewCopyRestartCommand(from, to);
 
-    expect(command).toBe(
-      `foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --yes --restart`,
-    );
+    expect(command).toBe(`foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --yes --restart`);
     expect(command).not.toContain('<accountUuid>');
   });
 });
@@ -401,6 +399,32 @@ describe('sweepSummary', () => {
 
     expect(lines).toContain(
       'Layout: 2 group rows, 1 new group, 3 order entries, 4 routines, 5 filter settings to bring — foster layout --yes --restart',
+    );
+  });
+
+  it('says a layout plan could not be made, rather than reading as nothing pending (R6)', () => {
+    // Every count is 0 here for a reason that has nothing to do with there
+    // being nothing to bring — `planLayout` itself threw while the sweep was
+    // planning it. The old check only asked `totalLayoutPending(layout) > 0`,
+    // so this read exactly like a clean run.
+    const lines = sweepSummary(
+      report({
+        layout: {
+          groupsCreated: 0,
+          cardsAssigned: 0,
+          orderEntriesAdded: 0,
+          routinesBrought: 0,
+          viewKeysCarried: 0,
+          error:
+            'claude_desktop_config.json holds a number literal a JSON round-trip would rewrite',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      'Layout: could not plan — claude_desktop_config.json holds a number literal a JSON round-trip would rewrite',
     );
   });
 });

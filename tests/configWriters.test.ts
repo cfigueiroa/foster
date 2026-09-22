@@ -68,7 +68,11 @@ describe('writeEpitaxyPrefs refuses on a lossy number literal', () => {
     writeRawConfig(store, text);
 
     expect(() =>
-      writeEpitaxyPrefs(store, { [environmentsKey(NEW_ACCOUNT)]: ['local'] }, { env: testEnv(store) }),
+      writeEpitaxyPrefs(
+        store,
+        { [environmentsKey(NEW_ACCOUNT)]: ['local'] },
+        { env: testEnv(store) },
+      ),
     ).toThrow(/1e3/);
     expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(text);
   });
@@ -80,15 +84,18 @@ describe('writeEpitaxyPrefs refuses on a lossy number literal', () => {
     writeRawConfig(store, text);
 
     expect(() =>
-      writeEpitaxyPrefs(store, { [environmentsKey(NEW_ACCOUNT)]: ['local'] }, { env: testEnv(store) }),
+      writeEpitaxyPrefs(
+        store,
+        { [environmentsKey(NEW_ACCOUNT)]: ['local'] },
+        { env: testEnv(store) },
+      ),
     ).toThrow(/12345678901234567890/);
     expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(text);
   });
 
   it('ignores a number-shaped run of digits sitting inside a string', () => {
     const store = makeStore();
-    const text =
-      '{"preferences":{"epitaxyPrefs":{"note":"build 12345678901234567890, v1.0"}}}';
+    const text = '{"preferences":{"epitaxyPrefs":{"note":"build 12345678901234567890, v1.0"}}}';
     writeRawConfig(store, text);
 
     // Does not throw: the offending-looking text is inside a JSON string, not

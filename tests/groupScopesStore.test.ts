@@ -85,7 +85,10 @@ describe('readGroupScopesReport / readGroupScopes: a bad entry does not sink its
     const store = makeStore();
     writeRawConfig(store, {
       [targetKey]: {
-        groups: [{ id: 'g1', name: 'A' }, { id: 'g2', name: 'B' }],
+        groups: [
+          { id: 'g1', name: 'A' },
+          { id: 'g2', name: 'B' },
+        ],
         assignments: {},
         order: { g1: ['code:local_a', 'code:local_b'], g2: 'not-a-list' },
       },
@@ -154,7 +157,10 @@ describe('writeGroupScope merges into the scope on disk instead of replacing it'
     const store = makeStore();
     writeRawConfig(store, {
       [targetKey]: {
-        groups: [{ id: 'g1', name: 'A' }, { id: 'g2', name: 'B' }],
+        groups: [
+          { id: 'g1', name: 'A' },
+          { id: 'g2', name: 'B' },
+        ],
         assignments: {},
         order: { g1: ['code:local_a'], g2: 'not-a-list' },
       },
@@ -164,7 +170,10 @@ describe('writeGroupScope merges into the scope on disk instead of replacing it'
       store,
       TARGET,
       {
-        groups: [{ id: 'g1', name: 'A' }, { id: 'g2', name: 'B' }],
+        groups: [
+          { id: 'g1', name: 'A' },
+          { id: 'g2', name: 'B' },
+        ],
         assignments: {},
         order: { g1: ['code:local_a', 'code:local_c'] },
       },
@@ -177,7 +186,7 @@ describe('writeGroupScope merges into the scope on disk instead of replacing it'
     expect(scope.order.g2).toBe('not-a-list');
   });
 
-  it('never touches another account\'s scope', () => {
+  it("never touches another account's scope", () => {
     const store = makeStore();
     writeRawConfig(store, {
       [targetKey]: { groups: [], assignments: {} },

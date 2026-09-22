@@ -131,8 +131,8 @@ function desktopRunningOn(root: string): ProcessRow[] {
 }
 
 const THIRD_ACCOUNT: AccountRef = {
-  accountUuid: '33333333-3333-4333-8333-333333333333',
-  organizationUuid: '33333333-3333-4333-8333-333333333334',
+  accountUuid: '00000000-0000-4000-8000-000000000773',
+  organizationUuid: '00000000-0000-4000-8000-000000000774',
 };
 
 describe('CLI word <-> stored value mapping', () => {
@@ -308,9 +308,9 @@ describe('planViewSet / applyViewSet', () => {
     writeDesktopConfig(store);
     const plan = planViewSet(store, NEW_ACCOUNT, { status: 'archived' });
 
-    expect(() =>
-      applyViewSet(plan, { store, list: () => desktopRunningOn(store.root) }),
-    ).toThrow(AppRunningError);
+    expect(() => applyViewSet(plan, { store, list: () => desktopRunningOn(store.root) })).toThrow(
+      AppRunningError,
+    );
   });
 
   it('#13: refuses --group-by state together with an explicit --status other than active, with a clear message', () => {
@@ -467,9 +467,9 @@ describe('planViewCopy / applyViewCopy', () => {
     writeEpitaxyPrefs(store, { [environmentsKey(OLD_ACCOUNT)]: ['local'] }, backupOpts(store));
     const plan = planViewCopy(store, OLD_ACCOUNT, NEW_ACCOUNT);
 
-    expect(() =>
-      applyViewCopy(plan, { store, list: () => desktopRunningOn(store.root) }),
-    ).toThrow(AppRunningError);
+    expect(() => applyViewCopy(plan, { store, list: () => desktopRunningOn(store.root) })).toThrow(
+      AppRunningError,
+    );
   });
 });
 
@@ -526,7 +526,7 @@ describe('planLayoutViewCarry (finding #6: status and activity-days are carried 
     expect(carry.account).toEqual({});
   });
 
-  it('#9c: reports nothing-to-do when the only other account\'s sole account pref is an empty environments array', () => {
+  it("#9c: reports nothing-to-do when the only other account's sole account pref is an empty environments array", () => {
     const store = makeStore();
     for (const account of [NEW_ACCOUNT, OLD_ACCOUNT]) {
       mkdirSync(path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid), {
@@ -551,7 +551,7 @@ describe('planLayoutViewCarry (finding #6: status and activity-days are carried 
     expect(carry.from).toBeUndefined();
   });
 
-  it('#9c: skips a source whose only pref is the empty-environments no-op and carries a later source\'s real setting', () => {
+  it("#9c: skips a source whose only pref is the empty-environments no-op and carries a later source's real setting", () => {
     const store = makeStore();
     for (const account of [NEW_ACCOUNT, OLD_ACCOUNT, THIRD_ACCOUNT]) {
       mkdirSync(path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid), {

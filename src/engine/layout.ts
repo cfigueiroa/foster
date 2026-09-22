@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { listAccountDirs } from '../domain/paths.js';
 import {
@@ -20,12 +20,15 @@ import {
   sessionIdOfCard,
   writeGroupScope,
   type GroupScope,
+  type GroupScopes,
 } from '../store/groupScopes.js';
 import {
+  idsOnDisk,
   readScheduledTasks,
   writeScheduledTasks,
   type ScheduledTask,
   type ScheduledTasksFile,
+  type ScheduledTasksRead,
 } from '../store/routines.js';
 import {
   backupLocalStorage,
@@ -35,6 +38,7 @@ import {
   writeLocalStorageEntries,
 } from '../store/localStorage.js';
 import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
+import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
@@ -364,10 +368,14 @@ function planRoutines(store: StoreLayout, target: AccountRef, now: number): Rout
       ),
   );
 
-  const targetRead = readScheduledTasks(store, target);
-  const targetIds = new Set(
-    targetRead.status === 'ok' ? targetRead.file.scheduledTasks.map((task) => task.id) : [],
-  );
+  // `idsOnDisk`, not `readScheduledTasks(...).file.scheduledTasks` — an entry
+  // this module cannot validate (missing a field, a shape from a build ahead
+  // of this one) still claims its id in the app, and `readScheduledTasks`
+  // filters it out of `scheduledTasks` entirely (see `store/routines.ts`).
+  // Asking the filtered list left an id "already here" invisible to this
+  // check, and the newest source copy of that id got brought in as a
+  // duplicate rather than left alone (#R1).
+  const targetIds = new Set(idsOnDisk(store, target));
 
   // Dedup by id across *every* source first, enabled or not — the newest
   // `createdAt` wins the id regardless. Only once there is one candidate per
@@ -526,6 +534,44 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
   );
 }
 
+export interface LayoutPlanSummary {
+  groupsCreated: number;
+  cardsAssigned: number;
+  orderEntriesAdded: number;
+  groupConflicts: number;
+  groupsSkipped: number;
+  routinesBrought: number;
+  routinesSkipped: number;
+  viewKeysCarried: number;
+}
+
+/**
+ * A small, comparable fingerprint of a plan — for a caller (`foster layout
+ * --restart`) that re-plans inside the gap between quitting Claude Desktop and
+ * starting it again, to tell whether the plan it is about to apply still
+ * matches the one it showed the user before asking to restart (#R2). Two
+ * `planLayout` calls against the same, unchanged store produce equal
+ * summaries; one where the app (or another `foster` run) wrote something in
+ * between does not, and the caller can decide whether that difference is
+ * worth telling the user about rather than silently applying a plan they
+ * never saw. Deliberately not the full `LayoutPlan` — two plans can differ in
+ * ways nobody cares about (group id text, ordering of an array) while
+ * agreeing on everything this counts.
+ */
+export function layoutPlanSummary(plan: LayoutPlan): LayoutPlanSummary {
+  const pending = pendingLayoutCounts(plan);
+  return {
+    groupsCreated: pending.groupsCreated,
+    cardsAssigned: pending.cardsAssigned,
+    orderEntriesAdded: pending.orderEntriesAdded,
+    groupConflicts: plan.groups.conflicts.length,
+    groupsSkipped: plan.groups.items.reduce((sum, item) => sum + item.skipped.length, 0),
+    routinesBrought: pending.routinesBrought,
+    routinesSkipped: plan.routines.skipped.length,
+    viewKeysCarried: pending.viewKeysCarried,
+  };
+}
+
 export interface ApplyLayoutOptions {
   store: StoreLayout;
   ledger: Ledger;
@@ -579,32 +625,62 @@ export class LayoutWriteError extends Error {
  * which is a gap to skip rather than a reason to fail the whole run — the
  * config copy is still written, and is what the app reads to rebuild the
  * other two the next time it does.
+ *
+ * `allScopes` is every scope the config file now holds, the target's own
+ * already merged in — what a caller reads fresh via `readGroupScopes` (or
+ * folds `nextScope` into in memory, without a second disk read) right before
+ * this is called. Which source a key's document is seeded from depends on
+ * whether that key has ever been written at all (#R5):
+ *
+ * - a key that already has a record ("when records exist") is merged the
+ *   narrow way `writeGroupScope` merges the config file — only the target's
+ *   own scope entry is replaced, and every other account's scope already
+ *   sitting in that record survives untouched;
+ * - a key with no record yet ("when missing") is seeded from every scope
+ *   `allScopes` holds, not the target's alone — a store where the sidebar's
+ *   filter menu has genuinely never been opened has nothing of its own to
+ *   preserve, and seeding only the target's scope would make this account
+ *   the only one the app could rebuild from Local Storage if the config copy
+ *   were ever lost, silently dropping every other account's groups from a
+ *   record that is supposed to hold all of them.
+ *
+ * A fresh `LSS-persisted.dframe-group-scopes` document takes the measured
+ * shape `{value, tabId, timestamp}`, `tabId` empty and `timestamp` now — the
+ * same shape a record that already exists keeps, just with `value` and
+ * `timestamp` updated. A fresh `dframe-store` document takes the measured
+ * `{state: {customGroupsByScope}, version: 1}` — `version` is only ever set
+ * here, on a document that had nothing to inherit it from; one that already
+ * exists keeps whatever `version` (and every other top-level key) it had.
  */
 function localStorageGroupWrites(
   store: StoreLayout,
   target: AccountRef,
-  nextScope: GroupScope,
+  allScopes: GroupScopes,
   nowMs: number,
 ): { scriptKey: string; document: Record<string, unknown> }[] | undefined {
   if (!localStoragePresent(store)) return undefined;
   const key = scopeKey(target);
+  const targetScope = allScopes[key];
 
   const lss = readLocalStorageValue(store, 'LSS-persisted.dframe-group-scopes');
-  const lssValue = (lss?.document.value as Record<string, unknown> | undefined) ?? {};
+  const lssValue = lss
+    ? { ...(lss.document.value as Record<string, unknown> | undefined), [key]: targetScope }
+    : { ...allScopes };
   const nextLss = {
     ...lss?.document,
-    value: { ...lssValue, [key]: nextScope },
+    value: lssValue,
     tabId: (lss?.document.tabId as string | undefined) ?? '',
     timestamp: nowMs,
   };
 
   const dframe = readLocalStorageValue(store, 'dframe-store');
   const state = (dframe?.document.state as Record<string, unknown> | undefined) ?? {};
-  const customGroups = (state.customGroupsByScope as Record<string, unknown> | undefined) ?? {};
-  const nextDframe = {
-    ...dframe?.document,
-    state: { ...state, customGroupsByScope: { ...customGroups, [key]: nextScope } },
-  };
+  const customGroups = dframe
+    ? { ...(state.customGroupsByScope as Record<string, unknown> | undefined), [key]: targetScope }
+    : { ...allScopes };
+  const nextDframe = dframe
+    ? { ...dframe.document, state: { ...state, customGroupsByScope: customGroups } }
+    : { state: { customGroupsByScope: customGroups }, version: 1 };
 
   return [
     { scriptKey: 'LSS-persisted.dframe-group-scopes', document: nextLss },
@@ -622,6 +698,29 @@ function localStorageGroupWrites(
  * The CLI checks the same thing first, for a message that names `--restart`;
  * this is the backstop for any other caller, sweep's own read-only planning
  * pass included — it never calls this function at all.
+ *
+ * Two passes, deliberately kept apart (#R3, "all-or-nothing as far as
+ * checkable"):
+ *
+ * - **Phase 1** reconciles the plan against disk state read fresh right here
+ *   — never the snapshot `planLayout` took, which can be stale by the time
+ *   this runs (a `--restart` gap is exactly that: the app can flush a group,
+ *   an assignment or a routine of its own into the seconds this call spans —
+ *   #R1, #R2) — and runs every check that can fail *without* writing
+ *   anything: the target's `scheduled-tasks.json` is readable, the config
+ *   file carries no number literal a JSON round trip would rewrite, and the
+ *   groups' Local Storage records (when there is a database to write into at
+ *   all) are locatable and decodable. Any of those failing throws before a
+ *   single byte anywhere has changed.
+ * - **Phase 2** writes exactly what Phase 1 decided, in the same order every
+ *   earlier build wrote it in. A failure here is a genuine race or
+ *   concurrent-modification refusal Phase 1 could not have predicted (writing
+ *   is the only way `writeGroupScope` / `writeEpitaxyPrefs` can tell whether
+ *   a neighbour moved) — it still throws `LayoutWriteError`, still names
+ *   exactly what had already landed in `written`, and a `layout_applied`
+ *   ledger event is appended for that landed part *before* the throw, so a
+ *   run that got half done is never lost from both the caller's return value
+ *   and the ledger at once (#R3, #R4).
  */
 export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): ApplyLayoutResult {
   const { store, ledger } = options;
@@ -632,50 +731,211 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     );
   }
 
+  const nowMs = (options.now?.() ?? new Date()).getTime();
+  const key = scopeKey(plan.target);
   const backups: string[] = [];
   const written: string[] = [];
-  let cardsAssigned = 0;
-  let groupsTouched = 0;
-  let groupsCreated = 0;
-  let orderEntriesAdded = 0;
-  let routinesBrought = 0;
-  const nowMs = (options.now?.() ?? new Date()).getTime();
+
+  // Only ever set once the write it describes has actually landed — never
+  // computed ahead of the write and trusted to still be true after it, which
+  // is what let a failed Local Storage write get reported as if the groups it
+  // never touched had (#R4).
+  const landed = {
+    groupsTouched: 0,
+    groupsCreated: 0,
+    cardsAssigned: 0,
+    orderEntriesAdded: 0,
+    routinesBrought: 0,
+    viewKeysCarried: 0,
+  };
+  let viewPrefsCarried = false;
+
+  const appendLedgerIfLanded = (): void => {
+    if (landed.groupsTouched > 0 || landed.routinesBrought > 0 || landed.viewKeysCarried > 0) {
+      ledger.append({
+        kind: 'layout_applied',
+        target: plan.target,
+        groups: landed.cardsAssigned,
+        groupsCreated: landed.groupsCreated,
+        orderEntriesAdded: landed.orderEntriesAdded,
+        routines: landed.routinesBrought,
+        viewKeysCarried: landed.viewKeysCarried,
+      });
+    }
+  };
+
+  // ---------------------------------------------------------------------
+  // Phase 1 — reconcile against fresh disk state; check everything that can
+  // fail before writing anything.
+  // ---------------------------------------------------------------------
 
   // Never create a group for nothing — see #9. A group whose only proposal
   // this run has is a card that turned out missing or archived elsewhere gets
   // an entry in `skipped`, and that is the whole record of it; nothing here
   // mints an id or a name for a group with zero rows to show.
-  const dirtyGroups = plan.groups.items.filter(
+  const plannedGroups = plan.groups.items.filter(
     (item) => item.assign.length > 0 || item.appendedOrder.length > 0,
   );
 
-  let nextScope: GroupScope | undefined;
-  if (dirtyGroups.length > 0) {
-    const scopes = readGroupScopes(store);
-    const key = scopeKey(plan.target);
-    const current: GroupScope = scopes[key] ?? { groups: [], assignments: {} };
-    const groups = [...current.groups];
-    const assignments = { ...current.assignments };
-    const order: Record<string, string[]> = { ...(current.order ?? {}) };
+  interface ReconciledGroups {
+    nextScope: GroupScope;
+    allScopes: GroupScopes;
+    groupsCreated: number;
+    cardsAssigned: number;
+    orderEntriesAdded: number;
+    groupsTouched: number;
+    localStorageWrites: { scriptKey: string; document: Record<string, unknown> }[] | undefined;
+  }
 
-    for (const item of dirtyGroups) {
-      if (item.created && !groups.some((group) => group.id === item.groupId)) {
-        groups.push({ id: item.groupId, name: item.name });
+  let groups: ReconciledGroups | undefined;
+  if (plannedGroups.length > 0) {
+    const scopes = readGroupScopes(store);
+    const current: GroupScope = scopes[key] ?? { groups: [], assignments: {} };
+    const nextGroups = [...current.groups];
+    const nextAssignments = { ...current.assignments };
+    const nextOrder: Record<string, string[]> = { ...(current.order ?? {}) };
+
+    // Rechecked fresh, right here (#R2): a group of this name, or an
+    // assignment for one of these cards, that the app (or another `foster`
+    // run) wrote to disk since the plan was taken is never shadowed by a
+    // second group of the same name, and never overwritten — the user's own
+    // filing (or the app's) still wins, the same rule `planGroups` already
+    // applies to the snapshot it read at plan time.
+    const nameToId = new Map(current.groups.map((g) => [g.name, g.id]));
+    const assignedOnDisk = new Set(Object.keys(current.assignments));
+
+    let groupsCreated = 0;
+    let cardsAssigned = 0;
+    let orderEntriesAdded = 0;
+    let groupsTouched = 0;
+
+    for (const item of plannedGroups) {
+      const droppedCardIds = new Set<string>();
+      const assign = item.assign.filter((entry) => {
+        if (assignedOnDisk.has(entry.cardId)) {
+          droppedCardIds.add(entry.cardId);
+          return false;
+        }
+        return true;
+      });
+      // A card whose assignment was just dropped is never left dangling in
+      // this group's order list either — the same "order follows where the
+      // card is actually filed" rule #A5 already applies at plan time.
+      const appendedOrder = item.appendedOrder.filter((cardId) => !droppedCardIds.has(cardId));
+      if (assign.length === 0 && appendedOrder.length === 0) continue; // #9, rechecked
+
+      const existingId = nameToId.get(item.name);
+      const groupId = existingId ?? item.groupId;
+
+      if (existingId === undefined && !nextGroups.some((g) => g.id === groupId)) {
+        nextGroups.push({ id: groupId, name: item.name });
         groupsCreated += 1;
       }
-      for (const assign of item.assign) assignments[assign.cardId] = item.groupId;
-      if (item.appendedOrder.length > 0) {
-        order[item.groupId] = [...(order[item.groupId] ?? []), ...item.appendedOrder];
-        orderEntriesAdded += item.appendedOrder.length;
+      for (const entry of assign) {
+        nextAssignments[entry.cardId] = groupId;
+        assignedOnDisk.add(entry.cardId);
+      }
+      if (appendedOrder.length > 0) {
+        nextOrder[groupId] = [...(nextOrder[groupId] ?? []), ...appendedOrder];
+        orderEntriesAdded += appendedOrder.length;
       }
       groupsTouched += 1;
-      cardsAssigned += item.assign.length;
+      cardsAssigned += assign.length;
     }
 
-    nextScope = { groups, assignments, ...(Object.keys(order).length > 0 ? { order } : {}) };
+    if (groupsTouched > 0) {
+      const nextScope: GroupScope = {
+        groups: nextGroups,
+        assignments: nextAssignments,
+        ...(Object.keys(nextOrder).length > 0 ? { order: nextOrder } : {}),
+      };
+      const allScopes: GroupScopes = { ...scopes, [key]: nextScope };
 
+      // Checkable without writing: can the two Local Storage records this
+      // would also touch even be located and decoded? A store whose sidebar
+      // filter menu was never opened has no database at all — a gap
+      // `localStorageGroupWrites` itself skips gracefully — but one with a
+      // database and a corrupt or unrecognised record in it is a real
+      // problem, and (#R3) it is caught here, before the config write, not
+      // discovered only after the config copy had already landed (#R4).
+      let localStorageWrites: ReconciledGroups['localStorageWrites'];
+      if (localStoragePresent(store)) {
+        try {
+          localStorageWrites = localStorageGroupWrites(store, plan.target, allScopes, nowMs);
+        } catch (error) {
+          throw new LayoutWriteError(written, 'groups (Local Storage)', error);
+        }
+      }
+
+      groups = {
+        nextScope,
+        allScopes,
+        groupsCreated,
+        cardsAssigned,
+        orderEntriesAdded,
+        groupsTouched,
+        localStorageWrites,
+      };
+    }
+  }
+
+  const viewKeysCarried = Object.keys(plan.viewPrefs.account).length;
+
+  // Checkable without writing, and shared by both writers of
+  // `claude_desktop_config.json` this run might use (groups, the view-prefs
+  // carry) — one read, checked once, before either write, so a store that
+  // would fail it never ends up with one of the two landed and the other
+  // refused.
+  if (groups || viewKeysCarried > 0) {
+    const raw = readFileSync(store.desktopConfigFile, 'utf8');
+    const lossy = nonCanonicalNumbers(raw)[0];
+    if (lossy) {
+      throw new LayoutWriteError(
+        written,
+        'groups (config)',
+        new Error(
+          `refusing to write: ${store.desktopConfigFile} holds a number literal that a JSON round-trip would rewrite (\`${lossy.literal}\`, at offset ${lossy.index}). Nothing was written.`,
+        ),
+      );
+    }
+  }
+
+  // Checkable without writing: is the target's own routines file even
+  // readable? Refused up front (#A3, #5) rather than overwritten wholesale on
+  // the strength of the plan alone, which would destroy whatever
+  // `recordedSkips` and existing tasks an unparsable file held — and refused
+  // here, before groups or view prefs write anything, not after (#R3): the
+  // old behaviour let a target with a broken routines file still receive a
+  // real groups write it was never told about failing alongside.
+  let routinesTargetRead: ScheduledTasksRead | undefined;
+  let toBringRoutines: RoutineBringItem[] = [];
+  if (plan.routines.bring.length > 0) {
+    routinesTargetRead = readScheduledTasks(store, plan.target);
+    if (routinesTargetRead.status === 'unreadable') {
+      throw new LayoutWriteError(
+        written,
+        'routines',
+        new Error(
+          `the target's scheduled-tasks.json could not be parsed (${routinesTargetRead.reason}); refusing to replace it`,
+        ),
+      );
+    }
+    // Rechecked fresh against `idsOnDisk`, the same reason planning itself
+    // does (#R1): an id the disk now claims — recognised or not, `idsOnDisk`
+    // sees both — is left alone, even one this plan was built before the
+    // target had it at all (another `foster` run, or the app itself, in the
+    // gap since `planLayout` ran).
+    const idsNow = new Set(idsOnDisk(store, plan.target));
+    toBringRoutines = plan.routines.bring.filter((item) => !idsNow.has(item.id));
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 2 — write exactly what Phase 1 decided, and nothing else.
+  // ---------------------------------------------------------------------
+
+  if (groups) {
     try {
-      const result = writeGroupScope(store, plan.target, nextScope, {
+      const result = writeGroupScope(store, plan.target, groups.nextScope, {
         now: options.now,
         env: options.env,
       });
@@ -684,44 +944,36 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     } catch (error) {
       throw new LayoutWriteError(written, 'groups (config)', error);
     }
+    landed.groupsTouched = groups.groupsTouched;
+    landed.groupsCreated = groups.groupsCreated;
+    landed.cardsAssigned = groups.cardsAssigned;
+    landed.orderEntriesAdded = groups.orderEntriesAdded;
 
-    try {
-      const entries = localStorageGroupWrites(store, plan.target, nextScope, nowMs);
-      if (entries) {
+    if (groups.localStorageWrites) {
+      try {
         backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));
         const record = readLocalStorageValue(store, 'dframe-store') ?? currentLog(store);
-        writeLocalStorageEntries(record, entries);
+        writeLocalStorageEntries(record, groups.localStorageWrites);
         written.push('groups (Local Storage)');
+      } catch (error) {
+        // #R4: this used to be swallowed into a "... FAILED" entry in
+        // `written`, with no throw — the config copy really had landed, so
+        // the run really had done *something*, but reporting the whole call
+        // as an ordinary success hid that one of the sidebar's three places
+        // never agreed with the other two. The config write already landed,
+        // so that much is logged before this throws.
+        appendLedgerIfLanded();
+        throw new LayoutWriteError(written, 'groups (Local Storage)', error);
       }
-    } catch (error) {
-      // The config copy already landed; Local Storage is one of two more
-      // places the app can rebuild it from at startup (see CLAUDE.md) — a
-      // failure here is worth reporting, never worth undoing the config write
-      // for, so it does not throw.
-      written.push(
-        `groups (Local Storage) FAILED: ${error instanceof Error ? error.message : String(error)}`,
-      );
     }
   }
 
-  if (plan.routines.bring.length > 0) {
-    const targetRead = readScheduledTasks(store, plan.target);
-    if (targetRead.status === 'unreadable') {
-      // Refused, never replaced wholesale (#A3, #5): the file is there and
-      // has content this cannot parse, which is not the same as nothing being
-      // there yet. Overwriting it on the strength of the plan alone would
-      // destroy whatever `recordedSkips` and existing tasks it held.
-      throw new LayoutWriteError(
-        written,
-        'routines',
-        new Error(
-          `the target's scheduled-tasks.json could not be parsed (${targetRead.reason}); refusing to replace it`,
-        ),
-      );
-    }
+  if (toBringRoutines.length > 0) {
     const file: ScheduledTasksFile =
-      targetRead.status === 'ok' ? targetRead.file : { scheduledTasks: [], recordedSkips: {} };
-    const added: ScheduledTask[] = plan.routines.bring.map((item) => ({
+      routinesTargetRead?.status === 'ok'
+        ? routinesTargetRead.file
+        : { scheduledTasks: [], recordedSkips: {} };
+    const added: ScheduledTask[] = toBringRoutines.map((item) => ({
       id: item.id,
       displayName: item.displayName,
       ...(item.cronExpression !== undefined ? { cronExpression: item.cronExpression } : {}),
@@ -746,13 +998,12 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       if (result.backup) backups.push(result.backup);
       written.push('routines');
     } catch (error) {
+      appendLedgerIfLanded();
       throw new LayoutWriteError(written, 'routines', error);
     }
-    routinesBrought = added.length;
+    landed.routinesBrought = added.length;
   }
 
-  let viewPrefsCarried = false;
-  const viewKeysCarried = Object.keys(plan.viewPrefs.account).length;
   if (viewKeysCarried > 0) {
     try {
       const result = writeEpitaxyPrefs(store, plan.viewPrefs.account, {
@@ -762,31 +1013,23 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       backups.push(result.backup);
       written.push('view prefs');
     } catch (error) {
+      appendLedgerIfLanded();
       throw new LayoutWriteError(written, 'view prefs', error);
     }
+    landed.viewKeysCarried = viewKeysCarried;
     viewPrefsCarried = true;
   }
 
-  if (groupsTouched > 0 || routinesBrought > 0 || viewPrefsCarried) {
-    ledger.append({
-      kind: 'layout_applied',
-      target: plan.target,
-      groups: cardsAssigned,
-      groupsCreated,
-      orderEntriesAdded,
-      routines: routinesBrought,
-      viewKeysCarried,
-    });
-  }
+  appendLedgerIfLanded();
 
   return {
-    groupsTouched,
-    groupsCreated,
-    cardsAssigned,
-    orderEntriesAdded,
-    routinesBrought,
+    groupsTouched: landed.groupsTouched,
+    groupsCreated: landed.groupsCreated,
+    cardsAssigned: landed.cardsAssigned,
+    orderEntriesAdded: landed.orderEntriesAdded,
+    routinesBrought: landed.routinesBrought,
     viewPrefsCarried,
-    viewKeysCarried,
+    viewKeysCarried: landed.viewKeysCarried,
     backups,
     written,
   };

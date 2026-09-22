@@ -211,11 +211,13 @@ import {
 } from '../domain/stale.js';
 import {
   applyLayout,
+  pendingLayoutCounts,
   planLayout,
   totalLayoutPending,
   type ApplyLayoutResult,
   type LayoutPlan,
 } from '../engine/layout.js';
+import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
   applyViewCopy,
   applyViewSet,
@@ -232,6 +234,7 @@ import {
   type StatusWord,
   type ViewChange,
   type ViewCopyPlan,
+  type ViewSetPlan,
   type ViewSetRequest,
 } from '../engine/view.js';
 import { applyLabel } from '../ops/label.js';
@@ -248,8 +251,11 @@ import {
   formatAge,
   formatBytes,
   formatDate,
-  formatRoutineFireAt,
   groupByAccount,
+  layoutFailureLines,
+  layoutPendingCountsChanged,
+  layoutPlanLines,
+  layoutResultLines,
   outcomeLine,
   purgeLine,
   renderAccount,
@@ -262,6 +268,8 @@ import {
   unclaimPlanLine,
   updateLine,
   viewCopyRestartCommand,
+  viewNoticeLines,
+  writtenOf,
 } from './render.js';
 
 interface GlobalOptions {
@@ -2493,22 +2501,32 @@ program
     const dryRun = opts.dryRun || !opts.yes;
     const target = resolveDestination(store, listAccountDirs(store), opts);
 
-    const plan = planLayout({ store, target, ledgerEvents: ledger.read() });
-    if (opts.groups === false) plan.groups.items = [];
-    if (opts.routines === false) plan.routines = { ...plan.routines, bring: [] };
-    // Cleared to the same empty shape `planLayoutViewCarry` itself returns
-    // when there is nothing to carry, so `--no-groups --no-routines
-    // --no-view` leaves every count `applyLayout` checks at zero and appends
-    // no ledger event — the same "wrote nothing, said nothing" rule the other
-    // two flags already followed.
-    if (opts.view === false) plan.viewPrefs = { changes: [], account: {} };
+    // Shared by the plan shown up front and the fresh re-plan `--restart` takes
+    // inside the gap (see below) — both have to honour the same `--no-*` flags.
+    const applyFlags = (p: LayoutPlan): LayoutPlan => {
+      if (opts.groups === false) p.groups.items = [];
+      if (opts.routines === false) p.routines = { ...p.routines, bring: [] };
+      // Cleared to the same empty shape `planLayoutViewCarry` itself returns
+      // when there is nothing to carry, so `--no-groups --no-routines
+      // --no-view` leaves every count `applyLayout` checks at zero and appends
+      // no ledger event — the same "wrote nothing, said nothing" rule the other
+      // two flags already followed.
+      if (opts.view === false) p.viewPrefs = { changes: [], account: {} };
+      return p;
+    };
+
+    const plan = applyFlags(planLayout({ store, target, ledgerEvents: ledger.read() }));
+
+    // A fact about the target's groups file as it stands right now, not about
+    // what this run would bring — see `readGroupScopesReport`.
+    const groupScopesSkipped = readGroupScopesReport(store).skippedEntries[scopeKey(target)] ?? 0;
 
     if (dryRun) {
       if (opts.json) {
         print({ target, dryRun: true, plan });
         return;
       }
-      printLayoutPlan(plan);
+      for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
       console.log(pc.dim('\nRe-run with --yes to write.'));
       return;
     }
@@ -2527,34 +2545,107 @@ program
           'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
         );
       }
-      const result = applyLayout(plan, { store, ledger });
+
+      // Caught here, not left to the top-level handler: that only ever had the
+      // bare error message to show, with no plan around it and no distinction
+      // between "wrote nothing" and "wrote three of five things, then failed".
+      let result: ApplyLayoutResult | undefined;
+      let failure: unknown;
+      try {
+        result = applyLayout(plan, { store, ledger });
+      } catch (error) {
+        failure = error;
+      }
+
       if (opts.json) {
-        print({ target, dryRun: false, plan, result });
+        print({
+          target,
+          dryRun: false,
+          plan,
+          result,
+          ...(failure
+            ? {
+                error: failure instanceof Error ? failure.message : String(failure),
+                written: writtenOf(failure),
+              }
+            : {}),
+        });
+        if (failure) process.exitCode = 1;
         return;
       }
-      printLayoutPlan(plan);
-      printLayoutResult(result);
-      console.log(
-        pc.dim(
-          `\nInvisible until the app re-reads its files: restart Claude Desktop, or ${restartCommand}.`,
-        ),
-      );
+
+      for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+      if (result) {
+        for (const line of layoutResultLines(result)) console.log(line);
+        console.log(
+          pc.dim(
+            `\nInvisible until the app re-reads its files: restart Claude Desktop, or ${restartCommand}.`,
+          ),
+        );
+      }
+      if (failure) {
+        for (const line of layoutFailureLines(failure)) console.log(line);
+        process.exitCode = 1;
+      }
       return;
     }
 
     let result: ApplyLayoutResult | undefined;
+    let freshPlan: LayoutPlan | undefined;
+    let writtenOnFailure: string[] | undefined;
     const restart = await restartAround(store, true, restartCommand, async () => {
-      result = applyLayout(plan, { store, ledger });
+      // The plan above was made while the app was still running. Re-planned
+      // fresh here, from disk, in the one window both files are safe to write
+      // — a group, a routine or a filter-menu setting the app itself flushed
+      // in the meantime would otherwise never make it into what actually gets
+      // applied. It is this fresh plan, not the stale one shown above, that is
+      // written.
+      freshPlan = applyFlags(planLayout({ store, target, ledgerEvents: ledger.read() }));
+      try {
+        result = applyLayout(freshPlan, { store, ledger });
+      } catch (error) {
+        // Captured here, ahead of the rethrow, because `restartAround` reports
+        // failure as a string `reason` — the only way this action still gets
+        // at what was written on its own is to have kept it before that
+        // string was ever built.
+        writtenOnFailure = writtenOf(error);
+        throw error;
+      }
     });
 
     if (opts.json) {
-      print({ target, dryRun: false, plan, result, restart });
+      print({
+        target,
+        dryRun: false,
+        plan,
+        freshPlan,
+        result,
+        restart,
+        ...(writtenOnFailure ? { written: writtenOnFailure } : {}),
+      });
       if (!restart.done) process.exitCode = 1;
       return;
     }
 
-    printLayoutPlan(plan);
-    if (result) printLayoutResult(result);
+    for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+    if (
+      freshPlan &&
+      layoutPendingCountsChanged(pendingLayoutCounts(plan), pendingLayoutCounts(freshPlan))
+    ) {
+      console.log(
+        pc.yellow('\nThe plan changed once the app closed — this is what was actually applied:'),
+      );
+      for (const line of layoutPlanLines(freshPlan)) console.log(line);
+    }
+    if (result) {
+      for (const line of layoutResultLines(result)) console.log(line);
+    } else if (writtenOnFailure && writtenOnFailure.length > 0) {
+      console.log(pc.dim(`\nWritten before the failure: ${writtenOnFailure.join(', ')}`));
+    }
+    // `restartAround` never runs `duringGap` at all when the app could not be
+    // quit, so `restart.done` is exactly the signal for whether the write
+    // above happened — never say "applied" over a gap that never opened, or
+    // one that opened and then threw.
     if (restart.done) {
       console.log(pc.bold('\nClaude Desktop is up, with the layout applied.'));
     } else {
@@ -2563,78 +2654,6 @@ program
       process.exitCode = 1;
     }
   });
-
-/** `foster layout`'s plan, in the shape both the dry run and a written run print. */
-function printLayoutPlan(plan: LayoutPlan): void {
-  const { groups, routines } = plan;
-  const sourceWord = (n: number): string => `${n} other account${n === 1 ? '' : 's'}`;
-
-  console.log(pc.bold(`Groups (from ${sourceWord(groups.sources)})`));
-  if (groups.items.length === 0) {
-    console.log(pc.dim('  nothing to do'));
-  } else {
-    for (const item of groups.items) {
-      if (item.created || item.assign.length > 0) {
-        const rows = item.assign.length;
-        console.log(
-          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}`,
-        );
-      }
-      for (const skip of item.skipped) {
-        const reason = skip.reason === 'archived' ? 'archived here' : 'no matching card here';
-        console.log(`  ${pc.dim('·')} ${skip.title} — ${reason}`);
-      }
-    }
-  }
-  if (groups.conflicts.length > 0) {
-    const count = groups.conflicts.length;
-    console.log(
-      pc.dim(
-        `  ${count} conversation${count === 1 ? '' : 's'} named for two different groups — the source with the latest activity won.`,
-      ),
-    );
-  }
-
-  console.log(pc.bold(`\nRoutines (from ${sourceWord(routines.sources)})`));
-  if (routines.bring.length === 0 && routines.skipped.length === 0) {
-    console.log(pc.dim('  nothing to do'));
-  } else {
-    for (const item of routines.bring) {
-      const when =
-        item.cronExpression ??
-        (item.fireAt !== undefined ? `once ${formatRoutineFireAt(item.fireAt)}` : '');
-      console.log(`  ${pc.green('+')} ${item.id}  ${pc.dim(when)}`);
-    }
-    for (const skip of routines.skipped) {
-      // Already-here is the ordinary, idempotent case on a second run — not
-      // worth a line every time, the same restraint `sweep`'s title pass takes
-      // for a copy renamed on purpose.
-      if (skip.reason === 'already-here') continue;
-      const detail =
-        skip.reason === 'missed-one-shot'
-          ? `missed one-shot (${formatRoutineFireAt(skip.firedAt)}), not brought`
-          : 'SKILL.md missing, not brought';
-      console.log(`  ${pc.dim('·')} ${skip.id} — ${detail}`);
-    }
-  }
-
-  if (Object.keys(plan.viewPrefs.account).length > 0) {
-    console.log(
-      pc.dim(
-        `\nAlso carrying the sidebar filter menu's account settings${plan.viewPrefs.from ? ` from ${shortId(plan.viewPrefs.from.accountUuid)}` : ''}.`,
-      ),
-    );
-  }
-}
-
-function printLayoutResult(result: ApplyLayoutResult): void {
-  console.log(
-    pc.bold(
-      `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
-        `${result.viewPrefsCarried ? ', filter menu carried' : ''}.`,
-    ),
-  );
-}
 
 const view = program
   .command('view')
@@ -2671,6 +2690,11 @@ const view = program
     }
 
     console.log(pc.bold(`Sidebar filters for ${shortId(target.accountUuid)}`));
+    // Whatever `readViewState`'s own reads (today, only the machine-wide Local
+    // Storage record) noticed while getting here — a recovered log, a record
+    // this build had to skip over — said before the settings themselves, since
+    // it can bear on whether the seven below are trustworthy.
+    for (const line of viewNoticeLines(state)) console.log(line);
     const row = (label: string, where: 'machine' | 'account', value: string): void =>
       console.log(`  ${label.padEnd(14)} ${value}  ${pc.dim(`(${where})`)}`);
     row('status', 'account', state.account.status ?? pc.dim('(never set)'));
@@ -2694,7 +2718,9 @@ const view = program
     row(
       'activity-days',
       'account',
-      state.account.activityDays !== undefined ? String(state.account.activityDays) : pc.dim('(default)'),
+      state.account.activityDays !== undefined
+        ? String(state.account.activityDays)
+        : pc.dim('(default)'),
     );
 
     if (state.legacy.length > 0) {
@@ -2768,10 +2794,21 @@ view
       return;
     }
 
+    // The plan above was made with the app still running; re-planned fresh
+    // inside the gap, from disk, and it is that fresh plan — not the stale one
+    // shown above — that gets written. See the same fix on `foster layout`.
+    let freshPlan: ViewSetPlan | undefined;
     const restart = await restartAround(store, true, restartCommand, async () => {
-      applyViewSet(plan, { store });
+      freshPlan = planViewSet(store, target, request);
+      if (freshPlan.changes.length > 0) applyViewSet(freshPlan, { store });
     });
     if (restart.done) {
+      if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
+        console.log(
+          pc.yellow('\nThe plan changed once the app closed — this is what was applied:'),
+        );
+        printViewChanges(freshPlan.changes, freshPlan.impliedStatusActive);
+      }
       console.log(pc.bold('\nClaude Desktop is up, with the filters applied.'));
     } else {
       console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));
@@ -2830,10 +2867,18 @@ view
       return;
     }
 
+    // Same fix as `view set` above: re-planned fresh inside the gap rather than
+    // applying the plan made while the app was still running.
+    let freshPlan: ViewCopyPlan | undefined;
     const restart = await restartAround(store, true, restartCommand, async () => {
-      applyViewCopy(plan, { store });
+      freshPlan = planViewCopy(store, from, to);
+      if (freshPlan.changes.length > 0) applyViewCopy(freshPlan, { store });
     });
     if (restart.done) {
+      if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
+        console.log(pc.yellow('\nThe plan changed once the app closed — this is what was copied:'));
+        printViewChanges(freshPlan.changes, false);
+      }
       console.log(pc.bold('\nClaude Desktop is up, with the filters copied.'));
     } else {
       console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));

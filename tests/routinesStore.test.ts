@@ -19,8 +19,8 @@ function task(id: string): ScheduledTask {
     displayName: id,
     cronExpression: '0 9 * * 1',
     enabled: true,
-    filePath: `C:\tasks\${id}\SKILL.md`,
-    cwd: 'C:\work',
+    filePath: `C:\\tasks\\${id}\\SKILL.md`,
+    cwd: 'C:\\work',
     createdAt: 1,
   } as ScheduledTask;
 }
@@ -31,7 +31,14 @@ describe('writeScheduledTasks — entries it cannot validate survive a write', (
     const target = scheduledTasksPath(store, NEW_ACCOUNT);
     mkdirSync(path.dirname(target), { recursive: true });
     // `cwd: null` fails validation; the app still runs this routine.
-    const odd = { id: 'odd-one', displayName: 'Odd', enabled: true, filePath: 'x', cwd: null, createdAt: 1 };
+    const odd = {
+      id: 'odd-one',
+      displayName: 'Odd',
+      enabled: true,
+      filePath: 'x',
+      cwd: null,
+      createdAt: 1,
+    };
     writeFileSync(
       target,
       JSON.stringify({ scheduledTasks: [odd, task('mine')], recordedSkips: { a: 1 } }),

@@ -138,7 +138,11 @@ export function writeScheduledTasks(
   const backup = existsSync(target) ? backupFile(target, 'scheduledTasks', options) : undefined;
   writeFileAtomic(
     target,
-    JSON.stringify({ ...file, scheduledTasks: keepingUnrecognised(target, file.scheduledTasks) }, null, 2),
+    JSON.stringify(
+      { ...file, scheduledTasks: keepingUnrecognised(target, file.scheduledTasks) },
+      null,
+      2,
+    ),
   );
   return { backup };
 }
@@ -159,7 +163,9 @@ export function writeScheduledTasks(
 function keepingUnrecognised(target: string, tasks: ScheduledTask[]): unknown[] {
   let onDisk: unknown[] = [];
   try {
-    const parsed = JSON.parse(stripBom(readFileSync(target, 'utf8'))) as { scheduledTasks?: unknown };
+    const parsed = JSON.parse(stripBom(readFileSync(target, 'utf8'))) as {
+      scheduledTasks?: unknown;
+    };
     if (Array.isArray(parsed.scheduledTasks)) onDisk = parsed.scheduledTasks;
   } catch {
     // Missing or unreadable: nothing to preserve. An unreadable file never
@@ -192,7 +198,9 @@ function keepingUnrecognised(target: string, tasks: ScheduledTask[]): unknown[] 
  */
 export function idsOnDisk(store: StoreLayout, account: AccountRef): string[] {
   try {
-    const parsed = JSON.parse(stripBom(readFileSync(scheduledTasksPath(store, account), 'utf8'))) as {
+    const parsed = JSON.parse(
+      stripBom(readFileSync(scheduledTasksPath(store, account), 'utf8')),
+    ) as {
       scheduledTasks?: unknown;
     };
     if (!Array.isArray(parsed.scheduledTasks)) return [];

@@ -16,17 +16,19 @@ describe('restartAround — finding #3: the app is always started back up', () =
     const start = vi.fn(async () => true);
     const duringGap = vi.fn(async () => {});
 
-    const result = await restartAround(
-      store,
-      true,
-      'foster layout --yes --restart',
-      duringGap,
-      { plan: () => possiblePlan(true), quit, start },
-    );
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
 
     expect(duringGap).toHaveBeenCalledOnce();
     expect(start).toHaveBeenCalledOnce();
-    expect(result).toEqual({ requested: true, done: true, command: 'foster layout --yes --restart' });
+    expect(result).toEqual({
+      requested: true,
+      done: true,
+      command: 'foster layout --yes --restart',
+    });
   });
 
   it('still starts the app when duringGap throws, and reports the failure afterward', async () => {
@@ -36,13 +38,11 @@ describe('restartAround — finding #3: the app is always started back up', () =
       throw new Error('the write failed midway');
     });
 
-    const result = await restartAround(
-      store,
-      true,
-      'foster layout --yes --restart',
-      duringGap,
-      { plan: () => possiblePlan(true), quit, start },
-    );
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
 
     // The old bug: a thrown duringGap propagated straight out of
     // restartAround, and `start` was never reached — the app was left closed
@@ -60,13 +60,11 @@ describe('restartAround — finding #3: the app is always started back up', () =
       throw new Error('write failed');
     });
 
-    const result = await restartAround(
-      store,
-      true,
-      'foster layout --yes --restart',
-      duringGap,
-      { plan: () => possiblePlan(true), quit, start },
-    );
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
 
     expect(start).toHaveBeenCalledOnce();
     expect(result.done).toBe(false);
@@ -79,22 +77,16 @@ describe('restartAround — finding #3: the app is always started back up', () =
     const start = vi.fn(async () => true);
     const duringGap = vi.fn(async () => {});
 
-    const result = await restartAround(
-      store,
-      true,
-      'foster layout --yes --restart',
-      duringGap,
-      {
-        plan: () => ({
-          possible: false,
-          running: true,
-          reason: 'foster is running inside Claude Desktop',
-          command: 'foster app restart',
-        }),
-        quit,
-        start,
-      },
-    );
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => ({
+        possible: false,
+        running: true,
+        reason: 'foster is running inside Claude Desktop',
+        command: 'foster app restart',
+      }),
+      quit,
+      start,
+    });
 
     expect(duringGap).not.toHaveBeenCalled();
     expect(quit).not.toHaveBeenCalled();
@@ -127,7 +119,9 @@ describe('restartAround — code review follow-ups', () => {
   });
 
   it('with a write waiting, a tray-hidden app hands back the caller command and says nothing was written', async () => {
-    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult);
+    const quit = vi.fn(
+      async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult,
+    );
     const start = vi.fn(async () => true);
     const duringGap = vi.fn(async () => {});
 
@@ -146,7 +140,9 @@ describe('restartAround — code review follow-ups', () => {
   });
 
   it('with nothing to write, a tray-hidden app still hands over app restart --terminate', async () => {
-    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult);
+    const quit = vi.fn(
+      async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult,
+    );
     const result = await restartAround(store, true, 'foster app restart', undefined, {
       plan: () => possiblePlan(true),
       quit,

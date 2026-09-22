@@ -7,6 +7,7 @@ import { AppRunningError } from '../src/engine/safety.js';
 import {
   applyLayout,
   LayoutWriteError,
+  layoutPlanSummary,
   pendingLayoutCounts,
   planLayout,
   totalLayoutPending,
@@ -15,8 +16,12 @@ import { Ledger } from '../src/ledger/log.js';
 import { project } from '../src/ledger/project.js';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import { groupCardId, scopeKey, type GroupScopes } from '../src/store/groupScopes.js';
-import { localStorageDir, localStorageKey, readLocalStorageValue } from '../src/store/localStorage.js';
-import type { ScheduledTask, ScheduledTasksFile } from '../src/store/routines.js';
+import {
+  localStorageDir,
+  localStorageKey,
+  readLocalStorageValue,
+} from '../src/store/localStorage.js';
+import type { ScheduledTasksFile } from '../src/store/routines.js';
 import type { ProcessRow } from '../src/util/processes.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -144,7 +149,40 @@ function makeMachineStore(store: StoreLayout, seed: Record<string, unknown> = {}
     key: localStorageKey(scriptKey),
     value: Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify(document), 'latin1')]),
   }));
-  writeFileSync(logPath, entries.length > 0 ? frameRecords(encodeBatch(1n, entries), 0) : Buffer.alloc(0));
+  writeFileSync(
+    logPath,
+    entries.length > 0 ? frameRecords(encodeBatch(1n, entries), 0) : Buffer.alloc(0),
+  );
+}
+
+/**
+ * A synthetic Local Storage database holding one record under `scriptKey`
+ * tagged with a DOM Storage string tag foster does not recognise (Chromium
+ * only ever writes `0x00` or `0x01`) — `readLocalStorageValue` throws
+ * `LocalStorageError` on this record rather than decoding it, the case
+ * `applyLayout`'s Local Storage pre-check (#R3/#R4) exists to catch.
+ */
+function makeMachineStoreWithCorruptEntry(store: StoreLayout, scriptKey: string): void {
+  const dir = localStorageDir(store);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'CURRENT'), 'MANIFEST-000001\n');
+  const edit = Buffer.concat([
+    encodeVarint32(1),
+    encodeVarint32(8),
+    Buffer.from('idb_cmp1'),
+    encodeVarint32(2),
+    encodeVarint32(MACHINE_LOG_NUMBER),
+  ]);
+  writeFileSync(path.join(dir, 'MANIFEST-000001'), frameRecords(edit, 0));
+
+  const logPath = path.join(dir, `${String(MACHINE_LOG_NUMBER).padStart(6, '0')}.log`);
+  const entries = [
+    {
+      key: localStorageKey(scriptKey),
+      value: Buffer.concat([Buffer.from([0x02]), Buffer.from('whatever this is', 'latin1')]),
+    },
+  ];
+  writeFileSync(logPath, frameRecords(encodeBatch(1n, entries), 0));
 }
 
 describe('planLayout / applyLayout — groups', () => {
@@ -409,7 +447,7 @@ describe('planLayout / applyLayout — groups', () => {
     ]);
   });
 
-  it('finding #10 / #A5: never appends a card to another group\'s order when it is filed elsewhere', () => {
+  it("finding #10 / #A5: never appends a card to another group's order when it is filed elsewhere", () => {
     const store = makeStore();
     writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s', cliSessionId: 'c1' }));
     writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t', cliSessionId: 'c1' }));
@@ -491,7 +529,8 @@ describe('planLayout / applyLayout — groups written to all three places (findi
       },
     });
 
-    const otherScopeKey = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const otherScopeKey =
+      '00000000-0000-4000-8000-000000000771/00000000-0000-4000-8000-000000000772';
     makeMachineStore(store, {
       'LSS-persisted.dframe-group-scopes': {
         value: { [otherScopeKey]: { groups: [{ id: 'cg-z', name: 'Kept' }], assignments: {} } },
@@ -732,7 +771,7 @@ describe('planLayout / applyLayout — routines', () => {
     expect(plan.routines.skipped[0]).toMatchObject({ id: 'r1', reason: 'missing-skill' });
   });
 
-  it('finding #8 / #A7: a null entry in another account\'s scheduledTasks is skipped, not thrown', () => {
+  it("finding #8 / #A7: a null entry in another account's scheduledTasks is skipped, not thrown", () => {
     const store = makeStore();
     writeTasksFile(store, OLD_ACCOUNT, [null]);
 
@@ -762,7 +801,14 @@ describe('planLayout / applyLayout — routines', () => {
       '\uFEFF' +
         JSON.stringify({
           scheduledTasks: [
-            { id: 'mine', displayName: 'mine', enabled: false, filePath: skill, createdAt: 1, cwd: store.root },
+            {
+              id: 'mine',
+              displayName: 'mine',
+              enabled: false,
+              filePath: skill,
+              createdAt: 1,
+              cwd: store.root,
+            },
           ],
           recordedSkips: { a: 1 },
         }),
@@ -943,44 +989,119 @@ describe('applyLayout — backups (findings #3 and #4)', () => {
     expect(readFileSync(result.backups[0]!, 'utf8')).toBe(originalText);
   });
 
-  it('reports exactly which files were written before a later one fails (finding #3)', () => {
-    const store = makeStore();
-    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s', cliSessionId: 'c1' }));
-    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t', cliSessionId: 'c1' }));
-    writeDesktopConfig(store, {
-      [scopeKey(OLD_ACCOUNT)]: {
-        groups: [{ id: 'cg-a', name: 'G' }],
-        assignments: { [groupCardId('local_s')]: 'cg-a' },
-      },
-    });
-    const skill = path.join(store.root, 'r.md');
-    writeFileSync(skill, '# skill', 'utf8');
-    writeTasksFile(store, OLD_ACCOUNT, [
-      { id: 'r1', displayName: 'r1', enabled: true, filePath: skill, createdAt: 1, cwd: store.root },
-    ]);
-    // The target's routines file is unreadable, so the routines write must
-    // refuse — after the groups write (a different file) already landed.
-    mkdirSync(accountDir(store, NEW_ACCOUNT), { recursive: true });
-    writeFileSync(
-      path.join(accountDir(store, NEW_ACCOUNT), 'scheduled-tasks.json'),
-      '{ not json',
-      'utf8',
-    );
+  it(
+    'refuses before writing anything when the target routines file cannot be parsed ' +
+      '(finding #3, superseded by #R3: checkable refusals are all-or-nothing)',
+    () => {
+      const store = makeStore();
+      writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s', cliSessionId: 'c1' }));
+      writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t', cliSessionId: 'c1' }));
+      writeDesktopConfig(store, {
+        [scopeKey(OLD_ACCOUNT)]: {
+          groups: [{ id: 'cg-a', name: 'G' }],
+          assignments: { [groupCardId('local_s')]: 'cg-a' },
+        },
+      });
+      const skill = path.join(store.root, 'r.md');
+      writeFileSync(skill, '# skill', 'utf8');
+      writeTasksFile(store, OLD_ACCOUNT, [
+        {
+          id: 'r1',
+          displayName: 'r1',
+          enabled: true,
+          filePath: skill,
+          createdAt: 1,
+          cwd: store.root,
+        },
+      ]);
+      // The target's routines file is unreadable — checkable without writing
+      // anything, so #R3 requires this to be caught before the groups write
+      // (a different file) is even attempted, not after.
+      mkdirSync(accountDir(store, NEW_ACCOUNT), { recursive: true });
+      writeFileSync(
+        path.join(accountDir(store, NEW_ACCOUNT), 'scheduled-tasks.json'),
+        '{ not json',
+        'utf8',
+      );
+      const before = readFileSync(store.desktopConfigFile, 'utf8');
 
-    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
-    let thrown: unknown;
-    try {
-      applyLayout(plan, applyOpts(store, ledgerAt(store)));
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(LayoutWriteError);
-    const message = (thrown as Error).message;
-    expect(message).toContain('groups (config)');
-    expect(message).toContain('routines');
-    // The groups write really did land, even though the run as a whole failed.
-    expect(readTargetScope(store, NEW_ACCOUNT)).toBeDefined();
-  });
+      const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+      let thrown: unknown;
+      try {
+        applyLayout(plan, applyOpts(store, ledgerAt(store)));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(LayoutWriteError);
+      const message = (thrown as Error).message;
+      expect(message).toContain('routines');
+      expect(message).toContain('before anything else was written');
+      // Old behaviour: the groups write landed first and only the routines
+      // write refused. Fixed (#R3): the routines file's own unreadability is
+      // checkable without writing, so it is caught up front and nothing —
+      // groups included — is written at all.
+      expect(readTargetScope(store, NEW_ACCOUNT)).toBeUndefined();
+      expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(before);
+    },
+  );
+
+  it(
+    'a genuinely later write failure (not checkable up front) still reports exactly ' +
+      'what landed, and logs it to the ledger before throwing (#R3, #R4)',
+    () => {
+      const store = makeStore();
+      writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s', cliSessionId: 'c1' }));
+      writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t', cliSessionId: 'c1' }));
+      writeDesktopConfig(store, {
+        [scopeKey(OLD_ACCOUNT)]: {
+          groups: [{ id: 'cg-a', name: 'G' }],
+          assignments: { [groupCardId('local_s')]: 'cg-a' },
+        },
+      });
+      const skill = path.join(store.root, 'r.md');
+      writeFileSync(skill, '# skill', 'utf8');
+      writeTasksFile(store, OLD_ACCOUNT, [
+        {
+          id: 'r1',
+          displayName: 'r1',
+          enabled: true,
+          filePath: skill,
+          createdAt: 1,
+          cwd: store.root,
+        },
+      ]);
+      // The target's routines "file" is a directory. `readScheduledTasks`
+      // treats a read error as "missing" — an ordinary, plannable case — so
+      // this is invisible to the up-front check in Phase 1, and only the real
+      // write (`backupFile`'s `copyFileSync` on a directory) discovers it.
+      mkdirSync(path.join(accountDir(store, NEW_ACCOUNT), 'scheduled-tasks.json'), {
+        recursive: true,
+      });
+
+      const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+      const ledger = ledgerAt(store);
+      let thrown: unknown;
+      try {
+        applyLayout(plan, applyOpts(store, ledger));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(LayoutWriteError);
+      const message = (thrown as Error).message;
+      expect(message).toContain('groups (config)');
+      expect(message).toContain('routines');
+      // The groups write really did land, even though the run as a whole failed.
+      expect(readTargetScope(store, NEW_ACCOUNT)).toBeDefined();
+      // ...and the ledger records exactly that partial landing, before the throw.
+      const applied = ledger.read().find((event) => event.kind === 'layout_applied');
+      expect(applied).toMatchObject({
+        groups: 1,
+        groupsCreated: 1,
+        routines: 0,
+        viewKeysCarried: 0,
+      });
+    },
+  );
 });
 
 describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied ledger event (finding #14/(c) and (e))', () => {
@@ -1008,7 +1129,14 @@ describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied le
     const skill = path.join(store.root, 'routine.md');
     writeFileSync(skill, '# skill', 'utf8');
     writeTasksFile(store, OLD_ACCOUNT, [
-      { id: 'r1', displayName: 'r1', enabled: true, filePath: skill, createdAt: 1, cwd: store.root },
+      {
+        id: 'r1',
+        displayName: 'r1',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
     ]);
 
     const plan = planLayout({ store, target: NEW_ACCOUNT, now: 9_999 });
@@ -1091,7 +1219,14 @@ describe('applyLayout — clearing every section leaves nothing to write (findin
     const skill = path.join(store.root, 'r.md');
     writeFileSync(skill, '# skill', 'utf8');
     writeTasksFile(store, OLD_ACCOUNT, [
-      { id: 'r1', displayName: 'r1', enabled: true, filePath: skill, createdAt: 1, cwd: store.root },
+      {
+        id: 'r1',
+        displayName: 'r1',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
     ]);
 
     const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
@@ -1111,5 +1246,276 @@ describe('applyLayout — clearing every section leaves nothing to write (findin
     expect(result.written).toEqual([]);
     expect(result.backups).toEqual([]);
     expect(ledger.read()).toEqual([]);
+  });
+});
+
+describe('routines: "already here" is decided by idsOnDisk, not the filtered file (#R1)', () => {
+  it('planning treats an id on disk as already-here even when the entry itself does not validate', () => {
+    const store = makeStore();
+    const skill = path.join(store.root, 'routine.md');
+    writeFileSync(skill, '# skill', 'utf8');
+    writeTasksFile(store, OLD_ACCOUNT, [
+      {
+        id: 'r1',
+        displayName: 'From source',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
+    ]);
+    // The target already has an entry claiming id 'r1' — but it is missing
+    // fields `isScheduledTask` requires, so `readScheduledTasks` drops it
+    // from `scheduledTasks` entirely. The id still belongs to something the
+    // app shows; `idsOnDisk` sees it regardless of shape.
+    writeTasksFile(store, NEW_ACCOUNT, [{ id: 'r1', someOtherShape: true }]);
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+    // Old behaviour: `targetIds` came from the filtered `scheduledTasks`
+    // list, which dropped the malformed entry along with its id — so 'r1'
+    // looked brand new and was brought in as a duplicate under the same id.
+    expect(plan.routines.bring).toEqual([]);
+    expect(plan.routines.skipped).toEqual([
+      { id: 'r1', displayName: 'From source', reason: 'already-here' },
+    ]);
+  });
+
+  it('apply rechecks idsOnDisk fresh, so an id the target gains between plan and apply is never duplicated', () => {
+    const store = makeStore();
+    const skill = path.join(store.root, 'routine.md');
+    writeFileSync(skill, '# skill', 'utf8');
+    writeTasksFile(store, OLD_ACCOUNT, [
+      {
+        id: 'r1',
+        displayName: 'From source',
+        enabled: true,
+        filePath: skill,
+        createdAt: 1,
+        cwd: store.root,
+      },
+    ]);
+    // Target starts with nothing — the plan brings 'r1'.
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000 });
+    expect(plan.routines.bring.map((item) => item.id)).toEqual(['r1']);
+
+    // Something else — the app, or another `foster` run — writes 'r1' to the
+    // target in the gap between plan and apply, e.g. across a `--restart`.
+    // Even a shape this module cannot validate still claims the id.
+    writeTasksFile(store, NEW_ACCOUNT, [{ id: 'r1', someOtherShape: true }]);
+
+    const result = applyLayout(plan, applyOpts(store, ledgerAt(store)));
+    expect(result.routinesBrought).toBe(0);
+    expect(result.written).not.toContain('routines');
+
+    const after = readTasksFile(store, NEW_ACCOUNT);
+    expect(after.scheduledTasks).toEqual([{ id: 'r1', someOtherShape: true }]);
+  });
+});
+
+describe('groups: apply rechecks against fresh disk state (#R2)', () => {
+  it('reuses a group of the same NAME created on disk since the plan was taken, instead of minting a duplicate', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    const item = plan.groups.items[0]!;
+    // At plan time, the target had no "Wanted" group at all.
+    expect(item.created).toBe(true);
+
+    // Between plan and apply, the app (or another `foster` run) creates a
+    // group of the very same name on disk, under a different id.
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+      [scopeKey(NEW_ACCOUNT)]: {
+        groups: [{ id: 'cg-made-by-app', name: 'Wanted' }],
+        assignments: {},
+      },
+    });
+
+    const result = applyLayout(plan, applyOpts(store, ledgerAt(store)));
+    // Reused, not minted a second time under the plan's own (now stale) id.
+    expect(result.groupsCreated).toBe(0);
+    expect(result.cardsAssigned).toBe(1);
+
+    const targetScope = readTargetScope(store, NEW_ACCOUNT)!;
+    expect(targetScope.groups).toEqual([{ id: 'cg-made-by-app', name: 'Wanted' }]);
+    expect(targetScope.assignments[groupCardId('local_tgt1')]).toBe('cg-made-by-app');
+  });
+
+  it('leaves a card alone if the disk shows it already assigned somewhere by the time this runs', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    const item = plan.groups.items[0]!;
+    // At plan time, nothing owned this card yet.
+    expect(item.assign).toHaveLength(1);
+
+    // Between plan and apply, the same card gets filed under a different,
+    // pre-existing group — the user's own filing, or the app's.
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+      [scopeKey(NEW_ACCOUNT)]: {
+        groups: [{ id: 'cg-mine', name: "User's own group" }],
+        assignments: { [groupCardId('local_tgt1')]: 'cg-mine' },
+      },
+    });
+
+    const result = applyLayout(plan, applyOpts(store, ledgerAt(store)));
+    // Nothing left to do for "Wanted" once the only card it had is dropped —
+    // #9's rule, rechecked against fresh disk state: no group is created
+    // for zero rows to show.
+    expect(result.groupsTouched).toBe(0);
+    expect(result.cardsAssigned).toBe(0);
+    expect(result.written).toEqual([]);
+
+    const targetScope = readTargetScope(store, NEW_ACCOUNT)!;
+    expect(targetScope.assignments[groupCardId('local_tgt1')]).toBe('cg-mine');
+    expect(targetScope.groups).toEqual([{ id: 'cg-mine', name: "User's own group" }]);
+  });
+});
+
+describe('applyLayout — a Local Storage decode failure never succeeds silently (#R4)', () => {
+  it('throws LayoutWriteError instead of recording "... FAILED" and returning success', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+    const before = readFileSync(store.desktopConfigFile, 'utf8');
+    makeMachineStoreWithCorruptEntry(store, 'LSS-persisted.dframe-group-scopes');
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    let thrown: unknown;
+    try {
+      applyLayout(plan, applyOpts(store, ledgerAt(store)));
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(LayoutWriteError);
+    const message = (thrown as Error).message;
+    // Old behaviour: swallowed into `written` as "groups (Local Storage)
+    // FAILED: ..." and returned as an ordinary, successful result.
+    expect(message).not.toContain('FAILED');
+    expect(message).toContain('groups (Local Storage)');
+    // Caught before any write lands at all (#R3) — the config file this run
+    // also had a valid plan for is untouched.
+    expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(before);
+  });
+});
+
+describe('groups written to all three places — seeding a document that has never existed (#R5)', () => {
+  it('seeds a missing LSS-persisted / dframe-store document from every scope in config, not just the target', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1', title: 'Row' }),
+    );
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+      [scopeKey(THIRD_ACCOUNT)]: {
+        groups: [{ id: 'cg-third', name: "Third account's own group" }],
+        assignments: {},
+      },
+    });
+    // A Local Storage database exists (the sidebar's filter menu was opened
+    // once) but neither key has ever been written — the common case for a
+    // store nothing has ever grouped through the sidebar yet.
+    makeMachineStore(store, {});
+
+    const now = () => new Date(5_000_000);
+    const plan = planLayout({ store, target: NEW_ACCOUNT, now: 5_000_000 });
+    applyLayout(plan, applyOpts(store, ledgerAt(store), { now }));
+
+    const configScope = readTargetScope(store, NEW_ACCOUNT)!;
+    const everyScopeKey = [
+      scopeKey(OLD_ACCOUNT),
+      scopeKey(THIRD_ACCOUNT),
+      scopeKey(NEW_ACCOUNT),
+    ].sort();
+
+    const lss = readLocalStorageValue(store, 'LSS-persisted.dframe-group-scopes')!;
+    const lssValue = lss.document.value as Record<string, unknown>;
+    // Seeded from the full config, not only the target's own merged scope.
+    expect(Object.keys(lssValue).sort()).toEqual(everyScopeKey);
+    expect(lssValue[scopeKey(THIRD_ACCOUNT)]).toEqual({
+      groups: [{ id: 'cg-third', name: "Third account's own group" }],
+      assignments: {},
+    });
+    expect(lssValue[scopeKey(NEW_ACCOUNT)]).toEqual(configScope);
+    expect(lss.document.tabId).toBe('');
+    expect(lss.document.timestamp).toBe(5_000_000);
+
+    const dframe = readLocalStorageValue(store, 'dframe-store')!;
+    // Set only because this document had nothing to inherit it from.
+    expect(dframe.document.version).toBe(1);
+    const state = dframe.document.state as Record<string, unknown>;
+    const customGroups = state.customGroupsByScope as Record<string, unknown>;
+    expect(Object.keys(customGroups).sort()).toEqual(everyScopeKey);
+    expect(customGroups[scopeKey(NEW_ACCOUNT)]).toEqual(configScope);
+  });
+});
+
+describe('layoutPlanSummary (#R2)', () => {
+  it('agrees across two plans against an unchanged store, and disagrees once the store changes', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+
+    const first = layoutPlanSummary(planLayout({ store, target: NEW_ACCOUNT }));
+    const second = layoutPlanSummary(planLayout({ store, target: NEW_ACCOUNT }));
+    expect(second).toEqual(first);
+    expect(first.cardsAssigned).toBe(1);
+
+    // Something else assigns this same card on disk in the meantime — the
+    // plan the CLI showed the user no longer matches what re-planning finds.
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+      [scopeKey(NEW_ACCOUNT)]: {
+        groups: [{ id: 'cg-mine', name: "User's own" }],
+        assignments: { [groupCardId('local_tgt1')]: 'cg-mine' },
+      },
+    });
+    const third = layoutPlanSummary(planLayout({ store, target: NEW_ACCOUNT }));
+    expect(third).not.toEqual(first);
+    expect(third.cardsAssigned).toBe(0);
   });
 });
