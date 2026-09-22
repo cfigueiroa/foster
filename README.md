@@ -490,6 +490,24 @@ app, not from disk.
 `foster` will do the restart for you — from the menu, or with `--restart`. It will not close an app
 it is running inside, because that would kill the session that asked.
 
+### Restarting from inside a hosted session: `--detach`
+
+Add `--detach` to `app restart`, `layout --yes --restart`, `view set/copy --yes --restart` or
+`sweep --restart` and the restart happens anyway, from outside the app: a small `.vbs` launched
+through WMI, in a process tree the app quitting cannot take down, waits a few seconds and then
+re-runs the same command from there. The write itself still happens in that second, detached run
+— this call only launches it and returns immediately, so the session that asked ends a few
+seconds later along with the app it restarted.
+
+Every session the app hosts ends when it quits, this one included — there is no way to warn one
+first and no undo — so `--detach` reads the live-session registry first and refuses, naming them,
+if restarting would end any session besides its own. `--detach-even-with-live` overrides that.
+`--detach-delay <seconds>` sets how long it waits before firing (default 20, 5–300).
+
+`foster detached [--last] [--json]` lists what `--detach` has launched from this machine —
+pending, running or done, with the log's own tail — which is how a session that ended before the
+restart landed finds out whether it actually did.
+
 Closing it is less polite than it should be, and `foster` says so rather than pretending otherwise.
 Claude Desktop's window-close handler quits the app **only when its tray icon is turned off**; with
 the tray on — the default — it cancels the close and hides the window. So asking politely would make
