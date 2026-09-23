@@ -80,6 +80,21 @@ export function localStorageKey(scriptKey: string, origin = 'https://claude.ai')
   ]);
 }
 
+/**
+ * The page's own marker for "`dframe-store` holds a local edit the server has
+ * not seen yet" — a bare string, not JSON. Measured 23/09/2026 (app 2.7032.0.0,
+ * and the claude.ai bundle it loaded that day): `dframe-store` is a
+ * server-synced store, and at startup the page folds the account's server copy
+ * over the local one — replacing the signed-in account's list of sidebar groups
+ * with the server's — *unless* this key names the signed-in identity
+ * (`<accountUuid>/<orgUuid>`, or the wildcard `1`), in which case it uploads the
+ * local state instead. The page sets it on every sidebar edit and deletes it
+ * once the upload lands; with a `|migrate` suffix it first unions the server's
+ * groups into the local ones (`mergePendingSeed`), which is what the page
+ * itself writes when it migrates legacy groups into an account.
+ */
+export const DFRAME_SYNC_PENDING_KEY = 'ccd-sync-pending:ccd/dframe-store';
+
 export class LocalStorageError extends Error {
   constructor(message: string) {
     super(message);
@@ -161,17 +176,24 @@ export interface LocalStorageRecord {
   encoding: LocalStorageEncoding;
 }
 
+interface RawLocalStorageRecord {
+  text: string;
+  logPath: string;
+  highestSequence: bigint;
+  notices: string[];
+  encoding: LocalStorageEncoding;
+}
+
 /**
- * Read one key's JSON document, or `undefined` when nothing has ever written it.
+ * Read one key's value as the text the page would get back from
+ * `localStorage.getItem`, or `undefined` when nothing has ever written it (or
+ * the newest entry for it is a delete).
  *
  * Both halves of the database are consulted — the sorted tables first, since a
  * record folded into one is the older copy, then the log, which is where a
  * recent write lives — exactly the order `readPinState` reads them in.
  */
-export function readLocalStorageValue(
-  store: StoreLayout,
-  scriptKey: string,
-): LocalStorageRecord | undefined {
+function readRaw(store: StoreLayout, scriptKey: string): RawLocalStorageRecord | undefined {
   const directory = localStorageDir(store);
   const { logPath, lastSequence, notice: located } = locate(directory);
   const log = readFileSync(logPath);
@@ -236,16 +258,44 @@ export function readLocalStorageValue(
     );
   }
 
+  return { text, logPath, highestSequence: highest, notices, encoding };
+}
+
+/**
+ * Read one key's JSON document, or `undefined` when nothing has ever written it.
+ */
+export function readLocalStorageValue(
+  store: StoreLayout,
+  scriptKey: string,
+): LocalStorageRecord | undefined {
+  const raw = readRaw(store, scriptKey);
+  if (!raw) return undefined;
+
   let document: Record<string, unknown>;
   try {
-    document = JSON.parse(text) as Record<string, unknown>;
+    document = JSON.parse(raw.text) as Record<string, unknown>;
   } catch (error) {
     throw new LocalStorageError(
       `${scriptKey}'s payload is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
-  return { document, logPath, highestSequence: highest, notices, encoding };
+  return {
+    document,
+    logPath: raw.logPath,
+    highestSequence: raw.highestSequence,
+    notices: raw.notices,
+    encoding: raw.encoding,
+  };
+}
+
+/**
+ * Read one key whose value the page stores as a bare string rather than a
+ * JSON document — `ccd-sync-pending:*` is one — or `undefined` when nothing
+ * has ever written it, or the newest entry for it is a delete.
+ */
+export function readLocalStorageText(store: StoreLayout, scriptKey: string): string | undefined {
+  return readRaw(store, scriptKey)?.text;
 }
 
 /** Whether every character of `text` fits in one Latin-1 byte — Chromium's own test for which tag to write. */
@@ -265,13 +315,21 @@ function fitsInLatin1(text: string): boolean {
  * as Latin-1, even when the new content would fit — that would just be
  * guessing at an encoding Chromium itself did not choose.
  */
-function encodeValue(document: Record<string, unknown>, encoding: LocalStorageEncoding): Buffer {
-  const json = JSON.stringify(document);
-  if (encoding === 'latin1' && fitsInLatin1(json)) {
-    return Buffer.concat([Buffer.from([ONE_BYTE_STRING]), Buffer.from(json, 'latin1')]);
+function encodeText(text: string, encoding: LocalStorageEncoding): Buffer {
+  if (encoding === 'latin1' && fitsInLatin1(text)) {
+    return Buffer.concat([Buffer.from([ONE_BYTE_STRING]), Buffer.from(text, 'latin1')]);
   }
-  return Buffer.concat([Buffer.from([TWO_BYTE_STRING]), Buffer.from(json, 'utf16le')]);
+  return Buffer.concat([Buffer.from([TWO_BYTE_STRING]), Buffer.from(text, 'utf16le')]);
 }
+
+/**
+ * One key's write: a JSON document, or — for a key the page stores as a bare
+ * string, like `ccd-sync-pending:*` — the text itself. A text write is tagged
+ * by its own content alone (Chromium's rule), never by the `encoding` a
+ * sibling document in the same batch was read under.
+ */
+export type LocalStorageWrite =
+  { scriptKey: string; document: Record<string, unknown> } | { scriptKey: string; text: string };
 
 /**
  * Replace one key's document by appending a write batch to the log — additive,
@@ -303,11 +361,14 @@ export function writeLocalStorageValue(
 export function writeLocalStorageEntries(
   record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'> &
     Partial<Pick<LocalStorageRecord, 'encoding'>>,
-  writes: { scriptKey: string; document: Record<string, unknown> }[],
+  writes: LocalStorageWrite[],
 ): void {
   const entries: BatchEntry[] = writes.map((write) => ({
     key: localStorageKey(write.scriptKey),
-    value: encodeValue(write.document, record.encoding ?? 'latin1'),
+    value:
+      'text' in write
+        ? encodeText(write.text, 'latin1')
+        : encodeText(JSON.stringify(write.document), record.encoding ?? 'latin1'),
   }));
 
   const existing = readFileSync(record.logPath);

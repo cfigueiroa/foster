@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  layoutCheckLines,
   layoutFailureLines,
   layoutPendingCountsChanged,
   layoutPlanLines,
@@ -131,6 +132,8 @@ describe('layoutResultLines / layoutFailureLines — R4', () => {
     viewKeysCarried: 0,
     backups: [],
     written: ['groups (config)', 'routines'],
+    assigned: [],
+    syncPendingMarked: false,
     ...overrides,
   });
 
@@ -176,6 +179,45 @@ describe('layoutResultLines / layoutFailureLines — R4', () => {
     expect(writtenOf(new LayoutWriteError([], 'routines', new Error('boom')))).toBeUndefined();
     expect(writtenOf(new Error('plain'))).toBeUndefined();
     expect(writtenOf('not even an error')).toBeUndefined();
+  });
+});
+
+describe('layoutCheckLines — groups read back after the restart', () => {
+  const a = { cardId: 'code:local_a', groupId: 'cg-1', groupName: 'CI' };
+  const b = { cardId: 'code:local_b', groupId: 'cg-2', groupName: 'Clients' };
+  const c = { cardId: 'code:local_c', groupId: 'cg-2', groupName: 'Clients' };
+
+  it('confirms every row once the app has rewritten its config with them', () => {
+    const lines = layoutCheckLines({ appRewrote: true, waitedMs: 8_000, kept: [a, b], dropped: [] })
+      .map(plain)
+      .join('\n');
+    expect(lines).toContain(
+      'Checked after the app rewrote its config: all 2 row(s) are still in their groups.',
+    );
+  });
+
+  it('says plainly that the app had not rewritten yet, rather than confirming', () => {
+    const lines = layoutCheckLines({ appRewrote: false, waitedMs: 30_000, kept: [a], dropped: [] })
+      .map(plain)
+      .join('\n');
+    expect(lines).toContain('The app had not rewritten its config 30s after starting');
+    expect(lines).not.toContain('Checked after');
+  });
+
+  it('names how many rows were dropped, from which groups, and why', () => {
+    const lines = layoutCheckLines({
+      appRewrote: true,
+      waitedMs: 8_000,
+      kept: [a],
+      dropped: [b, c],
+    })
+      .map(plain)
+      .join('\n');
+    expect(lines).toContain(
+      'The app dropped 2 of 3 row(s) from their groups when it started (Clients).',
+    );
+    expect(lines).toContain('server copy');
+    expect(lines).toContain('create_group and move_sessions');
   });
 });
 

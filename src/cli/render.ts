@@ -20,6 +20,7 @@ import {
   type LayoutPlan,
 } from '../engine/layout.js';
 import type { ViewState } from '../engine/view.js';
+import type { LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import type { AccountOverview } from '../store/accounts.js';
 import type { AccountProfile } from '../store/profile.js';
 import type { UsageReport } from '../engine/anthropicApi.js';
@@ -200,6 +201,40 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
     );
   }
   return lines;
+}
+
+/**
+ * What `verifyLayoutGroups` found once the app was up again — the line that
+ * decides whether "with the layout applied" may be printed at all. A drop is
+ * said in full: how many rows, which groups, why, and what still works,
+ * because the run above it has just reported writing them.
+ */
+export function layoutCheckLines(check: LayoutGroupsCheck): string[] {
+  const total = check.kept.length + check.dropped.length;
+  const seconds = Math.round(check.waitedMs / 1000);
+  if (check.dropped.length === 0) {
+    return [
+      check.appRewrote
+        ? pc.green(
+            `\nChecked after the app rewrote its config: all ${total} row(s) are still in their groups.`,
+          )
+        : pc.dim(
+            `\nThe app had not rewritten its config ${seconds}s after starting; all ${total} row(s) are still filed there.`,
+          ),
+    ];
+  }
+  const groups = [...new Set(check.dropped.map((entry) => entry.groupName))];
+  return [
+    pc.yellow(
+      `\nThe app dropped ${check.dropped.length} of ${total} row(s) from their groups when it started` +
+        ` (${groups.join(', ')}).`,
+    ),
+    pc.dim(
+      "  Its sidebar groups sync with the account's server copy, and startup replaced this\n" +
+        "  account's groups with the server's. File them from inside the app instead: its own\n" +
+        '  create_group and move_sessions tools, fed from "foster layout --json".',
+    ),
+  ];
 }
 
 /**
