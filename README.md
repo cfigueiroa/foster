@@ -642,8 +642,10 @@ under a group the server already knows. A group foster minted is not one of thos
 23/09/2026, every group one `foster layout --yes --restart` wrote was gone three seconds after the app
 came back. The page keeps a marker of its own for "this device has an edit the server has not seen",
 and when that marker names the signed-in account, startup uploads the local groups instead of
-replacing them; `foster layout` now sets it, in the same write as the groups. That second half is read
-from the page's code and has not yet been watched through a restart, so `--restart` checks: it waits
+replacing them; `foster layout` now sets it, in the same write as the groups. Watched through a real
+restart the same day, a group foster minted that way came back with its row and stayed through three
+more restarts. The page is claude.ai's code and can change without notice, though, so `--restart`
+still checks: it waits
 for the app to rewrite its config, reads every row back, and when any were dropped it says how many
 and from which groups, and exits non-zero, instead of reporting the layout applied. The way that
 held on 23/09 still works when it does: file them from inside the app, with its own group tools.

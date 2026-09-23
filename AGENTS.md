@@ -533,9 +533,13 @@ in first (`mergePendingSeed`), which is what the page itself writes when it migr
 The page sets it on every sidebar edit and deletes it once the upload lands. `applyLayout` now
 writes `<scopeKey>|migrate` into the same batch as the two documents, and leaves alone a marker that
 already names the target (it already uploads; turning it into a merge would bring back a group the
-user deleted here). Under any other signed-in account the page clears the marker unused. **This
-half is read from the page's code, not yet watched through a restart** — so `foster layout --yes
---restart` no longer ends on "with the layout applied" on the strength of the write: it waits for
+user deleted here). Under any other signed-in account the page clears the marker unused.
+**Watched through a restart the same day, 09:36:** a group with a freshly minted id and one row,
+written in the gap with the marker, came back with its row; 60 s after start the page had consumed
+the marker (gone from Local Storage), and `dframe-store` held the local groups plus the server-only
+ones `|migrate` had unioned in. The scope still held it after three more restarts. Even so, `foster
+layout --yes --restart` no longer ends on "with the layout applied" on the strength of the write —
+the page is claude.ai code and can change under it any day: it waits for
 the app's own rewrite of the config (≤30 s, then 5 s quiet — `verifyLayoutGroups`,
 `src/engine/layoutVerify.ts`), reads back every row it filed, and says how many the app dropped
 and from which groups, exiting 1, when it dropped any. The recovery that held on 23/09 is still
