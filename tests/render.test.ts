@@ -14,6 +14,7 @@ import {
 } from '../src/cli/render.js';
 import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
 import type { UnclaimItem, UnclaimOutcome } from '../src/engine/unclaim.js';
+import { totalLayoutPending } from '../src/engine/layout.js';
 
 const ACCOUNT_A = '00000000-0000-4000-8000-0000000000a1';
 const ACCOUNT_B = '11111111-1111-4111-8111-1111111111b1';
@@ -334,6 +335,61 @@ describe('sweepSummary', () => {
     expect(lines).toContain('is a branch that stopped');
     expect(lines).toMatch(/Claude Desktop is running/);
     expect(lines).not.toMatch(/Moved:/);
+  });
+
+  /**
+   * Measured 23/09/2026: the line read `"Jurídico & clientes" is a branch that
+   * stopped — pin "Jurídico & clientes" instead`, naming two rows by the same
+   * title, calling the other file of a conversation a branch, and asking to pin
+   * a row that already was.
+   */
+  it('names the marked row by the title it shows, and says when the row to continue in is already pinned', () => {
+    const lines = sweepSummary(
+      report({
+        pinFixes: {
+          fixes: [
+            {
+              staleSessionId: 'local_stale',
+              staleTitle: 'Clientes',
+              markedTitle: '(other file, stopped 23/09 08:17) Clientes',
+              as: 'other-file',
+              cleanTitle: 'Clientes',
+              cleanSessionId: 'local_clean',
+              cleanPinned: true,
+            },
+          ],
+          moved: false,
+          deferred: true,
+          blocked: 'Claude Desktop is running. Kept for later: "foster layout --yes --restart".',
+        },
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(lines).toContain(
+      '"(other file, stopped 23/09 08:17) Clientes" is the other file of its conversation — ' +
+        '"Clientes" is already pinned, so only this pin has to go',
+    );
+    expect(lines).toMatch(/foster layout --yes --restart/);
+  });
+
+  it('points at foster layout when the only thing waiting is a deferred pin', () => {
+    const counts = {
+      groupsCreated: 0,
+      cardsAssigned: 0,
+      orderEntriesAdded: 0,
+      routinesBrought: 0,
+      viewKeysCarried: 0,
+      pinsMoved: 1,
+    };
+    // What decides the command a sweep hands over (`foster layout` rather than a
+    // plain restart) and the argv of a detached one.
+    expect(totalLayoutPending(counts)).toBe(1);
+    const lines = sweepSummary(report({ layout: counts }))
+      .map(plain)
+      .join('\n');
+    expect(lines).toContain('Layout: 1 pin to bring — foster layout --yes --restart');
   });
 
   it('says nothing about pins when the branch pass touched none', () => {

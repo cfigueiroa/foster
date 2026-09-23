@@ -237,6 +237,7 @@ import {
   type ApplyLayoutResult,
   type LayoutPlan,
 } from '../engine/layout.js';
+import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
   applyViewCopy,
@@ -672,7 +673,7 @@ program
     }
 
     // The same rows `foster stores` prints, so a first run answers "which
-    // store, which account" without a second command — CLAUDE.md says to start
+    // store, which account" without a second command — AGENTS.md says to start
     // here for exactly that reason.
     console.log(pc.bold('Profiles'));
     const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
@@ -1140,7 +1141,12 @@ program
       }
       // The one output that has to wait: it is a single object, so the restart
       // has to have happened before any of it can be written.
-      const restart = await sweepRestart(store, Boolean(opts.restart) && !dryRun, restartCommand);
+      const restart = await sweepRestart(
+        store,
+        Boolean(opts.restart) && !dryRun,
+        restartCommand,
+        deferredPinsGap(store, ledger, target, report),
+      );
       print({ ...sweepJson(report), restart });
       return;
     }
@@ -1179,7 +1185,14 @@ program
       printDetachResult(outcome, false, detachNotNeededNote(store));
       return;
     }
-    reportSweepRestart(await sweepRestart(store, Boolean(opts.restart), restartCommand));
+    reportSweepRestart(
+      await sweepRestart(
+        store,
+        Boolean(opts.restart),
+        restartCommand,
+        deferredPinsGap(store, ledger, target, report),
+      ),
+    );
   });
 
 /**
@@ -1447,8 +1460,36 @@ async function sweepRestart(
   store: StoreLayout,
   requested: boolean,
   command: string = RESTART_COMMAND,
+  duringGap?: () => void,
 ): Promise<SweepRestart> {
-  return restartAround(store, requested, command);
+  return restartAround(store, requested, command, duringGap);
+}
+
+/**
+ * The one write a sweep does make in its own restart gap: the pin moves its pin
+ * pass had to defer because the app was open (ngine/pinMoves.ts). A sweep that
+ * restarts the app itself has the closed-app window those need right there, and
+ * handing the user `foster layout --yes --restart` instead would cost a second
+ * full restart for a single record. Groups and routines stay `foster layout`'s,
+ * as ever. `undefined` when nothing was deferred, so an ordinary restart is
+ * unchanged.
+ */
+function deferredPinsGap(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  report: SweepReport,
+): (() => void) | undefined {
+  if (!report.pinFixes.deferred) return undefined;
+  return () => {
+    // A failure leaves the move pending for the next `foster layout`, the same
+    // as `applyLayout` treats it — never a reason the restart itself failed.
+    try {
+      applyPinMoves(store, ledger, planPinMoves(store, ledger.read(), target));
+    } catch {
+      // still pending
+    }
+  };
 }
 
 /**
@@ -2647,6 +2688,7 @@ program
   .option('--no-groups', 'skip the sidebar groups')
   .option('--no-routines', 'skip the scheduled tasks')
   .option('--no-view', "skip the sidebar filter menu's account settings")
+  .option('--no-pins', 'skip the pin moves a sweep could not make with the app open')
   .option('--json', 'machine-readable output')
   .option(
     '--restart',
@@ -2674,6 +2716,7 @@ program
       groups: boolean;
       routines: boolean;
       view: boolean;
+      pins: boolean;
       json?: boolean;
       restart?: boolean;
       detach?: boolean;
@@ -2708,6 +2751,9 @@ program
       // no ledger event — the same "wrote nothing, said nothing" rule the other
       // two flags already followed.
       if (opts.view === false) p.viewPrefs = { changes: [], account: {} };
+      // Same shape planPinMoves returns with nothing pending, so the four
+      // --no-* flags together still write nothing and append nothing.
+      if (opts.pins === false) p.pins = { moves: [], settled: [] };
       return p;
     };
 
@@ -4316,7 +4362,7 @@ client
       "tab just lands on the CLI's own login — expected for a brand-new client's first sign-in,\n" +
       'which wants a private browser window. Every launch scrubs CLAUDE* from the spawned\n' +
       'environment and the shell command repeats the same cleanup, because whether `wt -w 0`\n' +
-      "reuses the target window's own environment was never measured (see CLAUDE.md).\n\n" +
+      "reuses the target window's own environment was never measured (see AGENTS.md).\n\n" +
       'A junction is a pointer, not a client, and opening straight on one is refused — a process\n' +
       'that opened the link before a repoint keeps writing through it after. --follow-link opens\n' +
       'on the target instead. --guard records the credential here first, so the vault can put it\n' +

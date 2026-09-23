@@ -28,6 +28,8 @@ const EVENT_KINDS = new Set<string>([
   'conversation_imported',
   'conversation_import_undone',
   'layout_applied',
+  'pin_move_deferred',
+  'pins_moved',
 ]);
 
 /**

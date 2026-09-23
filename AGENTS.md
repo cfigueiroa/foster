@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Notes for an agent working in this repository, or driving `foster` on the machine it is
 installed on. The README explains _why_ everything works the way it does; this file is the
@@ -535,6 +535,13 @@ source card with the latest `lastActivityAt`, and reported rather than silently 
 already known to the target (enabled or not) is left alone too, and a one-shot already overdue
 (`fireAt <= now`, no `cronExpression`) is never brought — the app fires an overdue task at its next
 launch, and a stale one firing unasked in an account that never scheduled it is worse than a gap.
+
+**Pins** ride the same gap. The sweep marks a pinned row (a branch that stopped, or the other file)
+and wants the pin on the row to continue in, but the pin list is the app's IndexedDB and a sweep
+from inside the app can never write it. Measured 23/09/2026: that move used to be one line of the
+summary and then forgotten. Now the sweep appends `pin_move_deferred` to the ledger and `foster
+layout` writes every pending move while the app is down (`engine/pinMoves.ts`), settling each with
+`pins_moved` — written, or found already undone by hand, so a row re-pinned on purpose is left alone.
 
 `foster layout --yes --restart` shares its quit-write-start machinery with `foster sweep --restart`
 (`restartAround` in `src/cli/index.ts`) but runs the write **inside** the gap between quit and start,

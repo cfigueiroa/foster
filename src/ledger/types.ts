@@ -29,7 +29,9 @@ export type LedgerEvent =
   | WorktreeReleaseUndoneEvent
   | ConversationImportedEvent
   | ConversationImportUndoneEvent
-  | LayoutAppliedEvent;
+  | LayoutAppliedEvent
+  | PinMoveDeferredEvent
+  | PinsMovedEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -614,6 +616,43 @@ export interface LayoutAppliedEvent extends BaseEvent {
 }
 
 /**
+ * A pin the sweep wanted to move and could not: it had just marked a pinned row
+ * (a branch that stopped, or the other file of a conversation shown twice), and
+ * the pin list lives in the app's own IndexedDB, which only takes a write while
+ * the app is closed — never the case for a sweep run from a session the app
+ * hosts.
+ *
+ * Before this was kept, the move was said once, in that run's summary, and then
+ * forgotten: the next sweep only looks at rows it marks itself, so the pin sat on
+ * the archived row for good. Recorded here so `foster layout` — which runs in the
+ * gap while the app is closed — can finish it (`engine/pinMoves.ts`). Settled by
+ * a later `pins_moved` naming the same `staleSessionId`.
+ */
+export interface PinMoveDeferredEvent extends BaseEvent {
+  kind: 'pin_move_deferred';
+  target: AccountRef;
+  /** The pinned row the sweep marked. */
+  staleSessionId: string;
+  /** The row to continue in — where the pin belongs. */
+  cleanSessionId: string;
+  /** The marked row's title as the sidebar shows it, mark included. */
+  staleTitle: string;
+  cleanTitle: string;
+  /** Which mark the stale row wears. */
+  as: 'stale' | 'other-file';
+}
+
+/**
+ * Deferred pin moves that are settled: written, or found already done by hand
+ * (the stale row no longer pinned). Either way `pendingPinMoves` stops offering
+ * them, so a row the user pins again on purpose is never unpinned a second time.
+ */
+export interface PinsMovedEvent extends BaseEvent {
+  kind: 'pins_moved';
+  moves: { staleSessionId: string; cleanSessionId: string; written: boolean }[];
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -646,7 +685,9 @@ export type LedgerEventInput =
   | Draft<WorktreeReleaseUndoneEvent>
   | Draft<ConversationImportedEvent>
   | Draft<ConversationImportUndoneEvent>
-  | Draft<LayoutAppliedEvent>;
+  | Draft<LayoutAppliedEvent>
+  | Draft<PinMoveDeferredEvent>
+  | Draft<PinsMovedEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
