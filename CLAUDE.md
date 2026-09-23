@@ -509,6 +509,17 @@ Storage database exists at all — skipped, not failed, on a store the sidebar's
 touched yet, since the config copy is what the app would read to rebuild the other two the first
 time it does.
 
+**Writing all three is not enough — measured 23/09/2026, 0.58.0, app 2.7032.0.0.** A detached
+`foster layout --yes --restart` quit the app at 08:36:20, wrote the target's scope to all three
+places ("wrote: groups (config), groups (Local Storage), routines"), and the app started again at
+08:36:22. It read the config at 08:36:22 and rewrote it at 08:36:25 **without** the target's scope;
+`list_groups` answered "No custom sidebar groups". Routines, written in the same gap, survived. So
+some fourth source — or a Local Storage write the app did not replay — wins over the file, and a
+layout write is not done until `list_groups` (inside the app) shows it. The recovery that held:
+the app's own `create_group` + `move_sessions`, fed from `foster layout --json`'s `assign` lists.
+Groups created that way with no rows never reach the config file, so a later `foster layout`
+still lists them as new.
+
 **Routines** (scheduled tasks) live per account/org at
 `<store.root>/claude-code-sessions/<accountUuid>/<orgUuid>/scheduled-tasks.json`
 (`store/routines.ts`). Every account/org directory has one, often with an empty list. `filePath`
