@@ -33,9 +33,12 @@ import {
 import {
   backupLocalStorage,
   currentLog,
+  DFRAME_SYNC_PENDING_KEY,
   localStoragePresent,
+  readLocalStorageText,
   readLocalStorageValue,
   writeLocalStorageEntries,
+  type LocalStorageWrite,
 } from '../store/localStorage.js';
 import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
@@ -634,6 +637,28 @@ export interface ApplyLayoutResult {
    * left for the caller to guess from a bare exception.
    */
   written: string[];
+  /**
+   * Every card this run filed, and the group it went into — what
+   * `verifyLayoutGroups` looks for once the app is up again. Empty when no
+   * group assignment landed.
+   */
+  assigned: LayoutAssignment[];
+  /**
+   * True when, after this run, Local Storage holds the page's sync-pending
+   * marker for the target (`DFRAME_SYNC_PENDING_KEY`) — written by this run in
+   * the same batch as the groups, or already there naming the target. False
+   * when there was no Local Storage database to write into, and then the
+   * groups this run wrote are at the mercy of the server copy at startup.
+   */
+  syncPendingMarked: boolean;
+}
+
+/** One card filed into one group by `applyLayout`. */
+export interface LayoutAssignment {
+  /** `code:local_<uuid>` — the sidebar's own card id. */
+  cardId: string;
+  groupId: string;
+  groupName: string;
 }
 
 export class LayoutWriteError extends Error {
@@ -650,11 +675,29 @@ export class LayoutWriteError extends Error {
 
 /**
  * The three places a target's groups have to agree — see AGENTS.md, "Groups
- * live in three places". `undefined` when there is no Local Storage database
- * to write into yet (a store the sidebar's filter menu has never touched),
- * which is a gap to skip rather than a reason to fail the whole run — the
- * config copy is still written, and is what the app reads to rebuild the
- * other two the next time it does.
+ * live in three places" — plus the one thing that makes them outlive the
+ * restart. `undefined` when there is no Local Storage database to write into
+ * yet (a store the sidebar's filter menu has never touched), which is a gap to
+ * skip rather than a reason to fail the whole run; the config copy is still
+ * written, and the post-restart check (`verifyLayoutGroups`) says whether it
+ * held.
+ *
+ * Measured 23/09/2026: all three places agreeing is not enough on its own.
+ * `dframe-store` is synced with the account's server copy, and at startup the
+ * page replaces the signed-in account's list of groups with the server's —
+ * keeping a local `code:local_*` assignment only when its group id is one the
+ * server already knows. A group minted here is not, so the whole scope went.
+ * The page's own way out is `DFRAME_SYNC_PENDING_KEY`: when it names the
+ * signed-in identity, startup uploads the local state instead, and a
+ * `|migrate` suffix unions the server's groups in first — so a group another
+ * machine added since is kept, not overwritten. It is written into the same
+ * batch as the two documents, as `<scopeKey>|migrate`, which only matches when
+ * the app next starts signed in as the target — under any other account the
+ * page itself clears it. An existing marker that already names the target
+ * (the page's own edit-mode value, or its wildcard `1`) is left as it is: it
+ * already makes startup upload the local state, groups included, and turning
+ * it into a merge would bring back a server-side group the user had since
+ * deleted here.
  *
  * `allScopes` is every scope the config file now holds, the target's own
  * already merged in — what a caller reads fresh via `readGroupScopes` (or
@@ -687,7 +730,7 @@ function localStorageGroupWrites(
   target: AccountRef,
   allScopes: GroupScopes,
   nowMs: number,
-): { scriptKey: string; document: Record<string, unknown> }[] | undefined {
+): LocalStorageWrite[] | undefined {
   if (!localStoragePresent(store)) return undefined;
   const key = scopeKey(target);
   const targetScope = allScopes[key];
@@ -712,10 +755,25 @@ function localStorageGroupWrites(
     ? { ...dframe.document, state: { ...state, customGroupsByScope: customGroups } }
     : { state: { customGroupsByScope: customGroups }, version: 1 };
 
+  const pending = readLocalStorageText(store, DFRAME_SYNC_PENDING_KEY);
+  const pendingNamesTarget = pending === key || pending === '1';
+
   return [
     { scriptKey: 'LSS-persisted.dframe-group-scopes', document: nextLss },
     { scriptKey: 'dframe-store', document: nextDframe },
+    ...(pendingNamesTarget
+      ? []
+      : [{ scriptKey: DFRAME_SYNC_PENDING_KEY, text: syncPendingMigrateValue(target) }]),
   ];
+}
+
+/**
+ * The marker `localStorageGroupWrites` writes: the page's own vouched identity
+ * (`<accountUuid>/<orgUuid>`, the same string `scopeKey` builds), with the
+ * `|migrate` suffix the page itself uses when it seeds groups into an account.
+ */
+export function syncPendingMigrateValue(target: AccountRef): string {
+  return `${scopeKey(target)}|migrate`;
 }
 
 /**
@@ -779,6 +837,8 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     viewKeysCarried: 0,
   };
   let viewPrefsCarried = false;
+  let assigned: LayoutAssignment[] = [];
+  let syncPendingMarked = false;
 
   const appendLedgerIfLanded = (): void => {
     if (landed.groupsTouched > 0 || landed.routinesBrought > 0 || landed.viewKeysCarried > 0) {
@@ -814,7 +874,8 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     cardsAssigned: number;
     orderEntriesAdded: number;
     groupsTouched: number;
-    localStorageWrites: { scriptKey: string; document: Record<string, unknown> }[] | undefined;
+    localStorageWrites: LocalStorageWrite[] | undefined;
+    assigned: LayoutAssignment[];
   }
 
   let groups: ReconciledGroups | undefined;
@@ -838,6 +899,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     let cardsAssigned = 0;
     let orderEntriesAdded = 0;
     let groupsTouched = 0;
+    const assigned: LayoutAssignment[] = [];
 
     for (const item of plannedGroups) {
       const droppedCardIds = new Set<string>();
@@ -864,6 +926,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       for (const entry of assign) {
         nextAssignments[entry.cardId] = groupId;
         assignedOnDisk.add(entry.cardId);
+        assigned.push({ cardId: entry.cardId, groupId, groupName: item.name });
       }
       if (appendedOrder.length > 0) {
         nextOrder[groupId] = [...(nextOrder[groupId] ?? []), ...appendedOrder];
@@ -905,6 +968,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         orderEntriesAdded,
         groupsTouched,
         localStorageWrites,
+        assigned,
       };
     }
   }
@@ -978,6 +1042,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     landed.groupsCreated = groups.groupsCreated;
     landed.cardsAssigned = groups.cardsAssigned;
     landed.orderEntriesAdded = groups.orderEntriesAdded;
+    assigned = groups.assigned;
 
     if (groups.localStorageWrites) {
       try {
@@ -985,6 +1050,9 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         const record = readLocalStorageValue(store, 'dframe-store') ?? currentLog(store);
         writeLocalStorageEntries(record, groups.localStorageWrites);
         written.push('groups (Local Storage)');
+        // Either this batch carried the marker, or `localStorageGroupWrites`
+        // left out one that already named the target — the same outcome.
+        syncPendingMarked = true;
       } catch (error) {
         // #R4: this used to be swallowed into a "... FAILED" entry in
         // `written`, with no throw — the config copy really had landed, so
@@ -1086,5 +1154,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     ...(pinsError ? { pinsError } : {}),
     backups,
     written,
+    assigned,
+    syncPendingMarked,
   };
 }

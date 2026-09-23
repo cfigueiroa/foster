@@ -1,5 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
@@ -238,6 +238,7 @@ import {
   type LayoutPlan,
 } from '../engine/layout.js';
 import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
+import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
   applyViewCopy,
@@ -273,6 +274,7 @@ import {
   formatBytes,
   formatDate,
   groupByAccount,
+  layoutCheckLines,
   layoutFailureLines,
   layoutPendingCountsChanged,
   layoutPlanLines,
@@ -2873,6 +2875,7 @@ program
     let result: ApplyLayoutResult | undefined;
     let freshPlan: LayoutPlan | undefined;
     let writtenOnFailure: string[] | undefined;
+    let writtenMtimeMs: number | undefined;
     const restart = await restartAround(store, true, restartCommand, async () => {
       // The plan above was made while the app was still running. Re-planned
       // fresh here, from disk, in the one window both files are safe to write
@@ -2883,6 +2886,9 @@ program
       freshPlan = applyFlags(planLayout({ store, target, ledgerEvents: ledger.read() }));
       try {
         result = applyLayout(freshPlan, { store, ledger });
+        // Taken before the app starts: any later mtime is the app's own
+        // rewrite, which is what `verifyLayoutGroups` waits for.
+        writtenMtimeMs = statSync(store.desktopConfigFile).mtimeMs;
       } catch (error) {
         // Captured here, ahead of the rethrow, because `restartAround` reports
         // failure as a string `reason` — the only way this action still gets
@@ -2893,6 +2899,17 @@ program
       }
     });
 
+    // The write landing is not the end of it: measured 23/09/2026, the app
+    // started, read the groups foster had written, and rewrote its config
+    // without them three seconds later (AGENTS.md, "What the app trusts at
+    // startup"). Whether that happened again is read back here, rather than
+    // left for the user to find in the sidebar under "layout applied".
+    let check: LayoutGroupsCheck | undefined;
+    if (restart.done && result && result.assigned.length > 0 && writtenMtimeMs !== undefined) {
+      check = await verifyLayoutGroups(store, target, result.assigned, { writtenMtimeMs });
+    }
+    const dropped = (check?.dropped.length ?? 0) > 0;
+
     if (opts.json) {
       print({
         target,
@@ -2901,9 +2918,10 @@ program
         freshPlan,
         result,
         restart,
+        ...(check ? { check } : {}),
         ...(writtenOnFailure ? { written: writtenOnFailure } : {}),
       });
-      if (!restart.done) process.exitCode = 1;
+      if (!restart.done || dropped) process.exitCode = 1;
       return;
     }
 
@@ -2925,8 +2943,15 @@ program
     // `restartAround` never runs `duringGap` at all when the app could not be
     // quit, so `restart.done` is exactly the signal for whether the write
     // above happened — never say "applied" over a gap that never opened, or
-    // one that opened and then threw.
-    if (restart.done) {
+    // one that opened and then threw. And never over groups the app dropped
+    // once it was up again — `check` is what says so.
+    if (check) {
+      for (const line of layoutCheckLines(check)) console.log(line);
+    }
+    if (restart.done && dropped) {
+      console.log(pc.yellow('\nClaude Desktop is up, but not with every group this run wrote.'));
+      process.exitCode = 1;
+    } else if (restart.done) {
       console.log(pc.bold('\nClaude Desktop is up, with the layout applied.'));
     } else {
       console.log(pc.yellow(`\n${restart.reason ?? 'The restart did not finish.'}`));

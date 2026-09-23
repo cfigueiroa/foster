@@ -631,10 +631,22 @@ account that never scheduled it is worse than one left behind. The copy also dro
 believe a run was missed here, and a session id that names nothing in this account.
 
 A group is not just that one config scope, either — the same scope sits in Local Storage too, once
-under its own key and again folded into the filter menu's own `dframe-store` record below. Which of
-the three the app actually trusts at startup was not measured, so `foster layout` writes all three
-together whenever a Local Storage database exists at all, and skips the Local Storage pair (writing
-only the config copy) on a store the sidebar's filter menu has never touched yet.
+under its own key and again folded into the filter menu's own `dframe-store` record below. `foster
+layout` writes all three together whenever a Local Storage database exists at all, and skips the Local
+Storage pair (writing only the config copy) on a store the sidebar's filter menu has never touched yet.
+
+None of the three is what the app trusts at startup, as it turned out. The sidebar is claude.ai's own
+code, and `dframe-store` is synced with the account's settings on the server: when the app starts, the
+server's list of groups for the signed-in account replaces the local one, and a row stays filed only
+under a group the server already knows. A group foster minted is not one of those — measured
+23/09/2026, every group one `foster layout --yes --restart` wrote was gone three seconds after the app
+came back. The page keeps a marker of its own for "this device has an edit the server has not seen",
+and when that marker names the signed-in account, startup uploads the local groups instead of
+replacing them; `foster layout` now sets it, in the same write as the groups. That second half is read
+from the page's code and has not yet been watched through a restart, so `--restart` checks: it waits
+for the app to rewrite its config, reads every row back, and when any were dropped it says how many
+and from which groups, and exits non-zero, instead of reporting the layout applied. The way that
+held on 23/09 still works when it does: file them from inside the app, with its own group tools.
 
 Both files are the app's own, and it rewrites them from memory the same way it does the pin database
 and its other preferences — so, like `foster pin`, a write needs the app **closed**, and `foster

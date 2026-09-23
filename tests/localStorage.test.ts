@@ -1,11 +1,13 @@
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
 import {
   localStorageDir,
   localStorageKey,
+  readLocalStorageText,
   readLocalStorageValue,
+  writeLocalStorageEntries,
   writeLocalStorageValue,
 } from '../src/store/localStorage.js';
 import type { StoreLayout } from '../src/domain/types.js';
@@ -229,5 +231,41 @@ describe('Local Storage: writing preserves unrelated state keys', () => {
       collapsed: ['a'],
     });
     expect(after.document.version).toBe(1);
+  });
+});
+
+describe('Local Storage: bare-string values (ccd-sync-pending:*)', () => {
+  const PENDING = 'ccd-sync-pending:ccd/dframe-store';
+
+  it('reads nothing for a key never written', () => {
+    const store = makeStore();
+    makeDatabase(store);
+    expect(readLocalStorageText(store, PENDING)).toBeUndefined();
+  });
+
+  it('writes a text value in the same batch as a document, unquoted and latin1-tagged', () => {
+    const store = makeStore();
+    const logPath = makeDatabase(store, { document: { state: {} }, encode: utf16Value });
+    const record = readLocalStorageValue(store, SCRIPT_KEY)!;
+    expect(record.encoding).toBe('utf16le');
+
+    writeLocalStorageEntries(record, [
+      { scriptKey: SCRIPT_KEY, document: { state: { sidebarWidth: 300 } } },
+      { scriptKey: PENDING, text: 'a/b|migrate' },
+    ]);
+
+    // What the page's own `localStorage.getItem` would return: the bare text,
+    // not a JSON string literal.
+    expect(readLocalStorageText(store, PENDING)).toBe('a/b|migrate');
+    // Tagged by its own content, not by the utf16le document beside it.
+    const log = readFileSync(logPath);
+    const tagged = Buffer.concat([
+      localStorageKey(PENDING),
+      Buffer.from([12, 0x01]),
+      Buffer.from('a/b|migrate', 'latin1'),
+    ]);
+    expect(log.includes(tagged)).toBe(true);
+    // The document keeps the tag it was read under.
+    expect(readLocalStorageValue(store, SCRIPT_KEY)!.encoding).toBe('utf16le');
   });
 });

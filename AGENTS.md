@@ -502,23 +502,46 @@ archived is skipped and reported, never assigned.
 Storage, once under its own key (`LSS-persisted.dframe-group-scopes`, keyed the same
 `<accountUuid>/<organizationUuid>` way, wrapped in a `{value, tabId, timestamp}` envelope) and again
 folded into `dframe-store`'s own `state.customGroupsByScope` — the same database the filter menu
-below lives in. Which of the three the app actually trusts at startup was not measured, so
-`applyLayout` (`localStorageGroupWrites`, `src/engine/layout.ts`) writes all three together in one
-batch (`writeLocalStorageEntries`, one sequence number for both Local Storage keys) whenever a Local
-Storage database exists at all — skipped, not failed, on a store the sidebar's filter menu has never
-touched yet, since the config copy is what the app would read to rebuild the other two the first
-time it does.
+below lives in. `applyLayout` (`localStorageGroupWrites`, `src/engine/layout.ts`) writes all three
+together in one batch (`writeLocalStorageEntries`, one sequence number for every Local Storage key)
+whenever a Local Storage database exists at all — skipped, not failed, on a store the sidebar's
+filter menu has never touched yet.
 
-**Writing all three is not enough — measured 23/09/2026, 0.58.0, app 2.7032.0.0.** A detached
-`foster layout --yes --restart` quit the app at 08:36:20, wrote the target's scope to all three
-places ("wrote: groups (config), groups (Local Storage), routines"), and the app started again at
-08:36:22. It read the config at 08:36:22 and rewrote it at 08:36:25 **without** the target's scope;
-`list_groups` answered "No custom sidebar groups". Routines, written in the same gap, survived. So
-some fourth source — or a Local Storage write the app did not replay — wins over the file, and a
-layout write is not done until `list_groups` (inside the app) shows it. The recovery that held:
-the app's own `create_group` + `move_sessions`, fed from `foster layout --json`'s `assign` lists.
-Groups created that way with no rows never reach the config file, so a later `foster layout`
-still lists them as new.
+**What the app trusts at startup: a fourth place, the server.** Measured 23/09/2026, 0.58.0, app
+2.7032.0.0. A detached `foster layout --yes --restart` quit the app at 08:36:20, wrote the target's
+scope to all three places, and the app started again at 08:36:22 — and at 08:36:25 rewrote the
+config and both Local Storage keys **without** the target's scope; `list_groups` answered "No custom
+sidebar groups". Routines, written in the same gap, survived. Not a write that lost the race: the
+Local Storage `LOG` says LevelDB reopened at 08:36:23 reusing the very log foster had appended to,
+with no corruption, and foster's records (5 groups, 27 rows) sit in the table it flushed next — one
+sequence number before the app's own write that emptied them. The sidebar is claude.ai code, not
+the desktop app's (`https://assets-proxy.anthropic.com/claude-ai/v2/assets/v1/`, read that day):
+`dframe-store` is a zustand store registered as a **server-synced store** (`ccd/dframe-store`, the
+account's `/api/claude_code/organizations/<org>/user_settings`). At startup the page hydrates from
+Local Storage, folds the config's scopes in only where Local Storage has none, then reconciles with
+the server — and the server merge replaces the signed-in account's **list of groups** with the
+server's, keeping a local `code:local_*` assignment only when its group id is one the server already
+knows. Those assignments never go up (a local session is machine-local); the group list does. A
+group foster minted had an id the server had never seen, so every assignment to it went with it.
+Other accounts' scopes survive because only the signed-in account's scope is synced.
+
+The page's own way out is the Local Storage key `ccd-sync-pending:ccd/dframe-store`, a bare string
+(`DFRAME_SYNC_PENDING_KEY`, `src/store/localStorage.ts`). When it names the signed-in identity —
+`<accountUuid>/<orgUuid>`, the same string `scopeKey` builds, or the wildcard `1` — startup uploads
+the local state instead of taking the server's, and a `|migrate` suffix unions the server's groups
+in first (`mergePendingSeed`), which is what the page itself writes when it migrates legacy groups.
+The page sets it on every sidebar edit and deletes it once the upload lands. `applyLayout` now
+writes `<scopeKey>|migrate` into the same batch as the two documents, and leaves alone a marker that
+already names the target (it already uploads; turning it into a merge would bring back a group the
+user deleted here). Under any other signed-in account the page clears the marker unused. **This
+half is read from the page's code, not yet watched through a restart** — so `foster layout --yes
+--restart` no longer ends on "with the layout applied" on the strength of the write: it waits for
+the app's own rewrite of the config (≤30 s, then 5 s quiet — `verifyLayoutGroups`,
+`src/engine/layoutVerify.ts`), reads back every row it filed, and says how many the app dropped
+and from which groups, exiting 1, when it dropped any. The recovery that held on 23/09 is still
+the fallback: the app's own `create_group` + `move_sessions`, fed from `foster layout --json`'s
+`assign` lists. Groups created that way with no rows never reach the config file (the page writes
+only groups that hold a row), so a later `foster layout` still lists them as new.
 
 **Routines** (scheduled tasks) live per account/org at
 `<store.root>/claude-code-sessions/<accountUuid>/<orgUuid>/scheduled-tasks.json`

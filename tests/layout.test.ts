@@ -10,6 +10,7 @@ import {
   layoutPlanSummary,
   pendingLayoutCounts,
   planLayout,
+  syncPendingMigrateValue,
   totalLayoutPending,
 } from '../src/engine/layout.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -19,6 +20,7 @@ import { groupCardId, scopeKey, type GroupScopes } from '../src/store/groupScope
 import {
   localStorageDir,
   localStorageKey,
+  readLocalStorageText,
   readLocalStorageValue,
 } from '../src/store/localStorage.js';
 import type { ScheduledTasksFile } from '../src/store/routines.js';
@@ -130,7 +132,11 @@ function desktopRunningOn(root: string): ProcessRow[] {
 
 const MACHINE_LOG_NUMBER = 4;
 
-/** A synthetic Local Storage database, optionally pre-seeded with a document per key. */
+/**
+ * A synthetic Local Storage database, optionally pre-seeded with a document per
+ * key — or, for a string, the bare text the page stores under a key like
+ * `ccd-sync-pending:*`.
+ */
 function makeMachineStore(store: StoreLayout, seed: Record<string, unknown> = {}): void {
   const dir = localStorageDir(store);
   mkdirSync(dir, { recursive: true });
@@ -147,7 +153,10 @@ function makeMachineStore(store: StoreLayout, seed: Record<string, unknown> = {}
   const logPath = path.join(dir, `${String(MACHINE_LOG_NUMBER).padStart(6, '0')}.log`);
   const entries = Object.entries(seed).map(([scriptKey, document]) => ({
     key: localStorageKey(scriptKey),
-    value: Buffer.concat([Buffer.from([0x01]), Buffer.from(JSON.stringify(document), 'latin1')]),
+    value: Buffer.concat([
+      Buffer.from([0x01]),
+      Buffer.from(typeof document === 'string' ? document : JSON.stringify(document), 'latin1'),
+    ]),
   }));
   writeFileSync(
     logPath,
@@ -1483,6 +1492,102 @@ describe('groups written to all three places — seeding a document that has nev
     const customGroups = state.customGroupsByScope as Record<string, unknown>;
     expect(Object.keys(customGroups).sort()).toEqual(everyScopeKey);
     expect(customGroups[scopeKey(NEW_ACCOUNT)]).toEqual(configScope);
+  });
+});
+
+describe("groups outlive the app's server sync — the page's own sync-pending marker", () => {
+  const PENDING = 'ccd-sync-pending:ccd/dframe-store';
+
+  /** One source card grouped as "Wanted", and the target's copy of it. */
+  function groupedStore(): StoreLayout {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1', title: 'Row' }),
+    );
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Wanted' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+    return store;
+  }
+
+  it('marks the target as a pending migration in the same batch, and reports what it filed', () => {
+    const store = groupedStore();
+    makeMachineStore(store, {});
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    const result = applyLayout(plan, applyOpts(store, ledgerAt(store)));
+
+    expect(readLocalStorageText(store, PENDING)).toBe(`${scopeKey(NEW_ACCOUNT)}|migrate`);
+    expect(syncPendingMigrateValue(NEW_ACCOUNT)).toBe(`${scopeKey(NEW_ACCOUNT)}|migrate`);
+    expect(result.syncPendingMarked).toBe(true);
+    const groupId = readTargetScope(store, NEW_ACCOUNT)!.groups[0]!.id;
+    expect(result.assigned).toEqual([
+      { cardId: groupCardId('local_tgt1'), groupId, groupName: 'Wanted' },
+    ]);
+  });
+
+  it("replaces a marker left for another identity — the page would clear it under the target's", () => {
+    const store = groupedStore();
+    makeMachineStore(store, { [PENDING]: `${scopeKey(OLD_ACCOUNT)}|migrate` });
+
+    const result = applyLayout(
+      planLayout({ store, target: NEW_ACCOUNT }),
+      applyOpts(store, ledgerAt(store)),
+    );
+
+    expect(readLocalStorageText(store, PENDING)).toBe(`${scopeKey(NEW_ACCOUNT)}|migrate`);
+    expect(result.syncPendingMarked).toBe(true);
+  });
+
+  it.each([
+    ['the edit-mode value naming the target', () => scopeKey(NEW_ACCOUNT)],
+    ["the page's wildcard", () => '1'],
+  ])('leaves %s alone: it already uploads the local state', (_label, value) => {
+    const store = groupedStore();
+    makeMachineStore(store, { [PENDING]: value() });
+
+    const result = applyLayout(
+      planLayout({ store, target: NEW_ACCOUNT }),
+      applyOpts(store, ledgerAt(store)),
+    );
+
+    expect(readLocalStorageText(store, PENDING)).toBe(value());
+    expect(result.syncPendingMarked).toBe(true);
+    expect(result.written).toContain('groups (Local Storage)');
+  });
+
+  it('cannot mark anything without a Local Storage database, and says so', () => {
+    const store = groupedStore();
+
+    const result = applyLayout(
+      planLayout({ store, target: NEW_ACCOUNT }),
+      applyOpts(store, ledgerAt(store)),
+    );
+
+    expect(result.written).toEqual(['groups (config)']);
+    expect(result.syncPendingMarked).toBe(false);
+    expect(result.assigned).toHaveLength(1);
+  });
+
+  it('marks nothing and files nothing when there were no groups to write', () => {
+    const store = makeStore();
+    writeDesktopConfig(store, {});
+    makeMachineStore(store, {});
+
+    const result = applyLayout(
+      planLayout({ store, target: NEW_ACCOUNT }),
+      applyOpts(store, ledgerAt(store)),
+    );
+
+    expect(readLocalStorageText(store, PENDING)).toBeUndefined();
+    expect(result.syncPendingMarked).toBe(false);
+    expect(result.assigned).toEqual([]);
   });
 });
 
