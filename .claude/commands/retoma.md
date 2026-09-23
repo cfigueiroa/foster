@@ -17,6 +17,22 @@ if a step fails in a way these instructions do not cover.
 **Use PowerShell.** `foster` is on the user PATH there. If it is not, the installed bundle is
 `node "$LOCALAPPDATA/foster/foster.js"`. Do not use a `dist/foster.js` from a checkout.
 
+## 0. This text and the installed foster must be the newest
+
+Claude Desktop hands a session a worktree it parked earlier, and that worktree can hold an old
+copy of this very file (measured 23/09/2026 with `/fosteia`: 0.54.0 against 0.58.0). One
+command, before anything else — the only look at the repository this command makes:
+
+```
+git fetch -q origin 2>$null; $f = '.claude/commands/retoma.md'; git diff --quiet HEAD origin/main -- $f 2>$null; if ($LASTEXITCODE -eq 1) { '[texto] STALE — follow the text below, not the one you loaded'; git show "origin/main:$f" } else { '[texto] current' }; $want = (git show origin/main:package.json | ConvertFrom-Json).version; "[foster] installed $(foster --version), origin/main $want"
+```
+
+- `[texto] STALE`: the text printed after that line is the current command. Follow **that** text
+  from its top instead of anything below here, skipping only its own step 0.
+- `[foster]` with the installed version older than `origin/main`'s: update it, then go on —
+  `& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/cfigueiroa/foster/v$want/install.ps1"))) -Version "v$want" -NoLaunch`.
+  If the release is not published yet, go on with the installed one and say so in the report.
+
 ## 1. The work list
 
 One command, one tool call:
