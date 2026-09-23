@@ -20,6 +20,32 @@ there. It is usually _not_ resolvable from Bash on this machine — if you end u
 without it, the installed bundle is `node "$LOCALAPPDATA/foster/foster.js"`. A `dist/foster.js`
 in a checkout is usually older; do not reach for it, and do not build from source.
 
+## First: this text and the installed foster must be the newest
+
+Claude Desktop hands a session a worktree it parked earlier, and that worktree can hold an old
+copy of this very file. Measured 23/09/2026: a `/fosteia` ran from a worktree at 0.54.0 while
+`origin/main` and the installed foster were at 0.58.0, so it skipped the `--other-file-prefix`
+below (45 rows marked in English) and the detached restart at the end. One command, before
+anything else — the only look at the repository this command makes:
+
+```
+git fetch -q origin 2>$null; $f = '.claude/commands/fosteia.md'; git diff --quiet HEAD origin/main -- $f 2>$null; if ($LASTEXITCODE -eq 1) { '[texto] STALE — follow the text below, not the one you loaded'; git show "origin/main:$f" } else { '[texto] current' }; $want = (git show origin/main:package.json | ConvertFrom-Json).version; "[foster] installed $(foster --version), origin/main $want"
+```
+
+- `[texto] STALE`: the file you loaded is older than `origin/main`, and the text printed after
+  that line is the current command. Follow **that** text from its top instead of anything below
+  here, skipping only its own "First" section — you have just run it.
+- `[foster]` with the installed version older than `origin/main`'s: a `SessionStart` guard on
+  this machine normally updates it before the session starts, so this means it could not. Update
+  it here, then go on:
+
+  ```
+  & ([scriptblock]::Create((irm "https://raw.githubusercontent.com/cfigueiroa/foster/v$want/install.ps1"))) -Version "v$want" -NoLaunch
+  ```
+
+  If that fails because the release is not published yet, go on with the installed one and say
+  so in the report.
+
 ## Run it
 
 One command, one tool call. What runs before the sweep is not decoration: those two lines are
