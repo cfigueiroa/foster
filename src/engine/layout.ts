@@ -40,6 +40,7 @@ import {
 import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
+import { applyPinMoves, planPinMoves, type PinMovesPlan } from './pinMoves.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
 
@@ -471,6 +472,12 @@ export interface LayoutPlan {
    * `planLayoutViewCarry`. The machine-wide half needs no copying.
    */
   viewPrefs: LayoutViewCarry;
+  /**
+   * Pin moves a sweep marked a pinned row for and could not write, because the
+   * app was open — see `engine/pinMoves.ts`. The pin list is the app's own
+   * IndexedDB, safe to write in the same closed-app gap as everything above.
+   */
+  pins?: PinMovesPlan;
 }
 
 export interface PlanLayoutOptions {
@@ -492,6 +499,7 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     groups: planGroups(store, target, options.ledgerEvents ?? []),
     routines: planRoutines(store, target, options.now ?? Date.now()),
     viewPrefs: planLayoutViewCarry(store, target),
+    pins: planPinMoves(store, options.ledgerEvents ?? [], target),
   };
 }
 
@@ -505,6 +513,8 @@ export interface LayoutPendingCounts {
   routinesBrought: number;
   /** Sidebar filter-menu (view) keys that would be carried from another account. */
   viewKeysCarried: number;
+  /** Pins a sweep could not move, still sitting on a row it marked. Absent on a hand-built count. */
+  pinsMoved?: number;
 }
 
 /**
@@ -529,6 +539,9 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
     orderEntriesAdded: dirtyGroups.reduce((sum, item) => sum + item.appendedOrder.length, 0),
     routinesBrought: plan.routines.bring.length,
     viewKeysCarried: Object.keys(plan.viewPrefs.account).length,
+    // `?.` for a plan built by hand without the field — every test fixture
+    // written before pins joined the layout.
+    pinsMoved: plan.pins?.moves.length ?? 0,
   };
 }
 
@@ -539,7 +552,8 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     counts.cardsAssigned +
     counts.orderEntriesAdded +
     counts.routinesBrought +
-    counts.viewKeysCarried
+    counts.viewKeysCarried +
+    (counts.pinsMoved ?? 0)
   );
 }
 
@@ -602,6 +616,13 @@ export interface ApplyLayoutResult {
   viewPrefsCarried: boolean;
   /** Sidebar filter-menu (view) keys carried this run — 0 when `viewPrefsCarried` is false. */
   viewKeysCarried: number;
+  /** Deferred pin moves written this run — see `engine/pinMoves.ts`. */
+  pinsMoved?: number;
+  /**
+   * Why the pin moves could not be written, when they could not. Never a
+   * reason the run failed — see the pin step at the end of `applyLayout`.
+   */
+  pinsError?: string;
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
   /**
@@ -628,7 +649,7 @@ export class LayoutWriteError extends Error {
 }
 
 /**
- * The three places a target's groups have to agree — see CLAUDE.md, "Groups
+ * The three places a target's groups have to agree — see AGENTS.md, "Groups
  * live in three places". `undefined` when there is no Local Storage database
  * to write into yet (a store the sidebar's filter menu has never touched),
  * which is a gap to skip rather than a reason to fail the whole run — the
@@ -1029,6 +1050,28 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     viewPrefsCarried = true;
   }
 
+  // Last, and in a database of its own: the pin list is the app's IndexedDB,
+  // not either file above, so nothing here can leave those half-written. It
+  // records its own ledger event (`pins_moved`), settling the moves a sweep
+  // deferred — see `engine/pinMoves.ts`.
+  //
+  // A failure here is reported, not thrown. Everything above has landed by
+  // now, and a pin is an extra: throwing would call the whole run failed, and
+  // since nothing settles the move, every later layout run would fail at the
+  // same step and never get to write anything else either.
+  let pinsMoved = 0;
+  let pinsError: string | undefined;
+  if (plan.pins && (plan.pins.moves.length > 0 || plan.pins.settled.length > 0)) {
+    try {
+      const result = applyPinMoves(store, ledger, plan.pins, { now: options.now });
+      if (result.backup) backups.push(result.backup);
+      if (result.moved > 0) written.push('pins');
+      pinsMoved = result.moved;
+    } catch (error) {
+      pinsError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   appendLedgerIfLanded();
 
   return {
@@ -1039,6 +1082,8 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     routinesBrought: landed.routinesBrought,
     viewPrefsCarried,
     viewKeysCarried: landed.viewKeysCarried,
+    pinsMoved,
+    ...(pinsError ? { pinsError } : {}),
     backups,
     written,
   };

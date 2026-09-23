@@ -1,4 +1,3 @@
-import path from 'node:path';
 import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
 import { listAccountDirs, storeIdentity } from '../domain/paths.js';
@@ -19,6 +18,7 @@ import { forksOf } from '../engine/branches.js';
 import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
+import { applyPinMoves, type PinMove } from '../engine/pinMoves.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -50,10 +50,10 @@ import {
 } from '../engine/unclaim.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
-import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
+import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
 import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
-import { errorMessage } from '../util/fs.js';
+import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
 
 /**
@@ -243,10 +243,20 @@ export interface FileCardsPhase extends FileCardsResult {
 export interface PinFix {
   /** The pinned id the branch pass just marked stale. */
   staleSessionId: string;
-  /** What that row was called before the mark, so the message can name it. */
+  /** What that row was called before the mark. */
   staleTitle: string;
+  /**
+   * What the sidebar shows for it now, mark included — the only way the
+   * message can tell the two rows apart when both carry the same title, which
+   * is every second file of a conversation and most branches.
+   */
+  markedTitle?: string;
+  /** Which mark it now wears: a branch that stopped, or the other file. */
+  as?: 'stale' | 'other-file';
   /** The branch that carried on — the row to pin instead. */
   cleanTitle: string;
+  /** True when the row to pin instead is already pinned, so only the stale pin has to go. */
+  cleanPinned?: boolean;
   /**
    * Its id in this account, when this pass could resolve one — see
    * `ForkOutcome.tipCard`. Absent only for the rare row this pass cannot name,
@@ -268,6 +278,12 @@ export interface PinFixesReport {
   fixes: PinFix[];
   /** True once `writePinState` has actually repointed every movable fix. */
   moved: boolean;
+  /**
+   * True when the move could not be written now and was recorded in the ledger
+   * instead (`pin_move_deferred`), for `foster layout --yes --restart` to write
+   * in the gap while the app is closed — see `engine/pinMoves.ts`.
+   */
+  deferred?: boolean;
   /**
    * Why a move that had something to do did not happen: the app is running, or
    * the write itself failed. Absent when there was nothing to move, or the
@@ -530,6 +546,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   const pinFixes = runPinPass(
     store,
     ledger,
+    target,
     passes.branches,
     files,
     dryRun,
@@ -825,6 +842,7 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
 function runPinPass(
   store: StoreLayout,
   ledger: Ledger,
+  target: AccountRef,
   branches: BranchesResult,
   files: FileCardsResult,
   dryRun: boolean,
@@ -851,7 +869,26 @@ function runPinPass(
   // this pass would bring the tip in as does not exist for the pin to point at.
   if (fixes.length === 0 || dryRun) return { fixes, moved: false };
 
-  return { fixes, ...applyPinFixes(store, ledger, pins, fixes, env, list) };
+  const applied = applyPinFixes(store, ledger, fixes, env, list);
+  if (applied.moved || !applied.blocked) return { fixes, ...applied };
+
+  // Not written now — the app is open, which it always is for a sweep run from
+  // a session it hosts. Recorded rather than only said, so the closed-app gap
+  // of `foster layout --yes --restart` can finish it; before this, the move was
+  // one line of this run's summary and then forgotten (`engine/pinMoves.ts`).
+  // Said here, after the fact, so the message never promises a record that
+  // was not written.
+  const moves = pinMovesOf(fixes);
+  for (const move of moves) ledger.append({ kind: 'pin_move_deferred', target, ...move });
+  if (moves.length === 0) return { fixes, ...applied };
+  return {
+    fixes,
+    ...applied,
+    blocked:
+      `${applied.blocked} Kept for later: "foster layout --yes --restart" moves ` +
+      `${moves.length === 1 ? 'it' : 'them'} in the gap while the app is down.`,
+    deferred: true,
+  };
 }
 
 /**
@@ -861,12 +898,6 @@ function runPinPass(
  * is nothing to read or write) and for a database it cannot make sense of;
  * either way the sweep has nothing to say about pins, not a reason to fail.
  */
-/** The first line of a message, which is the part that names the problem. */
-function firstLine(message: string): string {
-  const at = message.indexOf(String.fromCharCode(10));
-  return at === -1 ? message : message.slice(0, at);
-}
-
 function readPinsQuietly(store: StoreLayout): { pins?: PinState; unreadable?: string } {
   try {
     const pins = readPinState(store);
@@ -903,8 +934,11 @@ function planPinFixes(branches: BranchesResult, files: FileCardsResult, pins: Pi
         // The row's own title before the mark went on, not the fork's shared
         // title — a branch can have been renamed independently of its sibling.
         staleTitle: outcome.from || outcome.to,
+        markedTitle: outcome.to,
+        as: 'stale',
         cleanTitle: fork.tipCard.title,
         cleanSessionId: fork.tipCard.sessionId,
+        cleanPinned: pins.ids.includes(fork.tipCard.sessionId),
       });
     }
   }
@@ -921,8 +955,11 @@ function planPinFixes(branches: BranchesResult, files: FileCardsResult, pins: Pi
       fixes.push({
         staleSessionId: outcome.sessionId,
         staleTitle: outcome.from || outcome.to,
+        markedTitle: outcome.to,
+        as: 'other-file',
         cleanTitle: plan.working.title,
         cleanSessionId: plan.working.sessionId,
+        cleanPinned: pins.ids.includes(plan.working.sessionId),
       });
     }
   }
@@ -931,15 +968,16 @@ function planPinFixes(branches: BranchesResult, files: FileCardsResult, pins: Pi
 }
 
 /**
- * Move every fix in one write, the same append `writePinState` always makes.
- * Guarded exactly the way `foster pin` guards its own write: the database is
- * the app's own and holds unflushed writes in memory while it runs, so a
- * write here would just be overwritten the moment the app flushes.
+ * Move every fix in one write, through the same `applyPinMoves` that
+ * `foster layout` uses for a move this pass had to defer — one write-and-settle
+ * sequence, not two. Guarded exactly the way `foster pin` guards its own
+ * write: the database is the app's own and holds unflushed writes in memory
+ * while it runs, so a write here would just be overwritten the moment the app
+ * flushes.
  */
 function applyPinFixes(
   store: StoreLayout,
   ledger: Ledger,
-  pins: PinState,
   fixes: PinFix[],
   env: NodeJS.ProcessEnv,
   list: ProcessLister,
@@ -949,33 +987,36 @@ function applyPinFixes(
     return {
       moved: false,
       blocked:
-        `Claude Desktop is running (${app.evidence.join('; ')}), so the pin could not be moved yet. ` +
-        'Its IndexedDB is locked while the app holds it open — re-run the sweep once it is closed, or ' +
-        'move it by hand with "foster pin".',
+        `Claude Desktop is running (${app.evidence.join('; ')}), so the pin could not be moved yet — ` +
+        'its IndexedDB only takes a write while the app is closed.',
     };
   }
 
-  let next = pins.ids;
-  for (const fix of fixes) {
-    if (!fix.cleanSessionId) continue;
-    next = next.filter((id) => id !== fix.staleSessionId);
-    if (!next.includes(fix.cleanSessionId)) next = [...next, fix.cleanSessionId];
-  }
-  // Every movable fix turned out to be a no-op — the stale id was not actually
-  // pinned any more, or the clean id already was. Nothing written, same as any
-  // other pass that finds it has nothing to do.
-  if (next === pins.ids) return { moved: false };
-
   try {
-    backupPinState(
-      store,
-      path.join(path.dirname(ledger.path), 'backups', `pin-state-${Date.now()}`),
-    );
-    writePinState(pins, next);
-    return { moved: true };
+    // A stale id no longer pinned is settled rather than written, the same as
+    // any other pass that finds it has nothing to do.
+    const { moved } = applyPinMoves(store, ledger, { moves: pinMovesOf(fixes), settled: [] });
+    return { moved: moved > 0 };
   } catch (error) {
     return { moved: false, blocked: `The pin list could not be updated: ${errorMessage(error)}.` };
   }
+}
+
+/** The fixes this pass can name a destination for, in the shape `engine/pinMoves.ts` writes. */
+function pinMovesOf(fixes: readonly PinFix[]): PinMove[] {
+  return fixes.flatMap((fix) =>
+    fix.cleanSessionId
+      ? [
+          {
+            staleSessionId: fix.staleSessionId,
+            cleanSessionId: fix.cleanSessionId,
+            staleTitle: fix.markedTitle ?? fix.staleTitle,
+            cleanTitle: fix.cleanTitle,
+            as: fix.as ?? 'stale',
+          },
+        ]
+      : [],
+  );
 }
 
 /**

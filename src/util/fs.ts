@@ -51,3 +51,9 @@ export function readTimestampFile(file: string): number | undefined {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** The first line of a message, which is the part that names the problem. */
+export function firstLine(message: string): string {
+  const at = message.indexOf(String.fromCharCode(10));
+  return at === -1 ? message : message.slice(0, at);
+}

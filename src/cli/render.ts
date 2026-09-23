@@ -157,6 +157,19 @@ export function layoutPlanLines(
     );
   }
 
+  // Only when a sweep left something behind — a store with no deferred pin
+  // move has nothing to say here, and says nothing.
+  const pins = plan.pins;
+  if (pins && (pins.moves.length > 0 || pins.unreadable)) {
+    lines.push(pc.bold('\nPins (moves a sweep could not make with the app open)'));
+    for (const move of pins.moves) {
+      lines.push(`  ${pc.green('→')} "${move.staleTitle}" → "${move.cleanTitle}"`);
+    }
+    if (pins.unreadable) {
+      lines.push(pc.yellow(`  could not read the pin list: ${pins.unreadable}`));
+    }
+  }
+
   return lines;
 }
 
@@ -172,11 +185,19 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
   const lines = [
     pc.bold(
       `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
-        `${result.viewPrefsCarried ? ', filter menu carried' : ''}.`,
+        `${result.viewPrefsCarried ? ', filter menu carried' : ''}` +
+        `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}.`,
     ),
   ];
   if (result.written.length > 0) {
     lines.push(pc.dim(`  wrote: ${result.written.join(', ')}`));
+  }
+  if (result.pinsError) {
+    lines.push(
+      pc.yellow(
+        `  pins not moved: ${result.pinsError} — still pending, the next foster layout tries again.`,
+      ),
+    );
   }
   return lines;
 }
@@ -230,7 +251,8 @@ export function layoutPendingCountsChanged(
     before.groupsCreated !== after.groupsCreated ||
     before.cardsAssigned !== after.cardsAssigned ||
     before.routinesBrought !== after.routinesBrought ||
-    before.viewKeysCarried !== after.viewKeysCarried
+    before.viewKeysCarried !== after.viewKeysCarried ||
+    (before.pinsMoved ?? 0) !== (after.pinsMoved ?? 0)
   );
 }
 
@@ -952,6 +974,7 @@ export function sweepSummary(report: SweepReport): string[] {
       parts.push(
         `${layout.viewKeysCarried} filter setting${layout.viewKeysCarried === 1 ? '' : 's'}`,
       );
+    if (layout.pinsMoved) parts.push(`${layout.pinsMoved} pin${layout.pinsMoved === 1 ? '' : 's'}`);
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
     lines.push(`Layout: ${parts.join(', ')} to bring — foster layout --yes --restart`);
@@ -1148,15 +1171,23 @@ function pinFixesLine(pinFixes: SweepReport['pinFixes']): string {
   }
   if (pinFixes.fixes.length === 0) return '';
   const one = pinFixes.fixes.length === 1;
+  // Named by the title the sidebar shows now, mark included: the row before the
+  // mark and the row to continue in usually share a title, and a line reading
+  // `"X" ... pin "X" instead` names nothing (measured 23/09/2026).
   const named = pinFixes.fixes
-    .map(
-      (fix) => `  "${fix.staleTitle}" is a branch that stopped — pin "${fix.cleanTitle}" instead`,
-    )
+    .map((fix) => {
+      const what =
+        fix.as === 'other-file' ? 'the other file of its conversation' : 'a branch that stopped';
+      const instead = fix.cleanPinned
+        ? `"${fix.cleanTitle}" is already pinned, so only this pin has to go`
+        : `pin "${fix.cleanTitle}" instead`;
+      return `  "${fix.markedTitle ?? fix.staleTitle}" is ${what} — ${instead}`;
+    })
     .join('\n');
-  const head = `${pinFixes.fixes.length} pinned row${one ? '' : 's'} ${one ? 'is' : 'are'} a branch that stopped:`;
+  const head = `${pinFixes.fixes.length} pinned row${one ? '' : 's'} ${one ? 'wears' : 'wear'} a mark this run put on:`;
 
   if (pinFixes.moved) {
-    return `${head}\n${named}\nMoved: pinned ${one ? 'it' : 'them'} onto the branch that carried on.`;
+    return `${head}\n${named}\nMoved: the pin${one ? '' : 's'} now sit${one ? 's' : ''} on the row to continue in.`;
   }
   const why = pinFixes.blocked
     ? `\n${pinFixes.blocked}`

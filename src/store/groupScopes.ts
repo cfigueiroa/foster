@@ -82,7 +82,7 @@ function repairGroups(value: unknown): { groups: GroupRecord[]; skipped: number 
 
 /**
  * `assignments`, filtered entry by entry. A single card id pointing at a
- * non-string value (`null` measured in the wild, see CLAUDE.md) used to fail
+ * non-string value (`null` measured in the wild, see AGENTS.md) used to fail
  * `isStringRecord` for the *whole object*, which `readGroupScopes` then threw
  * away wholesale — every other, perfectly good assignment in that scope along
  * with it. Only the bad entries are dropped now, and counted.
@@ -241,7 +241,7 @@ export function readGroupScopes(store: StoreLayout): GroupScopes {
  * than trusted from an earlier `readGroupScopes`. `applyLayout` builds `scope`
  * from a read that can be stale by the time this runs, and — before this — a
  * single malformed entry anywhere in the target's own scope (a `null`
- * assignment is the case measured, see CLAUDE.md) made `readGroupScopes` drop
+ * assignment is the case measured, see AGENTS.md) made `readGroupScopes` drop
  * that whole scope, which then made this function's plain `scopes[key] =
  * scope` wipe every group and assignment the account actually had. Merging
  * fixes both: a group, an assignment or an order list this call's `scope`

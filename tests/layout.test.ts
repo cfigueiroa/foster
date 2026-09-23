@@ -1147,6 +1147,7 @@ describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied le
       groupsCreated: 1,
       cardsAssigned: 2,
       orderEntriesAdded: 2,
+      pinsMoved: 0,
       routinesBrought: 1,
       viewKeysCarried: 1,
     });

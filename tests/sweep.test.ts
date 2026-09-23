@@ -9,6 +9,7 @@ import {
   formatStamp,
 } from '../src/domain/stale.js';
 import { UNKNOWN_MARK_DETAIL } from '../src/engine/branchCards.js';
+import { applyLayout, planLayout } from '../src/engine/layout.js';
 import type { CodeSessionData, StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
 import { Ledger } from '../src/ledger/log.js';
@@ -362,6 +363,7 @@ describe('runSweep — layout preview agrees with what layout --yes would do (fi
       groupsCreated: 0,
       cardsAssigned: 0,
       orderEntriesAdded: 0,
+      pinsMoved: 0,
       routinesBrought: 1,
       viewKeysCarried: 0,
     });
@@ -813,8 +815,11 @@ describe('a pinned row the branch pass marks stale', () => {
       {
         staleSessionId: `local_${TRUNK_CARD}`,
         staleTitle: 'Macs',
+        markedTitle: `(stale, stopped ${STAMP}) Macs`,
+        as: 'stale',
         cleanTitle: 'Macs',
         cleanSessionId: expect.any(String),
+        cleanPinned: false,
       },
     ]);
 
@@ -876,6 +881,106 @@ describe('a pinned row the branch pass marks stale', () => {
 
     // Nothing was written: the pin list is exactly what it was before the run.
     expect(readPinState(store)!.ids).toEqual([`local_${TRUNK_CARD}`]);
+  });
+
+  /**
+   * Measured 23/09/2026: a /fosteia run from inside the app marked a pinned row,
+   * said the pin could not be moved yet, and nothing ever came back for it — the
+   * next sweep only looks at rows it marks itself, and the detached
+   * `foster layout --yes --restart` that finishes /fosteia knew nothing of pins.
+   * The move is now kept in the ledger, and the layout run finishes it.
+   */
+  it('keeps a move it could not make for foster layout to finish once the app is closed', () => {
+    setUp();
+
+    const report = sweep(false, { list: () => desktopRunningOn(store.root) });
+    expect(report.pinFixes.deferred).toBe(true);
+    expect(report.pinFixes.blocked).toMatch(/foster layout --yes --restart/);
+
+    const deferred = ledger.read().filter((event) => event.kind === 'pin_move_deferred');
+    expect(deferred).toHaveLength(1);
+
+    // The sweep's own layout line counts it, so the command it hands over is
+    // the one that actually finishes the job.
+    expect(report.layout.pinsMoved).toBe(1);
+
+    const tip = copies().find((data) => data.cliSessionId === TIP)!;
+    const plan = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(plan.pins?.moves).toEqual([
+      expect.objectContaining({
+        staleSessionId: `local_${TRUNK_CARD}`,
+        cleanSessionId: tip.sessionId,
+        staleTitle: `(stale, stopped ${STAMP}) Macs`,
+      }),
+    ]);
+
+    const result = applyLayout(plan, { store, ledger, list: () => [] });
+    expect(result.pinsMoved).toBe(1);
+    expect(result.written).toContain('pins');
+
+    const pins = readPinState(store)!;
+    expect(pins.ids).not.toContain(`local_${TRUNK_CARD}`);
+    expect(pins.ids).toContain(tip.sessionId);
+
+    // Settled: a second layout run offers nothing, and neither would one after
+    // the user pinned the old row again on purpose.
+    const again = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(again.pins).toEqual({ moves: [], settled: [] });
+  });
+
+  it('settles a deferred move the user already made by hand, without writing', () => {
+    setUp();
+    sweep(false, { list: () => desktopRunningOn(store.root) });
+
+    // Unpinned by hand in the meantime: nothing left to move.
+    pinDatabase([]);
+    const plan = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(plan.pins?.moves).toEqual([]);
+    expect(plan.pins?.settled).toHaveLength(1);
+
+    const result = applyLayout(plan, { store, ledger, list: () => [] });
+    expect(result.pinsMoved).toBe(0);
+    expect(result.written).not.toContain('pins');
+    expect(readPinState(store)!.ids).toEqual([]);
+
+    // And a pin the user puts back on the old row later stays where they put it.
+    pinDatabase([`local_${TRUNK_CARD}`]);
+    const later = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(later.pins).toEqual({ moves: [], settled: [] });
+  });
+
+  it('never moves a pin onto a row that has since been archived', () => {
+    setUp();
+    sweep(false, { list: () => desktopRunningOn(store.root) });
+
+    // A later sweep marked and archived the row the pin was meant for.
+    const tip = copies().find((data) => data.cliSessionId === TIP)!;
+    writeSession(store, NEW_ACCOUNT, { ...tip, isArchived: true });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(plan.pins?.moves).toEqual([]);
+    expect(plan.pins?.settled).toHaveLength(1);
+
+    applyLayout(plan, { store, ledger, list: () => [] });
+    // The pin stays where it was rather than landing on an archived row.
+    expect(readPinState(store)!.ids).toEqual([`local_${TRUNK_CARD}`]);
+  });
+
+  it('reports a pin write that fails without failing the layout run', () => {
+    setUp();
+    sweep(false, { list: () => desktopRunningOn(store.root) });
+    const plan = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    expect(plan.pins?.moves).toHaveLength(1);
+
+    // Readable when planned, gone by the time of the write.
+    rmSync(path.join(indexedDbDir(store), `${String(PIN_LOG_NUMBER).padStart(6, '0')}.log`));
+
+    const result = applyLayout(plan, { store, ledger, list: () => [] });
+    expect(result.pinsMoved).toBe(0);
+    expect(result.pinsError).toMatch(/not there/);
+    // Still pending, for the next run to try again.
+    const pending = ledger.read().filter((event) => event.kind === 'pins_moved');
+    expect(pending).toEqual([]);
   });
 
   it('has something to say but nothing to move on a dry run', () => {

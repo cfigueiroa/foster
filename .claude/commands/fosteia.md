@@ -127,8 +127,9 @@ on rather than re-deriving it:
   say it plainly, and say it as the row to open rather than as a lesser one: it holds the newest
   work, and the clean title holds the bulk of the history. More than one branch can wear that mark
   at once — it is measured against the branch that carried on, not against the other branches — so
-  never call it "the newest": it says what that branch did, not how it ranks. If a row they had
-  pinned was archived as stale, the current row needs pinning again;
+  never call it "the newest": it says what that branch did, not how it ranks. If the sweep names
+  a pinned row it just marked, pass on the line as it is — the pin is moved to the row to continue
+  in by the command in "Finish it" below, not by hand (it says "Kept for later" when that is so);
 - **how many conversations were shown here more than once, and which row to continue in.** One
   conversation can occupy two files — continued from a repository and from a worktree cut out of
   it — and the sweep brings a row for each on purpose, because each opens records the other
@@ -161,7 +162,7 @@ on rather than re-deriving it:
 
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
-- if the sweep printed a `Layout:` line, say what is waiting (groups, routines, or both) — it is
+- if the sweep printed a `Layout:` line, say what is waiting (groups, routines, pins) — it is
   about to be applied by the command in "Finish it" below, along with the restart;
 - say plainly, in this report, that the app is about to close and reopen (about 20 seconds after
   the next command runs), that this session closes with it, and that once it is back the way to

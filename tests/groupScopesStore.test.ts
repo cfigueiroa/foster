@@ -13,7 +13,7 @@ import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 /**
  * `readGroupScopes` used to drop a whole scope the moment one entry in it was
  * malformed (a `null` assignment being the case measured on a real store, see
- * CLAUDE.md), and `writeGroupScope` used to replace a scope wholesale rather
+ * AGENTS.md), and `writeGroupScope` used to replace a scope wholesale rather
  * than merge into it. Together, a layout write aimed at a target scope with
  * one bad assignment wiped every other group and assignment the account
  * actually had. These tests exercise the fix: reading tolerates a bad entry

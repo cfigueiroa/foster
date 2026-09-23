@@ -56,7 +56,7 @@ import type { LedgerEvent, LedgerEventInput } from '../ledger/types.js';
  *
  * The one registry subtree this ever touches sits behind `HandlerIo` so tests
  * never touch it — they hand in an in-memory fake and assert against that
- * instead. See CLAUDE.md, "The registry has two views".
+ * instead. See AGENTS.md, "The registry has two views".
  *
  * Finding *which* `AppX<hash>` ProgID is the right one is its own problem,
  * measured separately on 05/09/2026: a machine can carry more than one
