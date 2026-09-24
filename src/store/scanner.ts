@@ -3,9 +3,14 @@ import path from 'node:path';
 import { unfosterableReasons } from '../domain/fostering.js';
 import { isSessionFileName } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
-import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
+import type {
+  AccountRef,
+  CodeSessionData,
+  DiscoveredSession,
+  StoreLayout,
+} from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
-import { readSessionFile } from './sessionFile.js';
+import { readSessionCard, readSessionFile } from './sessionFile.js';
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -37,10 +42,22 @@ export type KnownCopies = ReadonlySet<string>;
 
 const NOTHING_KNOWN: KnownCopies = new Set<string>();
 
+/**
+ * How a scan reads each card. `slim` leaves `BULKY_CARD_FIELDS` out of what it
+ * keeps (`store/sessionFile.ts`) — for a caller that holds every card of the
+ * store for a long run, which is the sweep, and which puts them back with
+ * `withBulkyFields` before any write that copies a whole card. Off by default,
+ * so every other reader keeps the card exactly as the file holds it.
+ */
+export interface ScanOptions {
+  slim?: boolean;
+}
+
 export function scanAccount(
   store: StoreLayout,
   account: AccountRef,
   copies: KnownCopies = NOTHING_KNOWN,
+  options: ScanOptions = {},
 ): DiscoveredSession[] {
   const dir = accountDir(store, account);
   const out: DiscoveredSession[] = [];
@@ -49,8 +66,9 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const data = readSessionFile(file);
-    if (!data) continue;
+    const card = options.slim ? readSessionCard(file) : wholeCard(file);
+    if (!card) continue;
+    const { data } = card;
 
     // A copy foster wrote, not a session the app created. Classifying before
     // recording is what keeps a rescan from "discovering" copies as new sessions
@@ -67,7 +85,15 @@ export function scanAccount(
     // Always false here. One account cannot answer whether a conversation still
     // has a card of its own — the original may be sitting in the account next
     // door — so the judgement is made in scanStore, over everything.
-    out.push({ path: file, account, data, isCopy, isStranded: false, reasons });
+    out.push({
+      path: file,
+      account,
+      data,
+      isCopy,
+      isStranded: false,
+      reasons,
+      ...(card.slim ? { slim: true } : {}),
+    });
   }
 
   return out;
@@ -76,10 +102,16 @@ export function scanAccount(
 export function scanStore(
   store: StoreLayout,
   copies: KnownCopies = NOTHING_KNOWN,
+  options: ScanOptions = {},
 ): DiscoveredSession[] {
   return markStranded(
-    listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies)),
+    listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies, options)),
   );
+}
+
+function wholeCard(file: string): { data: CodeSessionData; slim: boolean } | undefined {
+  const data = readSessionFile(file);
+  return data ? { data, slim: false } : undefined;
 }
 
 /**

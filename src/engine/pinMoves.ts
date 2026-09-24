@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
@@ -45,10 +46,6 @@ export interface PinMovesPlan {
   settled: PinMove[];
   /** Set when there was something pending and the pin list could not be read. */
   unreadable?: string;
-}
-
-function sameAccount(a: AccountRef, b: AccountRef): boolean {
-  return a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid;
 }
 
 /**

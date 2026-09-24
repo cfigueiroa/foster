@@ -1,12 +1,18 @@
 import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
-import { listAccountDirs, storeIdentity } from '../domain/paths.js';
+import { comparablePath, listAccountDirs, sameAccount, storeIdentity } from '../domain/paths.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
   DEFAULT_STALE_TEMPLATE,
 } from '../domain/stale.js';
-import type { AccountRef, DiscoveredSession, StoreLayout, Unfosterable } from '../domain/types.js';
+import type {
+  AccountRef,
+  CodeSessionData,
+  DiscoveredSession,
+  StoreLayout,
+  Unfosterable,
+} from '../domain/types.js';
 import { requireCurrentAccount } from '../engine/account.js';
 import {
   applyBranchCards,
@@ -53,6 +59,7 @@ import { copySessionIds, project } from '../ledger/project.js';
 import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
 import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
 
@@ -421,6 +428,12 @@ export interface SweepReport {
    * about conversations.
    */
   layout: SweepLayoutPreview;
+  /**
+   * How many rounds of passes the run took — one on a dry run, and up to
+   * `SWEEP_ROUNDS` on a run whose re-plan kept finding work its own writes had
+   * made. See `runSweep`. Absent reads as one.
+   */
+  rounds?: number;
   /** Present only on a run that wrote: a dry run has nothing to confirm. */
   confirmation?: SweepConfirmation;
 }
@@ -510,7 +523,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   );
 
   const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
-  const scanned = scanStore(store, copySessionIds(ledger.read()));
+  const scanned = scanStore(store, copySessionIds(ledger.read()), SLIM);
   const run: SweepRun = {
     store,
     ledger,
@@ -531,18 +544,37 @@ export function runSweep(options: SweepOptions): SweepReport {
   // files, judged by the same rules that decide what the sweep may offer.
   const neverComes = countNeverComes(run.fromSources);
 
-  const passes = runPasses(run, fromAccounts(scanned, [target]), dryRun);
+  // Rounds, until the re-plan finds nothing left or the ceiling is reached. One
+  // round's writes can hand the next one work: a copy the ordinary pass brought
+  // completes a fork the branch pass had already judged without it, and a mark
+  // is only a pair's once both rows exist. Measured 24/09/2026 on a real store:
+  // `/fosteia` printed "Not finished" twice and took three whole runs, and every
+  // one of those re-read 6.7 GB of transcripts to rebuild the lineage it had
+  // just thrown away. A round here reuses it, and the scan of every other
+  // account, and pays only for the destination's own cards.
+  let round = runRound(run, scanned, fromAccounts(scanned, [target]), syncTitles, dryRun);
+  // Nothing was written on a dry run, so nothing has changed and a second pass
+  // would report exactly what the first one just did. Saying "finished" off
+  // that would be a claim about a run that never happened.
+  let check = dryRun ? undefined : confirm(run, scanned, syncTitles);
+  let rounds = 1;
+  while (check && !check.confirmation.exhausted && rounds < SWEEP_ROUNDS) {
+    const before = pendingOf(check.confirmation);
+    // The destination as the re-plan just read it: nothing has written since.
+    round = mergeRounds(round, runRound(run, scanned, check.hereCards, syncTitles, false));
+    check = confirm(run, scanned, syncTitles);
+    rounds += 1;
+    // A round that left as much to do as it found is not converging — a write
+    // that fails every time, or two passes undoing each other. Another round
+    // would only write it again, so the run stops and says "Not finished".
+    if (pendingOf(check.confirmation) >= before) break;
+  }
+  const confirmation = check?.confirmation;
+  const { passes, files, worktreeClaims, titleSync } = round;
 
-  // After the copies, and reading the destination again rather than the cards
-  // this run started from: a pair is only a pair once both rows exist, and the
-  // second of them may have been written moments ago by the pass above. A dry
-  // run has no such write to find, so it speaks only about the pairs already on
-  // disk — which is the honest answer to "what would this run mark".
-  const files = runFileCards(run, dryRun);
-
-  // Right after both marking passes, so the pin list is asked about the same
-  // marks and the same fresh copy this run just decided on — a later read would
-  // have to guess which of them were this run's doing.
+  // After every marking round, over what all of them marked: the pin list is
+  // asked about the marks and the fresh copies this run decided on, which the
+  // rounds' own results name — no later read has to guess which were its doing.
   const pinFixes = runPinPass(
     store,
     ledger,
@@ -553,17 +585,6 @@ export function runSweep(options: SweepOptions): SweepReport {
     env,
     options.list ?? readProcesses,
   );
-
-  // Last, and reading the ledger fresh: the three passes above may just have
-  // appended fosterings of their own, and this plans against whatever the
-  // ledger now says rather than the reading taken before any of them ran.
-  const worktreeClaims = runWorktreeClaims(store, ledger, dryRun, kin);
-
-  // After the worktree pass, and reading the ledger fresh again: the branch pass
-  // may have marked a card this one now has to preserve the mark of.
-  const titleSync = syncTitles
-    ? runTitleSync(store, ledger, target, dryRun, [staleTemplate, divergedTemplate])
-    : undefined;
 
   // Last of all, and only when asked. It reads every transcript the store's
   // cards point at, and it is the one pass that writes to native cards in bulk
@@ -619,14 +640,217 @@ export function runSweep(options: SweepOptions): SweepReport {
     neverComes,
     pinFixes,
     layout,
+    rounds,
   };
 
-  // Nothing was written, so nothing has changed and a second pass would report
-  // exactly what the first one just did. Saying "finished" off that would be a
-  // claim about a run that never happened.
-  if (dryRun) return report;
+  return confirmation ? { ...report, confirmation } : report;
+}
 
-  return { ...report, confirmation: confirm(run, syncTitles) };
+/**
+ * How many rounds one sweep may take before it hands "Not finished" back.
+ *
+ * Three, because that is what the measured case needed from the outside —
+ * copies, then the fork they completed, then the marks the app had undone —
+ * and a run still finding work after that is not converging on its own, which
+ * is worth saying rather than looping on.
+ */
+export const SWEEP_ROUNDS = 3;
+
+/** Everything a re-plan says is still to write, as one number. */
+function pendingOf(confirmation: SweepConfirmation): number {
+  return (
+    confirmation.fosterable +
+    confirmation.branches +
+    confirmation.secondFiles +
+    confirmation.restorable +
+    confirmation.worktreeClaims +
+    (confirmation.titlesOutOfStep ?? 0)
+  );
+}
+
+/** The sweep holds every card of the store for its whole run — see `ScanOptions`. */
+const SLIM = { slim: true } as const;
+
+/** One round's writes, in the order a sweep has always made them. */
+export interface Round {
+  passes: Passes;
+  files: FileCardsResult;
+  worktreeClaims: WorktreeClaimsPhase;
+  titleSync?: TitleSyncPhase;
+}
+
+function runRound(
+  run: SweepRun,
+  scanned: DiscoveredSession[],
+  hereCards: DiscoveredSession[],
+  syncTitles: boolean,
+  dryRun: boolean,
+): Round {
+  const { store, ledger, target, kin, staleTemplate, divergedTemplate } = run;
+  const passes = runPasses(run, hereCards, dryRun);
+
+  // After the copies, and reading the destination again rather than the cards
+  // this round started from: a pair is only a pair once both rows exist, and the
+  // second of them may have been written moments ago by the pass above. A dry
+  // run has no such write to find, so it speaks only about the pairs already on
+  // disk — which is the honest answer to "what would this run mark".
+  const files = runFileCards(run, dryRun);
+
+  // The destination once more, now that both marking passes have written: the
+  // title pass reads titles, and they are the ones those passes just changed.
+  // Every other account is read from the scan this run began with — a sweep
+  // writes into one directory only, so nothing it did can have moved them.
+  const settled = scanAccount(store, target, copySessionIds(ledger.read()), SLIM);
+  const cards = cardsAfter(scanned, target, settled);
+
+  // Reading the ledger fresh: the passes above may just have appended
+  // fosterings of their own, and this plans against whatever the ledger now
+  // says rather than the reading taken before any of them ran.
+  const worktreeClaims = runWorktreeClaims(store, ledger, dryRun, kin, cards);
+
+  // After the worktree pass, and reading the ledger fresh again: the branch pass
+  // may have marked a card this one now has to preserve the mark of.
+  const titleSync = syncTitles
+    ? runTitleSync(store, ledger, target, dryRun, [staleTemplate, divergedTemplate], cards.read)
+    : undefined;
+
+  return { passes, files, worktreeClaims, ...(titleSync ? { titleSync } : {}) };
+}
+
+/**
+ * The cards a pass that asks about one card at a time can have without
+ * reading each off disk again: the destination as it now stands, every other
+ * account as this run first read it. A path neither holds — a card written
+ * under another spelling of the store's root, or one that is simply gone — is
+ * read off disk, so a miss costs a read and never an answer.
+ */
+interface CardsAfter {
+  read: (file: string) => CodeSessionData | undefined;
+  of: (account: AccountRef) => DiscoveredSession[];
+}
+
+function cardsAfter(
+  scanned: DiscoveredSession[],
+  target: AccountRef,
+  settled: DiscoveredSession[],
+): CardsAfter {
+  const isTarget = (account: AccountRef): boolean => sameAccount(account, target);
+  const byPath = new Map<string, CodeSessionData>();
+  for (const session of scanned) {
+    if (!isTarget(session.account)) byPath.set(comparablePath(session.path), session.data);
+  }
+  for (const session of settled) byPath.set(comparablePath(session.path), session.data);
+  return {
+    read: (file) => byPath.get(comparablePath(file)) ?? readSessionFile(file),
+    of: (account) => (isTarget(account) ? settled : fromAccounts(scanned, [account])),
+  };
+}
+
+/**
+ * Two rounds as one report.
+ *
+ * Every pass lists what it left alone as well as what it did, and a second
+ * round lists the same candidates again — so only what a later round actually
+ * wrote is added, and a candidate a later round did bring stops being listed as
+ * skipped. A fork or a twice-shown conversation both rounds spoke about is one
+ * entry, with the later round's reading of it. Exported for tests.
+ */
+export function mergeRounds(first: Round, later: Round): Round {
+  const titleSync =
+    first.titleSync && later.titleSync
+      ? {
+          items: [...first.titleSync.items, ...later.titleSync.items],
+          skipped: later.titleSync.skipped,
+          outcomes: [...first.titleSync.outcomes, ...later.titleSync.outcomes],
+          counts: {
+            synced: first.titleSync.counts.synced + later.titleSync.counts.synced,
+            skipped: later.titleSync.counts.skipped,
+            failed: first.titleSync.counts.failed + later.titleSync.counts.failed,
+          },
+        }
+      : (first.titleSync ?? later.titleSync);
+  return {
+    passes: {
+      fostered: mergeOutcomes(first.passes.fostered, later.passes.fostered),
+      branches: mergeBranches(first.passes.branches, later.passes.branches),
+      restored: mergeOutcomes(first.passes.restored, later.passes.restored),
+    },
+    files: mergeFiles(first.files, later.files),
+    worktreeClaims: {
+      items: [...first.worktreeClaims.items, ...later.worktreeClaims.items],
+      outcomes: [...first.worktreeClaims.outcomes, ...later.worktreeClaims.outcomes],
+      counts: {
+        released: first.worktreeClaims.counts.released + later.worktreeClaims.counts.released,
+        skipped: first.worktreeClaims.counts.skipped + later.worktreeClaims.counts.skipped,
+        failed: first.worktreeClaims.counts.failed + later.worktreeClaims.counts.failed,
+      },
+    },
+    ...(titleSync ? { titleSync } : {}),
+  };
+}
+
+/**
+ * What a later round wrote or tried to, added; an earlier skip or failure for
+ * the same origin replaced by it, so a candidate that failed in every round is
+ * one failure, not one per round. Two brought copies of one origin both stay —
+ * a second file of a conversation is a second row on purpose.
+ */
+function mergeOutcomes(first: Outcome[], later: Outcome[]): Outcome[] {
+  const done = later.filter((outcome) => outcome.status !== 'skipped');
+  const nowDone = new Set(done.map((outcome) => outcome.originSessionId));
+  const superseded = (outcome: Outcome): boolean =>
+    (outcome.status === 'skipped' || outcome.status === 'failed') &&
+    nowDone.has(outcome.originSessionId);
+  return [...first.filter((outcome) => !superseded(outcome)), ...done];
+}
+
+function wroteSomething(outcome: RetitleOutcome): boolean {
+  return outcome.status !== 'skipped';
+}
+
+function mergeBranches(first: BranchesResult, later: BranchesResult): BranchesResult {
+  const forks = new Map(first.forks.map((fork) => [fork.root, fork]));
+  for (const fork of later.forks) {
+    const earlier = forks.get(fork.root);
+    forks.set(
+      fork.root,
+      earlier
+        ? {
+            ...fork,
+            brought: mergeOutcomes(earlier.brought, fork.brought),
+            retitled: [...earlier.retitled, ...fork.retitled.filter(wroteSomething)],
+            tipCard: fork.tipCard ?? earlier.tipCard,
+          }
+        : fork,
+    );
+  }
+  return {
+    forks: [...forks.values()],
+    outcomes: mergeOutcomes(first.outcomes, later.outcomes),
+    retitled: [...first.retitled, ...later.retitled.filter(wroteSomething)],
+    archived: first.archived + later.archived,
+  };
+}
+
+function mergeFiles(first: FileCardsResult, later: FileCardsResult): FileCardsResult {
+  const plans = new Map(first.plans.map((plan) => [plan.cliSessionId, plan]));
+  for (const plan of later.plans) {
+    const earlier = plans.get(plan.cliSessionId);
+    if (!earlier) {
+      plans.set(plan.cliSessionId, plan);
+      continue;
+    }
+    const paths = new Set(plan.retitle.map((request) => request.path));
+    plans.set(plan.cliSessionId, {
+      ...plan,
+      retitle: [...earlier.retitle.filter((request) => !paths.has(request.path)), ...plan.retitle],
+    });
+  }
+  return {
+    plans: [...plans.values()],
+    retitled: [...first.retitled, ...later.retitled.filter(wroteSomething)],
+    archived: first.archived + later.archived,
+  };
 }
 
 /**
@@ -729,10 +953,15 @@ function runPasses(run: SweepRun, hereCards: DiscoveredSession[], dryRun: boolea
  * the transcripts are what they were; what changed is the one directory the
  * sweep wrote into.
  */
-function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
+function confirm(
+  run: SweepRun,
+  scanned: DiscoveredSession[],
+  syncTitles: boolean,
+): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events));
+  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const cards = cardsAfter(scanned, target, hereCards);
   const again = runPasses(run, hereCards, true);
 
   const fosterable = summariseOutcomes(again.fostered).fostered;
@@ -751,26 +980,25 @@ function confirm(run: SweepRun, syncTitles: boolean): SweepConfirmation {
     state: project(events),
     events,
   }).reduce((count, plan) => count + plan.retitle.length, 0);
-  const worktreeClaims = planUnclaim(store, project(ledger.read()), { kin: run.kin }).items.length;
+  const worktreeClaims = planUnclaim(store, project(ledger.read()), {
+    kin: run.kin,
+    read: cards.read,
+    cardsOf: cards.of,
+  }).items.length;
   const titlesOutOfStep = syncTitles
-    ? planTitleSync(store, ledger, target).items.length
+    ? planTitleSync(store, ledger, target, undefined, [], cards.read).items.length
     : undefined;
 
-  return {
+  const confirmation: SweepConfirmation = {
     fosterable,
     branches,
     secondFiles,
     restorable,
     worktreeClaims,
     ...(titlesOutOfStep === undefined ? {} : { titlesOutOfStep }),
-    exhausted:
-      fosterable === 0 &&
-      branches === 0 &&
-      secondFiles === 0 &&
-      restorable === 0 &&
-      worktreeClaims === 0 &&
-      (titlesOutOfStep ?? 0) === 0,
+    exhausted: false,
   };
+  return { confirmation: { ...confirmation, exhausted: pendingOf(confirmation) === 0 }, hereCards };
 }
 
 function phase(outcomes: Outcome[]): SweepPhase {
@@ -791,7 +1019,7 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
   const { store, ledger, target, kin, live } = run;
   const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events));
+  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
   const plans = planFileCards({
     hereCards,
     kin,
@@ -1032,8 +1260,13 @@ function runWorktreeClaims(
   ledger: Ledger,
   dryRun: boolean,
   kin: Lineage,
+  cards: CardsAfter,
 ): WorktreeClaimsPhase {
-  const plan = planUnclaim(store, project(ledger.read()), { kin });
+  const plan = planUnclaim(store, project(ledger.read()), {
+    kin,
+    read: cards.read,
+    cardsOf: cards.of,
+  });
   const outcomes = dryRun ? [] : applyUnclaim(plan.items, { ledger });
   return { items: plan.items, outcomes, counts: countUnclaim(outcomes) };
 }
@@ -1086,8 +1319,9 @@ function runTitleSync(
   target: AccountRef,
   dryRun: boolean,
   runTemplates: readonly string[],
+  read: (file: string) => CodeSessionData | undefined,
 ): TitleSyncPhase {
-  const plan = planTitleSync(store, ledger, target, undefined, runTemplates);
+  const plan = planTitleSync(store, ledger, target, undefined, runTemplates, read);
   const outcomes = dryRun ? [] : applyTitleSync(plan.items, { ledger });
   const counts = { synced: 0, skipped: 0, failed: 0 };
   for (const outcome of outcomes) {

@@ -44,6 +44,8 @@ import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
 import { applyPinMoves, planPinMoves, type PinMovesPlan } from './pinMoves.js';
+import { planMarksBack } from './marksBack.js';
+import { retitleCards, type RetitleRequest } from './retitle.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
 
@@ -481,6 +483,12 @@ export interface LayoutPlan {
    * IndexedDB, safe to write in the same closed-app gap as everything above.
    */
   pins?: PinMovesPlan;
+  /**
+   * Marks a sweep wrote that the running app has since saved back over — see
+   * `engine/marksBack.ts`. Written again in the same closed-app gap, where the
+   * app cannot undo them before it reads them.
+   */
+  marks?: RetitleRequest[];
 }
 
 export interface PlanLayoutOptions {
@@ -503,6 +511,7 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     routines: planRoutines(store, target, options.now ?? Date.now()),
     viewPrefs: planLayoutViewCarry(store, target),
     pins: planPinMoves(store, options.ledgerEvents ?? [], target),
+    marks: planMarksBack(options.ledgerEvents ?? [], target, store),
   };
 }
 
@@ -518,6 +527,8 @@ export interface LayoutPendingCounts {
   viewKeysCarried: number;
   /** Pins a sweep could not move, still sitting on a row it marked. Absent on a hand-built count. */
   pinsMoved?: number;
+  /** Marks the running app saved back over, to write again. Absent on a hand-built count. */
+  marksBack?: number;
 }
 
 /**
@@ -545,6 +556,7 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
     // `?.` for a plan built by hand without the field — every test fixture
     // written before pins joined the layout.
     pinsMoved: plan.pins?.moves.length ?? 0,
+    marksBack: plan.marks?.length ?? 0,
   };
 }
 
@@ -556,7 +568,8 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     counts.orderEntriesAdded +
     counts.routinesBrought +
     counts.viewKeysCarried +
-    (counts.pinsMoved ?? 0)
+    (counts.pinsMoved ?? 0) +
+    (counts.marksBack ?? 0)
   );
 }
 
@@ -626,6 +639,8 @@ export interface ApplyLayoutResult {
    * reason the run failed — see the pin step at the end of `applyLayout`.
    */
   pinsError?: string;
+  /** Marks written again after the running app had saved over them — see `engine/marksBack.ts`. */
+  marksBack?: number;
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
   /**
@@ -1140,6 +1155,17 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     }
   }
 
+  // The marks the running app saved back over, each its own atomic write and
+  // its own `card_retitled`, exactly as the sweep first wrote them. Reported
+  // rather than thrown for the pins' reason: an extra, after everything else
+  // has landed. `retitleCards` never throws for one card; it records a failure.
+  let marksBack = 0;
+  if (plan.marks && plan.marks.length > 0) {
+    const outcomes = retitleCards(plan.marks, { ledger });
+    marksBack = outcomes.filter((outcome) => outcome.status === 'retitled').length;
+    if (marksBack > 0) written.push('marks');
+  }
+
   appendLedgerIfLanded();
 
   return {
@@ -1152,6 +1178,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     viewKeysCarried: landed.viewKeysCarried,
     pinsMoved,
     ...(pinsError ? { pinsError } : {}),
+    marksBack,
     backups,
     written,
     assigned,

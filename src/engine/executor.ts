@@ -6,6 +6,7 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
 import { blockingReasons } from '../domain/filter.js';
+import { withBulkyFields } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
@@ -370,7 +371,9 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
   ): boolean {
     const originId = session.data.sessionId;
     const title = session.data.title ?? '(untitled)';
-    const copy = buildFosterCopy(session.data, {
+    // A dry run writes nothing, so what the scan kept is enough to plan with; a
+    // write copies every field across, the bulky ones the scan left out included.
+    const copy = buildFosterCopy(dryRun ? session.data : withBulkyFields(session), {
       origin: session.account,
       ...(options.sourceStore && options.sourceStore !== store.root
         ? { originStore: options.sourceStore }

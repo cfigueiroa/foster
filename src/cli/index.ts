@@ -164,6 +164,7 @@ import {
   detachNeedsRestart,
   detachNeedsYes,
   launchDetached,
+  liveWritersEnding,
   liveWritersRefusal,
   listDetachedRuns,
   otherLiveWriters,
@@ -238,6 +239,7 @@ import {
   type LayoutPlan,
 } from '../engine/layout.js';
 import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
+import { planMarksBack } from '../engine/marksBack.js';
 import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
@@ -1113,7 +1115,11 @@ program
     // keys carried — not just the two an earlier cut checked here, which let
     // a plan with only a pending order entry or only a view-prefs carry print
     // the generic restart line instead of pointing at `foster layout`.
-    const layoutPending = totalLayoutPending(report.layout) > 0;
+    //
+    // A sweep that marked rows goes through `foster layout` too, even with no
+    // layout pending: its gap is the one that writes back any mark the running
+    // app saves over in the meantime (`engine/marksBack.ts`).
+    const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
     const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
 
     if (opts.json) {
@@ -1135,6 +1141,7 @@ program
                   vbs: outcome.plan.vbsPath,
                   delaySeconds: outcome.plan.delaySeconds,
                   argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
                 }
               : { detached: false, error: outcome.reason },
         });
@@ -1443,6 +1450,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,
     layout: report.layout,
+    rounds: report.rounds ?? 1,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
   };
 }
@@ -1468,8 +1476,19 @@ async function sweepRestart(
 }
 
 /**
+ * Whether this sweep put a mark on any row — which the running app may yet save
+ * back over, so the restart that finishes it goes through a gap that writes
+ * them again: `deferredPinsGap` in-process, `foster layout` when detached.
+ */
+function sweepMarked(report: SweepReport): boolean {
+  return [...report.branches.retitled, ...report.files.retitled].some(
+    (outcome) => outcome.status === 'retitled',
+  );
+}
+
+/**
  * The one write a sweep does make in its own restart gap: the pin moves its pin
- * pass had to defer because the app was open (ngine/pinMoves.ts). A sweep that
+ * pass had to defer because the app was open (`engine/pinMoves.ts`). A sweep that
  * restarts the app itself has the closed-app window those need right there, and
  * handing the user `foster layout --yes --restart` instead would cost a second
  * full restart for a single record. Groups and routines stay `foster layout`'s,
@@ -1482,7 +1501,10 @@ function deferredPinsGap(
   target: AccountRef,
   report: SweepReport,
 ): (() => void) | undefined {
-  if (!report.pinFixes.deferred) return undefined;
+  // The marks the app saved back over while the sweep ran are only knowable
+  // now, once it has closed — so a sweep that wrote any mark opens the gap for
+  // them even when no pin was deferred (`engine/marksBack.ts`).
+  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
   return () => {
     // A failure leaves the move pending for the next `foster layout`, the same
     // as `applyLayout` treats it — never a reason the restart itself failed.
@@ -1491,6 +1513,9 @@ function deferredPinsGap(
     } catch {
       // still pending
     }
+    // One card at a time and never throwing: `retitleCards` records a failure
+    // rather than raising it, and the next `foster layout` looks again.
+    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
   };
 }
 
@@ -1507,6 +1532,8 @@ interface DetachOutcome {
   reason?: string;
   plan?: DetachedPlan;
   launch?: DetachLaunchResult;
+  /** Other live sessions the restart will end, named — set only under `--detach-even-with-live`. */
+  ending?: string;
 }
 
 async function runDetach(
@@ -1521,6 +1548,10 @@ async function runDetach(
   if (others.length > 0 && !evenWithLive) {
     return { ok: false, reason: liveWritersRefusal(others) };
   }
+  // Overridden, the same list is still the one thing worth saying before the
+  // restart lands: which sessions it is about to end, named, so the person who
+  // asked for it can see what went with the app.
+  const ending = others.length > 0 ? liveWritersEnding(others) : undefined;
 
   const plan = planDetached({
     argv,
@@ -1531,7 +1562,7 @@ async function runDetach(
 
   try {
     const launch = launchDetached(plan);
-    return { ok: true, plan, launch };
+    return { ok: true, plan, launch, ...(ending ? { ending } : {}) };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error), plan };
   }
@@ -1549,6 +1580,7 @@ function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string)
         vbs: outcome.plan.vbsPath,
         delaySeconds: outcome.plan.delaySeconds,
         argv: outcome.plan.argv,
+        ...(outcome.ending ? { ending: outcome.ending } : {}),
       });
       return;
     }
@@ -1559,6 +1591,7 @@ function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string)
 
   if (outcome.ok && outcome.plan && outcome.launch) {
     if (note) console.log(pc.dim(`\n${note}`));
+    if (outcome.ending) console.log(pc.yellow(`\n${outcome.ending}`));
     console.log(
       pc.bold(
         `\nDetached (pid ${outcome.launch.pid} via ${outcome.launch.via}). In ~` +
@@ -2807,6 +2840,7 @@ program
                   vbs: outcome.plan.vbsPath,
                   delaySeconds: outcome.plan.delaySeconds,
                   argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
                 }
               : { detached: false, error: outcome.reason },
         });

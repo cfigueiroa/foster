@@ -167,6 +167,12 @@ export interface DiscoveredSession {
   isStranded: boolean;
   /** Empty when the session can be fostered normally. */
   reasons: Unfosterable[];
+  /**
+   * True when the scan left the card's bulky fields out of `data` — see
+   * `BULKY_CARD_FIELDS` in `store/sessionFile.ts`. A write that copies the whole
+   * card reads them back with `withBulkyFields` first.
+   */
+  slim?: boolean;
 }
 
 export interface StoreLayout {

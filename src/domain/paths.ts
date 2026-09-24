@@ -81,6 +81,11 @@ export function accountDir(store: StoreLayout, account: AccountRef): string {
   return path.join(store.codeSessionsDir, account.accountUuid, account.organizationUuid);
 }
 
+/** One account directory: the same account in the same organization. */
+export function sameAccount(a: AccountRef, b: AccountRef): boolean {
+  return a.accountUuid === b.accountUuid && a.organizationUuid === b.organizationUuid;
+}
+
 export function sessionPath(store: StoreLayout, account: AccountRef, sessionId: string): string {
   return path.join(accountDir(store, account), sessionFileName(sessionId));
 }
