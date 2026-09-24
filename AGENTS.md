@@ -265,6 +265,24 @@ never refused for it. A card the app rewrites in the meantime simply keeps (or r
 on disk, which the next `foster unclaim` or sweep pass finds and releases again — the change itself
 only becomes visible at the app's next restart, the same as a retitle.
 
+## The ledger fold: one active fostering per copy, not per key
+
+`LedgerState.active` (`src/ledger/project.ts`) is keyed on the copy's own session id, not on
+`fosteringKey(originSessionId, target, cliSessionId)`. The second-file path above is exactly why:
+`resolveExisting` (`src/engine/executor.ts`) legitimately writes a _second_ `fostered` event under
+one idempotency key when the first copy is still on disk but the offered card's own file reaches
+records it cannot — both copies are current, and keying the fold on the idempotency key let the
+second event overwrite the first, silently dropping the older copy from `listActive` forever
+(`return`, `unclaim`, `titleSync`, `consolidate` and everything else that reads `active` never saw
+it again, though the file itself was still there). Measured against the real ledger: 275 `fostered`
+events had overwritten a still-active key this way, all recovered by the fix with no migration
+event — `activeByKey` (a `fosteringKey -> Set<copySessionId>` reverse index) is a pure fold over
+the same log, folded fresh on every read. `isFostered` and the executor's own idempotency check
+read `activeByKey`; nothing else needs it, since everything else already enumerates copies through
+`listActive`/`active.values()`. `copySessionId` is what makes keying on it safe: every copy mints
+one from `mintSessionId()` (`domain/fostering.ts`), global and never reused, so two copies can
+never collide there the way two writes to the same idempotency key routinely do.
+
 ## You cannot restart the app from a session the app started — except through `--detach`
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the

@@ -106,22 +106,77 @@ describe('projection', () => {
     expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(false);
   });
 
-  it('keys idempotency on origin session and target account, not on the copy id', () => {
-    // Re-fostering mints a different copy id, so the file itself can never be the key.
+  it(
+    'keeps both copies active when a second fostered event shares a key — #63, the ' +
+      'second-file path',
+    () => {
+      // `resolveExisting` (engine/executor.ts) legitimately writes a second
+      // `fostered` event under the very key the first one used, when the first
+      // copy is still on disk but the offered card's own file reaches records it
+      // cannot (a second file of one conversation). Both copies are current, so
+      // folding this must keep both — keying `active` on the fostering key
+      // instead of on the copy id used to let the second event overwrite the
+      // first, silently orphaning it: measured against the real ledger, 275
+      // `fostered` events did this.
+      const state = project([
+        { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
+        { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', copySessionId: 'local_copy-2' },
+      ]);
+
+      expect(listActive(state)).toHaveLength(2);
+      expect(
+        listActive(state)
+          .map((f) => f.copySessionId)
+          .sort(),
+      ).toEqual(['local_copy-1', 'local_copy-2']);
+      expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(true);
+    },
+  );
+
+  it('returns both copies filed under one key — neither hides the other', () => {
     const state = project([
       { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
       { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', copySessionId: 'local_copy-2' },
+      {
+        kind: 'returned',
+        v: 1,
+        ts: 30,
+        toolVersion: '0.1.0',
+        originSessionId: 'local_origin-1',
+        target: NEW_ACCOUNT,
+        copySessionId: 'local_copy-1',
+      },
+      {
+        kind: 'returned',
+        v: 1,
+        ts: 40,
+        toolVersion: '0.1.0',
+        originSessionId: 'local_origin-1',
+        target: NEW_ACCOUNT,
+        copySessionId: 'local_copy-2',
+      },
     ]);
 
-    expect(listActive(state)).toHaveLength(1);
-    expect(listActive(state)[0]!.copySessionId).toBe('local_copy-2');
+    expect(listActive(state)).toHaveLength(0);
+    expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(false);
   });
 
   it('treats the same session in a different target account as a separate fostering', () => {
     const other = { accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', organizationUuid: 'x' };
     const state = project([
       { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
-      { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', target: other },
+      // A real second copy always mints its own id (`mintSessionId`, global —
+      // never scoped to a target account), which is what lets `active` be keyed
+      // on the copy id alone. Reusing `local_copy-1` here would collide on that
+      // key the way two real copies never do.
+      {
+        ...fostered,
+        v: 1,
+        ts: 20,
+        toolVersion: '0.1.0',
+        target: other,
+        copySessionId: 'local_copy-2',
+      },
     ]);
 
     expect(listActive(state)).toHaveLength(2);
