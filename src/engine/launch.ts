@@ -7,9 +7,10 @@ import { readClientIdentity } from '../store/clients.js';
 import { configDirCandidates, looksLikeClient } from '../store/configDirs.js';
 import { writerAlive, type WriterCheck } from '../store/liveSessions.js';
 import { isDirectory } from '../util/fs.js';
-import { encodePsCommand } from '../util/powershell.js';
+import { encodePsCommand, psSingleQuote } from '../util/powershell.js';
 import { scrubbedEnv } from './launchEnv.js';
 import { inspectPointer } from './pointer.js';
+import { sanitizeTitle } from './rescue.js';
 import { clobberersIn } from './switch.js';
 
 /**
@@ -237,7 +238,15 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
   const signedIn = hasCredential(effectiveConfigDir);
   const who = identity?.email ?? (signedIn ? 'signed-in' : 'signed-out');
   const slug = clientNameOf(effectiveConfigDir, home);
-  const title = `${slug}·${who}`.replace(/\s+/g, '-');
+  // `slug` is a directory basename and `who` is the CLI's own cached email
+  // claim (`readClientIdentity`) — both read off disk, neither chosen by
+  // this process. `wt` splits its command line on a literal `;` even inside
+  // a quoted argv element (see `buildPsCommand`'s comment and
+  // `sanitizeTitle`'s own, in rescue.ts, which this reuses rather than
+  // duplicating), and `hasQuoteOrControlChar` above never screens `;` at
+  // all — so an untrusted `;` in either half must be neutralized here,
+  // before it ever reaches `--title`.
+  const title = sanitizeTitle(`${slug}·${who}`).replace(/\s+/g, '-');
 
   const scrubbed = scrubbedEnv(env);
   const psCommand = buildPsCommand(effectiveConfigDir, claudeArgs);
@@ -423,10 +432,6 @@ function hasQuoteOrControlChar(value: string): boolean {
   return false;
 }
 
-function quoteSingle(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
 /**
  * Every `claude` argument is single-quoted unconditionally, not just the ones
  * that look like they need it. A single-quoted PowerShell string is always
@@ -434,10 +439,12 @@ function quoteSingle(value: string): string {
  * escapes — so this is the one form that is safe for a value this module did
  * not choose. Quoting only on whitespace or an apostrophe (the earlier rule)
  * let anything else — `$(...)`, backticks, `;` — pass through unquoted and
- * run in the tab's shell before `claude` itself ever started.
+ * run in the tab's shell before `claude` itself ever started. `psSingleQuote`
+ * (`util/powershell.ts`) is the same helper `buildPsCommand` below already
+ * uses for `configDir` — this just stops it being reimplemented here too.
  */
 function quoteArg(value: string): string {
-  return quoteSingle(value);
+  return psSingleQuote(value);
 }
 
 /**
@@ -449,7 +456,7 @@ function quoteArg(value: string): string {
  */
 function buildPsCommand(configDir: string, claudeArgs: string[]): string {
   const cleanup = 'Get-ChildItem Env:CLAUDE* | Remove-Item -ErrorAction SilentlyContinue';
-  const setConfigDir = `$env:CLAUDE_CONFIG_DIR=${quoteSingle(configDir)}`;
+  const setConfigDir = `$env:CLAUDE_CONFIG_DIR=${psSingleQuote(configDir)}`;
   const invocation = ['claude', ...claudeArgs.map(quoteArg)].join(' ');
   return `${cleanup}; ${setConfigDir}; ${invocation}`;
 }

@@ -323,6 +323,30 @@ describe('planLaunch: the command line', () => {
     expect(plan.blockers[0]).toContain('quote or control character');
   });
 
+  it('strips a semicolon out of the --title argument, not just the pwsh payload', () => {
+    // `hasQuoteOrControlChar` screens `"` and control characters, never `;`
+    // — a directory Windows will actually let you create can hold one, and
+    // `slug` (this directory's own basename, via `clientNameOf`) feeds
+    // straight into `--title` unsanitized. `wt` splits its command line on
+    // a literal `;` even inside a quoted argv element (the same fact
+    // `buildPsCommand`'s `-EncodedCommand` switch works around for the pwsh
+    // payload), so an untouched `;` here reopens the same hole for the
+    // `--title` argument this PR closed for everything else — the new tab
+    // could come up with no `CLAUDE_CONFIG_DIR` set at all.
+    const h = home();
+    const dir = path.join(scratch(), 'evilclient;pwn me');
+    mkdirSync(dir, { recursive: true });
+
+    const plan = planLaunch(dir, baseOpts({ home: h }));
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.title).toBeDefined();
+    expect(plan.title).not.toMatch(/;/);
+    const titleIndex = plan.args!.indexOf('--title');
+    expect(titleIndex).toBeGreaterThan(-1);
+    expect(plan.args![titleIndex + 1]).not.toMatch(/;/);
+  });
+
   it('gives a hyphenated title, so `wt` does not split it on a space', () => {
     const h = home();
     signIn(path.join(h, '.claude-work'), 'a b@example.com');
