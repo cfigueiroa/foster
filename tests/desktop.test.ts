@@ -12,6 +12,7 @@ import {
   trayNote,
   desktopExecutable,
   deliverUrl,
+  userDataDirArg,
   type ProcessRow,
   type QuitOptions,
 } from '../src/engine/desktop.js';
@@ -752,6 +753,34 @@ describe('starting the app', () => {
   });
 });
 
+describe('userDataDirArg', () => {
+  /**
+   * The `-Args` value `launchProfileAppWithIdentity` hands
+   * `Invoke-CommandInDesktopPackage` — see desktop.ts's own doc comment for
+   * the two layers of quoting this has to survive. Tested at this level
+   * because the function that embeds it spawns real PowerShell, which unit
+   * tests must not do.
+   */
+  it('wraps a plain path in double quotes, so a space in it stays one argument', () => {
+    expect(userDataDirArg('C:\\Claude Work')).toBe('--user-data-dir="C:\\Claude Work"');
+  });
+
+  it('leaves a path with no space or quote alone but for the wrapping', () => {
+    expect(userDataDirArg('C:\\home\\profile')).toBe('--user-data-dir="C:\\home\\profile"');
+  });
+
+  it('doubles a single quote, so it does not end the PowerShell string literal early', () => {
+    // A surname like O'Brien in a profile path — without this, the PowerShell
+    // single-quoted string this value is embedded in would terminate at the
+    // quote, breaking the rest of the -Command script.
+    expect(userDataDirArg("D:\\Claude\\O'Brien")).toBe('--user-data-dir="D:\\Claude\\O\'\'Brien"');
+  });
+
+  it('handles both a space and a quote in the same path', () => {
+    expect(userDataDirArg("D:\\O'Brien's Work")).toBe("--user-data-dir=\"D:\\O''Brien''s Work\"");
+  });
+});
+
 describe('starting a profile with package identity', () => {
   /**
    * Not a real machine path (this repo is public) — the same shape measured
@@ -995,6 +1024,8 @@ describe('desktopExecutable', () => {
       desktopExecutable(
         () => undefined,
         () => table,
+        {},
+        () => undefined,
       ),
     ).toBe(DESKTOP);
   });
@@ -1004,8 +1035,77 @@ describe('desktopExecutable', () => {
       desktopExecutable(
         () => undefined,
         () => [],
+        {},
+        () => undefined,
       ),
     ).toBeUndefined();
+  });
+
+  /**
+   * Measured 24/09/2026: `readProtocolCommand`'s registry key only exists
+   * inside the app's own MSIX container (AGENTS.md, "The registry has two
+   * views") — from an ordinary terminal, with the app closed, both it and the
+   * process table have nothing, and `Get-AppxPackage`'s InstallLocation is the
+   * one source left that is readable from outside the container without the
+   * app running. `installedAppId` finds the family from a live row's own
+   * `\WindowsApps\` path here — its other route, `candidateStoreRoots`, reads
+   * the real filesystem and is exercised in `installedAppId`'s own tests
+   * instead of depending on it here too.
+   */
+  it('derives the executable from the package when nothing is registered or running', () => {
+    const table = rows({
+      pid: 900,
+      parentPid: 1,
+      name: 'Claude.exe',
+      path: 'C:\\Program Files\\WindowsApps\\Claude_9.9.9.0_x64__abc\\app\\Claude.exe',
+      commandLine: '',
+    });
+    const seen: string[] = [];
+    const packageInstallLocation = (familyName: string): string | undefined => {
+      seen.push(familyName);
+      // The Package Family Name only — Invoke-CommandInDesktopPackage's -AppId
+      // is a separate parameter, and Get-AppxPackage's own PackageFamilyName
+      // never carries it either.
+      return familyName === 'Claude_abc'
+        ? 'C:\\Program Files\\WindowsApps\\Claude_9.9.9.0_x64__abc'
+        : undefined;
+    };
+
+    const result = desktopExecutable(
+      () => undefined,
+      () => table,
+      {},
+      packageInstallLocation,
+    );
+
+    expect(seen).toEqual(['Claude_abc']);
+    expect(result).toBe('C:\\Program Files\\WindowsApps\\Claude_9.9.9.0_x64__abc\\app\\Claude.exe');
+  });
+
+  it('never runs a package lookup when nothing named the family — no PowerShell for its own sake', () => {
+    let calls = 0;
+    desktopExecutable(
+      () => undefined,
+      () => [],
+      {},
+      () => {
+        calls++;
+        return undefined;
+      },
+    );
+    expect(calls).toBe(0);
+  });
+
+  it('falls through to the process table when the package lookup finds nothing', () => {
+    const table = rows({ pid: 500, parentPid: 9 });
+    expect(
+      desktopExecutable(
+        () => undefined,
+        () => table,
+        {},
+        () => undefined,
+      ),
+    ).toBe(DESKTOP);
   });
 });
 
@@ -1259,6 +1359,26 @@ describe('inspectDesktopFor', () => {
     const state = inspectDesktopFor(profile(ONE), () => table, {});
     expect(state.running).toBe(false);
     expect(state.uncertain).toMatch(/tasklist/);
+  });
+
+  /**
+   * `hostedElsewhere` used to take its own `ProcessLister` and call it again to
+   * ask `runningStores` its question, reading the process table twice for one
+   * `inspectDesktopFor` call — a real spawn of PowerShell each time in
+   * production. It now takes the rows this function already read.
+   */
+  it('reads the process table only once, even when the hosted-session marker sends it looking elsewhere', () => {
+    let calls = 0;
+    const table = rows({ pid: 500, parentPid: 9 });
+    const list = () => {
+      calls++;
+      return table;
+    };
+    const env = { CLAUDE_CODE_HOST_SESSION_ID: '00000000-0000-4000-8000-00000000000a' };
+
+    inspectDesktopFor(profile(ONE), list, env);
+
+    expect(calls).toBe(1);
   });
 });
 

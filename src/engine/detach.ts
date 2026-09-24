@@ -4,8 +4,10 @@ import path from 'node:path';
 import { isSelfHostedBy, isSelfSession, type LiveCliSession } from '../store/liveSessions.js';
 import {
   execFileSyncRunner,
+  readProcesses,
   systemExePath,
   type CommandRunner,
+  type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
 import { fileExists, safeReaddir } from '../util/fs.js';
@@ -240,6 +242,26 @@ export function planDetached(options: PlanDetachedOptions): DetachedPlan {
   const vbsPath = path.join(dir, `${stamp}-${verb}.vbs`);
   const logPath = path.join(dir, `${stamp}-${verb}.log`);
 
+  // `cleanArgv` above is checked because it comes from whoever invoked
+  // `foster ... --detach`; these three come from the machine's own
+  // environment and this build's own paths (`logPath` folds in `FOSTER_HOME`;
+  // `execPath` and `scriptPath` are `process.execPath` and `process.argv[1]`)
+  // — no less able to carry a `%` or a `"` that would break the cmd.exe
+  // compound line this builds. A `%` in `FOSTER_HOME` passed silently before
+  // this check existed.
+  for (const [name, value] of [
+    ['the log path (FOSTER_HOME)', logPath],
+    ['the node executable path', execPath],
+    ['the running script path', scriptPath],
+  ] as const) {
+    if (CMD_UNSAFE.test(value)) {
+      throw new Error(
+        `--detach cannot run: ${name} contains a character the cmd.exe line would misread: ` +
+          `${JSON.stringify(value)}.`,
+      );
+    }
+  }
+
   const pingCount = delaySeconds + 1;
   const quotedLog = quoteForCmd(logPath);
   const quotedExec = quoteForCmd(execPath);
@@ -287,17 +309,43 @@ function parseWmicCreatePid(stdout: string): number | undefined {
 }
 
 /**
+ * A `wscript.exe` already running the exact `.vbs` this `commandLine`
+ * (`wscript.exe "<vbsPath>"`) names — from the process table `launchWithFallback`
+ * below is given.
+ *
+ * `Invoke-CimMethod ... Create` submits the request to WMI and the process it
+ * creates lives independently of the PowerShell client that asked for it: a
+ * client that times out waiting for the reply does not undo a `Create` that
+ * had already gone through by the time the timeout fired. Falling straight to
+ * the `wmic` fallback on that timeout, as this used to unconditionally,
+ * risked launching a SECOND detached process — two quit/restart cycles, the
+ * first one started by the call this treated as failed. Checked only when
+ * `launchWithFallback` actually asks (a PowerShell timeout, never a `missing`
+ * or outright `failed` result, which never got far enough to plausibly have
+ * submitted anything).
+ */
+function findLaunchedWscript(commandLine: string, rows: ProcessRow[]): ProcessRow | undefined {
+  const vbsPath = /"([^"]+)"/.exec(commandLine)?.[1];
+  if (!vbsPath) return undefined;
+  return rows.find(
+    (row) => row.name.toLowerCase() === 'wscript.exe' && row.commandLine.includes(vbsPath),
+  );
+}
+
+/**
  * The default launcher: PowerShell's `Invoke-CimMethod ... Win32_Process Create`
  * first, `wmic process call create` if that fails — the same order and the same
  * reason `readProcesses` falls back (`src/util/processes.ts`): PowerShell can
  * hang at start-up on this machine rather than fail quickly. `run` is the same
  * `CommandRunner` seam `src/util/processes.ts` tests inject, so this fallback is
- * exercised without ever spawning PowerShell or wmic for real.
+ * exercised without ever spawning PowerShell or wmic for real. `list` is the
+ * same seam for the process-table check a timeout triggers, below.
  */
 export function launchWithFallback(
   commandLine: string,
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = execFileSyncRunner,
+  list: ProcessLister = readProcesses,
 ): DetachLaunchResult {
   const escapedForPs = commandLine.replace(/'/g, "''");
   const psScript =
@@ -319,6 +367,10 @@ export function launchWithFallback(
     psFailure.push(
       `PowerShell ${psOutcome.reason}${psOutcome.detail ? `: ${psOutcome.detail}` : ''}`,
     );
+    if (psOutcome.reason === 'timeout') {
+      const already = findLaunchedWscript(commandLine, list());
+      if (already) return { pid: already.pid, via: 'PowerShell' };
+    }
   }
 
   const wmicExe = systemExePath('wbem\\wmic.exe', env);
@@ -355,7 +407,14 @@ export function launchDetached(
   }
   const env = deps.env ?? process.env;
   mkdirSync(path.dirname(plan.vbsPath), { recursive: true });
-  writeFileSync(plan.vbsPath, plan.vbsText, 'utf8');
+  // wscript.exe reads a .vbs with no byte-order mark as the system's ANSI code
+  // page, not UTF-8 — a non-ASCII FOSTER_HOME or node install path (the same
+  // "ô" case util/processes.ts measures) silently breaks the script with no
+  // log line at all, because the corruption is in the very first statements
+  // that would open the log. UTF-16LE with a BOM is what wscript recognises
+  // unambiguously; `'\uFEFF' + text` encoded as 'utf16le' writes the BOM as
+  // its own correct little-endian bytes (FF FE), not the UTF-8 spelling of it.
+  writeFileSync(plan.vbsPath, `\uFEFF${plan.vbsText}`, 'utf16le');
   const launch =
     deps.launch ??
     ((commandLine: string, e: NodeJS.ProcessEnv) => launchWithFallback(commandLine, e));

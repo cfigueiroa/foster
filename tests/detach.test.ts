@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -20,7 +20,7 @@ import {
   vbsBuiltinCollision,
   type DetachedPlan,
 } from '../src/engine/detach.js';
-import type { CommandOutcome, CommandRunner } from '../src/util/processes.js';
+import type { CommandOutcome, CommandRunner, ProcessRow } from '../src/util/processes.js';
 import type { LiveCliSession } from '../src/store/liveSessions.js';
 
 function tmpHome(): string {
@@ -85,6 +85,25 @@ describe('planDetached', () => {
     for (const bad of ['a"b', 'a%b', 'a&b', 'a|b', 'a<b', 'a>b', 'a^b', 'a\nb']) {
       expect(() => planDetached(baseOptions(env, { argv: ['sweep', bad] }))).toThrow();
     }
+  });
+
+  /**
+   * Measured 24/09/2026: only `cleanArgv` was checked against CMD_UNSAFE — a
+   * `%` in FOSTER_HOME (folded into `logPath`), the node executable path or
+   * the running script path passed silently and reached the cmd.exe compound
+   * line unescaped.
+   */
+  it('refuses a FOSTER_HOME, node executable path or script path that would break the cmd.exe line', () => {
+    const home = tmpHome();
+    expect(() => planDetached(baseOptions({ FOSTER_HOME: path.join(home, 'a%b') }))).toThrow(
+      /cmd\.exe line would misread/,
+    );
+    expect(() =>
+      planDetached(baseOptions({ FOSTER_HOME: home }, { execPath: 'C:\\a%b\\node.exe' })),
+    ).toThrow(/cmd\.exe line would misread/);
+    expect(() =>
+      planDetached(baseOptions({ FOSTER_HOME: home }, { scriptPath: 'C:\\a"b\\foster.js' })),
+    ).toThrow(/cmd\.exe line would misread/);
   });
 
   it('names the vbs and log after a local timestamp and the leading verb', () => {
@@ -183,6 +202,70 @@ describe('launchWithFallback', () => {
       ),
     ).toThrow(/PowerShell.*timeout|timed out|missing/i);
   });
+
+  /**
+   * Measured/reasoned 24/09/2026: `Invoke-CimMethod ... Create` submits the
+   * request to WMI independently of the PowerShell client waiting for the
+   * reply — a timeout kills the client, not necessarily a Create that had
+   * already gone through. Falling straight to wmic on every timeout, as this
+   * used to, could launch a SECOND detached process: two quit/restart cycles.
+   */
+  describe('the process-table check a PowerShell timeout triggers', () => {
+    function wscriptRow(commandLine: string): ProcessRow {
+      return { pid: 7777, parentPid: 1, name: 'wscript.exe', path: '', commandLine };
+    }
+
+    it('finds the already-launched wscript and never falls back to wmic', () => {
+      let wmicCalled = false;
+      const run: CommandRunner = (exe) => {
+        if (exe.toLowerCase().includes('powershell')) return { ok: false, reason: 'timeout' };
+        wmicCalled = true;
+        return { ok: true, stdout: 'ProcessId = 9999;\nReturnValue = 0;' };
+      };
+      const list = () => [wscriptRow('wscript.exe "C:\\home\\.foster\\detached\\x.vbs"')];
+
+      const result = launchWithFallback(
+        'wscript.exe "C:\\home\\.foster\\detached\\x.vbs"',
+        { SystemRoot: 'C:\\W' },
+        run,
+        list,
+      );
+
+      expect(result).toEqual({ pid: 7777, via: 'PowerShell' });
+      expect(wmicCalled).toBe(false);
+    });
+
+    it('still falls back to wmic when the process table shows nothing for this vbs', () => {
+      const result = launchWithFallback(
+        'wscript.exe "C:\\home\\.foster\\detached\\x.vbs"',
+        { SystemRoot: 'C:\\W' },
+        runner({
+          powershell: { ok: false, reason: 'timeout' },
+          wmic: { ok: true, stdout: 'ProcessId = 4321;\nReturnValue = 0;' },
+        }),
+        () => [],
+      );
+      expect(result).toEqual({ pid: 4321, via: 'wmic' });
+    });
+
+    it('never checks the process table for a PowerShell failure that is not a timeout', () => {
+      let listCalled = false;
+      const result = launchWithFallback(
+        'wscript.exe "C:\\home\\.foster\\detached\\x.vbs"',
+        { SystemRoot: 'C:\\W' },
+        runner({
+          powershell: { ok: false, reason: 'missing' },
+          wmic: { ok: true, stdout: 'ProcessId = 4321;\nReturnValue = 0;' },
+        }),
+        () => {
+          listCalled = true;
+          return [wscriptRow('wscript.exe "C:\\home\\.foster\\detached\\x.vbs"')];
+        },
+      );
+      expect(listCalled).toBe(false);
+      expect(result).toEqual({ pid: 4321, via: 'wmic' });
+    });
+  });
 });
 
 describe('launchDetached', () => {
@@ -211,6 +294,37 @@ describe('launchDetached', () => {
     expect(() =>
       launchDetached(plan, { platform: 'linux', launch: () => ({ pid: 1, via: 'PowerShell' }) }),
     ).toThrow(/Windows-only/);
+  });
+
+  /**
+   * wscript.exe reads a .vbs with no byte-order mark as the system's ANSI
+   * code page, not UTF-8 — a non-ASCII FOSTER_HOME or node install path broke
+   * the script silently, with no log line at all, because the corruption hit
+   * the very first statements that would open the log. UTF-16LE with a BOM
+   * (0xFF 0xFE) is what wscript recognises unambiguously.
+   */
+  it('writes the vbs as UTF-16LE with a byte-order mark, not UTF-8', () => {
+    const home = tmpHome();
+    const plan = fixturePlan(home);
+    launchDetached(plan, { platform: 'win32', launch: () => ({ pid: 1, via: 'PowerShell' }) });
+
+    const bytes = readFileSync(plan.vbsPath);
+    expect(bytes[0]).toBe(0xff);
+    expect(bytes[1]).toBe(0xfe);
+    expect(bytes.subarray(2).toString('utf16le')).toBe(plan.vbsText);
+  });
+
+  it('round-trips a non-ASCII FOSTER_HOME through the written file', () => {
+    // The measured failure case: "ô" in a path, the same character
+    // util/processes.ts's own encoding fix was written against.
+    const home = mkdtempSync(path.join(tmpdir(), 'foster-detach-ô-'));
+    const plan = planDetached(baseOptions({ FOSTER_HOME: home }, { argv: ['app', 'restart'] }));
+    launchDetached(plan, { platform: 'win32', launch: () => ({ pid: 1, via: 'PowerShell' }) });
+
+    const bytes = readFileSync(plan.vbsPath);
+    const text = bytes.subarray(2).toString('utf16le');
+    expect(text).toContain('ô');
+    expect(plan.logPath).toContain('ô');
   });
 });
 

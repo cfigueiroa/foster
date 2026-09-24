@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { win32 } from 'node:path';
 import type { StoreLayout } from '../domain/types.js';
 import {
   candidateStoreRoots,
@@ -10,6 +11,7 @@ import {
 } from '../domain/paths.js';
 import { closingWindowQuits } from '../store/config.js';
 import {
+  execFileSyncRunner,
   isCodeCliProcess,
   mainWindowVisible,
   parseProcessCsv,
@@ -17,6 +19,7 @@ import {
   readProcesses,
   regExePath,
   systemExePath,
+  type CommandRunner,
   type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
@@ -186,8 +189,17 @@ export interface DesktopState {
  * this the only way to tell someone what to point `--store` at.
  */
 export function runningStores(list: ProcessLister = readProcesses): string[] {
+  return runningStoresFromRows(list());
+}
+
+/**
+ * `runningStores`'s own logic, over rows a caller already has — `inspectDesktopFor`
+ * below reads the process table once for its own purposes and would otherwise
+ * make `hostedElsewhere` read it again just to ask this same question.
+ */
+function runningStoresFromRows(rows: ProcessRow[]): string[] {
   const dirs = new Set<string>();
-  for (const row of list()) {
+  for (const row of rows) {
     if (row.name.toLowerCase() !== 'claude.exe') continue;
     // A partial row (tasklist) has no command line at all, so `--user-data-dir`
     // can never be read out of it — skipped explicitly rather than relying on
@@ -251,8 +263,10 @@ export function inspectDesktopFor(
       });
 
   // Ancestry is already scoped — the rows above are this instance's — so only the
-  // environment marker still needs narrowing to this store.
-  const scoped = hostedElsewhere(identity, env, list)
+  // environment marker still needs narrowing to this store. `allRows` is handed
+  // through rather than `list` itself, so hostedElsewhere's own runningStores
+  // question is answered from the read already above instead of a second one.
+  const scoped = hostedElsewhere(identity, env, allRows)
     ? { ...env, CLAUDE_CODE_HOST_SESSION_ID: undefined }
     : env;
 
@@ -272,23 +286,28 @@ export function inspectDesktopFor(
  * says nothing and the refusal stands: over-refusing costs a manual restart,
  * while under-refusing kills the caller.
  *
- * A partial table (tasklist) makes `runningStores` below name nothing at all —
- * it has no command lines to read a profile out of — so on a partial table this
- * can only ever find the environment marker's own store, never "some other
- * store the marker might belong to". The refusal stands in that case too, for
- * the same reason: it is the safe side, and unchanged by what caused it.
+ * A partial table (tasklist) makes `runningStoresFromRows` below name nothing
+ * at all — it has no command lines to read a profile out of — so on a partial
+ * table this can only ever find the environment marker's own store, never
+ * "some other store the marker might belong to". The refusal stands in that
+ * case too, for the same reason: it is the safe side, and unchanged by what
+ * caused it.
+ *
+ * Takes the rows `inspectDesktopFor` already read (`allRows`) rather than a
+ * `ProcessLister` of its own — the process table is otherwise read twice for
+ * one call, once here and once by the caller.
  */
 function hostedElsewhere(
   identity: StoreIdentity,
   env: NodeJS.ProcessEnv,
-  list: ProcessLister,
+  allRows: ProcessRow[],
 ): boolean {
   const hosted = env.CLAUDE_CODE_HOST_SESSION_ID;
   if (!hosted) return false;
   if (identity.roots.some((root) => storeHoldsSession(root, hosted))) return false;
   // Every other store there is: the installations this environment knows about,
   // plus the profiles only their own command lines name.
-  const others = [...candidateStoreRoots(env), ...runningStores(list)];
+  const others = [...candidateStoreRoots(env), ...runningStoresFromRows(allRows)];
   return others.some((root) => storeHoldsSession(root, hosted));
 }
 
@@ -1033,6 +1052,25 @@ function appIdFromWindowsAppsPath(executablePath: string): string | undefined {
 }
 
 /**
+ * The `-Args` value `Invoke-CommandInDesktopPackage` hands to the packaged
+ * launch: the `--user-data-dir` switch, its path wrapped in `"…"` so a space
+ * in it survives the OS's own command-line splitting when the app is
+ * actually activated, with any `'` in the path doubled — this value is
+ * embedded in a PowerShell single-quoted string literal (`launchProfileAppWithIdentity`,
+ * below), and PowerShell reads a doubled `'` inside one as a single literal
+ * quote rather than the string's end.
+ *
+ * Measured 24/09/2026: unquoted, a profile at `D:\Claude Work` launched the
+ * WRONG store — `-Args` is itself parsed as a command line by the OS when the
+ * packaged app is activated, so the unquoted switch arrived as two argv
+ * tokens, `--user-data-dir=D:\Claude` and `Work`, and the app fell back to its
+ * default userData rather than the profile's own.
+ */
+export function userDataDirArg(root: string): string {
+  return `--user-data-dir="${root.replace(/'/g, "''")}"`;
+}
+
+/**
  * Starts a profile through `Invoke-CommandInDesktopPackage`, so its main
  * process carries the same package identity the installed app's own does —
  * see `startDesktop`'s docblock for why that is what makes the sign-in
@@ -1053,7 +1091,7 @@ function launchProfileAppWithIdentity(
   const psExe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
   const command =
     `Invoke-CommandInDesktopPackage -PackageFamilyName '${family}' -AppId '${application}' ` +
-    `-Command '${executable}' -Args '--user-data-dir=${root}'`;
+    `-Command '${executable}' -Args '${userDataDirArg(root)}'`;
   execFileSync(psExe, ['-NoProfile', '-NonInteractive', '-Command', command], {
     windowsHide: true,
     stdio: 'pipe',
@@ -1064,21 +1102,74 @@ function launchProfileAppWithIdentity(
 }
 
 /**
+ * `Get-AppxPackage`'s `InstallLocation` for one package family — read from the
+ * package itself, not the registry or the process table. The executable sits
+ * at `<InstallLocation>\app\Claude.exe`, measured against a real MSIX install
+ * 24/09/2026 (the same layout `underAppPackageDirectory`'s own doc comment
+ * measured: `…\WindowsApps\Claude_<version>_x64__<hash>\app\Claude.exe`).
+ * `'` in the family name is defensive — Windows never puts one there — doubled
+ * the same way `userDataDirArg` above escapes one for a PowerShell literal.
+ */
+function readPackageInstallLocation(
+  familyName: string,
+  env: NodeJS.ProcessEnv,
+  run: CommandRunner = execFileSyncRunner,
+): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const psExe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
+  const escaped = familyName.replace(/'/g, "''");
+  const script =
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; " +
+    `$p = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq '${escaped}' } | ` +
+    'Select-Object -First 1; if ($p) { Write-Output $p.InstallLocation }';
+  const outcome = run(psExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
+    timeoutMs: 20_000,
+    encoding: 'utf8',
+  });
+  if (!outcome.ok) return undefined;
+  const out = outcome.stdout.trim();
+  return out === '' ? undefined : out;
+}
+
+/**
  * Where the installed app's executable is.
  *
  * Windows records it when it registers the `claude://` handler, as a plain
  * command line with the URL as an argument — so the registry names the same
  * executable Windows itself would run, without any of the guessing that reading
- * a versioned package directory would need. A running instance is the fallback:
- * its path is right there in the process table.
+ * a versioned package directory would need. But that registry key
+ * (`readProtocolCommand`, `HKCU\Software\Classes\claude\shell\open\command`)
+ * is the classic per-user one, and — see AGENTS.md, "The registry has two
+ * views" — it only exists inside the app's own MSIX container: from an
+ * ordinary terminal it is empty. Measured 24/09/2026: with the app closed and
+ * this run from a plain PowerShell, both the registry and the process table
+ * had nothing, so `--store work app restart` quit the running default
+ * installation and then failed to start it back up — `startDesktop` had no
+ * executable to launch. `installedAppId` already derives the package's family
+ * name from a store root this environment knows about, with no dependency on
+ * either the registry or a running process, so `Get-AppxPackage` on that
+ * family (`readPackageInstallLocation`) is tried next, ahead of the process
+ * table — the one source here that is readable from outside the container
+ * and does not need the app to be running.
  */
 export function desktopExecutable(
   read: () => string | undefined = readProtocolCommand,
   list: ProcessLister = readProcesses,
   env: NodeJS.ProcessEnv = process.env,
+  packageInstallLocation: (
+    familyName: string,
+    env: NodeJS.ProcessEnv,
+  ) => string | undefined = readPackageInstallLocation,
 ): string | undefined {
   const registered = /"([^"]+\.exe)"/i.exec(read() ?? '')?.[1];
   if (registered) return registered;
+
+  const family = installedAppId(env, list)?.split('!')[0];
+  if (family) {
+    const installLocation = packageInstallLocation(family, env);
+    if (installLocation) return win32.join(installLocation, 'app', 'Claude.exe');
+  }
+
   const rows = list();
   return rows.find((row) => isDesktopProcess(row, rows, env))?.path;
 }

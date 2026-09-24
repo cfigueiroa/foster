@@ -304,6 +304,29 @@ function, and a variable named `Log` kills the script with an error dialog befor
 runs — `src/engine/detach.ts` never names one of its own variables after a VBScript built-in
 (`Log`, `Date`, `Time`, `Len`, …), and a test holds that promise.
 
+The `.vbs` is written as UTF-16LE with a byte-order mark (`'﻿' + text` encoded `'utf16le'`),
+not plain UTF-8. `wscript.exe` reads a `.vbs` with no BOM as the system's ANSI code page, and a
+non-ASCII `FOSTER_HOME` or node install path corrupted the script silently — no error dialog, no
+log line, because the corruption lands in the very statements that would open the log. Verified
+on this machine 24/09/2026: a throwaway `.vbs` carrying "ô" in a comment, written as UTF-8 with no
+BOM and run through `wscript.exe`, echoed it back as two garbled bytes (`0xC7 0xEF`) through a
+codepage-mangled double translation; the same text written as UTF-16LE with the BOM echoed the
+correct single OEM byte (`0x93`, cp850's "ô" — the same byte PowerShell's own OEM output uses,
+see two sections up). The `CMD_UNSAFE` check that guards `planDetached`'s cmd.exe compound line
+used to run only over the caller's own `argv`; it now also covers `logPath` (which folds in
+`FOSTER_HOME`), `execPath` and `scriptPath` — a `%` in any of those reached the line unescaped
+before.
+
+`launchWithFallback`'s PowerShell step (`Invoke-CimMethod ... Win32_Process Create`) submits the
+request to WMI independently of the PowerShell client waiting for the reply: a client that times
+out does not undo a `Create` that had already gone through by the time the timeout fired. Falling
+straight to the `wmic` fallback on every timeout, as this used to, risked launching a SECOND
+detached process — two quit/restart cycles, the first one started by the call this treated as
+failed. On a timeout specifically (never a `missing` or outright `failed` result, which never got
+far enough to plausibly have submitted anything), it now checks the process table for a
+`wscript.exe` already running the exact `.vbs` this call was about to launch, and reuses that pid
+instead of launching a second one.
+
 The session that launched a detached restart is gone by the time it lands — there is no way for
 it to say whether the write actually happened. `foster detached --last` is what reads that back,
 from `<FOSTER_HOME>/detached/<stamp>-<verb>.log`: pending (no `start` line yet), running (`start`
@@ -386,6 +409,40 @@ When PowerShell is stuck and you need the answer directly, these run without it:
 tasklist /fo csv /nh
 wmic process get ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,CreationDate /format:list
 ```
+
+## The process table's PowerShell reader forces UTF-8 output
+
+Measured 24/09/2026: `powershell.exe`'s redirected stdout is the console's OEM code page
+(cp850 on this machine), never UTF-8, regardless of what `util/processes.ts` decodes it as
+(`'utf8'`, throughout that file). `Write-Output 'ô'` piped to a file and read back as UTF-8
+comes back as the single byte `0x93` — U+FFFD, the replacement character — where the correct
+UTF-8 encoding of "ô" is the two bytes `0xC3 0xB4`. A profile whose path holds a non-ASCII
+character (a surname, say) had its `--user-data-dir` corrupted on the way in: `isDesktopProcess`
+and `resolveStoreArg` compare the corrupted string against the real path and never match, so
+`inspectDesktopFor` reports the profile not running, `app restart` starts a second instance
+beside the live one, and `app quit` has nothing it recognises to quit.
+
+The fix is one line, `[Console]::OutputEncoding=[Text.Encoding]::UTF8;`, prefixed to every
+PowerShell script this module and `engine/desktop.ts` run (the process-table query,
+`processPackageIdentity`, `mainWindowVisible`, and the new `Get-AppxPackage` lookup in
+`desktopExecutable`) — verified against a real `powershell.exe` on this machine: without the
+prefix `Write-Output 'ô'` round-trips as the single mangled byte above; with it, the correct
+two UTF-8 bytes come back and decode to "ô" again.
+
+`mainWindowVisible` and `processPackageIdentity` used to ignore the process-table reader's own
+`ReaderMemory` (`skipPowerShell`), so a hung PowerShell cost each of them the full 20 s on every
+call — `startDesktop`'s window-raise poll can call `mainWindowVisible` up to six times in three
+seconds. Both now default to the _same_ `ReaderMemory` `readProcesses()` writes to: once any one
+of the three has recorded a PowerShell failure this run, the other two skip straight to their
+own negative answer (`'unknown'` / `undefined`) without spawning anything. A caller that wants
+its own isolated memory (tests, mainly) still passes one explicitly.
+
+`inspectDesktopFor` (`src/engine/desktop.ts`) used to read the process table itself and then hand
+its own `hostedElsewhere` helper a separate `ProcessLister`, which called `runningStores` and read
+the table again — a real PowerShell spawn each time, twice per `inspectDesktopFor` call in
+production. `hostedElsewhere` now takes the rows `inspectDesktopFor` already read, and
+`runningStores`'s own matching logic moved to `runningStoresFromRows` so both call sites (the
+exported `runningStores(list)` and `hostedElsewhere`) share it without either reading twice.
 
 ## Reviving what a usage limit stopped
 
@@ -503,6 +560,34 @@ single-use code** — not in `app login`'s own output, not in `app link`, not an
 transcript could keep it. `foster app login --restore --yes` is the way out of a login left routed
 by a crash or a stray Ctrl+C; `foster doctor` reports the ProgID found and warns when `Parameters`
 is still routed to a profile.
+
+## Quoting a profile path for `Invoke-CommandInDesktopPackage`
+
+`launchProfileAppWithIdentity` (`src/engine/desktop.ts`) builds its `-Args` value — the
+`--user-data-dir` switch — as a plain PowerShell string, with no inner quoting of the path and no
+escaping of a `'` in it. `-Args` is itself parsed as a command line by the OS when the packaged
+app is actually activated, so a profile at `D:\Claude Work` used to launch the WRONG store: the
+unquoted switch split into two argv tokens, `--user-data-dir=D:\Claude` and `Work`, and the app
+fell back to its default userData. `userDataDirArg` now wraps the path in `"…"` (so a space
+survives the OS's own splitting) and doubles any `'` in it (so it does not end the PowerShell
+single-quoted string literal this value is itself embedded in early) — unit-tested directly
+(`tests/desktop.test.ts`), since the function that embeds it spawns real PowerShell.
+
+## Finding the installed executable from outside the app's container
+
+`desktopExecutable` used to try only the classic registry key (`readProtocolCommand`, which only
+exists inside the app's own MSIX container — see "The registry has two views" above) and then the
+process table. From an ordinary terminal, with the app closed, both were empty: measured
+24/09/2026, `--store work app restart` run from a plain PowerShell quit the running default
+installation and then failed to start it back up, because nothing could name its executable.
+
+It now tries `Get-AppxPackage`'s `InstallLocation` for the package family `installedAppId`
+already derives (from a known store root, or a running row's own `\WindowsApps\` path — neither
+needs the registry or the app to be running), ahead of the process table. The executable sits at
+`<InstallLocation>\app\Claude.exe`; verified against this machine's real install 24/09/2026:
+`Get-AppxPackage | Where-Object PackageFamilyName -eq 'Claude_pzs8sxrjxfjjc'` answers
+`C:\Program Files\WindowsApps\Claude_2.7032.0.0_x64__pzs8sxrjxfjjc`, and
+`...\app\claude.exe` exists under it.
 
 ## Groups and routines: `foster layout`
 
