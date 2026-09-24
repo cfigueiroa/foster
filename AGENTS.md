@@ -654,4 +654,35 @@ npm run check
 `npm run privacy` is the one to remember when writing prose or fixtures: this repository is
 public, and the guard rejects any Windows user-profile path, any UUID that does not look
 obviously synthetic, and two personal identifiers that reached it once. Fixture uuids look
-like `00000000-0000-4000-8000-00000000000a`.
+like `00000000-0000-4000-8000-00000000000a`. `scripts/privacy.mjs` is the one implementation
+(issue #134, `tests/privacy.test.ts`): `git grep --untracked` (honours `.gitignore`) so it sees
+what the next `git add -A` would commit, not only what is already tracked — a fixture written but
+not `git add`-ed used to pass here and only fail once CI saw it tracked, after the push. CI's
+`privacy-guard` job runs this same script rather than a second copy of the patterns.
+
+## CI: Node matrix, the build-smoke gate, and the coverage floor
+
+`.github/workflows/ci.yml`'s `check` job runs on Node 22 and 24, on Ubuntu and Windows — Node 20
+(EOL April 2026) was dropped from the matrix, not kept alongside these, because vitest 5 (picked
+up to clear three high-severity advisories — `@vitest/mocker`'s path-traversal fix required the
+major bump) requires Node `^22.12.0 || ^24.0.0 || >=26.0.0` and refuses to start under 20 at all.
+`package.json`'s own `"engines": ">=20"` is untouched: that floor is a promise about the _built_
+CLI (`dist/foster.js`), which carries no vitest dependency, not about the dev toolchain a
+contributor runs `npm test` with. `release.yml`'s own `setup-node` step needed the same bump, for
+the same reason — it runs `npm test` too, ahead of the smoke test.
+
+Two more gates moved into `ci.yml`, both previously exercised only by `release.yml` on a tag push:
+a `build-smoke` job (`npm run build` then `scripts/smoke-bundle.sh` — single-file bundle,
+`--version` matches, starts with no stderr noise) so a packaging mistake is caught on the PR that
+made it, not on the release that ships it; and an `audit` job running `npm audit --omit=dev
+--audit-level=high`, scoped to the two runtime dependencies (`commander`, `picocolors`) since the
+dev toolchain (vitest, tsup, the agent SDK, ...) carries advisories of its own that never reach
+anything foster installs or executes on a user's machine. `scripts/smoke-bundle.sh` is the one
+implementation of the smoke test too, now — `release.yml` calls the same file instead of carrying
+its own copy of the bash block.
+
+`vitest.config.ts`'s coverage now includes `src/cli/**`, previously excluded — the exclusion made
+`npm run coverage` read 88% when the real figure, CLI entrypoints included, measured 66.6% (2026-09-24).
+`coverage.thresholds` sets a floor at that measured level (rounded down one decimal, so a
+platform-neutral rerun cannot flake below it): a genuine drop fails CI, and the floor is meant to
+be raised as coverage improves, never lowered to let a drop through.
