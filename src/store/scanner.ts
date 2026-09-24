@@ -81,6 +81,13 @@ interface CachedCard {
  * processes — a fresh `ScanCache` is exactly as safe as passing none at all.
  * See `ops/sweep.ts`, which is the only caller that keeps one alive across
  * several scans.
+ *
+ * A cache hit hands back the exact same `card.data` object reference every
+ * time (see `DiscoveredSession.data`'s own doc comment) — never a fresh
+ * parse. The whole point is to skip the `JSON.parse`, so nothing here clones
+ * it. That makes an in-place mutation of a cached card's `data` a bug that
+ * corrupts every later read of that card for the rest of the run, not just
+ * the caller that mutated it — always spread into a new object instead.
  */
 export class ScanCache {
   private readonly entries = new Map<string, CachedCard>();
