@@ -27,6 +27,10 @@ const STALE_CARD = '00000000-0000-4000-8000-0000000000f2';
 const ARCHIVED_TARGET = '00000000-0000-4000-8000-0000000000f3';
 const VISIBLE_SIBLING = '00000000-0000-4000-8000-0000000000f4';
 const OTHER_CONVERSATION_CARD = '00000000-0000-4000-8000-0000000000f5';
+const OLDER_VISIBLE_SIBLING = '00000000-0000-4000-8000-0000000000f6';
+// Lexicographic order matters for the tie-break below: f7 sorts before f8.
+const TIED_SIBLING_LOWER_ID = '00000000-0000-4000-8000-0000000000f7';
+const TIED_SIBLING_HIGHER_ID = '00000000-0000-4000-8000-0000000000f8';
 
 /** A `PinState` this test's `planPinMoves` calls never write, so only `ids` matters. */
 function fakePinState(ids: string[]): PinState {
@@ -196,6 +200,127 @@ describe('resolving a deferred pin move whose target row is gone', () => {
       expect.objectContaining({ cleanSessionId: `local_${VISIBLE_SIBLING}` }),
     ]);
     expect(plan.settled).toEqual([]);
+  });
+
+  it('picks the most recently active sibling when more than one is visible', () => {
+    const store = makeStore();
+    const ledger = newLedger();
+
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: STALE_CARD,
+        cliSessionId: CONVERSATION,
+        title: '(stale, stopped 21/09 09:00) Macs',
+        isArchived: true,
+      }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: ARCHIVED_TARGET,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: true,
+      }),
+    );
+    // Two visible siblings of the same conversation — the loop inside
+    // `redirectToVisible` has to keep comparing rather than stopping at the
+    // first one it sees.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: OLDER_VISIBLE_SIBLING,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: false,
+        lastActivityAt: 1_700_000_050_000,
+      }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: VISIBLE_SIBLING,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: false,
+        lastActivityAt: 1_700_000_100_000,
+      }),
+    );
+
+    deferMove(ledger, `local_${ARCHIVED_TARGET}`);
+
+    const plan = planPinMoves(store, ledger.read(), NEW_ACCOUNT, () =>
+      fakePinState([`local_${STALE_CARD}`]),
+    );
+
+    expect(plan.moves).toEqual([
+      expect.objectContaining({ cleanSessionId: `local_${VISIBLE_SIBLING}` }),
+    ]);
+  });
+
+  it('breaks an exact activity tie between visible siblings by session id', () => {
+    const store = makeStore();
+    const ledger = newLedger();
+
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: STALE_CARD,
+        cliSessionId: CONVERSATION,
+        title: '(stale, stopped 21/09 09:00) Macs',
+        isArchived: true,
+      }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: ARCHIVED_TARGET,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: true,
+      }),
+    );
+    // Written in an order that would make the higher-id row win if the loop
+    // just kept the last one it saw rather than actually comparing ids.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: TIED_SIBLING_HIGHER_ID,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: false,
+        lastActivityAt: 1_700_000_100_000,
+      }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({
+        sessionId: TIED_SIBLING_LOWER_ID,
+        cliSessionId: CONVERSATION,
+        title: 'Macs',
+        isArchived: false,
+        lastActivityAt: 1_700_000_100_000,
+      }),
+    );
+
+    deferMove(ledger, `local_${ARCHIVED_TARGET}`);
+
+    const plan = planPinMoves(store, ledger.read(), NEW_ACCOUNT, () =>
+      fakePinState([`local_${STALE_CARD}`]),
+    );
+
+    expect(plan.moves).toEqual([
+      expect.objectContaining({ cleanSessionId: `local_${TIED_SIBLING_LOWER_ID}` }),
+    ]);
   });
 
   it('is idempotent: settling the move leaves nothing pending for a second plan', () => {

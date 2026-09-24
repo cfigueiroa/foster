@@ -355,8 +355,12 @@ export interface LastAnswer {
  * and are passed over. Undefined when the tail holds no answer at all.
  *
  * `scanConversation`'s `lastAssistantAt` (below) is the whole-file sibling of
- * this and has to agree with it on what counts as an answer — see there for
- * why it did not, until it did.
+ * this, but the two answer different questions on purpose: this one surfaces
+ * whatever the app showed as the last answer, usage-limit record included —
+ * `revive.ts` reads its `error` field to know a rate limit, not a real
+ * answer, stopped the session — while `lastAssistantAt` excludes that record
+ * (and a sidechain one) because it asks whether real work moved, not what was
+ * last shown. See there for the bug that came from conflating the two.
  */
 export function lastAnswer(file: string): LastAnswer | undefined {
   const lines = tailLines(file);
@@ -445,13 +449,16 @@ export interface ConversationScan {
    *
    * Never a usage-limit record (`isApiErrorMessage: true`, the app's own
    * synthetic answer) or a sidechain one (`isSidechain: true`, a subagent's
-   * turn, not the main conversation's) — `lastAnswer` above already skips
-   * both, and this has to agree with it. Until this was fixed it did not: a
-   * row opened from a `(stale…)` mark, typed "continue", and hit the weekly
-   * limit before a real answer came back gave that branch a fresh, non-empty
-   * `only` and a `lastAssistantAt` newer than the tip's own — `branchCards.ts`
-   * called it diverged and `fileCards.ts` elected it, archiving the row that
-   * actually held the work.
+   * turn, not the main conversation's) — unlike `lastAnswer` above, which
+   * skips a sidechain record but deliberately surfaces the usage-limit one
+   * (its `error` field is what `revive.ts` reads to know a session was
+   * stopped by a rate limit, not a real answer). This asks whether real work
+   * moved, not what was last shown, so a usage-limit record does not count as
+   * one. Until this was fixed it did: a row opened from a `(stale…)` mark,
+   * typed "continue", and hit the weekly limit before a real answer came back
+   * gave that branch a fresh, non-empty `only` and a `lastAssistantAt` newer
+   * than the tip's own — `branchCards.ts` called it diverged and
+   * `fileCards.ts` elected it, archiving the row that actually held the work.
    */
   lastAssistantAt?: number;
 }

@@ -348,6 +348,18 @@ describe('a conversation this account shows more than once', () => {
     // The repository's file: fewer records overall, but two of its own against
     // the worktree's one, and it is where the work — not the click — was left.
     expect(working.cwd).toBe(REPO);
+
+    // Idempotency: this is the exact case the old `lastMessageAt` fallback
+    // flipped on every run, because opening the now-marked worktree row is
+    // itself a click, moving its `lastMessageAt` later still. `only` does not
+    // move on a click, so a second run has to agree with the first.
+    const second = sweep();
+    expect(second.files.retitled.filter((outcome) => outcome.status === 'retitled')).toHaveLength(
+      0,
+    );
+    const stillWorking = cards().find((data) => data.sessionId === plan.working.sessionId)!;
+    expect(stillWorking.cwd).toBe(REPO);
+    expect(stillWorking.isArchived).toBe(false);
   });
 
   it('does not flip against the branch pass when a row is the tip and the older file', () => {

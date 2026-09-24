@@ -867,6 +867,20 @@ describe('a tip already held in two rows', () => {
     // The archived row's own mark is `fileCards.ts`'s to speak about, not this
     // pass's — it is left exactly as it is, not stripped and not renamed.
     expect(card(MARKED_TIP_CARD)).toMatchObject({ title: marked, isArchived: true });
+
+    // Idempotency: `held[0]` was scan order, which a second run has no reason
+    // to repeat the same way — the fix has to pick the clean row on its own
+    // terms every time, not just the first.
+    const again = sweep();
+    const againFork = again.branches.forks.find((entry) => entry.tip === TIP)!;
+    expect(againFork.tipCard).toMatchObject({
+      sessionId: `local_${CLEAN_TIP_CARD}`,
+      title: 'Macs',
+    });
+    expect(again.branches.retitled.filter((outcome) => outcome.status === 'retitled')).toHaveLength(
+      0,
+    );
+    expect(card(MARKED_TIP_CARD)).toMatchObject({ title: marked, isArchived: true });
   });
 });
 

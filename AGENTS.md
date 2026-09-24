@@ -209,8 +209,11 @@ alone. Nothing is merged — `consolidate` still does not join two files of one 
 (`src/store/transcripts.ts`) used to count _any_ `type: 'assistant'` record, including the
 usage-limit record the app writes in the model's own place (`isApiErrorMessage: true`, model
 `<synthetic>`) and a subagent's sidechain turn (`isSidechain: true`) — `lastAnswer`, the tail
-reader right above it, already skipped both, and the whole-file scan disagreeing with it is what
-let a usage limit look like a fresh answer: a row opened from `(stale…)`, typed "continue", hit the
+reader right above it, skips the sidechain record but deliberately surfaces the usage-limit one
+(`revive.ts` reads its `error` field to know a rate limit, not a real answer, stopped the
+session), so the two answer different questions on purpose. The whole-file scan not excluding the
+usage-limit record too is what let a usage limit look like a fresh answer: a row opened from
+`(stale…)`, typed "continue", hit the
 weekly limit before a real answer came back, and the branch pass called that branch diverged,
 archiving the row that actually held the work. Measured 24/09/2026 over 11,191 real transcripts on
 this machine: 1,783 carry a synthetic usage-limit assistant record, 8,097 carry a sidechain one, and
