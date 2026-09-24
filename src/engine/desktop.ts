@@ -12,6 +12,7 @@ import {
 import { closingWindowQuits } from '../store/config.js';
 import {
   execFileSyncRunner,
+  FORCE_UTF8,
   isCodeCliProcess,
   mainWindowVisible,
   parseProcessCsv,
@@ -1065,9 +1066,24 @@ function appIdFromWindowsAppsPath(executablePath: string): string | undefined {
  * packaged app is activated, so the unquoted switch arrived as two argv
  * tokens, `--user-data-dir=D:\Claude` and `Work`, and the app fell back to its
  * default userData rather than the profile's own.
+ *
+ * A trailing `\` needs its own escaping, independent of the above: the
+ * standard Win32 argv rule (`CommandLineToArgvW`, which is what re-parses
+ * this string at activation) reads an odd run of `\` right before the
+ * closing `"` as literal backslashes plus one literal `"` — not as the
+ * string's end. Measured 24/09/2026 by hand-building the exact command line
+ * this produces and spawning it verbatim: a profile root of `D:\` (a
+ * drive-root profile, unavoidably spelled with one trailing backslash) came
+ * back as `--user-data-dir=D:"` — a corrupted value ending in a stray `"`,
+ * the same "wrong store" failure the quoting above exists to prevent, just
+ * for this one narrower input shape. Doubling a trailing run of `\` before
+ * the closing quote (so it is consumed as literal backslashes and the quote
+ * is still read as the terminator) fixes it without touching any `\` that
+ * isn't already adjacent to the closing quote.
  */
 export function userDataDirArg(root: string): string {
-  return `--user-data-dir="${root.replace(/'/g, "''")}"`;
+  const escaped = root.replace(/'/g, "''").replace(/\\+$/, (trailing) => trailing + trailing);
+  return `--user-data-dir="${escaped}"`;
 }
 
 /**
@@ -1109,6 +1125,9 @@ function launchProfileAppWithIdentity(
  * measured: `…\WindowsApps\Claude_<version>_x64__<hash>\app\Claude.exe`).
  * `'` in the family name is defensive — Windows never puts one there — doubled
  * the same way `userDataDirArg` above escapes one for a PowerShell literal.
+ * Prefixed with the same `FORCE_UTF8` (`util/processes.ts`) every other
+ * PowerShell query here uses, rather than its own copy of the literal, so a
+ * later change to the encoding fix cannot drift between the two files.
  */
 function readPackageInstallLocation(
   familyName: string,
@@ -1119,7 +1138,8 @@ function readPackageInstallLocation(
   const psExe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe', env);
   const escaped = familyName.replace(/'/g, "''");
   const script =
-    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $ErrorActionPreference='Stop'; " +
+    FORCE_UTF8 +
+    "$ErrorActionPreference='Stop'; " +
     `$p = Get-AppxPackage | Where-Object { $_.PackageFamilyName -eq '${escaped}' } | ` +
     'Select-Object -First 1; if ($p) { Write-Output $p.InstallLocation }';
   const outcome = run(psExe, ['-NoProfile', '-NonInteractive', '-Command', script], {
@@ -1151,6 +1171,12 @@ function readPackageInstallLocation(
  * family (`readPackageInstallLocation`) is tried next, ahead of the process
  * table — the one source here that is readable from outside the container
  * and does not need the app to be running.
+ *
+ * `list` is read at most once per call: `installedAppId`'s own process-table
+ * fallback and the final search below each want the table, so `listOnce`
+ * memoises the first real read and hands both the same rows — the same
+ * single-read discipline `inspectDesktopFor` already applies to
+ * `hostedElsewhere`/`runningStores` (`allRows`, above).
  */
 export function desktopExecutable(
   read: () => string | undefined = readProtocolCommand,
@@ -1164,14 +1190,17 @@ export function desktopExecutable(
   const registered = /"([^"]+\.exe)"/i.exec(read() ?? '')?.[1];
   if (registered) return registered;
 
-  const family = installedAppId(env, list)?.split('!')[0];
+  let rows: ProcessRow[] | undefined;
+  const listOnce: ProcessLister = () => (rows ??= list());
+
+  const family = installedAppId(env, listOnce)?.split('!')[0];
   if (family) {
     const installLocation = packageInstallLocation(family, env);
     if (installLocation) return win32.join(installLocation, 'app', 'Claude.exe');
   }
 
-  const rows = list();
-  return rows.find((row) => isDesktopProcess(row, rows, env))?.path;
+  const allRows = listOnce();
+  return allRows.find((row) => isDesktopProcess(row, allRows, env))?.path;
 }
 
 function readProtocolCommand(): string | undefined {

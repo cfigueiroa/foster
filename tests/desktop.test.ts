@@ -779,6 +779,32 @@ describe('userDataDirArg', () => {
   it('handles both a space and a quote in the same path', () => {
     expect(userDataDirArg("D:\\O'Brien's Work")).toBe("--user-data-dir=\"D:\\O''Brien''s Work\"");
   });
+
+  /**
+   * Per the standard Win32 argv-splitting rule (`CommandLineToArgvW`), an odd
+   * run of `\` immediately before a closing `"` is read as literal
+   * backslashes plus one literal `"`, not as the string's end. Measured
+   * 24/09/2026 by hand-building the exact command line and spawning it
+   * verbatim: without doubling, `D:\` round-tripped as the corrupted
+   * `--user-data-dir=D:"`; doubling the trailing run fixes it.
+   */
+  it('doubles a lone trailing backslash, so it does not escape the closing quote', () => {
+    expect(userDataDirArg('D:\\')).toBe('--user-data-dir="D:\\\\"');
+  });
+
+  it('doubles a trailing backslash after a subdirectory', () => {
+    expect(userDataDirArg('C:\\home\\profile\\')).toBe('--user-data-dir="C:\\home\\profile\\\\"');
+  });
+
+  it('also doubles an already-even run of trailing backslashes, for full round-trip fidelity', () => {
+    expect(userDataDirArg('C:\\home\\profile\\\\')).toBe(
+      '--user-data-dir="C:\\home\\profile\\\\\\\\"',
+    );
+  });
+
+  it('doubles a trailing backslash on a UNC share root', () => {
+    expect(userDataDirArg('\\\\server\\share\\')).toBe('--user-data-dir="\\\\server\\share\\\\"');
+  });
 });
 
 describe('starting a profile with package identity', () => {
@@ -1106,6 +1132,36 @@ describe('desktopExecutable', () => {
         () => undefined,
       ),
     ).toBe(DESKTOP);
+  });
+
+  /**
+   * `installedAppId`'s own process-table fallback and the final search below
+   * both want the table when nothing is registered and the package lookup
+   * comes up empty — `desktopExecutable` used to call `list` a second time
+   * for the final search, a real spawn of PowerShell/wmic/tasklist each time
+   * in production. It now reads the table once and hands both the same rows,
+   * the same discipline `inspectDesktopFor` already applies above.
+   */
+  it('reads the process table only once, even when both the family lookup and the final search need it', () => {
+    let calls = 0;
+    // Path is DESKTOP, not \WindowsApps\, so installedAppId's own row scan
+    // finds no family and desktopExecutable falls all the way through to the
+    // final process-table search below — both need rows.
+    const table = rows({ pid: 900, parentPid: 1 });
+    const list = () => {
+      calls++;
+      return table;
+    };
+
+    const result = desktopExecutable(
+      () => undefined,
+      list,
+      {},
+      () => undefined,
+    );
+
+    expect(calls).toBe(1);
+    expect(result).toBe(DESKTOP);
   });
 });
 

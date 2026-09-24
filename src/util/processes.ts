@@ -88,7 +88,7 @@ const TASKLIST_RELATIVE = 'tasklist.exe';
  * is what PowerShell's own formatter reads to encode text before it leaves the
  * process, pipe or not; this is the standard fix for exactly this failure.
  */
-const FORCE_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ';
+export const FORCE_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ';
 
 const POWERSHELL_QUERY =
   FORCE_UTF8 +
