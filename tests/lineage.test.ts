@@ -800,6 +800,46 @@ describe('deepen', () => {
       [ORIGINAL, MIDWAY].sort(),
     );
   });
+
+  /**
+   * The sweep calls `deepen` once per round (`runSweep`), each time with
+   * whatever cards that round knows about — not once with everything. A card
+   * the app creates between rounds shows up as exactly one new id in a later
+   * round, and `heads.size < 2` used to return before comparing it against
+   * anything at all.
+   */
+  it('compares a lone new id, brought in a later round, against a transcript an earlier round already read', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    // Round 1: only the host the fork was cut from is known yet.
+    kin.deepen([ORIGINAL]);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(false);
+
+    // Round 2 hands deepen exactly one new id.
+    kin.deepen([MIDWAY]);
+    expect(kin.rootOf(MIDWAY)).toBe(ROOT);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+
+  it('compares an earlier round’s head against a transcript a later round just brought, the other way round', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    // Round 1 sees only the branch; nothing to compare it against yet.
+    kin.deepen([MIDWAY]);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(false);
+
+    // Round 2 brings the host, a lone new id again.
+    kin.deepen([ORIGINAL]);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+
+  it('is idempotent across rounds: repeating a round already deepened adds nothing new', () => {
+    const kin = lineageAt(projects(forkedMidway()));
+    kin.deepen([ORIGINAL]);
+    kin.deepen([MIDWAY]);
+    kin.deepen([ORIGINAL, MIDWAY, UNRELATED]);
+
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+    expect(kin.sameWork(ORIGINAL, UNRELATED)).toBe(false);
+  });
 });
 
 /**

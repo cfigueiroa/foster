@@ -265,6 +265,48 @@ never refused for it. A card the app rewrites in the meantime simply keeps (or r
 on disk, which the next `foster unclaim` or sweep pass finds and releases again — the change itself
 only becomes visible at the app's next restart, the same as a retitle.
 
+## Lineage precision: nested ids, incremental deepen, big files, deep roots
+
+Four small correctness fixes to `src/store/transcripts.ts` and `src/engine/lineage.ts`, all
+measured against a real store (2,759 transcripts under `.claude/projects` and `.claude-frota/projects`,
+7.8 GB) rather than assumed.
+
+**`idsMentionedIn` no longer aliases on a nested id.** It matched `"uuid":"…"` anywhere in a
+transcript, so a structured `toolUseResult` — an MCP result object quoting another conversation's
+head as a nested value — could alias a whole conversation onto work it never wrote, and `deepen`
+trusted that enough to mark it stale. A hit is now confirmed against `recordFields` (the same
+structural reader `scanConversation` uses, which only reports a key found at a record's own top
+level) before it counts. Measured over the real store's ~2 million `"uuid":"…"` occurrences: one
+genuine nested (non-top-level) hit — real, and exactly what this was written for, and rare enough
+that validating only the candidates that already match `wanted` costs nothing on the common path.
+
+**`idsMentionedIn` and `conversationRoot` stream instead of reading a whole file or a fixed head.**
+`idsMentionedIn` used to `readFileSync` the whole transcript as one string; past V8's string-length
+ceiling (today's largest transcript is 78 MB and growing) that throws, is caught, and answers
+"mentions nothing" — the fork it belonged to silently disappears rather than erroring loudly. It
+now reads in 16 MiB chunks with a 128-byte overlap (comfortably more than the 45 characters
+`"uuid":"…"` can span), so a match split across a chunk boundary is still found, and a rare hit is
+confirmed by seeking out its own line directly off disk (`ownerLine`) rather than by holding lines
+in memory. An early version read line by line instead (reusing the line streamer `conversationRoot`
+now uses); over the real store that measured slower than a few big chunk reads, which is why chunk
+scanning stayed. Interleaved against one `readFileSync` per file on a warm disk cache, three
+approaches (whole-file, 1 MiB chunks, 16 MiB chunks) landed within the same ±30% run-to-run noise
+this machine has — nothing here beats the old whole-file read, only avoids losing to it while also
+not crashing on a giant file. `conversationRoot` used to stop at a fixed 64 KB head; it now streams
+until it finds a record with a `uuid`, capped at 4 MB. Measured: wrong (answered "no root" when a
+root exists) for 369 of 10,587 real transcripts under the old 64 KB cutoff — 159 of the 2,759
+transcripts checked directly in this pass alone went from "no root" to a real root once the cap
+moved.
+
+**`deepen` compares a lone new id against transcripts from earlier rounds, not just its own
+batch.** The sweep calls `Lineage.deepen` once per round (`runSweep`, up to `SWEEP_ROUNDS`) with
+whatever cards that round knows about, and `deepen` itself already skips ids it has seen before —
+but a round that hands it exactly one new id used to short-circuit (`heads.size < 2`) before
+searching anywhere, so a card the app creates between rounds was never weighed against the work
+already indexed. It now keeps every id's head it has ever been given (`deepenedHeads`) and searches
+both directions on each call: this round's new heads against every transcript any round has read,
+and every earlier round's heads against this round's own new transcripts.
+
 ## You cannot restart the app from a session the app started — except through `--detach`
 
 A Claude Code session launched from Claude Desktop's sidebar is a **child process of the
@@ -397,6 +439,14 @@ live writers and the duplicates it dropped are named in `passedOver`. It writes 
 sends nothing: the `/retoma` skill, run inside Claude Desktop, delivers the "quota is back,
 carry on by highest return" message with `send_message`. A headless resume is not a substitute
 — it never reattaches the card (next section).
+
+That answer comes from `lastAnswer` (`src/store/transcripts.ts`), which reads a transcript's tail
+looking for the last `assistant` record. The tail used to be a fixed 256 KB; measured on a real
+store, 22 of 7,721 transcripts have more than that much bookkeeping — queue operations, retitles —
+written after their actual last answer, which pushed it out of the window entirely and read as a
+session that finished cleanly. It now widens the read (×4 each retry, capped at 8 MB) when a
+window comes back with no assistant record, so those 22 are found rather than missed; the ordinary
+transcript, whose answer is already in the first 256 KB, pays nothing extra.
 
 ## Rescuing "cannot reach your computer" cards
 

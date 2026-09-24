@@ -87,6 +87,17 @@ export interface Lineage {
    * Called by whoever is about to group conversations, never on the way in: it
    * reads every transcript named here, which is seconds rather than
    * milliseconds. Idempotent, and remembers what it has already been given.
+   *
+   * Incremental across calls, and not just by skipping ids already seen: a
+   * later round's new ids are searched against every transcript any earlier
+   * round already knows the head of, not only against each other, and every
+   * earlier round's heads are searched against the new ids' own transcripts
+   * in turn. A single call already asks this of everything it is given —
+   * `heads.size < 2` used to end it there — but the sweep's own rounds (see
+   * `runSweep`) call this once per round with whatever the round just brought
+   * back, and a round that hands back exactly one new id used to compare it
+   * against nothing at all: a card the app creates between rounds never got
+   * weighed against the conversations already indexed.
    */
   deepen(cliSessionIds: Iterable<string>): void;
   /**
@@ -120,6 +131,8 @@ export function lineageAt(projectsDirs: string[]): Lineage {
   /** A root that turned out to be a record of another conversation, and whose. */
   const alias = new Map<string, string>();
   const deepened = new Set<string>();
+  /** Every id `deepen` has already found a head for, kept across rounds. */
+  const deepenedHeads = new Map<string, string>();
 
   const transcripts = (): Map<string, string[]> => {
     index ??= indexAllTranscripts(projectsDirs);
@@ -227,32 +240,58 @@ export function lineageAt(projectsDirs: string[]): Lineage {
     },
 
     deepen(cliSessionIds) {
-      const heads = new Map<string, string>();
+      const newHeads = new Map<string, string>();
       for (const id of cliSessionIds) {
         if (deepened.has(id)) continue;
         deepened.add(id);
         const head = headOf(id);
-        if (head !== undefined) heads.set(id, head);
+        if (head !== undefined) newHeads.set(id, head);
       }
-      // One conversation cannot be a fork of itself, and one root cannot be
-      // found inside another transcript that does not exist yet to be read.
-      if (heads.size < 2) return;
+      // Nothing new to search for. A lone new id is not skipped the way a
+      // second call with the same id already is — see below.
+      if (newHeads.size === 0) return;
 
-      const wanted = new Set(heads.values());
-      for (const [id, head] of heads) {
+      const apply = (host: string, found: string): void => {
+        // Its own head is not evidence of anything, and a root already
+        // spoken for keeps the first answer: the alias is a claim about one
+        // record, and two hosts holding it say the same thing.
+        if (found === host || alias.has(found)) return;
+        // A root that is this conversation's own head would make the work
+        // point at itself once canonicalised.
+        if (canonical(host) === found) return;
+        alias.set(found, host);
+      };
+
+      // A new head can be the record a much earlier round already read past —
+      // an id this round never touches — so it is hunted for in every
+      // transcript any round has read the head of, this one included, not
+      // only in the handful `cliSessionIds` names this time.
+      const wantedNew = new Set(newHeads.values());
+      for (const [id, host] of deepenedHeads) {
         for (const file of filesOf(id)) {
-          for (const found of idsMentionedIn(file, wanted)) {
-            // Its own head is not evidence of anything, and a root already
-            // spoken for keeps the first answer: the alias is a claim about one
-            // record, and two hosts holding it say the same thing.
-            if (found === head || alias.has(found)) continue;
-            // A root that is this conversation's own head would make the work
-            // point at itself once canonicalised.
-            if (canonical(head) === found) continue;
-            alias.set(found, head);
+          for (const found of idsMentionedIn(file, wantedNew)) apply(host, found);
+        }
+      }
+      for (const [id, host] of newHeads) {
+        for (const file of filesOf(id)) {
+          for (const found of idsMentionedIn(file, wantedNew)) apply(host, found);
+        }
+      }
+
+      // The mirror: a head an earlier round already found can turn out to sit
+      // inside a transcript this round just brought — a card the app created
+      // since. Earlier transcripts were already asked about these heads when
+      // the heads were found, so only the new ones need asking now.
+      if (deepenedHeads.size > 0) {
+        const wantedOld = new Set(deepenedHeads.values());
+        for (const [id, host] of newHeads) {
+          for (const file of filesOf(id)) {
+            for (const found of idsMentionedIn(file, wantedOld)) apply(host, found);
           }
         }
       }
+
+      for (const [id, head] of newHeads) deepenedHeads.set(id, head);
     },
 
     transcripts,
