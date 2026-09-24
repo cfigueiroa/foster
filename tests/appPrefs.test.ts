@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   APP_PREFS,
@@ -174,6 +175,73 @@ describe('writeAppPref', () => {
 
     expect(writeAppPref(store, 'allowAllBrowserActions', true).write.guard).toBe(true);
     expect(writeAppPref(store, 'menuBarEnabled', false).write.guard).toBe(false);
+  });
+
+  it('refuses on a lossy number literal elsewhere in the file, same guard groupScopes/viewPrefs carry', () => {
+    // Previously missing here (this file used its own hand-rolled write
+    // instead of the shared rewriteDesktopConfig): a `JSON.parse`/`stringify`
+    // round trip would have silently rewritten this trailing `.0`, invisible
+    // to the "did a neighbour move" check because both trees it compares are
+    // already-lossy parses.
+    const store = storeWith({ preferences: {} });
+    writeFileSync(
+      store.desktopConfigFile,
+      '{"preferences":{"menuBarEnabled":true},"scale":1.0}',
+      'utf8',
+    );
+
+    expect(() => writeAppPref(store, 'menuBarEnabled', false)).toThrow(/1\.0/);
+    expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(
+      '{"preferences":{"menuBarEnabled":true},"scale":1.0}',
+    );
+  });
+
+  it('backs up outside the app store, under ~/.foster/backups — never next to the file it copies', () => {
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    const home = path.join(store.root, '.foster-home');
+
+    const { backup } = writeAppPref(store, 'menuBarEnabled', false, {
+      env: { ...process.env, FOSTER_HOME: home },
+    });
+
+    expect(path.dirname(backup)).not.toBe(path.dirname(store.desktopConfigFile));
+    expect(backup).toMatch(/backups/);
+  });
+
+  it('two writes landing in the same backup-directory second each keep their own backup', () => {
+    // The old scheme named the backup `<file>.bak-<minute-resolution stamp>`,
+    // next to the file itself: a second writeAppPref within the same minute
+    // silently overwrote the first "backup" with the file the first write had
+    // already changed, losing the true original.
+    const store = storeWith({ preferences: { ccBranchPrefix: 'first' } });
+    const home = path.join(store.root, '.foster-home');
+    const env = { ...process.env, FOSTER_HOME: home };
+    const now = () => new Date('2026-09-24T10:00:00.000Z');
+
+    const first = writeAppPref(store, 'ccBranchPrefix', 'second', { env, now });
+    const second = writeAppPref(store, 'ccBranchPrefix', 'third', { env, now });
+
+    expect(first.backup).not.toBe(second.backup);
+    // first.backup is the byte-for-byte original (compact, as `storeWith`
+    // wrote it); second.backup is a copy of what the first write left behind
+    // (pretty-printed by writeFileAtomic) — either way, each write's backup
+    // holds the value from just before *that* write, not the other's.
+    expect(readFileSync(first.backup, 'utf8')).toContain('"ccBranchPrefix":"first"');
+    expect(readFileSync(second.backup, 'utf8')).toContain('"ccBranchPrefix": "second"');
+  });
+
+  it('takes an env option without also needing a now, defaulting the clock itself', () => {
+    // BackupOptions carries both `env` and `now`; a caller that only redirects
+    // FOSTER_HOME (this test, so it never touches the real one) still gets a
+    // working backup without picking a clock.
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    const home = path.join(store.root, '.foster-home');
+
+    const { backup } = writeAppPref(store, 'menuBarEnabled', false, {
+      env: { ...process.env, FOSTER_HOME: home },
+    });
+
+    expect(readdirSync(path.dirname(backup))).toContain(path.basename(backup));
   });
 });
 

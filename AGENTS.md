@@ -606,6 +606,29 @@ layout read-only alongside its own passes (`ops/sweep.ts`, never applied there) 
 `sweepSummary` when anything is pending; that line never counts toward "nothing is left to sweep",
 because a layout needs the app closed and a sweep run from inside the app can never close it.
 
+## One rewrite path for `claude_desktop_config.json`
+
+`appPrefs.ts`, `groupScopes.ts` and `viewPrefs.ts` each used to carry their own copy of the same
+shape — read twice, refuse on a lossy number literal, mutate, back up, compare every key the write
+was not meant to touch, write. The three had already drifted: `writeAppPref` alone was missing the
+number-literal guard (`util/jsonNumbers.ts`), so a `1.0` or an integer past
+`Number.MAX_SAFE_INTEGER` sitting anywhere else in the file would have been silently rewritten by
+an app-pref change while `writeGroupScope` and `writeEpitaxyPrefs` already refused on it.
+`store/desktopConfig.ts`'s `rewriteDesktopConfig(store, kind, allowedPaths, mutate)` is now the one
+path all three go through: `allowedPaths` names every chain of keys `mutate` is allowed to change
+(`[['preferences', 'menuBarEnabled']]` for one app pref, one entry per key for
+`writeEpitaxyPrefs`'s several at once), and everything else, at every level, is refused if it moved.
+`writeAppPref` no longer writes its own backup next to the file (`<file>.bak-<minute stamp>`,
+inside the app's own store) — it goes through `backupFile` under `~/.foster/backups`, the same as
+the other two.
+
+That backup naming had its own bug: `util/backups.ts`'s destination name was
+`<kind>-<millisecond>-<process-lifetime counter>`, unique within one process but not across two —
+a detached `foster layout --restart` and the in-app process it is restarting around can both
+compute a backup in the same millisecond, and `copyFileSync` silently overwrote whichever landed
+second. `backupFile` now folds `process.pid` into the name and opens the destination
+`COPYFILE_EXCL`-only, retrying once under a `-r<n>` suffix on `EEXIST` rather than overwriting.
+
 ## The sidebar's filter menu: two stores
 
 Measured 22/09/2026, same store/app; re-measured the same day via the app's own `set_view` tool

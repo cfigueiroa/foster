@@ -1,6 +1,7 @@
-import { copyFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import type { StoreLayout } from '../domain/types.js';
-import { writeFileAtomic } from '../util/fsatomic.js';
+import type { BackupOptions } from '../util/backups.js';
+import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
 
 /**
  * The Claude Desktop preferences, as the app itself defines them.
@@ -270,52 +271,40 @@ export interface PrefWriteResult {
  *
  * The neighbours are the point. This file holds the MCP server list and every
  * other preference the app has ever been given, so the write goes through
- * `JSON.parse`/`stringify` — never a round trip through a shell's JSON support,
- * which was measured turning `"...710Z"` into `"...71Z"` in untouched keys — and
- * the result is compared key by key against what was read before it is allowed
- * to replace the original. Anything else moved, and the write is refused with
- * the file untouched.
+ * `rewriteDesktopConfig` — the one rewrite path it shares with
+ * `groupScopes.ts` and `viewPrefs.ts` — never a round trip through a shell's
+ * JSON support, which was measured turning `"...710Z"` into `"...71Z"` in
+ * untouched keys. The result is compared key by key against what was read
+ * before it is allowed to replace the original, and a raw number literal a
+ * `JSON.parse`/`stringify` round trip would silently rewrite (see
+ * `util/jsonNumbers.ts`) refuses the write before any of that. Anything else
+ * moved, and the write is refused with the file untouched.
  *
- * A backup is written first regardless, named with the moment, because the one
- * failure this cannot check for is the one nobody predicted.
+ * A backup is written first regardless, under `~/.foster/backups` — see
+ * `util/backups.ts` — because the one failure this cannot check for is the
+ * one nobody predicted.
  */
 export function writeAppPref(
   store: StoreLayout,
   name: string,
   value: unknown,
-  options: { unset?: boolean; now?: () => Date } = {},
+  options: { unset?: boolean } & BackupOptions = {},
 ): PrefWriteResult {
-  const raw = readFileSync(store.desktopConfigFile, 'utf8');
-  const before = JSON.parse(raw) as Record<string, unknown>;
-  const preferences: Record<string, unknown> =
-    before.preferences &&
-    typeof before.preferences === 'object' &&
-    !Array.isArray(before.preferences)
-      ? (before.preferences as Record<string, unknown>)
-      : {};
+  let from: unknown;
+  const { backup } = rewriteDesktopConfig(
+    store,
+    'appPref',
+    [['preferences', name]],
+    (after) => {
+      const preferences = asObject(after.preferences);
+      after.preferences = preferences;
+      from = Object.hasOwn(preferences, name) ? preferences[name] : specOf(name)?.fallback;
+      if (options.unset) delete preferences[name];
+      else preferences[name] = value;
+    },
+    options,
+  );
 
-  const from = Object.hasOwn(preferences, name) ? preferences[name] : specOf(name)?.fallback;
-
-  const after = JSON.parse(raw) as Record<string, unknown>;
-  const next: Record<string, unknown> = { ...preferences };
-  if (options.unset) delete next[name];
-  else next[name] = value;
-  after.preferences = next;
-
-  const stamp = (options.now?.() ?? new Date()).toISOString().replace(/[:.]/g, '').slice(0, 15);
-  const backup = `${store.desktopConfigFile}.bak-${stamp}`;
-  copyFileSync(store.desktopConfigFile, backup);
-
-  const text = JSON.stringify(after, null, 2);
-  const back = JSON.parse(text) as Record<string, unknown>;
-  const moved = neighboursThatMoved(before, back, name);
-  if (moved.length > 0) {
-    throw new Error(
-      `refusing to write: ${moved.join(', ')} would have changed too. Nothing was written; the backup is at ${backup}`,
-    );
-  }
-
-  writeFileAtomic(store.desktopConfigFile, text);
   return {
     write: {
       name,
@@ -326,32 +315,4 @@ export function writeAppPref(
     },
     backup,
   };
-}
-
-/** Every key, at both levels, that is not the one being written and changed anyway. */
-function neighboursThatMoved(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-  name: string,
-): string[] {
-  const moved: string[] = [];
-  const top = new Set([...Object.keys(before), ...Object.keys(after)]);
-  for (const key of top) {
-    if (key === 'preferences') continue;
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) moved.push(key);
-  }
-
-  const asObject = (value: unknown): Record<string, unknown> =>
-    value && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {};
-  const wasPrefs = asObject(before.preferences);
-  const nowPrefs = asObject(after.preferences);
-  for (const key of new Set([...Object.keys(wasPrefs), ...Object.keys(nowPrefs)])) {
-    if (key === name) continue;
-    if (JSON.stringify(wasPrefs[key]) !== JSON.stringify(nowPrefs[key])) {
-      moved.push(`preferences.${key}`);
-    }
-  }
-  return moved;
 }

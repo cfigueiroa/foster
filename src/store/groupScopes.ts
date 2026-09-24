@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
-import { writeFileAtomic } from '../util/fsatomic.js';
-import { backupFile, type BackupOptions } from '../util/backups.js';
-import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
+import type { BackupOptions } from '../util/backups.js';
+import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
 
 /**
  * The sidebar's groups, and which card sits in which.
@@ -258,7 +257,9 @@ export function readGroupScopes(store: StoreLayout): GroupScopes {
  * notation…) — see `util/jsonNumbers.ts`. The "did a neighbour move" check
  * below compares two already-parsed trees, so a number that changed shape
  * during that same parse is invisible to it; this is the check that would
- * have caught it, so it runs first and writes nothing either way.
+ * have caught it, so it runs first and writes nothing either way. Both are
+ * `rewriteDesktopConfig`'s (`store/desktopConfig.ts`), the one rewrite path
+ * this shares with `writeAppPref` and `writeEpitaxyPrefs`.
  */
 export function writeGroupScope(
   store: StoreLayout,
@@ -267,43 +268,21 @@ export function writeGroupScope(
   options: BackupOptions = {},
 ): { backup: string } {
   const key = scopeKey(account);
-  const raw = readFileSync(store.desktopConfigFile, 'utf8');
-  const lossy = nonCanonicalNumbers(raw)[0];
-  if (lossy) {
-    throw new Error(
-      `refusing to write: ${store.desktopConfigFile} holds a number literal that a JSON round-trip would rewrite (\`${lossy.literal}\`, at offset ${lossy.index}). Nothing was written.`,
-    );
-  }
-  const before = JSON.parse(raw) as Record<string, unknown>;
-  const after = JSON.parse(raw) as Record<string, unknown>;
-
-  const preferences = asObject(after.preferences);
-  const epitaxy = asObject(preferences.epitaxyPrefs);
-  const scopes = asObject(epitaxy[DFRAME_GROUP_SCOPES]);
-  scopes[key] = mergeScope(scopes[key], scope);
-  epitaxy[DFRAME_GROUP_SCOPES] = scopes;
-  preferences.epitaxyPrefs = epitaxy;
-  after.preferences = preferences;
-
-  const backup = backupFile(store.desktopConfigFile, 'groupScope', options);
-
-  const text = JSON.stringify(after, null, 2);
-  const back = JSON.parse(text) as Record<string, unknown>;
-  const moved = neighboursThatMoved(before, back, key);
-  if (moved.length > 0) {
-    throw new Error(
-      `refusing to write: ${moved.join(', ')} would have changed too. Nothing was written; the backup is at ${backup}`,
-    );
-  }
-
-  writeFileAtomic(store.desktopConfigFile, text);
-  return { backup };
-}
-
-function asObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+  return rewriteDesktopConfig(
+    store,
+    'groupScope',
+    [['preferences', 'epitaxyPrefs', DFRAME_GROUP_SCOPES, key]],
+    (after) => {
+      const preferences = asObject(after.preferences);
+      const epitaxy = asObject(preferences.epitaxyPrefs);
+      const scopes = asObject(epitaxy[DFRAME_GROUP_SCOPES]);
+      scopes[key] = mergeScope(scopes[key], scope);
+      epitaxy[DFRAME_GROUP_SCOPES] = scopes;
+      preferences.epitaxyPrefs = epitaxy;
+      after.preferences = preferences;
+    },
+    options,
+  );
 }
 
 /** A raw `groups` array entry's `id`, or undefined for a shape that has none to merge by. */
@@ -390,46 +369,4 @@ function mergeScope(rawValue: unknown, incoming: GroupScope): Record<string, unk
     delete merged.order;
   }
   return merged;
-}
-
-/** Every key, at all four levels, that is not the scope being written and changed anyway. */
-function neighboursThatMoved(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-  scopeName: string,
-): string[] {
-  const moved: string[] = [];
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (key === 'preferences') continue;
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) moved.push(key);
-  }
-
-  const wasPrefs = asObject(before.preferences);
-  const nowPrefs = asObject(after.preferences);
-  for (const key of new Set([...Object.keys(wasPrefs), ...Object.keys(nowPrefs)])) {
-    if (key === 'epitaxyPrefs') continue;
-    if (JSON.stringify(wasPrefs[key]) !== JSON.stringify(nowPrefs[key])) {
-      moved.push(`preferences.${key}`);
-    }
-  }
-
-  const wasEpitaxy = asObject(wasPrefs.epitaxyPrefs);
-  const nowEpitaxy = asObject(nowPrefs.epitaxyPrefs);
-  for (const key of new Set([...Object.keys(wasEpitaxy), ...Object.keys(nowEpitaxy)])) {
-    if (key === DFRAME_GROUP_SCOPES) continue;
-    if (JSON.stringify(wasEpitaxy[key]) !== JSON.stringify(nowEpitaxy[key])) {
-      moved.push(`preferences.epitaxyPrefs.${key}`);
-    }
-  }
-
-  const wasScopes = asObject(wasEpitaxy[DFRAME_GROUP_SCOPES]);
-  const nowScopes = asObject(nowEpitaxy[DFRAME_GROUP_SCOPES]);
-  for (const key of new Set([...Object.keys(wasScopes), ...Object.keys(nowScopes)])) {
-    if (key === scopeName) continue;
-    if (JSON.stringify(wasScopes[key]) !== JSON.stringify(nowScopes[key])) {
-      moved.push(`preferences.epitaxyPrefs.${DFRAME_GROUP_SCOPES}.${key}`);
-    }
-  }
-
-  return moved;
 }

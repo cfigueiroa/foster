@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { constants as fsConstants, copyFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -15,8 +15,18 @@ import path from 'node:path';
  * once for the view-menu carry) took its second "backup" of the file the first
  * write had already changed, silently discarding the true original. Every
  * backup here gets its own name — a run-scoped timestamp directory plus a kind
- * label plus a process-lifetime counter — so no two calls, however close
- * together, ever share a path.
+ * label plus the writing process's pid plus a process-lifetime counter — so no
+ * two calls, however close together, ever share a path.
+ *
+ * The pid alone does not finish the job: the timestamp directory
+ * (second-resolution) is itself built from `now`, and a clock that has not
+ * ticked yet is exactly the case that used to bite (bug measured 22/09/2026 —
+ * a detached `foster layout --restart` and the in-app process it was
+ * restarting around, both writing backups within the same second). `backupFile`
+ * asks for the name `COPYFILE_EXCL`-only, so a name reused anyway — a clock
+ * that jumped backwards, or a `now()` fixture two callers happen to share in a
+ * test — fails loudly instead of quietly overwriting the earlier backup, and
+ * is retried once under a new suffix rather than left to throw.
  */
 
 let counter = 0;
@@ -31,9 +41,10 @@ function runDir(root: string, now: Date): string {
 }
 
 /** A destination this call alone will ever be given — never reused, never guessed twice. */
-function freshName(kind: string, now: Date, ext: string): string {
+function freshName(kind: string, now: Date, ext: string, retry: number): string {
   counter += 1;
-  return `${kind}-${now.getTime()}-${counter}${ext}`;
+  const suffix = retry > 0 ? `-r${retry}` : '';
+  return `${kind}-${now.getTime()}-${process.pid}-${counter}${suffix}${ext}`;
 }
 
 export interface BackupOptions {
@@ -41,14 +52,31 @@ export interface BackupOptions {
   now?: () => Date;
 }
 
-/** Copy one file aside. `kind` names what is being backed up, for a readable directory listing. */
+/**
+ * Copy one file aside. `kind` names what is being backed up, for a readable
+ * directory listing.
+ *
+ * The destination is opened with `COPYFILE_EXCL` — it fails rather than
+ * silently overwrites an existing file at that name — and on `EEXIST` this
+ * retries once under a new, still-fresh suffix rather than throwing: the name
+ * is meant to be unique on its own, so a collision is the rare case worth one
+ * more try, not a reason to give up the backup.
+ */
 export function backupFile(source: string, kind: string, options: BackupOptions = {}): string {
   const now = options.now?.() ?? new Date();
   const dir = runDir(backupsRoot(options.env), now);
   mkdirSync(dir, { recursive: true });
-  const dest = path.join(dir, freshName(kind, now, path.extname(source)));
-  copyFileSync(source, dest);
-  return dest;
+  const ext = path.extname(source);
+  for (let retry = 0; ; retry += 1) {
+    const dest = path.join(dir, freshName(kind, now, ext, retry));
+    try {
+      copyFileSync(source, dest, fsConstants.COPYFILE_EXCL);
+      return dest;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST' && retry < 5) continue;
+      throw error;
+    }
+  }
 }
 
 /**
@@ -60,7 +88,7 @@ export function backupFile(source: string, kind: string, options: BackupOptions 
  */
 export function backupDirectory(source: string, kind: string, options: BackupOptions = {}): string {
   const now = options.now?.() ?? new Date();
-  const dest = path.join(runDir(backupsRoot(options.env), now), freshName(kind, now, ''));
+  const dest = path.join(runDir(backupsRoot(options.env), now), freshName(kind, now, '', 0));
   mkdirSync(dest, { recursive: true });
   for (const name of readdirSync(source)) {
     if (name === 'LOCK') continue;
