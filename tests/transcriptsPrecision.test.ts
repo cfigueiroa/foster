@@ -31,6 +31,10 @@ function tmpFile(records: unknown[]): string {
   return file;
 }
 
+function toSorted(ids: Iterable<string>): string[] {
+  return [...ids].sort();
+}
+
 const OWN = '00000000-0000-4000-8000-000000001001';
 const NESTED = '00000000-0000-4000-8000-000000001002';
 const ROOT = '00000000-0000-4000-8000-000000001003';
@@ -110,9 +114,43 @@ describe('idsMentionedIn with a RecordIdCache', () => {
     expect(idsMentionedIn(file, new Set([OWN, NESTED]), cache)).toEqual([OWN]);
   });
 
-  it('reuses the first scan rather than reading the file again, on a later call for a different id', () => {
+  it('merges an id already searched for with a genuinely new one, in the same call', () => {
+    // `idsMentionedIn` splits `wanted` into what a file's cache entry has
+    // already been searched for and what it has not, on every call — this
+    // is the split itself, not just the two ends of it: one call naming both
+    // an already-known id and a never-asked one must answer both correctly,
+    // the known one from the cache and the new one from the one extra pass
+    // that call pays for.
+    const OTHER = '00000000-0000-4000-8000-000000001098';
+    const file = tmpFile([
+      { uuid: OWN, type: 'user', timestamp: '2026-09-24T00:00:00.000Z' },
+      { uuid: OTHER, type: 'user', timestamp: '2026-09-24T00:00:01.000Z' },
+    ]);
+    const cache: RecordIdCache = new Map();
+
+    // First call only ever asks about OWN.
+    expect(idsMentionedIn(file, new Set([OWN]), cache)).toEqual([OWN]);
+
+    // Second call asks about OWN again (already searched for) and OTHER
+    // (never searched for in this file before) together.
+    expect(toSorted(idsMentionedIn(file, new Set([OWN, OTHER]), cache))).toEqual(
+      toSorted([OWN, OTHER]),
+    );
+  });
+
+  it('scans again for an id this file has never been asked about, even once cached', () => {
+    // The regression this guards: an earlier version cached a file's whole
+    // occurrence map the first time any id was asked about it (building a
+    // Map entry for every "uuid":"…" the pattern found, not just `wanted`'s),
+    // so a later call for a genuinely different id answered from that first
+    // scan's leftovers instead of ever reading the file again — silently
+    // wrong whenever the new id was one the first scan had not recorded.
+    // `RecordIdCache` now remembers which ids a file has actually been
+    // searched for, per id, and pays one more filtered pass only for ids not
+    // in that set yet — this is `Lineage.deepen`'s own "new id this round"
+    // shape, one file asked about a different `wanted` set call to call.
     const REPLACED = '00000000-0000-4000-8000-000000001099';
-    const dir = mkdtempSync(path.join(tmpdir(), 'foster-prec-cache-'));
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-prec-cache-2-'));
     const file = path.join(dir, 't.jsonl');
     writeFileSync(
       file,
@@ -121,23 +159,20 @@ describe('idsMentionedIn with a RecordIdCache', () => {
     );
     const cache: RecordIdCache = new Map();
 
-    // First call scans the file as it is now and fills the cache.
+    // First call only ever asks about OWN — REPLACED has never been
+    // searched for in this file yet.
     expect(idsMentionedIn(file, new Set([OWN]), cache)).toEqual([OWN]);
 
-    // The file is rewritten in place with a different record's id, same
-    // length, same byte offset — a real transcript never does this, but it
-    // is the cleanest way to prove the second call never re-scans the bytes:
-    // a fresh scan would find REPLACED; a cached one still only knows OWN.
     writeFileSync(
       file,
       `${JSON.stringify({ uuid: REPLACED, type: 'user', timestamp: '2026-09-24T00:00:00.000Z' })}\n`,
       'utf8',
     );
 
-    expect(idsMentionedIn(file, new Set([REPLACED]), cache)).toEqual([]);
-    // Confirms the file really was rewritten, and that a fresh, uncached
-    // call reads what is on disk now.
-    expect(idsMentionedIn(file, new Set([REPLACED]))).toEqual([REPLACED]);
+    // REPLACED is a new id for this file's cache entry, so this pays one
+    // more filtered scan and finds it — never answered from OWN's leftover
+    // scan, and never silently empty the way a whole-file-once cache would.
+    expect(idsMentionedIn(file, new Set([REPLACED]), cache)).toEqual([REPLACED]);
   });
 });
 
