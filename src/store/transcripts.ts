@@ -751,9 +751,7 @@ export interface ConversationScan {
  * own size in memory.
  */
 export function scanConversation(file: string): ConversationScan {
-  const uuids = new Set<string>();
-  let lastMessageAt: number | undefined;
-  let lastAssistantAt: number | undefined;
+  const acc = newScanAccumulator();
 
   // Read field by field rather than record by record: five short fields out of
   // each line, and none of the graph around them. See `recordFields` for why the
@@ -763,29 +761,77 @@ export function scanConversation(file: string): ConversationScan {
   for (const line of streamLines(file, 'latin1')) {
     const record = recordFields(line);
     if (!record) continue;
-    if (record.uuid !== undefined && record.uuid !== '') uuids.add(record.uuid);
-    if (record.timestamp !== undefined) {
-      const at = Date.parse(record.timestamp);
-      if (Number.isFinite(at)) {
-        // The max, not the last record read: `branches.ts` already says copies
-        // do not preserve file order, and a scan that just took the last line
-        // was trusting an order this file never promised.
-        lastMessageAt = later(lastMessageAt, at);
-        if (
-          record.type === 'assistant' &&
-          record.isApiErrorMessage !== true &&
-          record.isSidechain !== true
-        ) {
-          lastAssistantAt = later(lastAssistantAt, at);
-        }
+    accumulateScanRecord(acc, record);
+  }
+
+  return scanAccumulatorResult(acc);
+}
+
+/**
+ * Mutable state `scanConversation` folds a whole file into, one record at a
+ * time — and the exact shape `accumulateScanRecord` needs, no more.
+ *
+ * Exported so the persistent cache's own incremental scan
+ * (`store/cache/transcriptCache.ts`) can fold a byte *range* of a transcript
+ * into the same rule this file's whole-file scan uses, instead of keeping a
+ * second copy of that rule that can quietly drift from this one. A cached
+ * cold/warm run and a `--no-cache` run disagreeing is exactly what a copy
+ * drifting looks like from the outside — see `accumulateScanRecord`'s own
+ * doc for the incident this replaced.
+ */
+export interface ScanAccumulator {
+  uuids: Set<string>;
+  lastMessageAt?: number;
+  lastAssistantAt?: number;
+}
+
+/** A fresh, empty accumulator — the state a scan of zero records leaves behind. */
+export function newScanAccumulator(): ScanAccumulator {
+  return { uuids: new Set<string>() };
+}
+
+/**
+ * Folds one record's fields into `acc` — the one place the rule "what counts
+ * toward `lastMessageAt` and `lastAssistantAt`" is written, so `scanConversation`
+ * (a whole file) and the cache's own range scan (`scanOwnRange`,
+ * `store/cache/transcriptCache.ts`) can never answer differently for the same
+ * bytes.
+ *
+ * Before this was shared, the cache's copy of this rule took the *last*
+ * timestamp read rather than the max, and let a usage-limit or sidechain
+ * assistant record set `lastAssistantAt` — both fixed here in 2026 but never
+ * ported to the copy. Cold and warm cache runs agreed with each other (both
+ * ran the buggy copy) but not with `--no-cache`, and the sweep elected the
+ * wrong file of a "second file" pair whenever the two disagreed. A structural
+ * fix — one routine, not two copies that can drift — is what keeps a fix like
+ * that from needing to be made twice again.
+ */
+export function accumulateScanRecord(acc: ScanAccumulator, record: RecordFields): void {
+  if (record.uuid !== undefined && record.uuid !== '') acc.uuids.add(record.uuid);
+  if (record.timestamp !== undefined) {
+    const at = Date.parse(record.timestamp);
+    if (Number.isFinite(at)) {
+      // The max, not the last record read: `branches.ts` already says copies
+      // do not preserve file order, and a scan that just took the last line
+      // was trusting an order this file never promised.
+      acc.lastMessageAt = later(acc.lastMessageAt, at);
+      if (
+        record.type === 'assistant' &&
+        record.isApiErrorMessage !== true &&
+        record.isSidechain !== true
+      ) {
+        acc.lastAssistantAt = later(acc.lastAssistantAt, at);
       }
     }
   }
+}
 
+/** `acc`, in the shape `ConversationScan` promises. */
+export function scanAccumulatorResult(acc: ScanAccumulator): ConversationScan {
   return {
-    uuids,
-    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
-    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
+    uuids: acc.uuids,
+    ...(acc.lastMessageAt === undefined ? {} : { lastMessageAt: acc.lastMessageAt }),
+    ...(acc.lastAssistantAt === undefined ? {} : { lastAssistantAt: acc.lastAssistantAt }),
   };
 }
 
@@ -828,8 +874,14 @@ export function scanConversationFiles(files: readonly string[]): ConversationSca
   };
 }
 
-/** The later of two moments, when either may be missing. */
-function later(a: number | undefined, b: number | undefined): number | undefined {
+/**
+ * The later of two moments, when either may be missing.
+ *
+ * Exported so `store/cache/transcriptCache.ts` merges a resumed range's
+ * timestamps into a stored entry with the exact same rule this file uses to
+ * merge two files of one conversation, rather than a second copy of it.
+ */
+export function later(a: number | undefined, b: number | undefined): number | undefined {
   if (a === undefined) return b;
   if (b === undefined) return a;
   return Math.max(a, b);

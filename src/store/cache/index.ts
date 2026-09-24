@@ -5,7 +5,6 @@ import { TranscriptCache } from './transcriptCache.js';
 
 export { readSessionCardCached, SlimCardCache } from './cardCache.js';
 export {
-  cachedIdsMentionedIn,
   cachedScanConversation,
   cachedScanConversationFiles,
   TranscriptCache,

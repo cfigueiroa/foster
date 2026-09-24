@@ -3,13 +3,16 @@ import path from 'node:path';
 import { writeFileAtomicBinary } from '../../util/fsatomic.js';
 import { VERSION } from '../../version.js';
 import {
-  idsMentionedIn,
+  accumulateScanRecord,
+  later,
+  newScanAccumulator,
   recordFields,
+  scanAccumulatorResult,
   scanConversation,
   scanConversationFiles,
   type ConversationScan,
 } from '../transcripts.js';
-import { ByteReader, ByteWriter, bytesToUuid, shortHash, uuidToBytes } from './binary.js';
+import { ByteReader, ByteWriter, packUuidSet, shortHash, unpackUuidSet } from './binary.js';
 import { CACHE_SCHEMA } from './schema.js';
 
 /** Bytes at the tail of the already-scanned region a resume verifies before trusting it. */
@@ -17,7 +20,7 @@ const TAIL_BYTES = 4096;
 
 const MAGIC = 'FCTC';
 
-/** A growth-resumable entry shared by both caches below, minus the payload each one adds. */
+/** The growth-resumable bookkeeping every scan entry carries, minus the payload it adds. */
 interface GrowthEntry {
   size: number;
   mtimeMs: number;
@@ -32,42 +35,33 @@ interface ScanEntry extends GrowthEntry {
   lastAssistantAt?: number;
   /** Each record's own `uuid` — what `ConversationScan.uuids` answers with. */
   uuids: Set<string>;
+  /**
+   * The exact bytes `uuids` packed to, last time they were read off disk —
+   * present only on an entry `ensureLoaded` built straight from the cache
+   * file, and never carried onto one a fresh or grown scan produced (see
+   * `unionOf`, and the two `ScanEntry` literals in `scanConversation`, none
+   * of which set this field). `save()` reuses these verbatim for an entry a
+   * warm run never touched instead of re-validating and re-packing a set
+   * nothing asked it to change — see `packUuidSet`'s own doc for why that
+   * used to be the slower half of a warm run.
+   */
+  packedUuids?: Buffer;
 }
-
-interface MentionEntry extends GrowthEntry {
-  /** Every id-shaped string the file mentions anywhere — what `idsMentionedIn` answers with. */
-  uuids: Set<string>;
-}
-
-interface OwnScanRange {
-  uuids: Set<string>;
-  lastMessageAt?: number;
-  lastAssistantAt?: number;
-}
-
-/** A record id occurring anywhere in the text, own-record or quoted inside another one. */
-const MENTIONED_ID = /"uuid":"([0-9a-fA-F-]{36})"/g;
 
 /**
- * `scanConversation` and `idsMentionedIn`, kept across runs — as two entirely
- * separate caches sharing one file, not one combined entry.
+ * `scanConversation`, kept across runs.
  *
- * They read the same bytes for different reasons, but a sweep asks them of
- * very different populations: `scanConversation` (through `Lineage.scanOf` /
- * `reachOf`) runs over every card it looks at, thousands of files on a real
- * store; `idsMentionedIn` (through `Lineage.deepen`) runs only over
- * conversations already known to be forked — "a handful", per
- * `engine/lineage.ts`. Measured 24/09/2026: computing and retaining the
- * mentioned-id superset for every file `scanConversation` touched, not only
- * the handful that ever asked for it, ran a real store's dry-run sweep out of
- * the default heap — `Ineffective mark-compacts near heap limit` — where the
- * uncached sweep finished in 78 s. Splitting the two back into independent,
- * independently-grown entries is what keeps a `scanConversation`-only run
- * paying for exactly what it always paid for.
+ * A persistent, on-disk twin of `idsMentionedIn` (`store/transcripts.ts`) used
+ * to live here too, grown independently for the same reason described below.
+ * Removed 2026-09: nothing outside this file's own tests ever called it —
+ * `Lineage.deepen` (`engine/lineage.ts`), the only caller `idsMentionedIn` has,
+ * has carried its own in-memory `RecordIdCache` since before this milestone
+ * and was never wired to this persistent one. A cache entry nothing reads is
+ * dead weight on every `save()`, not a feature kept in reserve.
  *
- * Both are still growth-resumable the same way: a transcript only grows, so on
- * a size increase the bytes an entry was built against are checked with a
- * hash of the `TAIL_BYTES` immediately before its stored offset — read fresh
+ * Growth-resumable: a transcript only grows, so on a size increase the bytes
+ * an entry was built against are checked with a hash of the `TAIL_BYTES`
+ * immediately before its stored offset — read fresh
  * from the file now, not assumed — and only a match trusts that appending is
  * all that happened; a mismatch means the file was rewritten in place, and the
  * whole thing is read again. `scanConversation`'s resumed read does not start
@@ -87,14 +81,15 @@ const MENTIONED_ID = /"uuid":"([0-9a-fA-F-]{36})"/g;
  * work, not correctness.
  *
  * Ids are stored as 16 raw bytes rather than the 36-character string a
- * transcript spells one as (`uuidToBytes`/`bytesToUuid`). A string that does
- * not pack — anything not a canonical lowercase uuid, which nothing real
- * writes — is never asked to: `save()` skips persisting that file's entry
- * rather than lose or mangle the id, and the next run reads it live again.
+ * transcript spells one as, a whole file's set packed and unpacked together
+ * (`packUuidSet`/`unpackUuidSet`, `binary.ts`) rather than one id at a time —
+ * see `packUuidSet`'s own doc for why. A string that does not pack — anything
+ * not a canonical lowercase uuid, which nothing real writes — is never asked
+ * to: `save()` skips persisting that file's entry rather than lose or mangle
+ * the id, and the next run reads it live again.
  */
 export class TranscriptCache {
   private readonly scans = new Map<string, ScanEntry>();
-  private readonly mentions = new Map<string, MentionEntry>();
   private dirty = false;
   private loaded = false;
 
@@ -126,7 +121,15 @@ export class TranscriptCache {
         const tailHash = reader.raw(16);
         const lastMessageAtRaw = reader.f64();
         const lastAssistantAtRaw = reader.f64();
-        const uuids = readUuidSet(reader);
+        const uuidCount = reader.u32();
+        const packedUuidsRaw = reader.rawView(uuidCount * 16);
+        const uuids = unpackUuidSet(packedUuidsRaw, 0, uuidCount);
+        // `save()` writes `entry.uuids.size` as the count, which only equals
+        // `uuidCount` when every packed id was distinct — true for every file
+        // this ever wrote, but a foreign or torn file that somehow duplicated
+        // one must not hand a byte length back that disagrees with the size
+        // `save()` would write for it next time.
+        const packedUuids = uuids.size === uuidCount ? packedUuidsRaw : undefined;
         this.scans.set(entryPath, {
           size,
           mtimeMs,
@@ -135,23 +138,12 @@ export class TranscriptCache {
           ...(lastMessageAtRaw < 0 ? {} : { lastMessageAt: lastMessageAtRaw }),
           ...(lastAssistantAtRaw < 0 ? {} : { lastAssistantAt: lastAssistantAtRaw }),
           uuids,
+          packedUuids,
         });
-      }
-
-      const mentionCount = reader.u32();
-      for (let index = 0; index < mentionCount; index += 1) {
-        const entryPath = reader.str();
-        const size = reader.f64();
-        const mtimeMs = reader.f64();
-        const offset = reader.f64();
-        const tailHash = reader.raw(16);
-        const uuids = readUuidSet(reader);
-        this.mentions.set(entryPath, { size, mtimeMs, offset, tailHash, uuids });
       }
     } catch {
       // A torn or foreign file is not a cache; start empty and rebuild it.
       this.scans.clear();
-      this.mentions.clear();
     }
   }
 
@@ -217,74 +209,6 @@ export class TranscriptCache {
     return ownResult(entry);
   }
 
-  /**
-   * `idsMentionedIn`, refreshing the cached entry first when the file has
-   * grown or changed. Independent of `scanConversation`'s own cache — see the
-   * class doc — so a caller that only ever wants this for a handful of
-   * conversations never grows the far larger population `scanConversation`
-   * sees.
-   *
-   * The persisted entry only proves an id-shaped string occurs somewhere in
-   * the file — it does not survive far enough to say whether an occurrence is
-   * a record's own `uuid` or a copy quoted inside another one (a
-   * `toolUseResult`, say), which is exactly the false-alias bug the live
-   * `idsMentionedIn` (`store/transcripts.ts`) guards against with
-   * `recordFields`. So a candidate this entry turns up is never trusted on
-   * its own: it is handed to the live function to confirm, over the
-   * (typically tiny) set of ids the cache actually narrowed things down to,
-   * never the whole file's own `wanted` set — the one thing a persisted entry
-   * cannot serve, this still reads for, but never more than it has to.
-   */
-  idsMentionedIn(file: string, wanted: ReadonlySet<string>): string[] {
-    if (wanted.size === 0) return [];
-    this.ensureLoaded();
-
-    const stat = statSafe(file);
-    if (!stat) return [];
-
-    let entry = this.mentions.get(file);
-    if (!entry || entry.size !== stat.size || entry.mtimeMs !== stat.mtimeMs) {
-      if (entry && stat.size > entry.size && tailStillMatches(file, entry.offset, entry.tailHash)) {
-        const from = Math.max(0, entry.offset - TAIL_BYTES);
-        const grown = scanMentionedRange(file, from, stat.size);
-        entry = grown
-          ? {
-              size: stat.size,
-              mtimeMs: stat.mtimeMs,
-              offset: stat.size,
-              tailHash: hashTail(file, stat.size),
-              uuids: unionOf(entry.uuids, grown),
-            }
-          : undefined;
-      } else {
-        entry = undefined;
-      }
-
-      if (!entry) {
-        const full = scanMentionedRange(file, 0, stat.size);
-        if (!full) {
-          this.mentions.delete(file);
-          return [];
-        }
-        entry = {
-          size: stat.size,
-          mtimeMs: stat.mtimeMs,
-          offset: stat.size,
-          tailHash: hashTail(file, stat.size),
-          uuids: full,
-        };
-      }
-
-      this.mentions.set(file, entry);
-      this.dirty = true;
-    }
-
-    const candidates = new Set<string>();
-    for (const id of entry.uuids) if (wanted.has(id)) candidates.add(id);
-    if (candidates.size === 0) return [];
-    return idsMentionedIn(file, candidates);
-  }
-
   get hasChanges(): boolean {
     return this.dirty;
   }
@@ -293,13 +217,16 @@ export class TranscriptCache {
     this.ensureLoaded();
     if (!this.dirty) return;
 
-    const scanRows: Array<[string, ScanEntry]> = [];
+    // `packedUuids` survives on an entry `ensureLoaded` read straight off
+    // disk and a fresh or grown scan never sets it (see the field's own
+    // doc), so this reuses the exact bytes for every entry a warm run's own
+    // rescans left untouched instead of re-validating and re-packing them —
+    // the difference between paying for what changed and paying for
+    // everything this cache has ever seen.
+    const scanRows: Array<[string, ScanEntry, Buffer]> = [];
     for (const [entryPath, entry] of this.scans) {
-      if (setPacks(entry.uuids)) scanRows.push([entryPath, entry]);
-    }
-    const mentionRows: Array<[string, MentionEntry]> = [];
-    for (const [entryPath, entry] of this.mentions) {
-      if (setPacks(entry.uuids)) mentionRows.push([entryPath, entry]);
+      const packed = entry.packedUuids ?? packUuidSet(entry.uuids);
+      if (packed) scanRows.push([entryPath, entry, packed]);
     }
 
     const writer = new ByteWriter();
@@ -308,7 +235,7 @@ export class TranscriptCache {
     writer.str(VERSION);
 
     writer.u32(scanRows.length);
-    for (const [entryPath, entry] of scanRows) {
+    for (const [entryPath, entry, packed] of scanRows) {
       writer.str(entryPath);
       writer.f64(entry.size);
       writer.f64(entry.mtimeMs);
@@ -316,17 +243,8 @@ export class TranscriptCache {
       writer.raw(entry.tailHash);
       writer.f64(entry.lastMessageAt ?? -1);
       writer.f64(entry.lastAssistantAt ?? -1);
-      writeUuidSet(writer, entry.uuids);
-    }
-
-    writer.u32(mentionRows.length);
-    for (const [entryPath, entry] of mentionRows) {
-      writer.str(entryPath);
-      writer.f64(entry.size);
-      writer.f64(entry.mtimeMs);
-      writer.f64(entry.offset);
-      writer.raw(entry.tailHash);
-      writeUuidSet(writer, entry.uuids);
+      writer.u32(entry.uuids.size);
+      writer.raw(packed);
     }
 
     try {
@@ -352,29 +270,6 @@ function unionOf(a: ReadonlySet<string>, b: ReadonlySet<string>): Set<string> {
   const out = new Set(a);
   for (const id of b) out.add(id);
   return out;
-}
-
-function later(a: number | undefined, b: number | undefined): number | undefined {
-  if (a === undefined) return b;
-  if (b === undefined) return a;
-  return Math.max(a, b);
-}
-
-function setPacks(ids: ReadonlySet<string>): boolean {
-  for (const id of ids) if (!uuidToBytes(id)) return false;
-  return true;
-}
-
-function writeUuidSet(writer: ByteWriter, ids: ReadonlySet<string>): void {
-  writer.u32(ids.size);
-  for (const id of ids) writer.raw(uuidToBytes(id)!);
-}
-
-function readUuidSet(reader: ByteReader): Set<string> {
-  const count = reader.u32();
-  const ids = new Set<string>();
-  for (let index = 0; index < count; index += 1) ids.add(bytesToUuid(reader.raw(16)));
-  return ids;
 }
 
 function statSafe(file: string): { size: number; mtimeMs: number } | undefined {
@@ -504,67 +399,27 @@ function* linesInRange(file: string, from: number, to: number): Generator<string
   }
 }
 
-/** Everything `scanConversation` needs — own-record uuids and the two timestamps — no more. */
-function scanOwnRange(file: string, from: number, to: number): OwnScanRange | undefined {
+/**
+ * Everything `scanConversation` needs — own-record uuids and the two
+ * timestamps — no more, folded through `accumulateScanRecord`
+ * (`store/transcripts.ts`) so this range scan and the live whole-file scan
+ * can never disagree about what a record counts toward.
+ */
+function scanOwnRange(file: string, from: number, to: number): ConversationScan | undefined {
   if (to < from) return undefined;
-  const uuids = new Set<string>();
-  let lastMessageAt: number | undefined;
-  let lastAssistantAt: number | undefined;
+  const acc = newScanAccumulator();
 
   try {
     for (const line of linesInRange(file, from, to)) {
       const record = recordFields(line);
       if (!record) continue;
-      if (record.uuid !== undefined && record.uuid !== '') uuids.add(record.uuid);
-      if (record.timestamp !== undefined) {
-        const at = Date.parse(record.timestamp);
-        if (Number.isFinite(at)) {
-          lastMessageAt = at;
-          if (record.type === 'assistant') lastAssistantAt = at;
-        }
-      }
+      accumulateScanRecord(acc, record);
     }
   } catch {
     return undefined;
   }
 
-  return {
-    uuids,
-    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
-    ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
-  };
-}
-
-/**
- * Everything `idsMentionedIn` needs — every id-shaped string the range holds,
- * own record or quoted copy alike.
- *
- * A raw match over the range's text rather than a per-line one: the pattern
- * (`[0-9a-fA-F-]{36}`) cannot match a newline, so a match can never straddle
- * two lines and reading the range as one block finds exactly what reading it
- * line by line would.
- */
-function scanMentionedRange(file: string, from: number, to: number): Set<string> | undefined {
-  if (to < from) return undefined;
-  let fd: number;
-  try {
-    fd = openSync(file, 'r');
-  } catch {
-    return undefined;
-  }
-  try {
-    const length = to - from;
-    const buffer = Buffer.alloc(length);
-    const read = readSync(fd, buffer, 0, length, from);
-    const text = buffer.subarray(0, read).toString('latin1');
-    const uuids = new Set<string>();
-    for (const match of text.matchAll(MENTIONED_ID)) uuids.add(match[1]!);
-    return uuids;
-  } catch {
-    return undefined;
-  } finally {
-    closeSync(fd);
-  }
+  return scanAccumulatorResult(acc);
 }
 
 /** `scanConversation`, consulting and then filling the cache. No cache: exactly the live function. */
@@ -597,13 +452,4 @@ export function cachedScanConversationFiles(
     ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
     ...(lastAssistantAt === undefined ? {} : { lastAssistantAt }),
   };
-}
-
-/** `idsMentionedIn`, consulting and then filling the cache. No cache: exactly the live function. */
-export function cachedIdsMentionedIn(
-  file: string,
-  wanted: ReadonlySet<string>,
-  cache: TranscriptCache | undefined,
-): string[] {
-  return cache ? cache.idsMentionedIn(file, wanted) : idsMentionedIn(file, wanted);
 }
