@@ -17,8 +17,8 @@ import { recordFields, scanConversation } from '../src/store/transcripts.js';
  * comparison over a real store, where the corpus is the argument.
  */
 
-/** What a parse of the whole record would have produced, for the same three fields. */
-function byParsing(line: string): Record<string, string> | undefined {
+/** What a parse of the whole record would have produced, for the same five fields. */
+function byParsing(line: string): Record<string, string | boolean> | undefined {
   let record: Record<string, unknown>;
   try {
     record = JSON.parse(line) as Record<string, unknown>;
@@ -26,25 +26,30 @@ function byParsing(line: string): Record<string, string> | undefined {
     return undefined;
   }
   if (record === null || typeof record !== 'object' || Array.isArray(record)) return undefined;
-  const fields: Record<string, string> = {};
+  const fields: Record<string, string | boolean> = {};
   for (const key of ['uuid', 'timestamp', 'type'] as const) {
     const value = record[key];
     if (typeof value === 'string') fields[key] = value;
+  }
+  for (const key of ['isApiErrorMessage', 'isSidechain'] as const) {
+    const value = record[key];
+    if (typeof value === 'boolean') fields[key] = value;
   }
   return fields;
 }
 
 /** Both readings of one line, so a test states the agreement rather than one side of it. */
 function bothWays(line: string): {
-  scanned: Record<string, string> | undefined;
-  parsed: Record<string, string> | undefined;
+  scanned: Record<string, string | boolean> | undefined;
+  parsed: Record<string, string | boolean> | undefined;
 } {
   const fields = recordFields(line);
-  const scanned = fields === undefined ? undefined : { ...(fields as Record<string, string>) };
+  const scanned =
+    fields === undefined ? undefined : { ...(fields as Record<string, string | boolean>) };
   return { scanned, parsed: byParsing(line) };
 }
 
-function agrees(line: string): Record<string, string> | undefined {
+function agrees(line: string): Record<string, string | boolean> | undefined {
   const { scanned, parsed } = bothWays(line);
   expect(scanned).toEqual(parsed);
   return parsed;
@@ -154,6 +159,51 @@ describe('reading a record without building it', () => {
   });
 });
 
+describe('the two booleans a whole-file scan needs', () => {
+  it('reads isApiErrorMessage and isSidechain as booleans, not strings', () => {
+    const fields = agrees(
+      JSON.stringify({
+        type: 'assistant',
+        uuid: ID,
+        isApiErrorMessage: true,
+        isSidechain: false,
+        model: '<synthetic>',
+      }),
+    );
+    expect(fields).toEqual({
+      type: 'assistant',
+      uuid: ID,
+      isApiErrorMessage: true,
+      isSidechain: false,
+    });
+  });
+
+  it('takes the last of a repeated boolean key, as a parse does', () => {
+    const fields = agrees(`{"isSidechain":true,"uuid":"${ID}","isSidechain":false}`);
+    expect(fields).toEqual({ uuid: ID, isSidechain: false });
+  });
+
+  it('drops a repeated boolean key whose later value is not a boolean, as a parse does', () => {
+    const fields = agrees(`{"isSidechain":true,"isSidechain":"x","uuid":"${ID}"}`);
+    expect(fields).toEqual({ uuid: ID });
+  });
+
+  it('ignores the booleans when the record does not carry them', () => {
+    expect(agrees(JSON.stringify({ type: 'user', uuid: ID }))).toEqual({ type: 'user', uuid: ID });
+  });
+
+  it('never takes an isApiErrorMessage quoted inside a tool result', () => {
+    const fields = agrees(
+      JSON.stringify({
+        type: 'user',
+        toolUseResult: { stdout: '{"isApiErrorMessage":true}' },
+        uuid: ID,
+      }),
+    );
+    expect(fields!.isApiErrorMessage).toBeUndefined();
+  });
+});
+
 describe('what a field holds on to', () => {
   it('hands back an id that does not keep its record alive', () => {
     // The defect this pins cost a build. `line.slice(from, to)` answers with a
@@ -221,6 +271,73 @@ describe('scanning a whole conversation', () => {
     );
     expect(scan.lastMessageAt).toBe(Date.parse('2026-09-21T07:00:00.000Z'));
     expect(scan.lastAssistantAt).toBe(Date.parse('2026-09-21T06:10:00.000Z'));
+  });
+
+  it('takes the max timestamp, not the last record in file order', () => {
+    // `branches.ts` already says copies do not preserve file order; a scan
+    // that took the last line as the newest was trusting an order this file
+    // never promised.
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-scan-'));
+    const file = path.join(dir, 'conversation.jsonl');
+    const lines = [
+      JSON.stringify({ type: 'assistant', uuid: ID, timestamp: '2026-09-21T09:00:00.000Z' }),
+      // Written later in the file, but an earlier moment.
+      JSON.stringify({ type: 'user', uuid: NESTED, timestamp: '2026-09-21T05:00:00.000Z' }),
+    ];
+    writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const scan = scanConversation(file);
+    expect(scan.lastMessageAt).toBe(Date.parse('2026-09-21T09:00:00.000Z'));
+    expect(scan.lastAssistantAt).toBe(Date.parse('2026-09-21T09:00:00.000Z'));
+  });
+
+  it('never counts the app’s own usage-limit record as the last answer', () => {
+    // The record the app writes in the model's own place when a usage limit
+    // cuts the conversation off: `isApiErrorMessage: true`, model
+    // `<synthetic>`. Scenario measured: a row opened from a `(stale…)` mark,
+    // typed "continue", and hit the weekly limit before a real answer came
+    // back — the branch pass read that as a fresh answer and called the row
+    // diverged, archiving the row that actually held the work.
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-scan-'));
+    const file = path.join(dir, 'conversation.jsonl');
+    const lines = [
+      JSON.stringify({ type: 'assistant', uuid: ID, timestamp: '2026-09-21T06:00:00.000Z' }),
+      JSON.stringify({ type: 'user', uuid: NESTED, timestamp: '2026-09-21T08:59:00.000Z' }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: '00000000-0000-4000-8000-00000000000d',
+        timestamp: '2026-09-21T09:00:00.000Z',
+        isApiErrorMessage: true,
+        model: '<synthetic>',
+        error: 'rate_limit',
+      }),
+    ];
+    writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const scan = scanConversation(file);
+    // The last thing said still moves — the limit record is a real message —
+    // but it never counts as an answer.
+    expect(scan.lastMessageAt).toBe(Date.parse('2026-09-21T09:00:00.000Z'));
+    expect(scan.lastAssistantAt).toBe(Date.parse('2026-09-21T06:00:00.000Z'));
+  });
+
+  it('never counts a sidechain record as the last answer', () => {
+    // A subagent's turn, not the main conversation's.
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-scan-'));
+    const file = path.join(dir, 'conversation.jsonl');
+    const lines = [
+      JSON.stringify({ type: 'assistant', uuid: ID, timestamp: '2026-09-21T06:00:00.000Z' }),
+      JSON.stringify({
+        type: 'assistant',
+        uuid: NESTED,
+        timestamp: '2026-09-21T09:00:00.000Z',
+        isSidechain: true,
+      }),
+    ];
+    writeFileSync(file, `${lines.join('\n')}\n`);
+
+    const scan = scanConversation(file);
+    expect(scan.lastAssistantAt).toBe(Date.parse('2026-09-21T06:00:00.000Z'));
   });
 
   it('reads a record that straddles the chunk boundary', () => {

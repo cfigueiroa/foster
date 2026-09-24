@@ -205,6 +205,25 @@ of both questions and its branch is what decides whether it belongs in the sideb
 row opening the _same_ file as the elected one is a duplicate, not a second file, so it is left
 alone. Nothing is merged — `consolidate` still does not join two files of one conversation.
 
+**The election has two more fixes worth knowing about.** `scanConversation`'s `lastAssistantAt`
+(`src/store/transcripts.ts`) used to count _any_ `type: 'assistant'` record, including the
+usage-limit record the app writes in the model's own place (`isApiErrorMessage: true`, model
+`<synthetic>`) and a subagent's sidechain turn (`isSidechain: true`) — `lastAnswer`, the tail
+reader right above it, already skipped both, and the whole-file scan disagreeing with it is what
+let a usage limit look like a fresh answer: a row opened from `(stale…)`, typed "continue", hit the
+weekly limit before a real answer came back, and the branch pass called that branch diverged,
+archiving the row that actually held the work. Measured 24/09/2026 over 11,191 real transcripts on
+this machine: 1,783 carry a synthetic usage-limit assistant record, 8,097 carry a sidechain one, and
+`lastAssistantAt` changes under the fix for 8,502 of them — the large majority. The same function
+also took the _last_ record in file order rather than the max timestamp, which `branches.ts`
+already documents copies as not preserving; measured the same day, 4,320 real files have
+out-of-order timestamps (rarely enough to move the final answer — only 30 changed `lastMessageAt` —
+but a real, not theoretical, gap). `byContinuation`'s tie-break (`src/engine/fileCards.ts`) had the
+same shape of bug one level up: on a tied `lastAssistantAt` it fell back to `lastMessageAt`, which a
+mere click changes, so opening the row this pass had just filed away could flip the election on the
+next run. `only` — what a file holds that its sibling does not, which a click never moves — is asked
+before `lastMessageAt` now.
+
 One thing this does not do: it never repoints or rewrites a card the account already has — the
 existing row keeps opening what it opened. What it does do is reach past `already fostered`: since
 #63, `resolveExisting` (`src/engine/executor.ts`) asks `unreached` of a copy the ledger vouches
@@ -589,6 +608,17 @@ from inside the app can never write it. Measured 23/09/2026: that move used to b
 summary and then forgotten. Now the sweep appends `pin_move_deferred` to the ledger and `foster
 layout` writes every pending move while the app is down (`engine/pinMoves.ts`), settling each with
 `pins_moved` — written, or found already undone by hand, so a row re-pinned on purpose is left alone.
+
+Naming the tip's own row for that deferred move used to be scan order's to decide, and since #63 a
+tip can legitimately have two rows here — one per file of its own conversation. `held[0]`
+(`src/engine/branchCards.ts`) took whichever the scan happened to list first, so the pin could be
+handed the archived "(other file…)" row's id instead of the clean one; `planPinMoves`'s own check
+then required the named row to already be visible and settled the move as unwritable for good when
+it was not, losing the pin permanently. Fixed two ways: `tipHeld` now prefers a held row
+`fileCards.ts` has not filed as the other file and that is not archived, falling back to the first
+only when every held row fails that; and `planPinMoves` (`src/engine/pinMoves.ts`) itself no longer
+gives up the moment the named row is not shown — `redirectToVisible` looks once for another row of
+the same conversation (same `cliSessionId`, not archived, most recently active) before settling.
 
 **Marks** ride it too (`engine/marksBack.ts`). A retitle is written with the app open, and the app
 can save a card it holds back over it: measured 24/09/2026, 10 of 49 fresh "(outro arquivo, …)"

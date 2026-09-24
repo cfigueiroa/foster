@@ -5,7 +5,13 @@ import type { LedgerEvent } from '../ledger/types.js';
 import type { LedgerState } from '../ledger/project.js';
 import { divergedFrom, type BranchWeight, type Forks } from './branches.js';
 import { fosterSessions, type FosterOptions, type Outcome } from './executor.js';
-import { markFor, UNKNOWN_MARK_DETAIL, type MarkDecision } from './marks.js';
+import {
+  archivedByFosterIds,
+  lastMarkedAs,
+  markFor,
+  UNKNOWN_MARK_DETAIL,
+  type MarkDecision,
+} from './marks.js';
 import { retitleCards, type RetitleOutcome, type RetitleRequest } from './retitle.js';
 import type { Sidebar } from './sidebar.js';
 
@@ -139,13 +145,7 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
   // Cards foster itself filed away, by session id. Only those are lifted back
   // out when their branch turns out to be the one that carried on: a flag the
   // user set is the user's.
-  const archivedByFoster = new Set<string>();
-  for (const fostering of state.active.values()) {
-    if (fostering.archivedByFoster) archivedByFoster.add(fostering.copySessionId);
-  }
-  for (const card of state.retitled.values()) {
-    if (card.toArchived) archivedByFoster.add(card.sessionId);
-  }
+  const archivedByFoster = archivedByFosterIds(state);
 
   // Rows wearing the other marking pass's mark. A tip strips whatever mark it
   // finds, and stripping one this pass did not write is a loop rather than a
@@ -190,12 +190,23 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
       if (held.length > 0) {
         row.action = 'keep';
         if (isTip) {
-          // The first held card stands in for the row; a tip with more than one
-          // is the app having made a duplicate, which is not this pass's problem
-          // to resolve. Read now, before `retitle` below might rewrite its title.
+          // Since #63 a tip can legitimately have two rows here, one per file
+          // of the conversation — and `held[0]` is whichever the scan happened
+          // to list first, not whichever the file pass has elected. Naming that
+          // one as the row to continue in let the pin follow onto the archived
+          // "(other file…)" row instead: `pinMoves.ts` then required the clean
+          // row to already be visible and gave up for good when it was not.
+          // Prefer a held row `fileCards.ts` has not filed as the other file
+          // (`fileMarked`, read fresh above from the ledger this run) and that
+          // is not archived; fall back to the first only when every held row
+          // fails that, which leaves this exactly as unresolved as before
+          // rather than guessing at a lie.
+          const clean =
+            held.find((card) => !fileMarked.has(card.data.sessionId) && !card.data.isArchived) ??
+            held[0]!;
           plan.tipHeld = {
-            sessionId: held[0]!.data.sessionId,
-            title: stripMarks(held[0]!.data.title ?? '', templates),
+            sessionId: clean.data.sessionId,
+            title: stripMarks(clean.data.title ?? '', templates),
           };
         }
         for (const card of held) {
@@ -274,17 +285,14 @@ export function planBranchCards(input: BranchPlanInput): ForkPlan[] {
 }
 
 /**
- * Cards the second-file pass is responsible for, by the last thing the ledger
- * says was written to them — the mirror of `fileCards.ts`'s own check, and the
- * other half of keeping the two passes from undoing each other.
+ * Cards the second-file pass is responsible for — the mirror of
+ * `fileCards.ts`'s own `branchMarkedIds`, and the other half of keeping the
+ * two passes from undoing each other. Both read `lastMarkedAs` (`marks.ts`)
+ * and keep only the `as` values that are theirs.
  */
 function fileMarkedIds(events: readonly LedgerEvent[]): Set<string> {
-  const last = new Map<string, string>();
-  for (const event of events) {
-    if (event.kind === 'card_retitled') last.set(event.sessionId, event.as);
-  }
   const ids = new Set<string>();
-  for (const [id, as] of last) if (as === 'other-file') ids.add(id);
+  for (const [id, as] of lastMarkedAs(events)) if (as === 'other-file') ids.add(id);
   return ids;
 }
 

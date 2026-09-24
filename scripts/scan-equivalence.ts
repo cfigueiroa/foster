@@ -1,12 +1,17 @@
 /**
  * Prove `scanConversation` still answers what a whole-record parse answered.
  *
- * The scan reads three top-level strings out of each JSONL line instead of
- * building the record, and decodes the bytes as latin1 instead of utf8. Both are
- * why a sweep got cheaper; neither is allowed to change an answer. The unit tests
- * pin the reading against `JSON.parse` on the shapes that could make them
- * disagree — they cannot pin it against shapes nobody thought of. This walks a
- * real corpus instead, so the argument for the change is a measurement.
+ * The scan reads five top-level fields — three strings and two booleans — out
+ * of each JSONL line instead of building the record, and decodes the bytes as
+ * latin1 instead of utf8. Both are why a sweep got cheaper; neither is allowed
+ * to change an answer, and nor is the moment either field joined the read:
+ * `lastMessageAt`/`lastAssistantAt` are each the **max** timestamp seen, never
+ * the last record in file order, and `lastAssistantAt` skips a usage-limit
+ * record (`isApiErrorMessage: true`) or a sidechain one (`isSidechain: true`)
+ * the same way `lastAnswer` already does. The unit tests pin the reading
+ * against `JSON.parse` on the shapes that could make them disagree — they
+ * cannot pin it against shapes nobody thought of. This walks a real corpus
+ * instead, so the argument for the change is a measurement.
  *
  * Both readings run over **the same bytes**, read once. Transcripts on a working
  * machine are being appended to while this runs, and reading each file twice
@@ -32,7 +37,12 @@ interface Scan {
   lastAssistantAt?: number;
 }
 
-/** The reading this replaced: decode as utf8, parse every line, take three fields. */
+/** The later of a running max and a freshly seen moment. */
+function maxOf(running: number | undefined, at: number): number {
+  return running === undefined ? at : Math.max(running, at);
+}
+
+/** The reading this replaced: decode as utf8, parse every line, take five fields. */
 function byParsing(text: string): Scan {
   const uuids = new Set<string>();
   let lastMessageAt: number | undefined;
@@ -50,8 +60,14 @@ function byParsing(text: string): Scan {
     if (typeof record.timestamp === 'string') {
       const at = Date.parse(record.timestamp);
       if (Number.isFinite(at)) {
-        lastMessageAt = at;
-        if (record.type === 'assistant') lastAssistantAt = at;
+        lastMessageAt = maxOf(lastMessageAt, at);
+        if (
+          record.type === 'assistant' &&
+          record.isApiErrorMessage !== true &&
+          record.isSidechain !== true
+        ) {
+          lastAssistantAt = maxOf(lastAssistantAt, at);
+        }
       }
     }
   }
@@ -71,8 +87,14 @@ function byScanning(text: string): Scan {
     if (record.timestamp !== undefined) {
       const at = Date.parse(record.timestamp);
       if (Number.isFinite(at)) {
-        lastMessageAt = at;
-        if (record.type === 'assistant') lastAssistantAt = at;
+        lastMessageAt = maxOf(lastMessageAt, at);
+        if (
+          record.type === 'assistant' &&
+          record.isApiErrorMessage !== true &&
+          record.isSidechain !== true
+        ) {
+          lastAssistantAt = maxOf(lastAssistantAt, at);
+        }
       }
     }
   }

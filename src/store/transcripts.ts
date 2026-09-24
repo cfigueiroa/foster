@@ -353,6 +353,10 @@ export interface LastAnswer {
  *
  * Records after it are the app's bookkeeping (`last-prompt`, queue operations)
  * and are passed over. Undefined when the tail holds no answer at all.
+ *
+ * `scanConversation`'s `lastAssistantAt` (below) is the whole-file sibling of
+ * this and has to agree with it on what counts as an answer — see there for
+ * why it did not, until it did.
  */
 export function lastAnswer(file: string): LastAnswer | undefined {
   const lines = tailLines(file);
@@ -438,6 +442,16 @@ export interface ConversationScan {
    * a real store: last answer 18:10 the day before, last record 08:24 that
    * morning, from one click. A stale row stamped with the click would claim to
    * be the newest thing there.
+   *
+   * Never a usage-limit record (`isApiErrorMessage: true`, the app's own
+   * synthetic answer) or a sidechain one (`isSidechain: true`, a subagent's
+   * turn, not the main conversation's) — `lastAnswer` above already skips
+   * both, and this has to agree with it. Until this was fixed it did not: a
+   * row opened from a `(stale…)` mark, typed "continue", and hit the weekly
+   * limit before a real answer came back gave that branch a fresh, non-empty
+   * `only` and a `lastAssistantAt` newer than the tip's own — `branchCards.ts`
+   * called it diverged and `fileCards.ts` elected it, archiving the row that
+   * actually held the work.
    */
   lastAssistantAt?: number;
 }
@@ -460,11 +474,11 @@ export function scanConversation(file: string): ConversationScan {
   let lastMessageAt: number | undefined;
   let lastAssistantAt: number | undefined;
 
-  // Read field by field rather than record by record: three strings out of each
-  // line, and none of the graph around them. See `recordFields` for why the
+  // Read field by field rather than record by record: five short fields out of
+  // each line, and none of the graph around them. See `recordFields` for why the
   // whole-record parse this replaces was the cost, and `streamLines` for why the
-  // bytes are decoded as latin1 — a uuid, an ISO timestamp and a type tag are
-  // ASCII, and nothing here is shown to anybody.
+  // bytes are decoded as latin1 — a uuid, an ISO timestamp, a type tag and two
+  // booleans are ASCII, and nothing here is shown to anybody.
   for (const line of streamLines(file, 'latin1')) {
     const record = recordFields(line);
     if (!record) continue;
@@ -472,8 +486,17 @@ export function scanConversation(file: string): ConversationScan {
     if (record.timestamp !== undefined) {
       const at = Date.parse(record.timestamp);
       if (Number.isFinite(at)) {
-        lastMessageAt = at;
-        if (record.type === 'assistant') lastAssistantAt = at;
+        // The max, not the last record read: `branches.ts` already says copies
+        // do not preserve file order, and a scan that just took the last line
+        // was trusting an order this file never promised.
+        lastMessageAt = later(lastMessageAt, at);
+        if (
+          record.type === 'assistant' &&
+          record.isApiErrorMessage !== true &&
+          record.isSidechain !== true
+        ) {
+          lastAssistantAt = later(lastAssistantAt, at);
+        }
       }
     }
   }
@@ -532,16 +555,18 @@ function later(a: number | undefined, b: number | undefined): number | undefined
 }
 
 /**
- * The three top-level fields a whole-file scan needs, read out of one JSONL line
+ * The top-level fields a whole-file scan needs, read out of one JSONL line
  * without building the record.
  *
  * `JSON.parse` is the obvious way and was the expensive one. These records carry
  * the whole conversation — a `message` with every content block, a
- * `toolUseResult` with whatever a tool returned — and a scan wants three short
- * strings out of each. Measured 21/09/2026 by CPU-profiling a dry `foster sweep`
- * on a real store: 105.8 s of wall clock, of which **57.3 s was the garbage
- * collector** alone, collecting record graphs built and dropped one line at a
- * time.
+ * `toolUseResult` with whatever a tool returned — and a scan wants a handful of
+ * short fields out of each. Measured 21/09/2026 by CPU-profiling a dry `foster
+ * sweep` on a real store: 105.8 s of wall clock, of which **57.3 s was the
+ * garbage collector** alone, collecting record graphs built and dropped one
+ * line at a time. `isApiErrorMessage` and `isSidechain` joined `uuid`,
+ * `timestamp` and `type` afterwards, for the same reason and at the same cost:
+ * two booleans compared in place, never allocated.
  *
  * Deliberately not `idsMentionedIn`'s trick. That one asks whether an id occurs
  * *anywhere*, so a regex over the raw bytes is the whole answer; this one asks
@@ -564,10 +589,17 @@ export interface RecordFields {
   uuid?: string;
   timestamp?: string;
   type?: string;
+  /** The usage-limit record the app writes in the model's own place. */
+  isApiErrorMessage?: boolean;
+  /** A subagent's turn, not the main conversation's. */
+  isSidechain?: boolean;
 }
 
 /** The only keys this reads; everything else is stepped over unexamined. */
-const SCANNED_KEYS = new Set(['uuid', 'timestamp', 'type']);
+const SCANNED_KEYS = new Set(['uuid', 'timestamp', 'type', 'isApiErrorMessage', 'isSidechain']);
+
+/** The two booleans among `SCANNED_KEYS` — every other scanned key is a string. */
+const BOOLEAN_KEYS = new Set(['isApiErrorMessage', 'isSidechain']);
 
 const SPACE = 0x20;
 const TAB = 0x09;
@@ -698,22 +730,42 @@ export function recordFields(line: string): RecordFields | undefined {
           const key = line.slice(at + 1, close);
           const valueAt = skipSpace(line, afterKey + 1);
           if (SCANNED_KEYS.has(key)) {
-            const field = key as keyof RecordFields;
-            if (line.charCodeAt(valueAt) === QUOTE) {
-              const valueEnd = endOfString(line, valueAt);
-              if (valueEnd === -1) return undefined;
-              const text = stringValue(line, valueAt + 1, valueEnd);
-              // A value this cannot decode is one the caller would have rejected
-              // anyway; dropping the key keeps a repeated one from leaving the
-              // earlier reading in place, exactly as a parse would.
-              if (text === undefined) delete fields[field];
-              else fields[field] = text;
-              at = valueEnd + 1;
-              continue;
+            if (BOOLEAN_KEYS.has(key)) {
+              const field = key as 'isApiErrorMessage' | 'isSidechain';
+              // No allocation either way: a literal compared in place, the same
+              // native scan `detachedSlice` exists to avoid paying for.
+              if (line.startsWith('true', valueAt)) {
+                fields[field] = true;
+                at = valueAt + 4;
+                continue;
+              }
+              if (line.startsWith('false', valueAt)) {
+                fields[field] = false;
+                at = valueAt + 5;
+                continue;
+              }
+              // Not a boolean, so not something this field accepts — and it
+              // still overrides an earlier key of the same name.
+              delete fields[field];
+            } else {
+              const field = key as 'uuid' | 'timestamp' | 'type';
+              if (line.charCodeAt(valueAt) === QUOTE) {
+                const valueEnd = endOfString(line, valueAt);
+                if (valueEnd === -1) return undefined;
+                const text = stringValue(line, valueAt + 1, valueEnd);
+                // A value this cannot decode is one the caller would have
+                // rejected anyway; dropping the key keeps a repeated one from
+                // leaving the earlier reading in place, exactly as a parse
+                // would.
+                if (text === undefined) delete fields[field];
+                else fields[field] = text;
+                at = valueEnd + 1;
+                continue;
+              }
+              // Not a string, so not something the callers accept — and it
+              // still overrides an earlier key of the same name.
+              delete fields[field];
             }
-            // Not a string, so not something the callers accept — and it still
-            // overrides an earlier key of the same name.
-            delete fields[field];
           }
           at = valueAt;
           continue;

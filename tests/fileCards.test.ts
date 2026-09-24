@@ -313,6 +313,43 @@ describe('a conversation this account shows more than once', () => {
     expect(cards().find((data) => data.sessionId === `local_${TWIN_CARD}`)!.title).toBe('Macs');
   });
 
+  it('elects the file with more of its own work over one merely clicked more recently', () => {
+    // Both files share the same last *answer* — a tie on `lastAssistantAt` —
+    // but the worktree's file was opened afterwards and picked up nothing but
+    // a click, which moves `lastMessageAt` without being work. Before the fix
+    // the tie fell back to `lastMessageAt`, so opening the marked row every
+    // run flipped which one it elected; `only` (what a file holds that its
+    // sibling does not) is asked first now, and the click does not move it.
+    const meta = { type: 'custom-title', customTitle: 'Macs' };
+    const tie = '2026-09-01T20:01:00.000Z';
+    transcript([
+      meta,
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(SHARED, 'assistant', tie),
+      rec(REPO_ONLY, 'user', '2026-09-01T20:02:00.000Z'),
+      rec('00000000-0000-4000-8000-0000000000e5', 'user', '2026-09-01T20:03:00.000Z'),
+    ]);
+    transcript(
+      [
+        meta,
+        rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+        rec(SHARED, 'assistant', tie),
+        // The click: a much later message, no answer after it.
+        rec(TREE_ONLY, 'user', '2026-09-01T23:00:00.000Z'),
+      ],
+      TREE_PROJECT,
+    );
+    bothRows();
+
+    const report = sweep();
+
+    const plan = report.files.plans[0]!;
+    const working = cards().find((data) => data.sessionId === plan.working.sessionId)!;
+    // The repository's file: fewer records overall, but two of its own against
+    // the worktree's one, and it is where the work — not the click — was left.
+    expect(working.cwd).toBe(REPO);
+  });
+
   it('does not flip against the branch pass when a row is the tip and the older file', () => {
     // The row can lose both questions at once: it is the tip of a fork — so the
     // branch pass wants no mark on it — and the older of two files of its own
