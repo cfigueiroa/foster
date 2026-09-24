@@ -9,8 +9,17 @@
  * nobody was watching because the release workflow beside it had gone green.
  * A real account UUID reached the published repository that way.
  *
- * Kept deliberately in step with .github/workflows/ci.yml: same patterns, same
- * exclusions. If one changes, change both.
+ * This is now the one implementation (issue #134): `.github/workflows/ci.yml`'s
+ * `privacy-guard` job runs this same file, instead of carrying its own copy of
+ * the patterns that nothing forced to stay in step.
+ *
+ * `--untracked` is what closes the second gap #134 measured: plain `git grep`
+ * only sees tracked files, so a fixture written but not yet `git add`-ed used
+ * to pass here and only fail once CI saw it tracked, after the push (#131's
+ * `tests/detach.test.ts`, cleaned up by #132 and a history rewrite).
+ * `--untracked` honours `.gitignore` and makes this script see exactly what
+ * the next `git add -A` would commit: tracked, staged, and
+ * untracked-but-not-ignored files alike.
  *
  *   node scripts/privacy.mjs
  */
@@ -25,7 +34,7 @@ const SCOPE = ['--', '.', ':(exclude).github/workflows/ci.yml', ':(exclude)scrip
 /** git grep exits 1 when it matches nothing, which is the good case here. */
 function grep(args) {
   try {
-    return execFileSync('git', ['grep', ...args, ...SCOPE], { encoding: 'utf8' });
+    return execFileSync('git', ['grep', '--untracked', ...args, ...SCOPE], { encoding: 'utf8' });
   } catch {
     return '';
   }
@@ -37,7 +46,7 @@ let failed = false;
 // doubled form used inside string literals, and the forward-slash spelling.
 const paths = grep(['-nIiE', String.raw`C:[\\/]+Users[\\/]+[A-Za-z0-9._-]+`]);
 if (paths.trim()) {
-  console.error('A literal C:\\Users\\<name> path is in a tracked file:\n');
+  console.error('A literal C:\\Users\\<name> path is in a file:\n');
   console.error(paths.trim());
   failed = true;
 }
@@ -52,9 +61,7 @@ const found = new Set(
 );
 
 if (found.size > 0) {
-  console.error(
-    `\n${found.size} realistic UUID(s) in tracked files — fixtures must be obviously synthetic:\n`,
-  );
+  console.error(`\n${found.size} realistic UUID(s) — fixtures must be obviously synthetic:\n`);
   for (const id of found) {
     console.error(`  ${id}`);
     console.error(grep(['-nI', id]).trimEnd());
@@ -82,4 +89,4 @@ if (failed) {
   process.exit(1);
 }
 
-console.log('privacy: no personal identifiers in tracked files.');
+console.log('privacy: no personal identifiers in tracked or untracked files.');

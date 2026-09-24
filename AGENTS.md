@@ -654,4 +654,56 @@ npm run check
 `npm run privacy` is the one to remember when writing prose or fixtures: this repository is
 public, and the guard rejects any Windows user-profile path, any UUID that does not look
 obviously synthetic, and two personal identifiers that reached it once. Fixture uuids look
-like `00000000-0000-4000-8000-00000000000a`.
+like `00000000-0000-4000-8000-00000000000a`. `scripts/privacy.mjs` is the one implementation
+(issue #134, `tests/privacy.test.ts`): `git grep --untracked` (honours `.gitignore`) so it sees
+what the next `git add -A` would commit, not only what is already tracked — a fixture written but
+not `git add`-ed used to pass here and only fail once CI saw it tracked, after the push. CI's
+`privacy-guard` job runs this same script rather than a second copy of the patterns.
+
+## CI: Node matrix, the build-smoke gate, and the coverage floor
+
+`.github/workflows/ci.yml`'s `check` job runs on Node 22 and 24, on Ubuntu and Windows — Node 20
+(EOL April 2026) was dropped from the matrix, not kept alongside these, because vitest 5 (picked
+up to clear three high-severity advisories — `@vitest/mocker`'s path-traversal fix required the
+major bump) requires Node `^22.12.0 || ^24.0.0 || >=26.0.0` and refuses to start under 20 at all.
+`package.json`'s own `"engines": ">=20"` is untouched: that floor is a promise about the _built_
+CLI (`dist/foster.js`), which carries no vitest dependency, not about the dev toolchain a
+contributor runs `npm test` with. `release.yml`'s own `setup-node` step needed the same bump, for
+the same reason — it runs `npm test` too, ahead of the smoke test.
+
+The `check` job's own test step is `npm run coverage`, not a plain `npm test`: `vitest run` alone
+never passes `--coverage`, so without it the thresholds below are configured but never collected
+or enforced — a PR could drop coverage to zero and every job would still pass. `npm run check`
+(`package.json`) runs the same `npm run coverage`, so a local run fails exactly when CI would.
+
+Two more gates moved into `ci.yml`, both previously exercised only by `release.yml` on a tag push:
+a `build-smoke` job (`npm run build` then `scripts/smoke-bundle.sh` — single-file bundle,
+`--version` matches, starts with no stderr noise) so a packaging mistake is caught on the PR that
+made it, not on the release that ships it; and an `audit` job running `npm audit --omit=dev
+--audit-level=high`, scoped to the two runtime dependencies (`commander`, `picocolors`) since the
+dev toolchain (vitest, tsup, the agent SDK, ...) carries advisories of its own that never reach
+anything foster installs or executes on a user's machine. `scripts/smoke-bundle.sh` is the one
+implementation of the smoke test too, now — `release.yml` calls the same file instead of carrying
+its own copy of the bash block. Unlike `check`, `build-smoke` runs no vitest at all, so it carries
+none of vitest 5's Node floor — its matrix is `[20, 24]`, not `[22, 24]`, because Node 20 is the
+one version `package.json`'s `"engines"` actually promises about `dist/foster.js`, the one thing
+this job executes; pinning it to 24 only would have verified the shipped bundle on a newer Node
+than the CLI claims to support, and never on its own stated floor.
+
+`vitest.config.ts`'s coverage now includes `src/cli/**`, previously excluded — the exclusion made
+`npm run coverage` read 88% when the real figure, CLI entrypoints included, measured 66.6%
+statements (2026-09-24). The naive fix — pin `coverage.thresholds` to that exact measured level —
+does not hold, and not just at the last decimal: several `src/store` and `src/engine` paths branch
+on what actually exists under the home directory and on OS, so the percentage genuinely moves with
+the environment `npm run coverage` runs in. Measured the same day, all real: a normal populated
+Windows `$HOME` (66.60 / 60.52 / 71.51 / 67.82 — statements/branches/functions/lines), an empty
+`mktemp`'d Windows `$HOME` + `%USERPROFILE%` (66.59 / 60.46 / 71.51 / 67.84), GitHub Actions
+`windows-latest` (66.49 / 60.35 / 71.46 / 67.78), and GitHub Actions `ubuntu-latest` — the real low
+point — at 66.31 / 60.16 / 71.23 / 67.61. A first pass at this floor was pinned to the two Windows
+numbers and failed both `ubuntu-latest` cells the first time this PR actually ran in CI (`check`
+had never run `npm run coverage` before, so nothing had caught this). The configured thresholds
+(statements 66.0 / branches 59.8 / functions 71.0 / lines 67.3) sit with margin under the
+`ubuntu-latest` figures, the real low point among the four measurements, not under whichever
+environment happened to be measured most recently: a genuine drop still fails CI without the floor
+itself flaking on environment alone; raise it as coverage improves by more than that margin, never
+lower it to let a real drop through.
