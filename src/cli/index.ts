@@ -164,6 +164,7 @@ import {
   detachNeedsRestart,
   detachNeedsYes,
   launchDetached,
+  liveWritersEnding,
   liveWritersRefusal,
   listDetachedRuns,
   otherLiveWriters,
@@ -238,6 +239,7 @@ import {
   type LayoutPlan,
 } from '../engine/layout.js';
 import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
+import { planMarksBack } from '../engine/marksBack.js';
 import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
@@ -1135,6 +1137,7 @@ program
                   vbs: outcome.plan.vbsPath,
                   delaySeconds: outcome.plan.delaySeconds,
                   argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
                 }
               : { detached: false, error: outcome.reason },
         });
@@ -1443,6 +1446,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     liveWriters: report.liveWriters,
     neverComes: report.neverComes,
     layout: report.layout,
+    rounds: report.rounds ?? 1,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
   };
 }
@@ -1482,7 +1486,13 @@ function deferredPinsGap(
   target: AccountRef,
   report: SweepReport,
 ): (() => void) | undefined {
-  if (!report.pinFixes.deferred) return undefined;
+  // The marks the app saved back over while the sweep ran are only knowable
+  // now, once it has closed — so a sweep that wrote any mark opens the gap for
+  // them even when no pin was deferred (`engine/marksBack.ts`).
+  const marked = [...report.branches.retitled, ...report.files.retitled].some(
+    (outcome) => outcome.status === 'retitled',
+  );
+  if (!report.pinFixes.deferred && !marked) return undefined;
   return () => {
     // A failure leaves the move pending for the next `foster layout`, the same
     // as `applyLayout` treats it — never a reason the restart itself failed.
@@ -1491,6 +1501,9 @@ function deferredPinsGap(
     } catch {
       // still pending
     }
+    // One card at a time and never throwing: `retitleCards` records a failure
+    // rather than raising it, and the next `foster layout` looks again.
+    retitleCards(planMarksBack(ledger.read(), target), { ledger });
   };
 }
 
@@ -1507,6 +1520,8 @@ interface DetachOutcome {
   reason?: string;
   plan?: DetachedPlan;
   launch?: DetachLaunchResult;
+  /** Other live sessions the restart will end, named — set only under `--detach-even-with-live`. */
+  ending?: string;
 }
 
 async function runDetach(
@@ -1521,6 +1536,10 @@ async function runDetach(
   if (others.length > 0 && !evenWithLive) {
     return { ok: false, reason: liveWritersRefusal(others) };
   }
+  // Overridden, the same list is still the one thing worth saying before the
+  // restart lands: which sessions it is about to end, named, so the person who
+  // asked for it can see what went with the app.
+  const ending = others.length > 0 ? liveWritersEnding(others) : undefined;
 
   const plan = planDetached({
     argv,
@@ -1531,7 +1550,7 @@ async function runDetach(
 
   try {
     const launch = launchDetached(plan);
-    return { ok: true, plan, launch };
+    return { ok: true, plan, launch, ...(ending ? { ending } : {}) };
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error), plan };
   }
@@ -1549,6 +1568,7 @@ function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string)
         vbs: outcome.plan.vbsPath,
         delaySeconds: outcome.plan.delaySeconds,
         argv: outcome.plan.argv,
+        ...(outcome.ending ? { ending: outcome.ending } : {}),
       });
       return;
     }
@@ -1559,6 +1579,7 @@ function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string)
 
   if (outcome.ok && outcome.plan && outcome.launch) {
     if (note) console.log(pc.dim(`\n${note}`));
+    if (outcome.ending) console.log(pc.yellow(`\n${outcome.ending}`));
     console.log(
       pc.bold(
         `\nDetached (pid ${outcome.launch.pid} via ${outcome.launch.via}). In ~` +
@@ -2807,6 +2828,7 @@ program
                   vbs: outcome.plan.vbsPath,
                   delaySeconds: outcome.plan.delaySeconds,
                   argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
                 }
               : { detached: false, error: outcome.reason },
         });

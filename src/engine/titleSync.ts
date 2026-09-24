@@ -290,7 +290,10 @@ function storeFor(fostering: ActiveFostering, store: StoreLayout): StoreLayout {
 /**
  * Every copy in one account whose original is called something else now.
  *
- * Read-only: it opens the cards on both sides and writes nothing.
+ * Read-only: it opens the cards on both sides and writes nothing. `read` is
+ * how it opens them — the sweep hands in the cards it has already read, where
+ * reading each copy and its original off disk again was two thousand files a
+ * pass, twice a sweep.
  */
 export function planTitleSync(
   store: StoreLayout,
@@ -298,6 +301,7 @@ export function planTitleSync(
   target: AccountRef,
   state: LedgerState = project(ledger.read()),
   runTemplates: readonly string[] = [],
+  read: (file: string) => CodeSessionData | undefined = readSessionFile,
 ): PlanTitleSyncResult {
   const items: TitleSyncItem[] = [];
   const skipped: TitleSyncSkipped[] = [];
@@ -323,10 +327,10 @@ export function planTitleSync(
       continue;
     }
 
-    const copy = readSessionFile(fostering.copyPath);
+    const copy = read(fostering.copyPath);
     if (!copy) continue;
 
-    const origin = readSessionFile(
+    const origin = read(
       sessionPath(storeFor(fostering, store), fostering.origin, fostering.originSessionId),
     );
     if (!origin) {

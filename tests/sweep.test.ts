@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -224,6 +224,29 @@ describe('runSweep', () => {
       worktreeClaims: 0,
       exhausted: true,
     });
+    // Finished in the round it started with: nothing it wrote left work behind.
+    expect(report.rounds).toBe(1);
+  });
+
+  it('copies every field of a card across, the bulky ones its scan leaves out included', () => {
+    const servers = { remote: { url: 'https://example.invalid/mcp', tools: ['a', 'b'] } };
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORDINARY,
+        title: 'Heavy card',
+        ...({ remoteMcpServersConfig: servers, enabledMcpTools: ['a'] } as object),
+      }),
+    );
+
+    sweep();
+
+    const written = scanAccount(store, NEW_ACCOUNT).find((entry) => entry.isCopy);
+    expect(written?.slim).toBe(true);
+    const onDisk = JSON.parse(readFileSync(written!.path, 'utf8')) as Record<string, unknown>;
+    expect(onDisk.remoteMcpServersConfig).toEqual(servers);
+    expect(onDisk.enabledMcpTools).toEqual(['a']);
   });
 
   it('has nothing to confirm on a dry run, and says so by leaving it out', () => {
@@ -364,6 +387,7 @@ describe('runSweep — layout preview agrees with what layout --yes would do (fi
       cardsAssigned: 0,
       orderEntriesAdded: 0,
       pinsMoved: 0,
+      marksBack: 0,
       routinesBrought: 1,
       viewKeysCarried: 0,
     });

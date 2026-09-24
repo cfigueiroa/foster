@@ -230,6 +230,24 @@ You are done when it prints **"Nothing is left to sweep"**. It also counts what 
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
 that line rather than leaving the user to wonder what the gap was.
 
+One invocation finishes what used to take three. Measured 24/09/2026: `/fosteia` printed "Not
+finished" twice, and each re-run re-read 6.7 GB of transcripts. Two causes, two fixes. A round's
+own writes can hand the next round work — a copy the ordinary pass brought completes a fork the
+branch pass had already judged without it — so `runSweep` now takes up to `SWEEP_ROUNDS` (3)
+rounds in the same process when its re-plan still finds work, reusing the lineage and every other
+account's scan, and says "Took N rounds" when it did. The rest was the running app saving 10 of
+49 fresh marks back over from memory within three minutes, after the run's own re-plan had
+passed; that is `engine/marksBack.ts` in the layout gap, below.
+
+The same day's profile: an 85-second dry run spent 42 s in the garbage collector. The store held
+25,174 cards, 1 GB of JSON, 93% of it `remoteMcpServersConfig`, and the sweep kept every card of
+every account alive for the whole run. A scan now leaves `BULKY_CARD_FIELDS`
+(`store/sessionFile.ts`) out of what it keeps (`DiscoveredSession.slim`), and the one write that
+copies a whole card reads them back from disk first (`withBulkyFields`, `executor.ts`) — any new
+writer that spreads a scanned card's `data` into a file must do the same. `planUnclaim` and
+`planTitleSync` take the cards the sweep already read instead of re-reading each off disk. With
+`/fosteia`'s flags, a dry run went from 131 s to 45 s.
+
 `--restart` restarts Claude Desktop at the end, which is what makes the copies visible. When
 foster is running inside the app it will not do that (see below) and the output ends with the
 command to run elsewhere instead.
@@ -278,8 +296,10 @@ The cost is not optional and is said before it is paid: **every session the app 
 it quits, this one included**, with no way to warn one first and no undo. `--detach` reads the
 live-session registry the way `foster live` does and refuses outright, naming them, if it would
 end anything besides the session it is running in — `--detach-even-with-live` is the override,
-and nothing in this codebase adds it on its own initiative (see the `/fosteia` skill's own
-"Never" list). Pitfall measured writing the `.vbs` generator: `Log` is a VBScript built-in
+and it then names every session it is ending before it launches. The `/fosteia` command passes
+it on its final `foster layout --yes --restart --detach`, by the user's decision of 24/09/2026 —
+that one command and no other; nothing else in this codebase adds it on its own initiative (see
+the command's own "Never" list). Pitfall measured writing the `.vbs` generator: `Log` is a VBScript built-in
 function, and a variable named `Log` kills the script with an error dialog before anything
 runs — `src/engine/detach.ts` never names one of its own variables after a VBScript built-in
 (`Log`, `Date`, `Time`, `Len`, …), and a test holds that promise.
@@ -569,6 +589,14 @@ from inside the app can never write it. Measured 23/09/2026: that move used to b
 summary and then forgotten. Now the sweep appends `pin_move_deferred` to the ledger and `foster
 layout` writes every pending move while the app is down (`engine/pinMoves.ts`), settling each with
 `pins_moved` — written, or found already undone by hand, so a row re-pinned on purpose is left alone.
+
+**Marks** ride it too (`engine/marksBack.ts`). A retitle is written with the app open, and the app
+can save a card it holds back over it: measured 24/09/2026, 10 of 49 fresh "(outro arquivo, …)"
+marks were gone three minutes later with no foster event in between. In the gap — `foster layout`,
+or `sweep --restart`'s own when the sweep marked anything — every card of the target whose last
+ledger write is a retitle, and which now shows a title foster has seen it wear _before_ that
+write, gets the write again (title and archived flag). Any other title was somebody's rename and
+is left alone; a lifted archived flag under the right title is left alone too.
 
 `foster layout --yes --restart` shares its quit-write-start machinery with `foster sweep --restart`
 (`restartAround` in `src/cli/index.ts`) but runs the write **inside** the gap between quit and start,

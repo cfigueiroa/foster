@@ -5,7 +5,7 @@ import { isSessionFileName } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
-import { readSessionFile } from './sessionFile.js';
+import { readSessionCard } from './sessionFile.js';
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -49,8 +49,9 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const data = readSessionFile(file);
-    if (!data) continue;
+    const card = readSessionCard(file);
+    if (!card) continue;
+    const { data } = card;
 
     // A copy foster wrote, not a session the app created. Classifying before
     // recording is what keeps a rescan from "discovering" copies as new sessions
@@ -67,7 +68,15 @@ export function scanAccount(
     // Always false here. One account cannot answer whether a conversation still
     // has a card of its own — the original may be sitting in the account next
     // door — so the judgement is made in scanStore, over everything.
-    out.push({ path: file, account, data, isCopy, isStranded: false, reasons });
+    out.push({
+      path: file,
+      account,
+      data,
+      isCopy,
+      isStranded: false,
+      reasons,
+      ...(card.slim ? { slim: true } : {}),
+    });
   }
 
   return out;

@@ -384,14 +384,24 @@ export function selfHostedCheck(
   return (pid: number) => isSelfHostedBy(pid, () => rows, selfPid);
 }
 
+function writerLines(others: LiveCliSession[]): string {
+  return others
+    .map((session) => `  ${session.pid}  ${session.cwd ?? session.sessionId}`)
+    .join('\n');
+}
+
 /** The line `--detach`'s refusal names the writers with. */
 export function liveWritersRefusal(others: LiveCliSession[]): string {
-  const lines = others.map((session) => `  ${session.pid}  ${session.cwd ?? session.sessionId}`);
   return (
     `Restarting the app would end these sessions: no way to warn them first, and no undo:\n` +
-    `${lines.join('\n')}\n` +
+    `${writerLines(others)}\n` +
     'Close them yourself, or re-run with --detach-even-with-live.'
   );
+}
+
+/** The same writers, named once `--detach-even-with-live` has said to go ahead anyway. */
+export function liveWritersEnding(others: LiveCliSession[]): string {
+  return `The restart will also end these sessions (--detach-even-with-live):\n${writerLines(others)}`;
 }
 
 /** `--detach` without a restart on the way is pointless; refuse with the reason, or say nothing. */

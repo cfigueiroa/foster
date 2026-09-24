@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs';
 import { copyCwd, worktreeClaim } from '../domain/fostering.js';
 import { comparablePath, samePath, storeRootOfCopy } from '../domain/paths.js';
-import type { CodeSessionData, StoreLayout } from '../domain/types.js';
+import type { CodeSessionData, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { listActive, listWorktreeReleased, project, type LedgerState } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { worktreeReachOf, type Lineage } from './lineage.js';
-import { sidebarOf, type Sidebar } from './sidebar.js';
+import { sidebarFrom, sidebarOf, type Sidebar } from './sidebar.js';
 import type { AccountRef } from '../domain/types.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
 
@@ -83,6 +83,12 @@ export interface PlanUnclaimOptions {
    * the reach was measurable at all.
    */
   kin?: Lineage;
+  /**
+   * The cards of one account, when the caller has already read them — the
+   * sweep has, every account's, and asking `sidebarOf` again re-read the whole
+   * store a second time. Defaults to scanning the account.
+   */
+  cardsOf?: (account: AccountRef) => DiscoveredSession[];
 }
 
 /**
@@ -114,7 +120,9 @@ export function planUnclaim(
     const key = `${account.accountUuid}/${account.organizationUuid}`;
     let here = sidebars.get(key);
     if (here === undefined) {
-      here = sidebarOf(store, account, copies, kin);
+      here = opts.cardsOf
+        ? sidebarFrom(opts.cardsOf(account), kin)
+        : sidebarOf(store, account, copies, kin);
       sidebars.set(key, here);
     }
     return here;
@@ -126,14 +134,13 @@ export function planUnclaim(
     // another profile is not this run's to touch.
     if (comparablePath(storeRootOfCopy(fostering.copyPath)) !== root) continue;
 
-    if (!existsSync(fostering.copyPath)) {
-      skipped.gone += 1;
-      continue;
-    }
-
+    // Read first and only then asked whether the file is there at all: a read
+    // that answers settles it, and on a sweep almost every one answers from
+    // cards already in memory, where a stat per copy was a second of its own.
     const data = read(fostering.copyPath);
     if (!data) {
-      skipped.unreadable += 1;
+      if (existsSync(fostering.copyPath)) skipped.unreadable += 1;
+      else skipped.gone += 1;
       continue;
     }
 

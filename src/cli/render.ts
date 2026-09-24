@@ -171,6 +171,13 @@ export function layoutPlanLines(
     }
   }
 
+  // The same restraint: said only when the running app saved over a mark.
+  const marks = plan.marks ?? [];
+  if (marks.length > 0) {
+    lines.push(pc.bold('\nMarks (the app saved these rows back over a sweep while it was open)'));
+    for (const request of marks) lines.push(`  ${pc.cyan('~')} ${request.title}`);
+  }
+
   return lines;
 }
 
@@ -187,7 +194,8 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
     pc.bold(
       `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
         `${result.viewPrefsCarried ? ', filter menu carried' : ''}` +
-        `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}.`,
+        `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}` +
+        `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}.`,
     ),
   ];
   if (result.written.length > 0) {
@@ -287,7 +295,8 @@ export function layoutPendingCountsChanged(
     before.cardsAssigned !== after.cardsAssigned ||
     before.routinesBrought !== after.routinesBrought ||
     before.viewKeysCarried !== after.viewKeysCarried ||
-    (before.pinsMoved ?? 0) !== (after.pinsMoved ?? 0)
+    (before.pinsMoved ?? 0) !== (after.pinsMoved ?? 0) ||
+    (before.marksBack ?? 0) !== (after.marksBack ?? 0)
   );
 }
 
@@ -983,6 +992,16 @@ export function sweepSummary(report: SweepReport): string[] {
               '. Run it again.',
           ),
     );
+    // Said only when it happened: a round beyond the first is this run finishing
+    // work its own writes made, which used to be a second and third invocation.
+    const rounds = report.rounds ?? 1;
+    if (rounds > 1) {
+      lines.push(
+        pc.dim(
+          `Took ${rounds} rounds in this one run — the writes of each left work for the next.`,
+        ),
+      );
+    }
   }
 
   const layout = report.layout;
@@ -1010,6 +1029,8 @@ export function sweepSummary(report: SweepReport): string[] {
         `${layout.viewKeysCarried} filter setting${layout.viewKeysCarried === 1 ? '' : 's'}`,
       );
     if (layout.pinsMoved) parts.push(`${layout.pinsMoved} pin${layout.pinsMoved === 1 ? '' : 's'}`);
+    if (layout.marksBack)
+      parts.push(`${layout.marksBack} mark${layout.marksBack === 1 ? '' : 's'} the app undid`);
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
     lines.push(`Layout: ${parts.join(', ')} to bring — foster layout --yes --restart`);

@@ -80,8 +80,8 @@ fails loudly on its own and confirms itself.
 `--restart` in the one-liner above is kept, but it is harmless rather than the thing that finishes
 the job: this session is a child of the app, so foster will not restart it in-process from here —
 that would kill this session part-way through — and the sweep says so rather than trying. The
-actual last step of this whole command is `foster layout --yes --restart --detach`, in "Finish
-it" below, run only after the rename and the report.
+actual last step of this whole command is `foster layout --yes --restart --detach
+--detach-even-with-live`, in "Finish it" below, run only after the rename and the report.
 
 ## Name this conversation
 
@@ -139,8 +139,9 @@ on rather than re-deriving it:
   own half of the work. `foster consolidate` does **not** join these two, so never offer it here;
 - how many titles were brought back into step with their original, when the run names any, and
   that a copy renamed by hand is left alone on purpose;
-- whether it said **"Nothing is left to sweep"**. If it said "Not finished" instead, run the same
-  command again and say why;
+- whether it said **"Nothing is left to sweep"**. The sweep now takes up to three rounds on its
+  own when its writes leave work for a next one, and says "Took N rounds" when it did — pass that
+  on as it is. If it still said "Not finished", run the same command again and say why;
 - the "can never come" line, when there is one: scheduled tasks, background tasks, sessions
   never opened, files over the 10 MB the app refuses to load. Report the count rather than
   leaving a silent gap — and pass on the ways out the line itself offers, because most of that
@@ -165,9 +166,13 @@ on rather than re-deriving it:
 - if the sweep printed a `Layout:` line, say what is waiting (groups, routines, pins) — it is
   about to be applied by the command in "Finish it" below, along with the restart;
 - say plainly, in this report, that the app is about to close and reopen (about 20 seconds after
-  the next command runs), that this session closes with it, and that once it is back the way to
-  confirm the restart actually landed is `foster detached --last` — in a new session, since this
-  one is gone by then;
+  the next command runs), that this session closes with it — and so does **every other session
+  the app is hosting right now**, because the command below ends them rather than waiting on
+  them — and that once it is back the way to confirm the restart actually landed is `foster
+detached --last` — in a new session, since this one is gone by then;
+- if the `Layout:` line names marks "the app undid", say so in one line: the running app saved
+  some rows back over their mark after the sweep wrote it, and the command below writes those
+  marks again while the app is closed;
 - the next step, in one line: once the app has restarted, `/retoma` tells every session a
   usage limit stopped in the last 24 hours that the quota is back and to carry on. Do not run
   it yourself — it spends this account's quota on every one of them at once, and that is the
@@ -179,20 +184,19 @@ The one command that actually restarts the app, run only after the rename and th
 are both done:
 
 ```
-foster layout --yes --restart --detach
+foster layout --yes --restart --detach --detach-even-with-live
 ```
 
 It applies whatever the sweep's `Layout:` line named (a no-op, harmlessly, when there was
-nothing pending) and restarts Claude Desktop from a process tree outside it — the one way to
-finish this from a session the app itself hosts, which this one is. About 20 seconds after it
-launches, the app closes and reopens, and this session closes with the app; nothing after this
-command is read by anyone.
+nothing pending), writes back any mark the running app saved over since the sweep, and restarts
+Claude Desktop from a process tree outside it — the one way to finish this from a session the
+app itself hosts, which this one is. About 20 seconds after it launches, the app closes and
+reopens, and this session closes with the app; nothing after this command is read by anyone.
 
-If it refuses instead of launching — because another live session, not this one, would be ended
-by the restart — it names them. **Do not add `--detach-even-with-live` on your own**: pass the
-list of sessions it named on to the user in the report, and hand over the same command,
-`foster layout --yes --restart --detach`, for them to run themselves once those are dealt with,
-exactly the way an earlier version of this command handed over a plain restart line.
+`--detach-even-with-live` is on by default, by the user's own decision (24/09/2026): a live
+session in another conversation used to make this refuse and leave the restart for later, and
+the user chose to have it go ahead. The command names every other session it is ending, in its
+own output, before it launches — they end with the app, the way this one does.
 
 ## Proving nothing was left behind
 
@@ -253,7 +257,6 @@ Report matched / missing / diverged from that; never from re-running the sweep, 
 - **`foster layout --yes` without `--restart --detach`, run from inside this session.** Plain
   `--restart` refuses on its own — the app it would need to write past is the one hosting this
   very session — so there is nothing to gain by trying it here without `--detach` too.
-- **`--detach-even-with-live`, unless the user explicitly asks for it.** When `foster layout
---yes --restart --detach` refuses because of another live session, that refusal is the correct
-  answer — ending someone else's session without asking is not this command's call to make. Pass
-  the list on in the report and hand over the command; do not add the override yourself.
+- **`--detach-even-with-live` anywhere but the one command in "Finish it".** It is the default
+  there because the user decided so for this command; it is not a flag to add to `app restart`,
+  `sweep`, `view` or any other restart this command does not itself name.
