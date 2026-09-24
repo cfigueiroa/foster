@@ -223,7 +223,29 @@ function openWindowsTerminalTab(row: StrandedConversation): void {
   if (result.status !== 0) throw new Error(`wt exited with ${result.status}`);
 }
 
+/**
+ * `wt`'s own command-line parser splits on a literal `;` to chain multiple
+ * actions, and that split is not scoped by argv boundaries — a `;` sitting
+ * inside what `CreateProcess` delivered as one quoted `--title` argument can
+ * still end this `new-tab` action early and start whatever follows as a
+ * second, unrecognized `wt` command (the same fact `launch.ts`'s
+ * `buildPsCommand` comment measures and works around with
+ * `-EncodedCommand`). `row.title` is a card title read off disk, not
+ * something foster wrote — untrusted the same way any other file content is
+ * — so a semicolon, a literal quote (Windows' own argv-quoting character),
+ * or a control character in it is replaced rather than passed through.
+ */
+export function sanitizeTitle(value: string): string {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    const code = value.charCodeAt(i);
+    out += ch === ';' || ch === '"' || code <= 0x1f || code === 0x7f ? '-' : ch;
+  }
+  return out;
+}
+
 function tabTitle(row: StrandedConversation): string {
-  const base = (row.title ?? row.cliSessionId).trim().replace(/\s+/g, '-');
+  const base = sanitizeTitle((row.title ?? row.cliSessionId).trim()).replace(/\s+/g, '-');
   return base.length > 40 ? base.slice(0, 40) : base;
 }

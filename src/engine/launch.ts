@@ -7,6 +7,7 @@ import { readClientIdentity } from '../store/clients.js';
 import { configDirCandidates, looksLikeClient } from '../store/configDirs.js';
 import { writerAlive, type WriterCheck } from '../store/liveSessions.js';
 import { isDirectory } from '../util/fs.js';
+import { encodePsCommand } from '../util/powershell.js';
 import { scrubbedEnv } from './launchEnv.js';
 import { inspectPointer } from './pointer.js';
 import { clobberersIn } from './switch.js';
@@ -28,19 +29,39 @@ import { clobberersIn } from './switch.js';
  *  - **P7** — whether `wt -w 0 new-tab` inherits the *target* window's own
  *    environment rather than the one this process hands the new process. If it
  *    does, a `CLAUDE_CONFIG_DIR` (or any other `CLAUDE*` variable) already set
- *    in that window would leak into the new tab's shell before the `-Command`
- *    ever runs. So both defences are applied, not one: `spawnSync` gets a
- *    scrubbed copy of the environment (`scrubbedEnv`, in case `wt` forwards
- *    what it was launched with), and the `-Command` itself starts by deleting
- *    every `CLAUDE*` variable a moment before setting `CLAUDE_CONFIG_DIR`
- *    fresh (in case the shell that opens is the target window's own, carrying
- *    whatever that window set).
+ *    in that window would leak into the new tab's shell before the pwsh
+ *    command ever runs. So both defences are applied, not one: `spawnSync`
+ *    gets a scrubbed copy of the environment (`scrubbedEnv`, in case `wt`
+ *    forwards what it was launched with), and the command itself starts by
+ *    deleting every `CLAUDE*` variable a moment before setting
+ *    `CLAUDE_CONFIG_DIR` fresh (in case the shell that opens is the target
+ *    window's own, carrying whatever that window set).
  *  - **P11** — whether opening a terminal directly on the directory a fleet
  *    junction currently targets interferes with that fleet's own rotation.
  *    Unmeasured, so this warns rather than refuses, and there is no `--fleet`
  *    flag to make it stricter: a warning that turns out to be unnecessary
  *    costs a line of output, a refusal that turns out to be unnecessary costs
  *    someone their afternoon.
+ *
+ * A third thing this rests on, and does not merely assume: `wt`'s own
+ * command-line parser splits on a literal `;` to chain multiple actions
+ * (`wt new-tab ; split-pane ...`), and that split is not scoped by argv
+ * boundaries — a `;` sitting inside what `CreateProcess` delivered as one
+ * quoted argument can still end the `new-tab` action early and start
+ * whatever token follows as a second, unrecognized `wt` command. The pwsh
+ * command this module builds (`buildPsCommand`) is a `;`-joined sequence of
+ * statements by construction, so passing it as `pwsh -Command "<script>"`
+ * hands `wt` exactly the shape it splits on — with the config-dir statement
+ * on the losing side, the new tab can come up on whatever account was
+ * already the CLI's default rather than the one this call resolved. This
+ * was never reproduced against a real `wt` (opening one from here is
+ * forbidden precisely because it cannot be undone from a script), so it is
+ * carried the same way as P7 and P11 above: assume the dangerous reading and
+ * close it off rather than go looking for proof. `buildPsCommand`'s result
+ * is therefore never handed to `wt` as text — it is base64-encoded UTF-16LE
+ * (`encodePsCommand`) and passed as `pwsh -EncodedCommand <base64>`, which
+ * has no `;`, no quote, and no whitespace of its own for any layer between
+ * here and PowerShell's own decoder to reparse.
  */
 
 /** The seams a caller supplies explicitly — never read from the ledger in here. */
@@ -75,10 +96,17 @@ export interface LaunchPlan {
   title?: string;
   /** The executable `openTerminalTab` spawns — always `'wt'` when there are no blockers. */
   command?: string;
-  /** The argv `openTerminalTab` spawns it with. */
+  /** The argv `openTerminalTab` spawns it with — carries the pwsh command base64-encoded, not as text. */
   args?: string[];
   /** The environment the spawn gets — `scrubbedEnv` of whatever `env` named. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * The pwsh command in cleartext, kept only so `formatLaunchCommand` can
+   * show a human something readable for `--print` and for a failed-spawn
+   * line — the real `args` above never carry this text itself, only its
+   * `-EncodedCommand` base64.
+   */
+  psCommand?: string;
 }
 
 /**
@@ -212,6 +240,7 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
   const title = `${slug}·${who}`.replace(/\s+/g, '-');
 
   const scrubbed = scrubbedEnv(env);
+  const psCommand = buildPsCommand(effectiveConfigDir, claudeArgs);
   const args = [
     '-w',
     '0',
@@ -223,8 +252,8 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
     'pwsh',
     '-NoLogo',
     '-NoExit',
-    '-Command',
-    buildPsCommand(effectiveConfigDir, claudeArgs),
+    '-EncodedCommand',
+    encodePsCommand(psCommand),
   ];
 
   return {
@@ -235,6 +264,7 @@ export function planLaunch(client: string, opts: LaunchOptions): LaunchPlan {
     command: 'wt',
     args,
     env: scrubbed,
+    psCommand,
   };
 }
 
@@ -413,7 +443,9 @@ function quoteArg(value: string): string {
 /**
  * The command a fresh `wt` tab runs, deleting `CLAUDE*` a second time before
  * setting it — see P7 in the module doc for why this is not redundant with
- * `scrubbedEnv`.
+ * `scrubbedEnv`. Returned as cleartext; the caller never hands this string to
+ * `wt` as-is (see the module doc's third point) — it goes through
+ * `encodePsCommand` first.
  */
 function buildPsCommand(configDir: string, claudeArgs: string[]): string {
   const cleanup = 'Get-ChildItem Env:CLAUDE* | Remove-Item -ErrorAction SilentlyContinue';
@@ -422,12 +454,26 @@ function buildPsCommand(configDir: string, claudeArgs: string[]): string {
   return `${cleanup}; ${setConfigDir}; ${invocation}`;
 }
 
-/** The line `--print`, a platform that is not win32, and a failed spawn all show. */
+/**
+ * The line `--print`, a platform that is not win32, and a failed spawn all
+ * show. The real `args` carry the pwsh command as `-EncodedCommand <base64>`
+ * (see the module doc); for a human reading this line, that pair is swapped
+ * back for `-Command "<cleartext>"` using `plan.psCommand` — this is display
+ * only, never what actually gets spawned.
+ */
 export function formatLaunchCommand(plan: LaunchPlan): string {
   if (!plan.command || !plan.args) return '(nothing to run)';
   const display = (arg: string) =>
     arg.length === 0 || /\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
-  return [plan.command, ...plan.args.map(display)].join(' ');
+  const args = [...plan.args];
+  if (plan.psCommand !== undefined) {
+    const encodedIndex = args.indexOf('-EncodedCommand');
+    if (encodedIndex !== -1) {
+      args[encodedIndex] = '-Command';
+      args[encodedIndex + 1] = plan.psCommand;
+    }
+  }
+  return [plan.command, ...args.map(display)].join(' ');
 }
 
 export type TabOpener = (plan: LaunchPlan) => void;
