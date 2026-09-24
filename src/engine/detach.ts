@@ -155,10 +155,43 @@ function localStamp(now: Date): string {
   );
 }
 
-/** The leading run of non-flag tokens (`app restart` → `app-restart`), for a readable filename. */
+/**
+ * A leading run of `--store <value>` / `--ledger <value>` (or `--store=value`
+ * / `--ledger=value`) tokens, stripped from the front of an argv — the two
+ * global options a command line may carry ahead of its own verb (see
+ * AGENTS.md's own documented convention, e.g. `foster --store "D:\Claude-Work"
+ * app restart --terminate`). Only a *leading* run is stripped: once a token
+ * that is not one of these two options is seen, everything from there on is
+ * left untouched, so this never mistakes an unrelated argument deeper in the
+ * line for the verb.
+ */
+export function stripLeadingGlobalOptions(argv: string[]): string[] {
+  let i = 0;
+  while (i < argv.length) {
+    const arg = argv[i];
+    if (arg === '--store' || arg === '--ledger') {
+      i += 2;
+      continue;
+    }
+    if (arg !== undefined && (arg.startsWith('--store=') || arg.startsWith('--ledger='))) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return argv.slice(i);
+}
+
+/**
+ * The leading run of non-flag tokens (`app restart` → `app-restart`), for a
+ * readable filename — a leading `--store`/`--ledger` pair is skipped first, so
+ * `sweepDetachArgv`'s own `--store`-forwarding (see its doc comment) still
+ * names the file after the real verb (`layout`, `app-restart`) instead of
+ * falling back to the generic `run`.
+ */
 function verbOf(argv: string[]): string {
   const words: string[] = [];
-  for (const token of argv) {
+  for (const token of stripLeadingGlobalOptions(argv)) {
     if (token.startsWith('-')) break;
     words.push(token);
   }
@@ -480,6 +513,14 @@ export function detachNeedsYes(input: { detach: boolean; yes: boolean }): string
  * accepts it, but once it is on the command line it rides straight through to
  * the re-run, so the fix here is to ask for it rather than to invent a way to
  * add it to commands that were never given one.
+ *
+ * `isAppRestart` used to read `argv[0]`/`argv[1]` positionally, which missed
+ * every `app restart` invoked as `foster --store <x> app restart --detach` —
+ * this repo's own documented convention (AGENTS.md, README.md) puts the
+ * global `--store`/`--ledger` options *before* the verb, so `argv[0]` was
+ * `'--store'`, not `'app'`, and the refusal silently dropped the `--store`
+ * the caller actually needed. `stripLeadingGlobalOptions` strips that prefix
+ * first, the same fix `sweepDetachArgv` needed for forwarding it onward.
  */
 export function detachNeedsTerminate(input: {
   closingWindowQuits: boolean;
@@ -487,7 +528,8 @@ export function detachNeedsTerminate(input: {
 }): string | undefined {
   if (input.closingWindowQuits) return undefined;
   if (stripDetachFlags(input.argv).includes('--terminate')) return undefined;
-  const isAppRestart = input.argv[0] === 'app' && input.argv[1] === 'restart';
+  const verbArgv = stripLeadingGlobalOptions(stripDetachFlags(input.argv));
+  const isAppRestart = verbArgv[0] === 'app' && verbArgv[1] === 'restart';
   return (
     'Claude Desktop keeps a tray icon here: closing its window only hides it, so a detached ' +
     'restart would run, find the app still up, and finish nothing.\n' +

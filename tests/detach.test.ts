@@ -17,6 +17,7 @@ import {
   planDetached,
   restartCommandFromArgv,
   stripDetachFlags,
+  stripLeadingGlobalOptions,
   sweepDetachArgv,
   tailLines,
   VBS_VARIABLE_NAMES,
@@ -95,6 +96,19 @@ describe('planDetached', () => {
     const plan = planDetached(baseOptions(env, { argv: ['app', 'restart'] }));
     expect(path.basename(plan.vbsPath)).toBe('2026-09-22T153000-app-restart.vbs');
     expect(path.basename(plan.logPath)).toBe('2026-09-22T153000-app-restart.log');
+  });
+
+  it('names the vbs after the real verb even behind a leading --store/--ledger', () => {
+    // sweepDetachArgv forwards --store/--ledger ahead of the verb (see its own
+    // doc comment); before verbOf skipped them the same way, this produced the
+    // generic '<stamp>-run.vbs' instead of '<stamp>-layout.vbs'.
+    const env = { FOSTER_HOME: tmpHome() };
+    const plan = planDetached(
+      baseOptions(env, {
+        argv: ['--store', 'work', '--ledger', 'C:\\ledger.jsonl', 'layout', '--yes', '--restart'],
+      }),
+    );
+    expect(path.basename(plan.vbsPath)).toBe('2026-09-22T153000-layout.vbs');
   });
 
   it('breaks a filename collision with a counter', () => {
@@ -190,6 +204,48 @@ describe('stripDetachFlags', () => {
   });
 });
 
+describe('stripLeadingGlobalOptions', () => {
+  it('strips a leading --store <value>', () => {
+    expect(stripLeadingGlobalOptions(['--store', 'work', 'app', 'restart'])).toEqual([
+      'app',
+      'restart',
+    ]);
+  });
+
+  it('strips a leading --store and --ledger together, in either order', () => {
+    expect(
+      stripLeadingGlobalOptions(['--store', 'work', '--ledger', 'C:\\l.jsonl', 'app', 'restart']),
+    ).toEqual(['app', 'restart']);
+    expect(
+      stripLeadingGlobalOptions(['--ledger', 'C:\\l.jsonl', '--store', 'work', 'app', 'restart']),
+    ).toEqual(['app', 'restart']);
+  });
+
+  it('strips the --store=value / --ledger=value form', () => {
+    expect(stripLeadingGlobalOptions(['--store=work', 'app', 'restart'])).toEqual([
+      'app',
+      'restart',
+    ]);
+  });
+
+  it('leaves argv with no leading global options untouched', () => {
+    expect(stripLeadingGlobalOptions(['app', 'restart', '--detach'])).toEqual([
+      'app',
+      'restart',
+      '--detach',
+    ]);
+  });
+
+  it('only strips a leading run — a later --store is left alone', () => {
+    expect(stripLeadingGlobalOptions(['app', 'restart', '--store', 'work'])).toEqual([
+      'app',
+      'restart',
+      '--store',
+      'work',
+    ]);
+  });
+});
+
 describe('restartCommandFromArgv', () => {
   it('echoes the actual argv rather than a bare template', () => {
     expect(
@@ -241,6 +297,38 @@ describe('detachNeedsTerminate', () => {
       argv: ['layout', '--yes', '--restart', '--detach'],
     });
     expect(reason).toMatch(/foster app restart --detach --terminate/);
+  });
+
+  it('still recognises "app restart" behind a leading --store, and asks for --terminate', () => {
+    // This repo's own documented convention (AGENTS.md, README.md) puts the
+    // global --store/--ledger options before the verb: `foster --store
+    // "D:\Claude-Work" app restart --terminate`. argv[0] is '--store' there,
+    // not 'app' — the positional check used to fall through to the wrong
+    // ("close Claude Desktop yourself") branch and drop --store from the
+    // suggested fix-up command entirely.
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--store', 'work', 'app', 'restart', '--detach'],
+    });
+    expect(reason).toMatch(/--terminate/);
+    expect(reason).not.toMatch(/close Claude Desktop yourself/);
+  });
+
+  it('recognises "app restart" behind a leading --store/--ledger pair, in the --store=value form too', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--ledger', 'C:\\l.jsonl', '--store=work', 'app', 'restart', '--detach'],
+    });
+    expect(reason).toMatch(/--terminate/);
+    expect(reason).not.toMatch(/close Claude Desktop yourself/);
+  });
+
+  it('still says "close Claude Desktop yourself" for a non-app-restart command behind --store', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--store', 'work', 'sweep', '--yes', '--restart', '--detach'],
+    });
+    expect(reason).toMatch(/close Claude Desktop yourself/);
   });
 });
 
