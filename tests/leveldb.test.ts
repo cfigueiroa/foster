@@ -284,6 +284,49 @@ describe('leveldb sorted tables', () => {
   it('refuses a file that is not a sorted table', () => {
     expect(() => scanTable(Buffer.alloc(64), () => {})).toThrow(LevelDbFormatError);
   });
+
+  /**
+   * The block trailer's checksum used to be read and thrown away without ever
+   * being compared — despite this module's own docstring claiming every block
+   * is "read, verified and (if compressed) decompressed in full". A flipped
+   * bit inside a block therefore looked like a perfectly ordinary record
+   * instead of the corruption it was.
+   */
+  it('refuses a block whose checksum does not match', () => {
+    const table = makeTable([record('alpha', 10n, 'one')]);
+    const damaged = Buffer.from(table);
+    // The data block is the first thing in the file; flip a byte of its content.
+    damaged.writeUInt8(damaged.readUInt8(0) ^ 0xff, 0);
+
+    expect(() => scanTable(damaged, () => {})).toThrow(LevelDbFormatError);
+    expect(() => scanTable(damaged, () => {})).toThrow(/checksum/);
+  });
+
+  it('refuses a block whose stored checksum was never updated after an edit', () => {
+    // Distinguishes "the checksum is compared" from "the checksum bytes changed
+    // along with everything else" — flip a byte inside the trailer's own crc
+    // field instead of the block content, so the content and a stale checksum
+    // now disagree with each other.
+    const table = makeTable([record('alpha', 10n, 'one')]);
+    const damaged = Buffer.from(table);
+    const dataBlockContentEnd = damaged.indexOf(Buffer.from('one'), 0) + 'one'.length;
+    // One byte into the trailer's checksum (past the one-byte compression tag).
+    const crcByte = dataBlockContentEnd + 1;
+    damaged.writeUInt8(damaged.readUInt8(crcByte) ^ 0xff, crcByte);
+
+    expect(() => scanTable(damaged, () => {})).toThrow(/checksum/);
+  });
+
+  it('still reads a table whose block checksums are correct', () => {
+    // Not a tautology: every other test here builds tables through the same
+    // `makeTable` helper, so this is the one place that would catch the helper
+    // and the reader silently agreeing on the wrong checksum computation (say,
+    // covering the type byte before the content instead of after).
+    const table = makeTable([record('alpha', 10n, 'one'), record('beta', 11n, 'two')]);
+    const seen: string[] = [];
+    scanTable(table, (entry) => seen.push(entry.userKey.toString()));
+    expect(seen).toEqual(['alpha', 'beta']);
+  });
 });
 
 /**

@@ -1,16 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import {
-  decodeBatch,
-  encodeBatch,
-  frameRecords,
-  nextSequence,
-  readLog,
-  readManifest,
-  scanTable,
-  type BatchEntry,
-} from './format/leveldb.js';
-import { safeReaddir } from '../util/fs.js';
+import { encodeBatch, frameRecords, type BatchEntry } from './format/leveldb.js';
+import { fitsInLatin1, locateLog, newestValue, nextWriteSequence } from './leveldbDb.js';
 import { appendSynced } from '../util/fsatomic.js';
 import { backupDirectory, type BackupOptions } from '../util/backups.js';
 import type { StoreLayout } from '../domain/types.js';
@@ -102,57 +93,9 @@ export class LocalStorageError extends Error {
   }
 }
 
-function logsIn(directory: string): { name: string; number: number }[] {
-  const logs: { name: string; number: number }[] = [];
-  for (const name of safeReaddir(directory)) {
-    const match = /^(\d+)\.log$/.exec(name);
-    if (match) logs.push({ name, number: Number(match[1]) });
-  }
-  return logs.sort((a, b) => b.number - a.number);
-}
-
-/**
- * Which log to read, and to append to — the newest at or above the manifest's
- * own floor, the same reasoning `pinstate.ts`'s `locate` documents at length:
- * the manifest names a log only when it has had a reason to write one, and
- * Chromium opens these databases reusing whichever log recovery finds.
- *
- * When the chosen log is not the one the manifest names, `pinstate.ts`'s
- * `locate` keeps a notice about it rather than reading the substitute silently
- * — the same thing applies here, word for word, since it is the same
- * "manifest's number is a floor, not an address" reasoning.
- */
-function locate(directory: string): { logPath: string; lastSequence: bigint; notice?: string } {
-  const current = path.join(directory, 'CURRENT');
-  if (!existsSync(current)) {
-    throw new LocalStorageError(`No Local Storage database at ${directory}.`);
-  }
-  const manifestName = readFileSync(current, 'utf8').trim();
-  const manifest = path.join(directory, manifestName);
-  if (!existsSync(manifest)) {
-    throw new LocalStorageError(`${current} names ${manifestName}, which is not there.`);
-  }
-  const state = readManifest(readFileSync(manifest));
-  if (state.logNumber === undefined) {
-    throw new LocalStorageError(`Could not tell which log ${manifestName} is writing to.`);
-  }
-  const floor = Number(state.logNumber);
-  const name = `${String(state.logNumber).padStart(6, '0')}.log`;
-  const chosen = logsIn(directory).filter((log) => log.number >= floor)[0];
-  if (!chosen) {
-    throw new LocalStorageError(`${manifestName} names the log ${name}, which is not there.`);
-  }
-  return {
-    logPath: path.join(directory, chosen.name),
-    lastSequence: state.lastSequence ?? 0n,
-    ...(chosen.name === name
-      ? {}
-      : {
-          notice:
-            `${manifestName} names the log ${name}, which is not there; ` +
-            `read ${chosen.name} instead, the newest log at or above that number.`,
-        }),
-  };
+/** Builds a `LocalStorageError` — the shape `leveldbDb.ts`'s directory-opening helpers want. */
+function noDatabase(message: string): LocalStorageError {
+  return new LocalStorageError(message);
 }
 
 /**
@@ -161,10 +104,22 @@ function locate(directory: string): { logPath: string; lastSequence: bigint; not
  * has nothing to return. The manifest's own `lastSequence` is always at least
  * as high as any sequence a healthy database has actually used, which is the
  * same floor `readLocalStorageValue` starts every per-key search from.
+ *
+ * No table is scanned for a key `currentLog` builds a write target for — there
+ * is nothing to look for yet — so `tablesUnreadable` is always empty here; a
+ * write starting from this is never refused on that account.
  */
-export function currentLog(store: StoreLayout): { logPath: string; highestSequence: bigint } {
-  const { logPath, lastSequence } = locate(localStorageDir(store));
-  return { logPath, highestSequence: lastSequence };
+export function currentLog(store: StoreLayout): {
+  logPath: string;
+  highestSequence: bigint;
+  tablesUnreadable: string[];
+} {
+  const { logPath, lastSequence } = locateLog(
+    localStorageDir(store),
+    noDatabase,
+    `No Local Storage database at ${localStorageDir(store)}.`,
+  );
+  return { logPath, highestSequence: lastSequence, tablesUnreadable: [] };
 }
 
 export interface LocalStorageRecord {
@@ -174,6 +129,12 @@ export interface LocalStorageRecord {
   notices: string[];
   /** The tag the record was actually read under — `writeLocalStorageEntries` writes this back. */
   encoding: LocalStorageEncoding;
+  /**
+   * Sorted tables this read could not open at all, by name. Non-empty means the
+   * value found here might not be the newest one — see `leveldbDb.ts`'s
+   * `newestValue` — so `writeLocalStorageEntries` refuses to write from it.
+   */
+  tablesUnreadable: string[];
 }
 
 interface RawLocalStorageRecord {
@@ -182,6 +143,7 @@ interface RawLocalStorageRecord {
   highestSequence: bigint;
   notices: string[];
   encoding: LocalStorageEncoding;
+  tablesUnreadable: string[];
 }
 
 /**
@@ -195,49 +157,17 @@ interface RawLocalStorageRecord {
  */
 function readRaw(store: StoreLayout, scriptKey: string): RawLocalStorageRecord | undefined {
   const directory = localStorageDir(store);
-  const { logPath, lastSequence, notice: located } = locate(directory);
-  const log = readFileSync(logPath);
   const key = localStorageKey(scriptKey);
 
-  let highest = lastSequence;
-  let newest: { sequence: bigint; value?: Buffer } | undefined;
-  const consider = (sequence: bigint, value: Buffer | undefined): void => {
-    if (sequence > highest) highest = sequence;
-    if (!newest || sequence >= newest.sequence) newest = { sequence, value };
-  };
+  const found = newestValue(
+    directory,
+    noDatabase,
+    `No Local Storage database at ${directory}.`,
+    (candidate) => candidate.equals(key),
+  );
 
-  for (const name of safeReaddir(directory)) {
-    if (!name.endsWith('.ldb')) continue;
-    try {
-      scanTable(readFileSync(path.join(directory, name)), (entry, value) => {
-        if (!entry.userKey.equals(key)) return;
-        consider(entry.sequence, entry.isDelete ? undefined : Buffer.from(value));
-      });
-    } catch {
-      // A table this cannot read is skipped, not fatal — see `readPinState`.
-    }
-  }
-
-  // Seeded with `locate`'s own notice, exactly as `readPinState` seeds it from
-  // `pinstate.ts`'s `locate` — lost otherwise, since nothing else carries it
-  // forward.
-  const notices: string[] = located ? [located] : [];
-  for (const batch of readLog(log, {
-    tolerant: true,
-    onNotice: (message) => notices.push(message),
-  })) {
-    const decoded = decodeBatch(batch.payload);
-    decoded.entries.forEach((entry, index) => {
-      if (!entry.key.equals(key)) return;
-      consider(
-        decoded.sequence + BigInt(index),
-        entry.value ? Buffer.from(entry.value) : undefined,
-      );
-    });
-  }
-
-  if (!newest?.value) return undefined;
-  const record = newest.value;
+  if (!found.value) return undefined;
+  const record = found.value;
 
   // Chromium tags a DOM Storage value with which of its two string encodings
   // the bytes that follow are: `ONE_BYTE_STRING` when every character fits in
@@ -258,7 +188,14 @@ function readRaw(store: StoreLayout, scriptKey: string): RawLocalStorageRecord |
     );
   }
 
-  return { text, logPath, highestSequence: highest, notices, encoding };
+  return {
+    text,
+    logPath: found.logPath,
+    highestSequence: found.highestSequence,
+    notices: found.notices,
+    encoding,
+    tablesUnreadable: found.tablesUnreadable,
+  };
 }
 
 /**
@@ -286,6 +223,7 @@ export function readLocalStorageValue(
     highestSequence: raw.highestSequence,
     notices: raw.notices,
     encoding: raw.encoding,
+    tablesUnreadable: raw.tablesUnreadable,
   };
 }
 
@@ -296,14 +234,6 @@ export function readLocalStorageValue(
  */
 export function readLocalStorageText(store: StoreLayout, scriptKey: string): string | undefined {
   return readRaw(store, scriptKey)?.text;
-}
-
-/** Whether every character of `text` fits in one Latin-1 byte — Chromium's own test for which tag to write. */
-function fitsInLatin1(text: string): boolean {
-  for (let index = 0; index < text.length; index++) {
-    if (text.charCodeAt(index) > 0xff) return false;
-  }
-  return true;
 }
 
 /**
@@ -337,7 +267,7 @@ export type LocalStorageWrite =
  * interrupted write leaves behind is a trailing partial record.
  */
 export function writeLocalStorageValue(
-  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'> &
+  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence' | 'tablesUnreadable'> &
     Partial<Pick<LocalStorageRecord, 'encoding'>>,
   scriptKey: string,
   document: Record<string, unknown>,
@@ -359,10 +289,24 @@ export function writeLocalStorageValue(
  * `'latin1'`, the only tag a value that has never existed could need.
  */
 export function writeLocalStorageEntries(
-  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence'> &
+  record: Pick<LocalStorageRecord, 'logPath' | 'highestSequence' | 'tablesUnreadable'> &
     Partial<Pick<LocalStorageRecord, 'encoding'>>,
   writes: LocalStorageWrite[],
 ): void {
+  // The read this record came from could not see everything: a sorted table it
+  // failed to open might hold a copy newer than the one found elsewhere (or the
+  // one `currentLog` assumed did not exist at all). Writing from it anyway would
+  // carry a stale copy forward and silently erase whatever that table actually
+  // held (see `leveldbDb.ts`'s `newestValue`).
+  if (record.tablesUnreadable.length > 0) {
+    throw new LocalStorageError(
+      `${record.tablesUnreadable.length === 1 ? 'A sorted table' : 'Sorted tables'} could not be ` +
+        `read (${record.tablesUnreadable.join(', ')}), so this read might be missing whatever the ` +
+        'newest copy of one of these keys actually says. Writing from it risks erasing that copy ' +
+        'instead of changing it. Refusing rather than guessing — re-run once the table reads cleanly.',
+    );
+  }
+
   const entries: BatchEntry[] = writes.map((write) => ({
     key: localStorageKey(write.scriptKey),
     value:
@@ -372,8 +316,7 @@ export function writeLocalStorageEntries(
   }));
 
   const existing = readFileSync(record.logPath);
-  const inLog = nextSequence(readLog(existing));
-  const sequence = inLog > record.highestSequence ? inLog : record.highestSequence + 1n;
+  const sequence = nextWriteSequence(existing, record.highestSequence);
   appendSynced(record.logPath, frameRecords(encodeBatch(sequence, entries), existing.length));
 }
 

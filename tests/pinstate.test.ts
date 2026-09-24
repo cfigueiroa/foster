@@ -316,6 +316,37 @@ describe('pin state', () => {
   });
 
   /**
+   * `Buffer.from(text, 'latin1')` truncates any character above 0xFF to its low
+   * byte instead of erroring — V8 stores such a string with its two-byte tag,
+   * and writing it as if it were one-byte-per-character silently corrupts it.
+   * Session ids and JSON punctuation are ASCII, so this can only happen through
+   * a field foster carries forward without understanding — `extra`, here.
+   */
+  it('refuses to write a document holding a character Latin-1 cannot carry', () => {
+    const store = makeStore();
+    const logPath = makeDatabase(store, { ids: [ID_A] });
+
+    // A field a newer app could plausibly add to the persisted document — not
+    // reachable through this fixture's own writer, which encodes with the same
+    // truncating `Buffer.from(text, 'latin1')` this test exists to guard
+    // against, so a genuinely wide character is put on the state directly.
+    const state = { ...readPinState(store)!, document: { futureField: '日本語' } };
+    expect(() => writePinState(state, [ID_A, ID_B])).toThrow(PinStateError);
+    expect(() => writePinState(state, [ID_A, ID_B])).toThrow(/Latin-1/);
+
+    // Refused before anything is appended, and the pinned list on disk is
+    // exactly what it was — not a version silently truncated to garbage.
+    const before = readFileSync(logPath);
+    try {
+      writePinState(state, [ID_A, ID_B]);
+    } catch {
+      // expected
+    }
+    expect(readFileSync(logPath).equals(before)).toBe(true);
+    expect(readPinState(store)!.ids).toEqual([ID_A]);
+  });
+
+  /**
    * The failure this was written for: against a real installation foster read
    * only the log, found nothing, and reported that the app had never pinned
    * anything — while ten sessions sat pinned in the sidebar. LevelDB had folded
@@ -388,6 +419,44 @@ describe('pin state', () => {
     writeFileSync(path.join(indexedDbDir(store), '000099.ldb'), Buffer.alloc(2048, 0x41));
 
     expect(readPinState(store)!.ids).toEqual([ID_A]);
+  });
+
+  /**
+   * A table `readPinState` cannot read might be exactly the one holding the
+   * newest copy of the record — reading only what the other tables and the log
+   * agree on then quietly reports an older list as current. Skipping such a
+   * table for a read that only lists is fine (above); starting a write from it
+   * is not, because the write would carry that stale list forward and erase
+   * whatever the unreadable table actually held.
+   */
+  it('records a table it could not read, alongside the read that still succeeds', () => {
+    const store = makeStore();
+    makeDatabase(store, { ids: [ID_A] });
+    writeFileSync(path.join(indexedDbDir(store), '000099.ldb'), Buffer.alloc(2048, 0x41));
+
+    const state = readPinState(store)!;
+    expect(state.ids).toEqual([ID_A]);
+    expect(state.tablesUnreadable).toEqual(['000099.ldb']);
+    expect(state.notices.join(' ')).toMatch(/000099\.ldb/);
+  });
+
+  it('refuses to write from a read that could not see every table', () => {
+    const store = makeStore();
+    const logPath = makeDatabase(store, { ids: [ID_A] });
+    writeFileSync(path.join(indexedDbDir(store), '000099.ldb'), Buffer.alloc(2048, 0x41));
+
+    const state = readPinState(store)!;
+    expect(() => writePinState(state, [ID_A, ID_B])).toThrow(PinStateError);
+    expect(() => writePinState(state, [ID_A, ID_B])).toThrow(/000099\.ldb/);
+
+    // Nothing was appended by the refused attempt.
+    const before = readFileSync(logPath);
+    try {
+      writePinState(state, [ID_A, ID_B]);
+    } catch {
+      // expected
+    }
+    expect(readFileSync(logPath).equals(before)).toBe(true);
   });
 
   it('reads the newest log on disk when the manifest names one that is gone', () => {
