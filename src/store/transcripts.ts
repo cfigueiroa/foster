@@ -241,17 +241,35 @@ export function conversationRoot(file: string): string | undefined {
  * seeks around the match's own byte offset for it, growing outward only
  * because these are rare.
  *
- * `cache`, when passed, is where the chunked read and the pattern match
- * (`scanRecordIdOccurrences`) are remembered across calls — see
- * `RecordIdCache`. Without one, every call pays the read again; `deepen`
- * passes one because it is exactly the caller this exists for: the sweep
+ * The scan itself is filtered to `wanted` as it goes — `wanted.has(id)` per
+ * match, not a Map insert for every `"uuid":"…"` the pattern finds. A real
+ * transcript can hold thousands of records, almost every one its own unique
+ * id, and only a handful of files ever mention one of the (usually tiny)
+ * `wanted` set at all: recording every match regardless of `wanted` used to
+ * build a full occurrence map per file — thousands of short-lived arrays and
+ * Map entries retained for the run — and that retained size, not the read or
+ * the match itself, is what measured as the slower half of the GC time on a
+ * real store (2,523 conversations, round 1 going from ~13 s to ~22 s).
+ * Filtering inline keeps what is kept down to actual hits, which are rare.
+ *
+ * `cache`, when passed, is where a file's scan is remembered — see
+ * `RecordIdCache`. It remembers two things per file: which ids have already
+ * been searched for (found or not), and the offsets of the ones that were
+ * found. A `wanted` id already searched for answers from that memory,
+ * without touching the file again; a `wanted` id this file has never been
+ * asked about triggers one more filtered pass over it, folded into the same
+ * cache entry. `deepen` is exactly the caller this exists for: the sweep
  * calls it once per round, each round asking the same already-known files
- * about whatever new ids that round brought, and re-reading every earlier
- * round's files from disk for one new id undid most of the saving the
- * rounds themselves were written to buy. Measured on a real store (2,523
- * conversations): an initial full deepen ~17 s, a next round adding exactly
- * one new id ~13 s uncached — nearly the same cost again — against
- * effectively free once that round's files are cached from the first pass.
+ * about whatever new ids that round brought. A dry-run sweep — the common
+ * case this is measured against — only ever calls `deepen` once, so its
+ * whole cost is one filtered pass per file; a multi-round `--yes` run pays
+ * one more filtered pass per file per round that hands it a genuinely new
+ * id, which stays far cheaper than the read-and-validate cost the unfiltered
+ * map was avoiding in the first place, since the pass itself is cheap and it
+ * is the previous approach's retained memory that was slow, not the I/O.
+ * Without a cache at all, every call scans fresh, filtered to whatever it
+ * was asked this time — strictly less work than the old unfiltered scan,
+ * never more.
  */
 export function idsMentionedIn(
   file: string,
@@ -260,12 +278,23 @@ export function idsMentionedIn(
 ): string[] {
   if (wanted.size === 0) return [];
 
-  let occurrences = cache?.get(file);
-  if (occurrences === undefined) {
-    occurrences = scanRecordIdOccurrences(file);
-    cache?.set(file, occurrences);
+  let entry = cache?.get(file);
+  if (entry === undefined) {
+    entry = { searched: new Set(), hits: new Map() };
+    cache?.set(file, entry);
   }
-  if (occurrences.size === 0) return [];
+
+  let unsearched: Set<string> | undefined;
+  for (const id of wanted) {
+    if (entry.searched.has(id)) continue;
+    (unsearched ??= new Set()).add(id);
+  }
+  if (unsearched !== undefined) {
+    scanRecordIdOccurrencesInto(file, unsearched, entry.hits);
+    for (const id of unsearched) entry.searched.add(id);
+  }
+
+  if (entry.hits.size === 0) return [];
 
   let fd: number;
   try {
@@ -279,7 +308,7 @@ export function idsMentionedIn(
   try {
     const size = statSync(file).size;
     for (const id of wanted) {
-      const offsets = occurrences.get(id);
+      const offsets = entry.hits.get(id);
       if (offsets === undefined) continue;
       for (const offset of offsets) {
         // A structured toolUseResult — an MCP result object, say — can quote
@@ -315,41 +344,76 @@ export function idsMentionedIn(
  *
  * `Lineage.deepen` keeps one for the lifetime of a run (the same lifetime as
  * its other memos, one per account) and passes it to every `idsMentionedIn`
- * call it makes, so a file already scanned for one round's `wanted` answers a
- * later round's different — usually smaller, sometimes a single id —
- * `wanted` from memory instead of from disk. Nothing here is specific to
- * `deepen`; a future caller with the same "ask the same file about a
- * shifting `wanted` set, more than once" shape can share the type.
+ * call it makes. Each entry remembers `searched` — every id this file has
+ * ever been asked about, whether or not it was found — and `hits`, the
+ * offsets of the ones that were. A later round's `wanted` set is split
+ * against `searched`: the ids already known answer from `hits` alone; any
+ * id not in `searched` yet costs one more filtered pass over the file,
+ * folded into the same entry (`scanRecordIdOccurrencesInto`). Nothing here
+ * is specific to `deepen`; a future caller with the same "ask the same file
+ * about a shifting `wanted` set, more than once" shape can share the type.
  */
-export type RecordIdCache = Map<string, ReadonlyMap<string, number[]>>;
+export type RecordIdCache = Map<string, RecordIdCacheEntry>;
+
+interface RecordIdCacheEntry {
+  /** Every id this file has been scanned for so far, found or not. */
+  searched: Set<string>;
+  /** The ids that were found, each with the byte offsets it occurred at. */
+  hits: Map<string, number[]>;
+}
 
 /**
- * `idsMentionedIn`'s own chunked read and pattern match, without the
- * `wanted` filter or the structural validation: every `"uuid":"…"` match the
- * pattern finds anywhere in the file, keyed by id, each id's value the byte
- * offsets it was found at — almost always one, more only when a real
- * record's id is genuinely quoted more than once.
- *
- * Split out so the expensive part — the disk read and the `matchAll` pass —
- * runs once per file no matter how many different `wanted` sets ask about it
- * afterwards (`RecordIdCache`); validating a hit is what stays cheap and
- * rare, done by `idsMentionedIn` against whichever ids a caller actually
- * wants, every time it is asked.
+ * The chunk buffer every `scanRecordIdOccurrencesInto` call reads into,
+ * grown once and then reused for the rest of the process rather than
+ * allocated fresh per file. A deepen over a real store calls this for
+ * thousands of files, almost all of them well under `SCAN_CHUNK_BYTES`, and
+ * `Buffer.alloc` zero-fills whatever it hands back — cost proportional to
+ * the buffer's size, paid again on every one of those files for a buffer
+ * that is thrown away as soon as the file is read. One buffer, sized to the
+ * largest file asked for so far (capped at `SCAN_CHUNK_BYTES`), removes both
+ * costs: nothing is allocated once it has grown to fit, and what it starts
+ * out as is never zeroed at all — `allocUnsafe`, safe here because every
+ * read fills it before anything reads it back, and every reader is bounded
+ * to `buffer.subarray(0, read)`, never to a byte this call did not just
+ * write.
  */
-function scanRecordIdOccurrences(file: string): ReadonlyMap<string, number[]> {
-  const occurrences = new Map<string, number[]>();
+let scanBuffer: Buffer | undefined;
 
+function scanBufferSized(atLeast: number): Buffer {
+  const wanted = Math.min(atLeast, SCAN_CHUNK_BYTES);
+  if (scanBuffer === undefined || scanBuffer.length < wanted) {
+    scanBuffer = Buffer.allocUnsafe(wanted);
+  }
+  return scanBuffer;
+}
+
+/**
+ * `idsMentionedIn`'s own chunked read and pattern match, filtered to
+ * `wanted` as it goes and without the structural validation: a `"uuid":"…"`
+ * match whose id is not in `wanted` costs one `Set.has` and nothing more —
+ * no array, no Map entry — so what `hits` ends up holding is actual matches
+ * against `wanted`, not every id the file happens to mention. `wanted` here
+ * is `RecordIdCache`'s own `unsearched` — the ids the caller has not asked
+ * this file about before — never the caller's whole `wanted` set, so a file
+ * already holding hits for other ids keeps them; this only adds to `hits`,
+ * never replaces it.
+ */
+function scanRecordIdOccurrencesInto(
+  file: string,
+  wanted: ReadonlySet<string>,
+  hits: Map<string, number[]>,
+): void {
   let fd: number;
   try {
     fd = openSync(file, 'r');
   } catch {
     // Unreadable says nothing about lineage, exactly as a missing root does.
-    return occurrences;
+    return;
   }
 
   try {
     const size = statSync(file).size;
-    const buffer = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, size));
+    const buffer = scanBufferSized(size);
     let position = 0;
     // What the previous chunk's own tail read as latin1, carried forward so a
     // pattern split across the boundary is complete in the next chunk too.
@@ -364,9 +428,10 @@ function scanRecordIdOccurrences(file: string): ReadonlyMap<string, number[]> {
 
       for (const match of text.matchAll(RECORD_ID)) {
         const id = match[1]!;
+        if (!wanted.has(id)) continue;
         const offset = textStart + (match.index ?? 0);
-        const offsets = occurrences.get(id);
-        if (offsets === undefined) occurrences.set(id, [offset]);
+        const offsets = hits.get(id);
+        if (offsets === undefined) hits.set(id, [offset]);
         // The overlap carries a boundary match into the next chunk on
         // purpose, so the same physical match is seen twice, back to back,
         // at the same computed offset — kept once rather than piling up.
@@ -382,8 +447,6 @@ function scanRecordIdOccurrences(file: string): ReadonlyMap<string, number[]> {
   } finally {
     closeSync(fd);
   }
-
-  return occurrences;
 }
 
 /**
@@ -431,7 +494,10 @@ function ownerLine(fd: number, size: number, at: number): string | undefined {
     const start = Math.max(0, at - radius);
     const end = Math.min(size, at + radius);
     const length = end - start;
-    const buffer = Buffer.alloc(length);
+    // `allocUnsafe`: every byte read below is what gets read back
+    // (`buffer.subarray(0, read)`), so nothing here ever sees an unwritten
+    // one — a rare-hit call, but there is no reason to pay to zero it first.
+    const buffer = Buffer.allocUnsafe(length);
     let read: number;
     try {
       read = readSync(fd, buffer, 0, length, start);

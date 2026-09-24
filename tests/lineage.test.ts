@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -846,22 +846,52 @@ describe('deepen', () => {
    * round already knew — the fix for the `heads.size < 2` bug above
    * reintroduced almost the full cost of the very read the rounds exist to
    * spread out, measured on a real store as ~13 s for one new id after an
-   * initial ~17 s deepen. `idsMentionedIn`'s `RecordIdCache` is what keeps a
-   * file to one read for the life of a `Lineage` — proved here by rewriting
-   * a file's content in place between rounds: a live re-read would see the
-   * new content and answer differently, so answering as round 1 saw it is
-   * only possible off the cache, not off disk.
+   * initial ~17 s deepen. An earlier `RecordIdCache` closed that by caching
+   * a file's *whole* occurrence map — every id the pattern found, not just
+   * the round's own `wanted` — the first time any round touched the file, so
+   * a later round's different `wanted` never touched disk again. That traded
+   * away more than the read: building the full map, for a file whose
+   * `wanted` hit is rare, spent most of its cost retaining offsets for ids
+   * nobody asked about, and a real store measured that as the larger share
+   * of a regression against the version before it (round 1 ~13 s -> ~22 s,
+   * mostly extra GC time from the retained map). It also meant a record
+   * appended to a file *between* two rounds was invisible to anything the
+   * second round asked about it — answering off a snapshot taken before the
+   * append, not off the file as it now is.
+   *
+   * `RecordIdCache` now remembers, per file, which ids have actually been
+   * searched for — not everything the pattern could have found — and pays
+   * one more filtered pass, cheaper than the old unfiltered one, only for a
+   * `wanted` id that file's entry has never seen. Two things follow, both
+   * proved below: a round asking about an id it already knows the answer to
+   * for a file never touches disk again for it, exactly as before; and a
+   * round asking about a genuinely new id gets a live answer, appended
+   * content included, because that id was never searched for in that file
+   * before now.
    */
-  it('never sees a match added to an already-scanned file after the scan', () => {
-    // A record `deepen` validates as it goes, so this cannot use the same
-    // trick `idsMentionedIn`'s own cache test does (rewriting a match's own
-    // line and checking the answer is still the old one) — validation reads
-    // the current file, on purpose, so a rewritten line answers correctly
-    // either way. What the cache skips is the scan that finds a match's
-    // position in the first place, so the proof is an appended record: real
-    // new content, at a position the round-1 scan never read because the
-    // file was shorter then. A live re-scan would find it; the cache, built
-    // before the append, cannot.
+  it('answers an id it has already searched a file for without touching disk again', () => {
+    const env = forkedMidway();
+    const kin = lineageAt(projects(env));
+
+    // Round 1 establishes the fork — MIDWAY's own head is found inside
+    // ORIGINAL's file, both ids now searched for there.
+    kin.deepen([ORIGINAL, MIDWAY]);
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+
+    // Delete the file out from under the cache. A round that asked disk
+    // again for MIDWAY's already-known answer would find nothing readable
+    // and lose the fork; a round that answers from what it already searched
+    // for never needs to.
+    const dir = path.join(env.CLAUDE_CONFIG_DIR!, 'projects', '-workspace-project');
+    rmSync(path.join(dir, `${ORIGINAL}.jsonl`));
+
+    // Round 2 hands deepen the same ids again — nothing new to search for.
+    kin.deepen([ORIGINAL, MIDWAY, UNRELATED]);
+
+    expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
+  });
+
+  it('sees a match added to an already-scanned file, once a later round asks about a genuinely new id', () => {
     const env = forkedMidway();
     const kin = lineageAt(projects(env));
 
@@ -871,24 +901,24 @@ describe('deepen', () => {
     writeFileSync(path.join(dir, `${EXTRA_SESSION}.jsonl`), `${record(EXTRA)}\n`, 'utf8');
 
     // Round 1 scans and caches ORIGINAL's file as it is right now — nothing
-    // about EXTRA yet, because nothing about EXTRA exists yet.
+    // about EXTRA yet, because nothing about EXTRA exists yet, and EXTRA is
+    // not among the ids this round searches ORIGINAL's file for.
     kin.deepen([ORIGINAL]);
 
     // Append a record naming EXTRA to ORIGINAL's file, growing it past what
     // round 1 read. A real transcript only ever grows this way too; this is
-    // just doing between two rounds what an idle writer could do between
-    // two sweep rounds in practice.
+    // just doing between two rounds what an idle writer could do between two
+    // sweep rounds in practice.
     const originalFile = path.join(dir, `${ORIGINAL}.jsonl`);
     writeFileSync(originalFile, `${readFileSync(originalFile, 'utf8')}${record(EXTRA)}\n`, 'utf8');
 
     // Round 2 hands deepen exactly one new id: EXTRA_SESSION, whose own head
-    // is EXTRA.
+    // is EXTRA. EXTRA has never been searched for in ORIGINAL's file before,
+    // so this round pays one more filtered pass over it — and sees the
+    // append, because that pass reads the file as it is now.
     kin.deepen([EXTRA_SESSION]);
 
-    // Not recognised as the same work: the only place EXTRA now sits nested
-    // is the part of ORIGINAL's file appended after round 1's scan, which
-    // the cache never read.
-    expect(kin.sameWork(ORIGINAL, EXTRA_SESSION)).toBe(false);
+    expect(kin.sameWork(ORIGINAL, EXTRA_SESSION)).toBe(true);
   });
 });
 
