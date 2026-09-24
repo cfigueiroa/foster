@@ -344,6 +344,18 @@ do is name a writer that is not there.
 `live --stop` is still `taskkill /F /T`, so whatever that session had not written is lost —
 and it refuses a pid it could not identify, and the session foster is itself running in.
 
+`staleRegistryEntries` and `pruneRegistry` used to trust one scan across both of them: a file
+judged stale is a pid, and `<pid>.json` is the CLI's own naming, not foster's — nothing stops
+Windows reissuing that exact pid to a brand-new `claude` process in the gap between the scan
+and the delete, and that process registering itself under the very filename about to be
+removed. `pruneRegistry` now re-reads each file's `procStart`/mtime immediately before
+`unlinkSync` and skips the delete (reporting it under `failed`, not `removed`) when what it
+finds no longer matches what made the file stale — the new session's own registration survives
+instead of losing its fork protection the moment it takes effect. Tested with a synthetic
+recycle (`tests/liveSessions.test.ts`, "does not delete a registry file whose pid was recycled
+between the scan and the delete"); not reproduced against the real registry, since it is a race
+that only a live scheduler can actually trigger.
+
 `foster live` and `app status` now also say **which store hosts** a live session, not just its
 raw cwd: each registry entry is cross-referenced against every known installation's own card
 (`hostedStoreFor`, `storeHoldsSession`) and printed as `hosted by <name|root> · last seen as
@@ -644,6 +656,59 @@ status and the activity window included — from the first other account that ha
 the target has none — the same "target already has one, leave it" rule groups follow; the
 machine-wide half needs no copying, since one Local Storage record already covers every account on
 the installation.
+
+## LevelDB reads and writes: a table that fails to read is not harmless when a write follows
+
+Measured 24/09/2026, real MSIX store. `pinstate.ts` and `localStorage.ts` both read a key's
+current value by scanning every `.ldb` sorted table and the log, keeping whichever copy carries
+the highest sequence number, and both used to skip a table that failed to read — an
+unimplemented compression, a flipped bit — the same way they skip one LevelDB itself left
+half-written after a killed compaction. That conflation is fine for a read that only lists (a
+warning and a shorter answer is the honest outcome either way), but not for the read a write
+starts from: if the table that failed to open happened to hold the newest copy of the record, the
+older value the other tables and the log agree on is reported as current, and a write built from
+it carries that stale copy forward — erasing whatever the unreadable table actually held, with no
+error at any point.
+
+Both readers now track which tables they could not open (`tablesUnreadable`, populated by the
+shared `newestValue` in the new `src/store/leveldbDb.ts`) and carry it on the `PinState` /
+`LocalStorageRecord` they return. Reading still degrades the same way it always did — the value
+found elsewhere, plus a notice naming the table. `writePinState` and `writeLocalStorageEntries`
+now refuse outright when `tablesUnreadable` is non-empty, before touching the log. `currentLog`
+(the write target `applyLayout` builds for a key nothing has read yet) never scans a table at all,
+so it always hands back an empty `tablesUnreadable` and is never refused on that account.
+
+`readBlock` (`store/format/leveldb.ts`) read a sorted table block's trailing checksum and threw it
+away without ever comparing it, despite the module's own docstring claiming every block is "read,
+verified and (if compressed) decompressed in full" — a flipped bit inside a block used to look like
+an ordinary, if oddly shaped, record rather than the corruption it was. It now verifies the masked
+crc32c the way `table/format.cc`'s `ReadBlock` does: over the block's own bytes followed by the
+one-byte compression tag (`data ++ [type]`, not `[type] ++ data` — the opposite order from a log
+record's checksum, and the detail most likely to be gotten backwards). `tests/helpers/leveldb.ts`'s
+`makeTable` used to write a zeroed four-byte checksum that nothing ever checked; it now computes a
+real one, or every existing test built on it would have started failing the moment the check was
+added.
+
+`pinstate.ts`'s `writePinState` encoded its JSON payload with `Buffer.from(text, 'latin1')`
+unconditionally — silently truncating any character above `0xFF` to its low byte rather than
+erroring, since V8 stores such a string with its two-byte tag and this module only ever writes the
+one-byte envelope `readPinState` recognises. Session ids and JSON punctuation are ASCII, so this
+was only reachable through a field the app itself might add to the persisted document that foster
+carries forward without understanding (`extra`/`futureField` in the tests) — but a future app
+version doing exactly that would have had its setting silently corrupted on the next `foster pin`
+write. It now refuses the write instead, naming the field problem rather than encoding it wrong;
+`localStorage.ts`'s `encodeText` already handled this correctly (it upgrades to the `TWO_BYTE_STRING`
+tag when the content does not fit Latin-1), so only the pin-state side needed the fix.
+
+`locate`/`logsIn`/the tables-then-log newest-value scan were duplicated near-verbatim between the
+two files; both now call the same `logsIn`/`locateLog`/`newestValue`/`nextWriteSequence` in
+`src/store/leveldbDb.ts`, parameterised by which error class and "no database" message each
+caller wants. Validated read-only against a copy of the real installed store (`IndexedDB` and
+`Local Storage` directories copied to scratch, never the live ones): 96 pinned ids and the
+sidebar's `group-by: custom` setting, both matching what the installed (pre-fix) `foster` bundle
+reports against the live store — `tablesUnreadable` came back empty on every real table read,
+so the refusal path itself is unexercised by real data and rests on the synthetic-corruption
+tests in `tests/pinstate.test.ts`, `tests/localStorage.test.ts` and `tests/leveldbDb.test.ts`.
 
 ## Before pushing
 

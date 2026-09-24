@@ -594,6 +594,13 @@ tables too, decompresses them, and takes whichever copy of the record carries th
 number. The same number is what a write has to climb above: a record appended to the log but numbered
 below the table's is read as the older of the two, and the change quietly does nothing.
 
+A sorted table that fails to read — a compression this does not implement, a corrupt block — is
+skipped for a read that only lists, the same as LevelDB's own half-written tables from a killed
+compaction. Writing is different: if the table that failed happened to hold the newest copy of the
+record, the value found elsewhere is older than it looks, and a write built from it would erase
+whatever that table actually held. `foster pin --yes` refuses outright rather than write from a
+read like that, naming the table; re-run once it reads cleanly.
+
 One thing `foster` deliberately will not do: write a pin list into an installation that has **never
 pinned anything**. The record carries Blink's serialisation envelope, and with no record there is
 nothing to copy it from — inventing one is guessing at a serialiser version. Pin any session in the

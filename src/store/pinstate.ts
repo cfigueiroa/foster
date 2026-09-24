@@ -1,17 +1,13 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import {
-  decodeBatch,
   decodeVarint32,
   encodeBatch,
   encodeVarint32,
   frameRecords,
-  nextSequence,
-  readLog,
-  readManifest,
-  scanTable,
   type BatchEntry,
 } from './format/leveldb.js';
+import { fitsInLatin1, locateLog, newestValue, nextWriteSequence } from './leveldbDb.js';
 import { appendSynced } from '../util/fsatomic.js';
 import { safeReaddir } from '../util/fs.js';
 import type { StoreLayout } from '../domain/types.js';
@@ -190,78 +186,14 @@ export interface PinState {
    * Empty when the database read cleanly.
    */
   notices: string[];
-}
-
-/**
- * The log files a LevelDB directory holds, newest number first.
- *
- * LevelDB names them `NNNNNN.log`, and the number orders them: a higher number
- * was opened later, so it holds the later records.
- */
-function logsIn(directory: string): { name: string; number: number }[] {
-  const logs: { name: string; number: number }[] = [];
-  for (const name of safeReaddir(directory)) {
-    const match = /^(\d+)\.log$/.exec(name);
-    if (match) logs.push({ name, number: Number(match[1]) });
-  }
-  return logs.sort((a, b) => b.number - a.number);
-}
-
-function locate(directory: string): {
-  logPath: string;
-  lastSequence: bigint;
-  notice?: string;
-} {
-  const current = path.join(directory, 'CURRENT');
-  if (!existsSync(current)) {
-    throw new PinStateError(
-      `No IndexedDB database at ${directory}.\n` +
-        'Pinning is stored there, so there is nothing for foster to read or change.',
-    );
-  }
-
-  const manifestName = readFileSync(current, 'utf8').trim();
-  const manifest = path.join(directory, manifestName);
-  if (!existsSync(manifest)) {
-    throw new PinStateError(`${current} names ${manifestName}, which is not there.`);
-  }
-
-  const state = readManifest(readFileSync(manifest));
-  if (state.logNumber === undefined) {
-    throw new PinStateError(`Could not tell which log ${manifestName} is writing to.`);
-  }
-
-  const name = `${String(state.logNumber).padStart(6, '0')}.log`;
-
-  // The manifest's log number is a floor, not an address. LevelDB appends a new
-  // version edit naming its log only when it has a reason to write one, and
-  // Chromium opens these databases with log reuse: the LOG file for this store
-  // reads `Reusing MANIFEST ... Recovering log #3 ... Reusing old log`, and the
-  // manifest has said `log 0` since the database was created. Recovery is
-  // defined over every log from that number up, so the log to read — and the one
-  // a write must append to, since it is the one the app replays — is the
-  // highest-numbered of those actually on disk. Measured 21/09/2026 on a real
-  // install: `foster pin` refused a perfectly healthy database with
-  // `MANIFEST-000001 names the log 000000.log, which is not there`, because
-  // 000003.log was the only log there.
-  const floor = Number(state.logNumber);
-  const usable = logsIn(directory).filter((log) => log.number >= floor);
-  const chosen = usable[0];
-  if (!chosen) {
-    throw new PinStateError(`${manifestName} names the log ${name}, which is not there.`);
-  }
-
-  return {
-    logPath: path.join(directory, chosen.name),
-    lastSequence: state.lastSequence ?? 0n,
-    ...(chosen.name === name
-      ? {}
-      : {
-          notice:
-            `${manifestName} names the log ${name}, which is not there; ` +
-            `read ${chosen.name} instead, the newest log at or above that number.`,
-        }),
-  };
+  /**
+   * Sorted tables `readPinState` could not read at all, by name. Non-empty
+   * means the record this state was built from might not be the newest one —
+   * the real newest copy could be sitting in exactly the table that failed —
+   * so `writePinState` refuses to write from it rather than risk erasing
+   * whatever that table actually held.
+   */
+  tablesUnreadable: string[];
 }
 
 /**
@@ -279,79 +211,45 @@ function locate(directory: string): {
  */
 export function readPinState(store: StoreLayout): PinState | undefined {
   const directory = indexedDbDir(store);
-  const { logPath, lastSequence, notice: located } = locate(directory);
-  const log = readFileSync(logPath);
 
-  // The id first, because every key below depends on it. Looked for in the log
-  // and then in the sorted tables, in that order: a record folded into a table
-  // is the older copy, and the log is where a recent pin lives.
-  let databaseId = databaseIdIn(log);
+  const noDatabase = (message: string): PinStateError => new PinStateError(message);
+  const noDatabaseMessage =
+    `No IndexedDB database at ${directory}.\n` +
+    'Pinning is stored there, so there is nothing for foster to read or change.';
+
+  // The id first, because the key every read and write below is built from
+  // depends on it. Looked for in the log and then in the sorted tables, in
+  // that order: a record folded into a table is the older copy, and the log
+  // is where a recent pin lives. This walk tolerates an unreadable table the
+  // same way LevelDB's own compaction leaves half-written ones behind — an id
+  // it cannot find here still turns up in `newestValue`'s own table scan below
+  // if it is really there, and if it never is, "nothing pinned" is the honest
+  // answer regardless.
+  const { logPath } = locateLog(directory, noDatabase, noDatabaseMessage);
+  let databaseId = databaseIdIn(readFileSync(logPath));
   if (databaseId === undefined) {
     for (const name of safeReaddir(directory)) {
       if (!name.endsWith('.ldb')) continue;
       try {
         databaseId = databaseIdIn(readFileSync(path.join(directory, name)));
       } catch {
-        // Same reasoning as the scan below: an unreadable table is skipped.
+        // Same reasoning as `newestValue`'s own scan: an unreadable table is
+        // skipped for discovering the id, since the id itself is recoverable
+        // from any table (or the log) that still carries the record.
       }
       if (databaseId !== undefined) break;
     }
   }
   // Nothing anywhere carrying that name means nothing has ever been pinned, and
-  // the reads below will say so on their own. The default keeps the shape of the
+  // the read below will say so on its own. The default keeps the shape of the
   // key valid for that walk rather than standing in for a discovery.
   const dataKey = recordKey(OBJECT_STORE_DATA, PIN_STATE_KEY, databaseId ?? 1);
 
-  let highest = lastSequence;
-  let newest: { sequence: bigint; value?: Buffer } | undefined;
-  const consider = (sequence: bigint, value: Buffer | undefined): void => {
-    if (sequence > highest) highest = sequence;
-    if (!newest || sequence >= newest.sequence) newest = { sequence, value };
-  };
+  const found = newestValue(directory, noDatabase, noDatabaseMessage, (key) => key.equals(dataKey));
 
-  for (const name of safeReaddir(directory)) {
-    if (!name.endsWith('.ldb')) continue;
-    try {
-      scanTable(readFileSync(path.join(directory, name)), (entry, value) => {
-        if (!entry.userKey.equals(dataKey)) return;
-        // A delete carries no value, and one at a higher sequence than the record
-        // means the record is gone however many older copies of it survive.
-        consider(entry.sequence, entry.isDelete ? undefined : Buffer.from(value));
-      });
-    } catch {
-      // A table foster cannot read is skipped rather than fatal, because the
-      // directory is not a curated list: LevelDB leaves half-written tables
-      // behind when a process is killed during a compaction and simply ignores
-      // them afterwards, since the manifest never names them. Treating one of
-      // those as an error would let a file the app itself disregards stop foster
-      // from reading a database that is otherwise perfectly intact — and the
-      // same would happen to a healthy database the first time these tables use
-      // a compression this does not implement.
-    }
-  }
-
-  // Tolerant on purpose: a torn record at the end of a log is what any kill
-  // during a write leaves, and LevelDB opens such a log by discarding it. Every
-  // record before the damage is still checksummed and still read. Anything the
-  // tolerant read gives up on is collected so the caller can say so instead of
-  // quietly reporting a shorter list.
-  const notices: string[] = located ? [located] : [];
-  for (const batch of readLog(log, {
-    tolerant: true,
-    onNotice: (message) => notices.push(message),
-  })) {
-    const decoded = decodeBatch(batch.payload);
-    decoded.entries.forEach((entry, index) => {
-      if (!entry.key.equals(dataKey)) return;
-      consider(
-        decoded.sequence + BigInt(index),
-        entry.value ? Buffer.from(entry.value) : undefined,
-      );
-    });
-  }
-
-  if (!newest?.value) return undefined;
-  const record = newest.value;
+  if (!found.value) return undefined;
+  const record = found.value;
+  const notices = found.notices;
 
   // Walked field by field rather than searched for. Both the version varint and
   // the length varint can legitimately contain the bytes the envelope starts and
@@ -396,8 +294,9 @@ export function readPinState(store: StoreLayout): PinState | undefined {
     version: version.value,
     envelope: Buffer.from(record.subarray(version.next, tag + 1)),
     document,
-    highestSequence: highest,
+    highestSequence: found.highestSequence,
     notices,
+    tablesUnreadable: found.tablesUnreadable,
   };
 }
 
@@ -410,6 +309,20 @@ export function readPinState(store: StoreLayout): PinState | undefined {
  * kind of damage the log format is built to discard.
  */
 export function writePinState(state: PinState, ids: string[]): void {
+  // The read this state came from could not see everything: a sorted table it
+  // failed to open might hold a copy newer than the one found elsewhere. Writing
+  // from it anyway would carry that stale copy forward and silently erase
+  // whatever the unreadable table actually held (see `newestValue`).
+  if (state.tablesUnreadable.length > 0) {
+    throw new PinStateError(
+      `${state.tablesUnreadable.length === 1 ? 'A sorted table' : 'Sorted tables'} in ` +
+        `${path.dirname(state.logPath)} could not be read ` +
+        `(${state.tablesUnreadable.join(', ')}), so this read might be missing whatever the newest ` +
+        'copy of the pin record actually says. Writing from it risks erasing that copy instead of ' +
+        'changing it. Refusing rather than guessing — re-run once the table reads cleanly.',
+    );
+  }
+
   const document = {
     ...state.document,
     state: { ...(state.document.state as object), starredIds: ids },
@@ -418,8 +331,25 @@ export function writePinState(state: PinState, ids: string[]): void {
 
   // latin1 throughout: the envelope declares a one-byte-per-character string, so
   // the length that follows counts bytes and characters at once. Session ids and
-  // JSON punctuation are ASCII, so nothing here can exceed it.
-  const payload = Buffer.from(JSON.stringify(document), 'latin1');
+  // JSON punctuation are ASCII, so nothing here can exceed it — but a `document`
+  // carrying a future field the app itself put there is not guaranteed to be, and
+  // `Buffer.from(text, 'latin1')` truncates any character above 0xFF to its low
+  // byte rather than erroring, which used to write a silently corrupted record.
+  // The envelope this module copies forward always declares the one-byte tag
+  // (`readPinState` only ever recognises `ONE_BYTE_STRING`), so there is no wider
+  // tag to switch to here without also teaching the reader to expect it — refusing
+  // is the honest alternative to writing bytes nothing agrees on the meaning of.
+  const json = JSON.stringify(document);
+  if (!fitsInLatin1(json)) {
+    throw new PinStateError(
+      'The pin record cannot be written: its JSON payload holds a character outside Latin-1, and ' +
+        'this module only ever writes the one-byte-per-character envelope readPinState recognises. ' +
+        'Encoding it anyway would silently truncate every such character to its low byte. Session ids ' +
+        'and JSON punctuation are always ASCII, so this means some other field in the pinned document ' +
+        'carries non-Latin-1 text; foster refuses to write a corrupted copy of it.',
+    );
+  }
+  const payload = Buffer.from(json, 'latin1');
   const version = state.version + 1;
 
   const entries: BatchEntry[] = [
@@ -446,8 +376,7 @@ export function writePinState(state: PinState, ids: string[]): void {
   // Strict here, unlike the read: a damaged log is something to report and stop
   // on when the next act is to append to it, however readable it was for
   // listing.
-  const inLog = nextSequence(readLog(existing));
-  const sequence = inLog > state.highestSequence ? inLog : state.highestSequence + 1n;
+  const sequence = nextWriteSequence(existing, state.highestSequence);
   // Read-then-append is not atomic against another writer in between. That is
   // deliberate: the app must be closed to reach here (its unflushed writes would
   // be put back on top of the log), so the only other writer is a second `foster

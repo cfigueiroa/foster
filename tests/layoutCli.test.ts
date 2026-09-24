@@ -269,6 +269,7 @@ describe('viewNoticeLines — R8', () => {
               highestSequence: 0n,
               notices,
               encoding: 'latin1',
+              tablesUnreadable: [],
             },
           }
         : {}),

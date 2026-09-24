@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -627,6 +627,94 @@ describe('pruning the registry', () => {
     expect(existsSync(path.join(root, '4242.hash4242.key'))).toBe(true);
     expect(existsSync(path.join(root, '1.json'))).toBe(false);
     expect(existsSync(path.join(root, '7272.hash7272.key'))).toBe(false);
+  });
+
+  /**
+   * Windows reissues a pid as soon as its old holder has exited — the reason
+   * every liveness check here goes through `procStart` rather than trusting
+   * the pid alone. `staleRegistryEntries` and `pruneRegistry` used to trust
+   * their own scan across the gap between them, which is exactly long enough
+   * for a new `claude` process to be handed the recycled pid and register
+   * itself under the very filename about to be deleted.
+   */
+  it('does not delete a registry file whose pid was recycled between the scan and the delete', () => {
+    const root = registryWith([
+      recordAsWritten({ pid: 7272, sessionId: '00000000-0000-4000-8000-0000000000e2' }),
+    ]);
+    const rows = [
+      process_({ pid: 7272, name: 'postgres.exe', path: '', startedAt: RECORDED_AT + 12 * HOUR }),
+    ];
+    const stale = staleRegistryEntries(
+      [root],
+      () => true,
+      () => rows,
+    );
+    expect(stale).toHaveLength(1);
+
+    // A brand new session is handed the recycled pid and writes its own record
+    // under the same name — `<pid>.json` is not a name foster chose, so it
+    // cannot avoid this collision by using a different one.
+    const file = path.join(root, '0.json');
+    const revived = recordAsWritten({
+      pid: 7272,
+      sessionId: '00000000-0000-4000-8000-0000000000e9',
+      procStart: filetime(RECORDED_AT + 20 * HOUR),
+      startedAt: RECORDED_AT + 20 * HOUR,
+    });
+    writeFileSync(file, JSON.stringify(revived), 'utf8');
+
+    const { removed, failed } = pruneRegistry(stale);
+
+    expect(removed).toEqual([]);
+    expect(failed).toEqual([file]);
+    expect(existsSync(file)).toBe(true);
+    expect(JSON.parse(readFileSync(file, 'utf8')).sessionId).toBe(
+      '00000000-0000-4000-8000-0000000000e9',
+    );
+  });
+
+  it('does not delete a peer key whose pid was recycled between the scan and the delete', () => {
+    const root = registryWith([]);
+    const file = peerKey(root, 7272, keyFor());
+    const rows = [
+      process_({ pid: 7272, name: 'postgres.exe', path: '', startedAt: RECORDED_AT + 12 * HOUR }),
+    ];
+    const stale = staleRegistryEntries(
+      [root],
+      () => true,
+      () => rows,
+    );
+    expect(stale).toHaveLength(1);
+
+    // Same collision, on the key a session leaves beside its record.
+    peerKey(root, 7272, keyFor(RECORDED_AT + 20 * HOUR));
+
+    const { removed, failed } = pruneRegistry(stale);
+
+    expect(removed).toEqual([]);
+    expect(failed).toEqual([file]);
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it('still deletes a file whose identity did not change in the gap', () => {
+    // The ordinary case, alongside the recycle guard above: nothing rewrote the
+    // file between the scan and the delete, so it goes exactly as before.
+    const root = registryWith([
+      recordAsWritten({ pid: 7272, sessionId: '00000000-0000-4000-8000-0000000000e2' }),
+    ]);
+    const rows = [
+      process_({ pid: 7272, name: 'postgres.exe', path: '', startedAt: RECORDED_AT + 12 * HOUR }),
+    ];
+    const stale = staleRegistryEntries(
+      [root],
+      () => true,
+      () => rows,
+    );
+
+    const { removed, failed } = pruneRegistry(stale);
+
+    expect(failed).toEqual([]);
+    expect(removed).toEqual([path.join(root, '0.json')]);
   });
 });
 
