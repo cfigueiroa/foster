@@ -32,19 +32,35 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run format:check
-      - run: npm test
+      # Coverage, not a plain test run: vitest.config.ts sets a coverage floor
+      # (see the comment there) and only --coverage actually collects and
+      # enforces it. `npm test` alone would let coverage regress silently —
+      # this is the gate, and `npm run check` (package.json) mirrors it so a
+      # local run fails the same way CI would.
+      - run: npm run coverage
 
   # Build + bundle smoke test used to run only in release.yml, on a tag push —
   # a packaging mistake in the single-file bundle was invisible until a release
   # was already being cut. Runs on every PR and push now, same script release.yml
   # uses, so the two cannot drift apart.
+  #
+  # Node 20 is kept alongside 24 here (unlike the `check` job above): this job
+  # never runs vitest, so it carries none of vitest 5's Node floor, and
+  # package.json's own "engines" (>=20) is a live promise about dist/foster.js
+  # itself — the one thing this job actually executes. Dropping the matrix to
+  # 24-only would verify the shipped bundle only on a newer Node than the CLI
+  # claims to support.
   build-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 24]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run build

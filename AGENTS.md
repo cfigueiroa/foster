@@ -671,6 +671,11 @@ CLI (`dist/foster.js`), which carries no vitest dependency, not about the dev to
 contributor runs `npm test` with. `release.yml`'s own `setup-node` step needed the same bump, for
 the same reason — it runs `npm test` too, ahead of the smoke test.
 
+The `check` job's own test step is `npm run coverage`, not a plain `npm test`: `vitest run` alone
+never passes `--coverage`, so without it the thresholds below are configured but never collected
+or enforced — a PR could drop coverage to zero and every job would still pass. `npm run check`
+(`package.json`) runs the same `npm run coverage`, so a local run fails exactly when CI would.
+
 Two more gates moved into `ci.yml`, both previously exercised only by `release.yml` on a tag push:
 a `build-smoke` job (`npm run build` then `scripts/smoke-bundle.sh` — single-file bundle,
 `--version` matches, starts with no stderr noise) so a packaging mistake is caught on the PR that
@@ -679,10 +684,21 @@ made it, not on the release that ships it; and an `audit` job running `npm audit
 dev toolchain (vitest, tsup, the agent SDK, ...) carries advisories of its own that never reach
 anything foster installs or executes on a user's machine. `scripts/smoke-bundle.sh` is the one
 implementation of the smoke test too, now — `release.yml` calls the same file instead of carrying
-its own copy of the bash block.
+its own copy of the bash block. Unlike `check`, `build-smoke` runs no vitest at all, so it carries
+none of vitest 5's Node floor — its matrix is `[20, 24]`, not `[22, 24]`, because Node 20 is the
+one version `package.json`'s `"engines"` actually promises about `dist/foster.js`, the one thing
+this job executes; pinning it to 24 only would have verified the shipped bundle on a newer Node
+than the CLI claims to support, and never on its own stated floor.
 
 `vitest.config.ts`'s coverage now includes `src/cli/**`, previously excluded — the exclusion made
-`npm run coverage` read 88% when the real figure, CLI entrypoints included, measured 66.6% (2026-09-24).
-`coverage.thresholds` sets a floor at that measured level (rounded down one decimal, so a
-platform-neutral rerun cannot flake below it): a genuine drop fails CI, and the floor is meant to
-be raised as coverage improves, never lowered to let a drop through.
+`npm run coverage` read 88% when the real figure, CLI entrypoints included, measured 66.6%
+statements (2026-09-24). The naive fix — pin `coverage.thresholds` to that exact measured level —
+does not hold: the same `npm run coverage`, run again with `HOME`/`USERPROFILE` pointed at an
+empty `mktemp -d` directory instead of a normal populated one, measured 66.59% statements, not
+66.6% — several `src/store` and `src/engine` paths branch on what actually exists under the real
+home directory, so the percentage is environment-dependent, not merely noisy at the last decimal.
+The configured thresholds (statements 66.3 / branches 60.2 / functions 71.3 / lines 67.6) sit
+below the lower of the two measurements, with margin for a third environment neither matches —
+the GitHub Actions runner's own `$HOME` — so a genuine drop still fails CI without the floor
+itself flaking on environment alone; raise it as coverage improves by more than that margin, never
+lower it to let a real drop through.

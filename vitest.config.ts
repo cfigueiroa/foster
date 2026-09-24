@@ -10,14 +10,23 @@ export default defineConfig({
       provider: 'v8',
       include: ['src/**/*.ts'],
       // A floor, not a target: today's real coverage (2026-09-24, src/cli
-      // included), rounded down to one decimal so a platform-neutral rerun
-      // cannot flake below it. Raise it when coverage genuinely improves;
-      // never lower it to make a drop pass.
+      // included). Measured 66.6% statements / 60.5% branches / 71.5%
+      // functions / 67.8% lines under a normal, populated $HOME, and a
+      // *different* 66.59% / 60.46% / 71.51% / 67.84% under an empty one
+      // (mktemp'd HOME + USERPROFILE) — several src/store and src/engine
+      // code paths branch on what actually exists under the real home
+      // directory, so the percentage itself is environment-dependent, not
+      // just noisy at the last decimal the way a single flaky test would
+      // be. Each number below sits under the lower of those two
+      // measurements, with headroom for a third environment neither
+      // matches (the GitHub Actions runner's own $HOME): raise a
+      // threshold when coverage genuinely improves by more than this
+      // margin; never lower one to let a real drop pass.
       thresholds: {
-        statements: 66.6,
-        branches: 60.4,
-        functions: 71.5,
-        lines: 67.8,
+        statements: 66.3,
+        branches: 60.2,
+        functions: 71.3,
+        lines: 67.6,
       },
     },
   },
