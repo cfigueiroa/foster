@@ -1526,6 +1526,20 @@ file-election path up front, since a query does not know in advance which kind o
 asking about. Read-only; the search phase uses `scanAccount(..., { slim: true })`, the same perf seam
 sweep uses (#116/#117).
 
+`byContinuation` only ever decides between _files_ — every row open on the same file shares that
+file's one `ScanWeight`, so on a tie between two such rows it degenerates to its own last resort, the
+row id, which carries no account preference at all. Measured on a real store (24/09/2026, milestone
+D1): named a row in another account — one of them archived — as the one to continue in, in 2 of 4
+checks, although the signed-in (target) account had a row open on that very file. `byWorkingRow`'s own
+`accountRank` is the tiebreak `where` now tries first whenever the file election ties on the same
+file: the target account's visible row, then its archived row — its own card outranks a jump to
+another account either way — then another account's visible row, then the rest; the row id is still
+the very last word. `target` is `signedInAccount(store)` for the store `--store` resolves to (the
+default installation when it is not given), threaded through `buildWhereReport`'s new optional
+parameter; `foster sweep`'s own election is untouched; this tiebreak is `where`'s alone; a card the
+sweep would itself elect between two files of one account never reaches it, since that pass never
+puts two rows of the same account on the same file in `readable` to begin with.
+
 Cross-checked against a real store 24/09/2026: `foster where` on a title fragment reported "1 file,
 255 record(s) total"; an independent `grep`-and-`sort -u` of the transcript's own `uuid` fields
 counted 255 distinct ids out of 374 lines. On a two-file conversation it reported "12335 record(s)
