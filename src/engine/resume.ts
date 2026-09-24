@@ -52,7 +52,10 @@ export async function resumeConversation(
     };
   }
 
-  const run = options.runner ?? runClaudeResume;
+  const configDir = (options.env ?? process.env).CLAUDE_CONFIG_DIR;
+  const run: ResumeRunner =
+    options.runner ??
+    ((sessionId, p, timeoutMs) => runClaudeResume(sessionId, p, timeoutMs, configDir));
   const output = await run(id, prompt, options.timeoutMs ?? TIMEOUT_DEFAULT_MS);
   const capped =
     output.length > OUTPUT_CAP ? `${output.slice(0, OUTPUT_CAP)}\n[output truncated]` : output;
@@ -80,14 +83,29 @@ const STREAM_HARD_CAP = 16 * 1024 * 1024;
  * `spawn` plus a timer this function owns fixes that: on timeout it runs
  * `taskkill /PID <pid> /T /F` against the pid `spawn()` itself returned (the
  * shell), and `/T` walks down to every process that shell started — `claude`
- * included. The env is `scrubbedEnv`, for the same reason every other launch
- * in this codebase uses it: a `claude` started from inside a hosted session
- * must not come up thinking it is hosted too (`launchEnv.ts`).
+ * included. The env is `scrubbedEnv` of `process.env`, for the same reason
+ * every other launch in this codebase uses it: a `claude` started from inside
+ * a hosted session must not come up thinking it is hosted too
+ * (`launchEnv.ts`). `scrubbedEnv` strips everything starting with `CLAUDE`,
+ * case-insensitively — including `CLAUDE_CONFIG_DIR` — so `configDir` (read
+ * by the caller from the same env `sessionRegistryRoots` used for the
+ * live-writer check, before the scrub) is put back explicitly: that is the
+ * only thing standing between this spawn and the operator's own `~/.claude`,
+ * in exactly the multi-account scenario `foster client open <client>` sets up
+ * by putting `CLAUDE_CONFIG_DIR` on the tab (see AGENTS.md). Scrub-then-set
+ * is the same two-step `buildPsCommand`/`launch.ts` already uses for `wt`.
  */
-function runClaudeResume(cliSessionId: string, prompt: string, timeoutMs: number): Promise<string> {
+function runClaudeResume(
+  cliSessionId: string,
+  prompt: string,
+  timeoutMs: number,
+  configDir: string | undefined,
+): Promise<string> {
   return new Promise((resolve, reject) => {
+    const scrubbed = scrubbedEnv(process.env);
+    const spawnEnv = configDir ? { ...scrubbed, CLAUDE_CONFIG_DIR: configDir } : scrubbed;
     const child = spawn('claude', ['-p', '--resume', cliSessionId], {
-      env: scrubbedEnv(process.env),
+      env: spawnEnv,
       windowsHide: true,
       shell: process.platform === 'win32',
     });
@@ -149,17 +167,32 @@ function runClaudeResume(cliSessionId: string, prompt: string, timeoutMs: number
  * Kills the process tree rooted at `pid` — see the comment on `runClaudeResume`.
  * Scoped to exactly the pid that call just spawned: this function starts no
  * process of its own and never touches a pid it was not handed.
+ *
+ * `taskkill` is Windows-only. On win32 `spawn` above runs through a shell (a
+ * `.cmd` shim needs one to resolve at all), so the spawned pid is the shell's,
+ * and `/T` is what walks down to the real `claude` process it started — a
+ * plain kill of the shell pid would leave `claude` running and orphaned,
+ * which is the exact bug this module exists to close. On every other
+ * platform `shell: false` is used instead (see `runClaudeResume`), so
+ * `child.pid` already names the real `claude` process directly — no shell,
+ * no tree to walk — and `process.kill` with `SIGKILL` reaches it the same
+ * way `execFileSync`'s own timeout used to, before this module switched to
+ * `spawn`.
  */
 function killTree(pid: number | undefined): void {
   if (!pid) return;
   try {
-    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-      windowsHide: true,
-      timeout: 5_000,
-      stdio: 'ignore',
-    });
+    if (process.platform === 'win32') {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        timeout: 5_000,
+        stdio: 'ignore',
+      });
+    } else {
+      process.kill(pid, 'SIGKILL');
+    }
   } catch {
-    // Already exited between the timeout firing and taskkill running, or
+    // Already exited between the timeout firing and the kill running, or
     // taskkill itself could not be found — either way, nothing more to do.
   }
 }

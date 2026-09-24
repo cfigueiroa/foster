@@ -132,6 +132,49 @@ describe('resumeConversation — the default runner (spawn mocked, never the rea
     await promise;
   });
 
+  it('restores CLAUDE_CONFIG_DIR after the scrub, sourced from the caller-supplied env', async () => {
+    // process.env itself carries no CLAUDE_CONFIG_DIR here, so if the spawn env
+    // still gets one, it can only have come from `options.env` — the same env
+    // `resumeConversation` used for the live-writer check, matching a tab
+    // opened via `foster client open <client>` (AGENTS.md), not the ambient
+    // environment of whatever process happens to be running foster.
+    vi.stubEnv('CLAUDE_CONFIG_DIR', '');
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const targetConfigDir = mkdtempSync(path.join(tmpdir(), 'foster-resume-target-'));
+    const child = new FakeChild();
+    spawnMock.mockReturnValue(child);
+
+    const promise = resumeConversation(ID, 'hi', {
+      env: { CLAUDE_CONFIG_DIR: targetConfigDir } as NodeJS.ProcessEnv,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const opts = spawnMock.mock.calls[0]![2] as { env: NodeJS.ProcessEnv };
+    expect(opts.env.CLAUDE_CONFIG_DIR).toBe(targetConfigDir);
+
+    child.emit('close', 0, null);
+    await promise;
+  });
+
+  it('leaves CLAUDE_CONFIG_DIR out of the spawn env when neither the caller env nor process.env has one', async () => {
+    delete process.env.CLAUDE_CONFIG_DIR;
+    const child = new FakeChild();
+    spawnMock.mockReturnValue(child);
+
+    const promise = resumeConversation(ID, 'hi', {
+      env: { FOO: 'bar' } as NodeJS.ProcessEnv,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const opts = spawnMock.mock.calls[0]![2] as { env: NodeJS.ProcessEnv };
+    expect(opts.env.CLAUDE_CONFIG_DIR).toBeUndefined();
+
+    child.emit('close', 0, null);
+    await promise;
+  });
+
   it('rejects on a non-zero exit, surfacing stderr', async () => {
     const child = new FakeChild();
     spawnMock.mockReturnValue(child);
@@ -172,6 +215,38 @@ describe('resumeConversation — the default runner (spawn mocked, never the rea
     // the point of the tree kill was that nothing should still be writing.
     child.emit('close', null, 'SIGTERM');
     await expect(promise).rejects.toThrow(/did not answer within/);
+  });
+
+  it('on a non-Windows platform, kills the spawned pid directly with SIGKILL instead of shelling out to taskkill', async () => {
+    // On win32 `spawn` above resolves the `claude` `.cmd` shim through a shell,
+    // so the spawned pid is the shell's and `/T` is what reaches the real
+    // `claude` process. On every other platform `shell: false` is used
+    // instead, so the spawned pid already names `claude` directly — killTree
+    // must not depend on a Windows-only binary to reach it.
+    vi.useFakeTimers();
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    try {
+      const child = new FakeChild();
+      spawnMock.mockReturnValue(child);
+
+      const promise = resumeConversation(ID, 'hi', {
+        env: { CLAUDE_CONFIG_DIR: mkdtempSync(path.join(tmpdir(), 'foster-resume-idle-')) },
+        timeoutMs: 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(killSpy).toHaveBeenCalledWith(child.pid, 'SIGKILL');
+      expect(execFileSyncMock).not.toHaveBeenCalled();
+
+      child.emit('close', null, 'SIGTERM');
+      await expect(promise).rejects.toThrow(/did not answer within/);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+      killSpy.mockRestore();
+    }
   });
 
   it('taskkill itself failing (already exited, or missing) does not throw out of the timeout path', async () => {
