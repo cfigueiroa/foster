@@ -4,7 +4,13 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
-import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
+import {
+  isFostered,
+  listActive,
+  listImportedFrom,
+  project,
+  selectByTarget,
+} from '../src/ledger/project.js';
 import type { ActiveFostering, LedgerEvent } from '../src/ledger/types.js';
 import type { AccountRef } from '../src/domain/types.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
@@ -884,5 +890,49 @@ describe('handler_armed / handler_restored', () => {
       restoreFailed: true,
     });
     expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
+  });
+});
+
+describe('listImportedFrom', () => {
+  // Regression for the blocker found reviewing `foster cloud pull`: both
+  // importers fold `conversation_imported` into the same `state.imported`
+  // map keyed on `rolloutId` alone, so a bare `import-codex --undo` (no
+  // `--session` filter) must not sweep up a `foster cloud pull`-written
+  // conversation just because it lives in the same map.
+  it('keeps a codex-sourced entry out of the cloud list, and vice versa', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'conversation_imported',
+      // No `source` — a Codex import predating the `source` field, or one
+      // written by the default importer, which never sets it.
+      rolloutId: 'codex-rollout-1',
+      sourceRolloutPath: '/home/user/.codex/sessions/rollout-1.jsonl',
+      contentHash: 'a'.repeat(64),
+      target: NEW_ACCOUNT,
+      cardPath: '/store/new/local_codex-card-1.json',
+      transcriptPath: '/home/user/.claude/projects/demo/codex-1.jsonl',
+      sessionId: 'local_codex-1',
+      title: 'A Codex thread',
+    });
+    ledger.append({
+      kind: 'conversation_imported',
+      source: 'cloud',
+      rolloutId: 'cse_cloud-session-1',
+      sourceRolloutPath: 'cloud session cse_cloud-session-1',
+      contentHash: 'b'.repeat(64),
+      target: NEW_ACCOUNT,
+      cardPath: '/store/new/local_cloud-card-1.json',
+      transcriptPath: '/home/user/.claude/projects/demo/cloud-1.jsonl',
+      sessionId: 'local_cloud-1',
+      title: 'A cloud session',
+    });
+
+    const state = project(ledger.read());
+
+    const codexOnly = listImportedFrom(state, 'codex');
+    expect(codexOnly.map((i) => i.rolloutId)).toEqual(['codex-rollout-1']);
+
+    const cloudOnly = listImportedFrom(state, 'cloud');
+    expect(cloudOnly.map((i) => i.rolloutId)).toEqual(['cse_cloud-session-1']);
   });
 });

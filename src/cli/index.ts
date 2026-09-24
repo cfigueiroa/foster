@@ -1,5 +1,6 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
 import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
@@ -104,7 +105,7 @@ import {
   listActive,
   listDated,
   listRepointed,
-  listImported,
+  listImportedFrom,
   listRetitled,
   listWorktreeReleased,
   project,
@@ -209,6 +210,16 @@ import {
   undoCodexImports,
   type ImportOutcome,
 } from '../engine/codexImportWrite.js';
+import {
+  fetchCloudSession,
+  fetchTeleportEvents,
+  isCloudApiError,
+  listCloudSessions,
+  type CloudSessionSummary,
+} from '../engine/cloudApi.js';
+import { pullCloudSession, type CloudPullOutcome } from '../engine/cloudImportWrite.js';
+import { readCloudAuth, type CloudAuthRefusal } from '../store/cloudAuth.js';
+import { clientNameOf } from '../engine/launch.js';
 import {
   firstPrompt,
   indexTranscripts,
@@ -6614,9 +6625,13 @@ program
     const state = project(ledger.read());
     const dryRun = !opts.yes;
 
-    // --undo: remove what an import wrote.
+    // --undo: remove what an import wrote. Scoped to this importer's own
+    // conversations — `foster cloud pull` writes into the same `state.imported`
+    // map (see `ImportedConversation.source`), and a bare `import-codex --undo`
+    // must never sweep up cloud-pulled ones just because it ran with no
+    // `--session` filter.
     if (opts.undo) {
-      let imports = listImported(state);
+      let imports = listImportedFrom(state, 'codex');
       if (opts.session?.length) {
         const { matched, unmatched } = matchCodexIds(imports, (i) => i.rolloutId, opts.session);
         if (unmatched.length > 0) {
@@ -6682,6 +6697,308 @@ program
 
     reportImport(outcomes, dryRun);
     if (!dryRun) await finish(store, Boolean(opts.restart));
+  });
+
+/** "run claude in <dir> to refresh" — never a refresh foster performs itself. See `cloudAuth.ts`. */
+function cloudAuthRefusalMessage(reason: CloudAuthRefusal, configDir: string): string {
+  switch (reason) {
+    case 'signed-out':
+      return 'not signed in';
+    case 'expired':
+      return `access token expired — run claude in ${configDir} to refresh`;
+    case 'no-organization':
+      return `no cached organization on file — run claude in ${configDir} at least once`;
+  }
+}
+
+/**
+ * Resolve `--client <name>` (or, absent, the client in use) against
+ * `listClients()` the same way `client open` resolves its own argument by
+ * name — but only by name, not by path or registered root: `cloud` reads a
+ * credential to call an external API with, and a default that quietly grew to
+ * cover registered fleet roots would widen what one `--client` flag can reach
+ * without anyone asking for that (the same reasoning `listClients`'
+ * `registeredDirs` argument documents).
+ */
+function resolveCloudClient(name: string | undefined, home: string): ClaudeClient {
+  const clients = listClients(process.env);
+  if (name === undefined) {
+    const inUse = clients.find((c) => c.inUse);
+    if (!inUse) throw new Error('No client is in use — pass --client <name>.');
+    return inUse;
+  }
+  const found = clients.find((c) => clientNameOf(c.configDir, home) === name);
+  if (found) return found;
+  const known = clients.map((c) => clientNameOf(c.configDir, home));
+  throw new Error(
+    known.length > 0
+      ? `No client named "${name}". Known clients: ${known.join(', ')}.`
+      : `No client named "${name}", and no clients are known yet — see \`foster clients\`.`,
+  );
+}
+
+/**
+ * `foster cloud` — list and pull Claude Code cloud sessions into the Desktop
+ * sidebar.
+ *
+ * The two endpoints this command family calls (`v1/code/sessions` and
+ * `v1/code/sessions/{id}/teleport-events`) are private and undocumented —
+ * read out of the installed CLI's own bundle rather than a published spec —
+ * and can change without notice. See `src/engine/cloudApi.ts`'s module
+ * comment for exactly what was measured and against what build.
+ */
+const cloud = program
+  .command('cloud')
+  .helpGroup('Cloud sessions:')
+  .description(
+    'list and pull Claude Code cloud sessions (code.claude.com) into the Desktop sidebar',
+  );
+
+cloud
+  .command('list')
+  .summary('list cloud sessions for one or every signed-in CLI account')
+  .description(
+    'Calls the cloud-sessions API for every CLI config directory that is signed in — or just\n' +
+      "--client <name> — and shows each session's title, status, repository and last activity.\n\n" +
+      'Reads only, and never refreshes a token: an account whose access token has expired is\n' +
+      'reported as such, not renewed — refreshing rotates the refresh token in .credentials.json,\n' +
+      "which every other client sharing that account's login would be affected by. Run `claude` in\n" +
+      'that config directory yourself to refresh it.\n\n' +
+      'API keys are rejected outright by the API itself: cloud sessions need a claude.ai sign-in.\n\n' +
+      "--client matches by name only, against `foster clients`' own list — never a `foster client\n" +
+      'register`ed root: this reads a credential to call an external API with, and a registered\n' +
+      'fleet root reaching that by default is not something naming it here should quietly grant.',
+  )
+  .option(
+    '--client <name>',
+    'only this client (as `foster clients` names it) — registered fleet roots are out of scope, see above',
+  )
+  .option('--all', 'every signed-in client — the default; only useful to say so explicitly')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command) {
+    const opts = this.opts<{ client?: string; all?: boolean; json?: boolean }>();
+    const home = homedir();
+    const clients = listClients(process.env);
+    const targets = opts.client ? [resolveCloudClient(opts.client, home)] : clients;
+
+    interface Row {
+      client: string;
+      configDir: string;
+      ok: boolean;
+      reason?: string;
+      sessions?: CloudSessionSummary[];
+    }
+    const rows: Row[] = [];
+    for (const client of targets) {
+      if (!client.signedIn) continue; // never authenticated for anything cloud-related
+      const name = clientNameOf(client.configDir, home);
+      const auth = readCloudAuth(client.configDir, client.isDefault, home);
+      if (!auth.ok) {
+        rows.push({
+          client: name,
+          configDir: client.configDir,
+          ok: false,
+          reason: cloudAuthRefusalMessage(auth.reason, client.configDir),
+        });
+        continue;
+      }
+      const sessions = await listCloudSessions(auth.auth);
+      if (isCloudApiError(sessions)) {
+        rows.push({
+          client: name,
+          configDir: client.configDir,
+          ok: false,
+          reason: sessions.message,
+        });
+        continue;
+      }
+      rows.push({ client: name, configDir: client.configDir, ok: true, sessions });
+    }
+
+    if (opts.json) {
+      print({ rows });
+      return;
+    }
+
+    if (rows.length === 0) {
+      console.log('No signed-in CLI client to ask.');
+      return;
+    }
+    let total = 0;
+    for (const row of rows) {
+      console.log(pc.bold(`${row.client}`) + pc.dim(`  (${row.configDir})`));
+      if (!row.ok) {
+        console.log(pc.yellow(`  ${row.reason}`));
+        continue;
+      }
+      if (row.sessions!.length === 0) {
+        console.log(pc.dim('  no cloud sessions'));
+        continue;
+      }
+      for (const s of row.sessions!) {
+        total += 1;
+        const repo = s.repo.repo ?? s.repo.url;
+        console.log(`  ${s.title}`);
+        console.log(
+          pc.dim(
+            `    ${s.id}  ·  ${s.status}` +
+              (repo ? `  ·  ${repo}${s.repo.branch ? ` @ ${s.repo.branch}` : ''}` : '') +
+              (s.lastEventAt ? `  ·  last active ${s.lastEventAt}` : ''),
+          ),
+        );
+      }
+    }
+    console.log(pc.bold(`\n${total} cloud session(s).`));
+    console.log(pc.dim('foster cloud pull <id> --into <cwd> brings one in (dry run first).'));
+  });
+
+cloud
+  .command('pull')
+  .summary('bring one cloud session in as a Claude Desktop conversation')
+  .description(
+    "Fetches one cloud session's history and writes it as a local Claude transcript plus a\n" +
+      'sidebar card — the same widening `import-codex` makes for a Codex CLI thread: neither\n' +
+      'session ran as a local Desktop conversation before this, so it fabricates both files. The\n' +
+      "transcript gets a freshly minted session id (a cloud session's own id is not shaped like\n" +
+      'the uuid a local one is) and the same "continued from another machine" notice the CLI\'s\n' +
+      'own --teleport adds.\n\n' +
+      'Dry run by default: nothing is written until --yes. --undo removes what a pull wrote.\n\n' +
+      'No git operations happen here — the repository and branch the session last ran against are\n' +
+      'printed as a hint; make sure --into already has them checked out.',
+  )
+  .argument('<id>', 'the cloud session id (cse_… / session_…), or a unique prefix')
+  .option('--into <cwd>', 'the working directory the resumed conversation opens in')
+  .option(
+    '--client <name>',
+    'the CLI client to fetch with, and to write the transcript under — defaults to the client in ' +
+      'use; matches by name only, never a registered fleet root (see `cloud list --help`)',
+  )
+  .option('--to <accountUuid>', 'pull into this account instead of the one signed in')
+  .option('--to-org <organizationUuid>', 'pull into this organization')
+  .option('--yes', 'actually write; without it nothing is written')
+  .option('--undo', 'remove a conversation a previous pull wrote')
+  .option('--restart', 'restart Claude Desktop afterwards')
+  .action(async function (this: Command, id: string) {
+    const opts = this.opts<{
+      into?: string;
+      client?: string;
+      to?: string;
+      toOrg?: string;
+      yes?: boolean;
+      undo?: boolean;
+      restart?: boolean;
+    }>();
+    const { store, ledger } = context(this);
+    const state = project(ledger.read());
+    const dryRun = !opts.yes;
+
+    if (opts.undo) {
+      const { matched, unmatched } = matchCodexIds(
+        listImportedFrom(state, 'cloud'),
+        (i) => i.rolloutId,
+        [id],
+      );
+      if (unmatched.length > 0) {
+        throw new Error(`No pulled cloud session matches ${unmatched.join(', ')}.`);
+      }
+      const outcomes = undoCodexImports(matched, { ledger, dryRun });
+      for (const o of outcomes) {
+        const label = o.title ?? o.rolloutId;
+        if (o.status === 'failed') console.log(pc.red(`  failed: ${label} — ${o.reason}`));
+        else console.log(`  ${dryRun ? 'would remove' : 'removed'}: ${label}`);
+      }
+      console.log(
+        pc.bold(
+          `\n${dryRun ? 'Dry run: ' : ''}${outcomes.filter((o) => dryRun || o.status === 'undone').length} removed.`,
+        ),
+      );
+      if (dryRun) console.log(pc.dim('Re-run with --yes to remove.'));
+      return;
+    }
+
+    if (!opts.into) {
+      throw new Error('--into <cwd> is required: where should the resumed conversation open?');
+    }
+    const cwd = path.resolve(opts.into);
+    const home = homedir();
+    const client = resolveCloudClient(opts.client, home);
+
+    const auth = readCloudAuth(client.configDir, client.isDefault, home);
+    if (!auth.ok) throw new Error(cloudAuthRefusalMessage(auth.reason, client.configDir));
+
+    // Resolved against a fresh list rather than a bare GET-by-id: it lets `id`
+    // be a unique prefix, the same courtesy `matchCodexIds` gives every other
+    // id argument in this CLI, and it is one call the size of this account's
+    // whole session list rather than a guess at whether the id is already exact.
+    const sessions = await listCloudSessions(auth.auth);
+    if (isCloudApiError(sessions)) {
+      throw new Error(`Could not list cloud sessions on ${client.configDir}: ${sessions.message}`);
+    }
+    const { matched, unmatched } = matchCodexIds(sessions, (s) => s.id, [id]);
+    if (unmatched.length > 0) {
+      throw new Error(
+        `No cloud session matches "${id}" on ${clientNameOf(client.configDir, home)}.\n` +
+          `Run \`foster cloud list --client ${clientNameOf(client.configDir, home)}\` to see what is available.`,
+      );
+    }
+    if (matched.length > 1) {
+      throw new Error(
+        `"${id}" matches more than one cloud session on this client — use the full id.`,
+      );
+    }
+    const resolvedId = matched[0]!.id;
+
+    const detail = await fetchCloudSession(auth.auth, resolvedId);
+    if (isCloudApiError(detail)) {
+      throw new Error(`Could not fetch session ${resolvedId}: ${detail.message}`);
+    }
+    const events = await fetchTeleportEvents(auth.auth, resolvedId);
+    if (isCloudApiError(events)) {
+      throw new Error(`Could not fetch session ${resolvedId}'s history: ${events.message}`);
+    }
+
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const outcome: CloudPullOutcome = pullCloudSession(resolvedId, detail, events, {
+      store,
+      ledger,
+      state,
+      target,
+      cwd,
+      dryRun,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: client.configDir },
+    });
+
+    if (outcome.status === 'failed') {
+      console.log(pc.red(`failed: ${outcome.title ?? outcome.cloudSessionId} — ${outcome.reason}`));
+      process.exitCode = 1;
+      return;
+    }
+    if (outcome.status === 'skipped') {
+      console.log(`${outcome.title ?? outcome.cloudSessionId}: ${outcome.reason}`);
+      return;
+    }
+
+    console.log(
+      `${dryRun ? 'Would pull' : 'Pulled'}: ${outcome.title} ` +
+        pc.dim(
+          `(${outcome.records ?? 0} record(s), ${outcome.sidechainsDropped ?? 0} sidechain(s) dropped)`,
+        ),
+    );
+    const repo = outcome.repo?.repo ?? outcome.repo?.url;
+    if (repo) {
+      console.log(
+        pc.dim(
+          `  ran against ${repo}${outcome.repo?.branch ? ` @ ${outcome.repo.branch}` : ''} — make ` +
+            `sure ${cwd} matches before you continue it`,
+        ),
+      );
+    }
+    if (dryRun) {
+      console.log(pc.dim('Re-run with --yes to write.'));
+    } else {
+      console.log(pc.dim('The copy becomes visible after Claude Desktop restarts.'));
+      await finish(store, Boolean(opts.restart));
+    }
   });
 
 program
