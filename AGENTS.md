@@ -293,10 +293,12 @@ scanning stayed. Interleaved against one `readFileSync` per file on a warm disk 
 approaches (whole-file, 1 MiB chunks, 16 MiB chunks) landed within the same ±30% run-to-run noise
 this machine has — nothing here beats the old whole-file read, only avoids losing to it while also
 not crashing on a giant file. `conversationRoot` used to stop at a fixed 64 KB head; it now streams
-until it finds a record with a `uuid`, capped at 4 MB. Measured: wrong (answered "no root" when a
-root exists) for 369 of 10,587 real transcripts under the old 64 KB cutoff — 159 of the 2,759
-transcripts checked directly in this pass alone went from "no root" to a real root once the cap
-moved.
+until it finds a record with a `uuid`, capped at 4 MB. The task that asked for this fix cited 369 of
+10,587 real transcripts answering wrong ("no root" when a root exists) under the old 64 KB cutoff —
+a figure this pass did not itself reproduce, since it measured against a smaller corpus (the 2,759
+transcripts named above). What this pass measured directly, old code against new over that corpus:
+159 of the 2,759 went from "no root" to a real root once the cap moved, and none went the other way
+— no regression, consistent with (if smaller in absolute count than) the cited figure.
 
 **`deepen` compares a lone new id against transcripts from earlier rounds, not just its own
 batch.** The sweep calls `Lineage.deepen` once per round (`runSweep`, up to `SWEEP_ROUNDS`) with
@@ -306,6 +308,30 @@ searching anywhere, so a card the app creates between rounds was never weighed a
 already indexed. It now keeps every id's head it has ever been given (`deepenedHeads`) and searches
 both directions on each call: this round's new heads against every transcript any round has read,
 and every earlier round's heads against this round's own new transcripts.
+
+That fix, by itself, made a later round with even one new id pay to re-read and re-scan every file
+any earlier round had already read, from disk, every time — because `idsMentionedIn` never remembered
+anything between calls, and a `wanted` set's size does not change how many bytes it reads. Measured
+directly, old code against new, against this machine's own real store (2,523 conversations, 2,760
+files, the same corpus the rest of this section cites) — a round holding back two ids to stand in for
+"a card the app created between rounds", same as `runSweep`'s own rounds do: old code, an initial full
+deepen ~12–13 s, a next round adding exactly one new id ~8–9 s, a third round adding one more ~8–9 s
+again — reintroducing, on one new id, most of the cost `SWEEP_ROUNDS` exists to spread across up to
+three passes instead of paying once. `deepen` now passes `idsMentionedIn` a `RecordIdCache`
+(`src/store/transcripts.ts`) that remembers each file's chunked scan — every `"uuid":"…"` match and the
+byte offset it sits at, unvalidated — the first time a round asks about that file, and every later
+round's different `wanted` is answered from that memo instead of a fresh read: the same corpus, new
+code, round 1 ~22 s (slower than old — building the full per-file occurrence map, not just the ids one
+round happens to want, costs more up front), round 2 and round 3 ~0.18 s each. One new id went from
+costing 8–9 s a round to costing under a fifth of a second, and the three rounds together dropped from
+~30 s to ~23 s despite round 1 alone costing more — the saving `SWEEP_ROUNDS` was written to buy back.
+Validating a hit still reads the current line off disk, same as before: only
+the scan that finds candidate positions is cached, not the record content, so a file that grows between
+rounds (an append, same as always happens to a live transcript) is read fresh for whatever position a
+later round's own file-open covers — a match sitting only in bytes appended after a file's own first
+scan is not found by a later round that reuses the cached scan of that file, which is deliberate and
+covered by a test (`tests/lineage.test.ts`, "never sees a match added to an already-scanned file after
+the scan") rather than assumed harmless.
 
 ## You cannot restart the app from a session the app started — except through `--detach`
 
@@ -441,12 +467,15 @@ carry on by highest return" message with `send_message`. A headless resume is no
 — it never reattaches the card (next section).
 
 That answer comes from `lastAnswer` (`src/store/transcripts.ts`), which reads a transcript's tail
-looking for the last `assistant` record. The tail used to be a fixed 256 KB; measured on a real
-store, 22 of 7,721 transcripts have more than that much bookkeeping — queue operations, retitles —
-written after their actual last answer, which pushed it out of the window entirely and read as a
-session that finished cleanly. It now widens the read (×4 each retry, capped at 8 MB) when a
-window comes back with no assistant record, so those 22 are found rather than missed; the ordinary
-transcript, whose answer is already in the first 256 KB, pays nothing extra.
+looking for the last `assistant` record. The tail used to be a fixed 256 KB; the task that asked for
+this fix cited 22 of 7,721 real transcripts with more than that much bookkeeping — queue operations,
+retitles — written after the actual last answer, pushing it out of the window entirely and reading as
+a session that finished cleanly. This pass did not reproduce that figure: its own 2,759-transcript
+corpus held none of the long-tail-bookkeeping transcripts the fix targets, so old code against new gave
+zero differences over it — no regression, but no direct confirmation of the benefit either. It now
+widens the read (×4 each retry, capped at 8 MB) when a window comes back with no assistant record, so
+a transcript like the cited 22 is found rather than missed; the ordinary transcript, whose answer is
+already in the first 256 KB, pays nothing extra.
 
 ## Rescuing "cannot reach your computer" cards
 

@@ -10,6 +10,7 @@ import {
   scanConversationFiles,
   transcriptRoots,
   type ConversationScan,
+  type RecordIdCache,
 } from '../store/transcripts.js';
 
 /**
@@ -98,6 +99,15 @@ export interface Lineage {
    * back, and a round that hands back exactly one new id used to compare it
    * against nothing at all: a card the app creates between rounds never got
    * weighed against the conversations already indexed.
+   *
+   * "Searched against every transcript any earlier round already knows the
+   * head of" reads a file, not a whole transcript, so it is bounded by a
+   * cache rather than by round count: a file is read and pattern-matched at
+   * most once for the life of this `Lineage`, whichever round is the first
+   * to ask about it — see `idsMentionedIn`'s `RecordIdCache`. Without that, a
+   * round bringing back a single new id would pay to re-read every file any
+   * earlier round had already read, for that one id, which is most of the
+   * cost the rounds exist to spread out in the first place.
    */
   deepen(cliSessionIds: Iterable<string>): void;
   /**
@@ -133,6 +143,15 @@ export function lineageAt(projectsDirs: string[]): Lineage {
   const deepened = new Set<string>();
   /** Every id `deepen` has already found a head for, kept across rounds. */
   const deepenedHeads = new Map<string, string>();
+  /**
+   * `idsMentionedIn`'s own memo of what each file's `matchAll` pass turned
+   * up, kept for the run so a file `deepen` has already read once answers a
+   * later round's different `wanted` from memory. Without this, every round
+   * re-reads and re-scans every file any earlier round already knows the
+   * head of (see the loop below) — see `RecordIdCache`'s own doc for the
+   * cost that reintroduces.
+   */
+  const recordIdCache: RecordIdCache = new Map();
 
   const transcripts = (): Map<string, string[]> => {
     index ??= indexAllTranscripts(projectsDirs);
@@ -265,16 +284,19 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       // A new head can be the record a much earlier round already read past —
       // an id this round never touches — so it is hunted for in every
       // transcript any round has read the head of, this one included, not
-      // only in the handful `cliSessionIds` names this time.
+      // only in the handful `cliSessionIds` names this time. `recordIdCache`
+      // is what keeps this from being a full re-read of every earlier
+      // round's files: the first round to touch a file pays for the scan,
+      // every later one asking it about a different `wantedNew` reuses it.
       const wantedNew = new Set(newHeads.values());
       for (const [id, host] of deepenedHeads) {
         for (const file of filesOf(id)) {
-          for (const found of idsMentionedIn(file, wantedNew)) apply(host, found);
+          for (const found of idsMentionedIn(file, wantedNew, recordIdCache)) apply(host, found);
         }
       }
       for (const [id, host] of newHeads) {
         for (const file of filesOf(id)) {
-          for (const found of idsMentionedIn(file, wantedNew)) apply(host, found);
+          for (const found of idsMentionedIn(file, wantedNew, recordIdCache)) apply(host, found);
         }
       }
 
@@ -286,7 +308,7 @@ export function lineageAt(projectsDirs: string[]): Lineage {
         const wantedOld = new Set(deepenedHeads.values());
         for (const [id, host] of newHeads) {
           for (const file of filesOf(id)) {
-            for (const found of idsMentionedIn(file, wantedOld)) apply(host, found);
+            for (const found of idsMentionedIn(file, wantedOld, recordIdCache)) apply(host, found);
           }
         }
       }

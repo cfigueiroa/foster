@@ -2,7 +2,12 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { conversationRoot, idsMentionedIn, lastAnswer } from '../src/store/transcripts.js';
+import {
+  conversationRoot,
+  idsMentionedIn,
+  lastAnswer,
+  type RecordIdCache,
+} from '../src/store/transcripts.js';
 
 /**
  * Precision fixes to the transcript readers in `src/store/transcripts.ts`:
@@ -75,6 +80,64 @@ describe('idsMentionedIn', () => {
     expect(idsMentionedIn(path.join(tmpdir(), 'no-such-transcript.jsonl'), new Set([OWN]))).toEqual(
       [],
     );
+  });
+});
+
+/**
+ * `RecordIdCache`: `Lineage.deepen` asks the same file about a different,
+ * usually smaller `wanted` set on every sweep round. Without a cache that
+ * means reading and pattern-matching the whole file again for each round —
+ * measured against a real store (2,523 conversations): an initial full
+ * deepen ~17 s, a next round adding exactly one new id ~13 s uncached,
+ * against effectively free once the file is cached from the first pass.
+ */
+describe('idsMentionedIn with a RecordIdCache', () => {
+  it('answers the same as without one', () => {
+    const file = tmpFile([
+      { uuid: OWN, type: 'user', timestamp: '2026-09-24T00:00:00.000Z' },
+      {
+        uuid: '00000000-0000-4000-8000-000000001004',
+        type: 'user',
+        timestamp: '2026-09-24T00:00:01.000Z',
+        toolUseResult: { content: [{ type: 'text', text: 'ok' }], result: { uuid: NESTED } },
+      },
+    ]);
+    const cache: RecordIdCache = new Map();
+
+    expect(idsMentionedIn(file, new Set([OWN, NESTED]), cache)).toEqual([OWN]);
+    // A second call, same wanted set, reuses the cached scan rather than
+    // reading the file again — and still answers the same.
+    expect(idsMentionedIn(file, new Set([OWN, NESTED]), cache)).toEqual([OWN]);
+  });
+
+  it('reuses the first scan rather than reading the file again, on a later call for a different id', () => {
+    const REPLACED = '00000000-0000-4000-8000-000000001099';
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-prec-cache-'));
+    const file = path.join(dir, 't.jsonl');
+    writeFileSync(
+      file,
+      `${JSON.stringify({ uuid: OWN, type: 'user', timestamp: '2026-09-24T00:00:00.000Z' })}\n`,
+      'utf8',
+    );
+    const cache: RecordIdCache = new Map();
+
+    // First call scans the file as it is now and fills the cache.
+    expect(idsMentionedIn(file, new Set([OWN]), cache)).toEqual([OWN]);
+
+    // The file is rewritten in place with a different record's id, same
+    // length, same byte offset — a real transcript never does this, but it
+    // is the cleanest way to prove the second call never re-scans the bytes:
+    // a fresh scan would find REPLACED; a cached one still only knows OWN.
+    writeFileSync(
+      file,
+      `${JSON.stringify({ uuid: REPLACED, type: 'user', timestamp: '2026-09-24T00:00:00.000Z' })}\n`,
+      'utf8',
+    );
+
+    expect(idsMentionedIn(file, new Set([REPLACED]), cache)).toEqual([]);
+    // Confirms the file really was rewritten, and that a fresh, uncached
+    // call reads what is on disk now.
+    expect(idsMentionedIn(file, new Set([REPLACED]))).toEqual([REPLACED]);
   });
 });
 

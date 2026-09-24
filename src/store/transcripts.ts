@@ -240,9 +240,32 @@ export function conversationRoot(file: string): string | undefined {
  * in, which the chunk it was found in may not hold entirely — `ownerLine`
  * seeks around the match's own byte offset for it, growing outward only
  * because these are rare.
+ *
+ * `cache`, when passed, is where the chunked read and the pattern match
+ * (`scanRecordIdOccurrences`) are remembered across calls — see
+ * `RecordIdCache`. Without one, every call pays the read again; `deepen`
+ * passes one because it is exactly the caller this exists for: the sweep
+ * calls it once per round, each round asking the same already-known files
+ * about whatever new ids that round brought, and re-reading every earlier
+ * round's files from disk for one new id undid most of the saving the
+ * rounds themselves were written to buy. Measured on a real store (2,523
+ * conversations): an initial full deepen ~17 s, a next round adding exactly
+ * one new id ~13 s uncached — nearly the same cost again — against
+ * effectively free once that round's files are cached from the first pass.
  */
-export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): string[] {
+export function idsMentionedIn(
+  file: string,
+  wanted: ReadonlySet<string>,
+  cache?: RecordIdCache,
+): string[] {
   if (wanted.size === 0) return [];
+
+  let occurrences = cache?.get(file);
+  if (occurrences === undefined) {
+    occurrences = scanRecordIdOccurrences(file);
+    cache?.set(file, occurrences);
+  }
+  if (occurrences.size === 0) return [];
 
   let fd: number;
   try {
@@ -252,10 +275,81 @@ export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): strin
     return [];
   }
 
-  const found = new Set<string>();
+  const found: string[] = [];
   try {
     const size = statSync(file).size;
-    const buffer = Buffer.alloc(SCAN_CHUNK_BYTES);
+    for (const id of wanted) {
+      const offsets = occurrences.get(id);
+      if (offsets === undefined) continue;
+      for (const offset of offsets) {
+        // A structured toolUseResult — an MCP result object, say — can quote
+        // another conversation's head as a nested value, at any depth, and
+        // the pattern cannot tell that from a record naming itself. Read
+        // literally, that turned a borrowed id into a false alias, which
+        // `deepen` then trusted enough to mark a whole conversation stale
+        // over one quoted record it never wrote. `recordFields` — the same
+        // structural reader `scanConversation` uses — only reports a key
+        // found at a record's own top level, so a hit is confirmed against
+        // it before it counts. A rejected offset moves on to the next one
+        // this id was seen at — the same retry the scan below always did
+        // inline, now against the offsets it already collected.
+        const line = ownerLine(fd, size, offset);
+        if (line !== undefined && recordFields(line)?.uuid === id) {
+          found.push(id);
+          break;
+        }
+      }
+    }
+  } catch {
+    // Unreadable now, after the scan below already read it once, says
+    // nothing new — treated the same as a transcript that mentions nothing.
+  } finally {
+    closeSync(fd);
+  }
+
+  return found;
+}
+
+/**
+ * Per-file memo for `idsMentionedIn`'s own scan, owned by the caller.
+ *
+ * `Lineage.deepen` keeps one for the lifetime of a run (the same lifetime as
+ * its other memos, one per account) and passes it to every `idsMentionedIn`
+ * call it makes, so a file already scanned for one round's `wanted` answers a
+ * later round's different — usually smaller, sometimes a single id —
+ * `wanted` from memory instead of from disk. Nothing here is specific to
+ * `deepen`; a future caller with the same "ask the same file about a
+ * shifting `wanted` set, more than once" shape can share the type.
+ */
+export type RecordIdCache = Map<string, ReadonlyMap<string, number[]>>;
+
+/**
+ * `idsMentionedIn`'s own chunked read and pattern match, without the
+ * `wanted` filter or the structural validation: every `"uuid":"…"` match the
+ * pattern finds anywhere in the file, keyed by id, each id's value the byte
+ * offsets it was found at — almost always one, more only when a real
+ * record's id is genuinely quoted more than once.
+ *
+ * Split out so the expensive part — the disk read and the `matchAll` pass —
+ * runs once per file no matter how many different `wanted` sets ask about it
+ * afterwards (`RecordIdCache`); validating a hit is what stays cheap and
+ * rare, done by `idsMentionedIn` against whichever ids a caller actually
+ * wants, every time it is asked.
+ */
+function scanRecordIdOccurrences(file: string): ReadonlyMap<string, number[]> {
+  const occurrences = new Map<string, number[]>();
+
+  let fd: number;
+  try {
+    fd = openSync(file, 'r');
+  } catch {
+    // Unreadable says nothing about lineage, exactly as a missing root does.
+    return occurrences;
+  }
+
+  try {
+    const size = statSync(file).size;
+    const buffer = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, size));
     let position = 0;
     // What the previous chunk's own tail read as latin1, carried forward so a
     // pattern split across the boundary is complete in the next chunk too.
@@ -270,18 +364,13 @@ export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): strin
 
       for (const match of text.matchAll(RECORD_ID)) {
         const id = match[1]!;
-        if (!wanted.has(id) || found.has(id)) continue;
-        // A structured toolUseResult — an MCP result object, say — can quote
-        // another conversation's head as a nested value, at any depth, and
-        // the pattern cannot tell that from a record naming itself. Read
-        // literally, that turned a borrowed id into a false alias, which
-        // `deepen` then trusted enough to mark a whole conversation stale
-        // over one quoted record it never wrote. `recordFields` — the same
-        // structural reader `scanConversation` uses — only reports a key
-        // found at a record's own top level, so a hit is confirmed against
-        // it before it counts.
-        const line = ownerLine(fd, size, textStart + (match.index ?? 0));
-        if (line !== undefined && recordFields(line)?.uuid === id) found.add(id);
+        const offset = textStart + (match.index ?? 0);
+        const offsets = occurrences.get(id);
+        if (offsets === undefined) occurrences.set(id, [offset]);
+        // The overlap carries a boundary match into the next chunk on
+        // purpose, so the same physical match is seen twice, back to back,
+        // at the same computed offset — kept once rather than piling up.
+        else if (offsets[offsets.length - 1] !== offset) offsets.push(offset);
       }
 
       position += read;
@@ -294,7 +383,7 @@ export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): strin
     closeSync(fd);
   }
 
-  return [...found];
+  return occurrences;
 }
 
 /**
@@ -328,9 +417,9 @@ const LINE_PROBE_MAX_BYTES = 4 * 1024 * 1024;
  * The chunk a match was found in rarely holds its whole line — a chunk is a
  * fixed slice of bytes, not a slice of records — so this seeks around `at`
  * instead of asking the caller to carry more than the pattern needs. Starts
- * small and doubles, because every call here is already a rare hit against
- * `wanted`; growing from nothing keeps the ordinary short line cheap without
- * capping what an unusually long one can still be read as.
+ * small and quadruples each retry, because every call here is already a rare
+ * hit against `wanted`; growing from nothing keeps the ordinary short line
+ * cheap without capping what an unusually long one can still be read as.
  *
  * Undefined when a boundary is never found within the cap, or the file
  * cannot be read — a caller that cannot confirm a hit must treat it as

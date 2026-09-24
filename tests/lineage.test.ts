@@ -840,6 +840,56 @@ describe('deepen', () => {
     expect(kin.sameWork(ORIGINAL, MIDWAY)).toBe(true);
     expect(kin.sameWork(ORIGINAL, UNRELATED)).toBe(false);
   });
+
+  /**
+   * A later round with one new id used to re-read every file an earlier
+   * round already knew — the fix for the `heads.size < 2` bug above
+   * reintroduced almost the full cost of the very read the rounds exist to
+   * spread out, measured on a real store as ~13 s for one new id after an
+   * initial ~17 s deepen. `idsMentionedIn`'s `RecordIdCache` is what keeps a
+   * file to one read for the life of a `Lineage` — proved here by rewriting
+   * a file's content in place between rounds: a live re-read would see the
+   * new content and answer differently, so answering as round 1 saw it is
+   * only possible off the cache, not off disk.
+   */
+  it('never sees a match added to an already-scanned file after the scan', () => {
+    // A record `deepen` validates as it goes, so this cannot use the same
+    // trick `idsMentionedIn`'s own cache test does (rewriting a match's own
+    // line and checking the answer is still the old one) — validation reads
+    // the current file, on purpose, so a rewritten line answers correctly
+    // either way. What the cache skips is the scan that finds a match's
+    // position in the first place, so the proof is an appended record: real
+    // new content, at a position the round-1 scan never read because the
+    // file was shorter then. A live re-scan would find it; the cache, built
+    // before the append, cannot.
+    const env = forkedMidway();
+    const kin = lineageAt(projects(env));
+
+    const EXTRA_SESSION = '00000000-0000-4000-8000-0000000000f9';
+    const EXTRA = '00000000-0000-4000-8000-0000000000fa';
+    const dir = path.join(env.CLAUDE_CONFIG_DIR!, 'projects', '-workspace-project');
+    writeFileSync(path.join(dir, `${EXTRA_SESSION}.jsonl`), `${record(EXTRA)}\n`, 'utf8');
+
+    // Round 1 scans and caches ORIGINAL's file as it is right now — nothing
+    // about EXTRA yet, because nothing about EXTRA exists yet.
+    kin.deepen([ORIGINAL]);
+
+    // Append a record naming EXTRA to ORIGINAL's file, growing it past what
+    // round 1 read. A real transcript only ever grows this way too; this is
+    // just doing between two rounds what an idle writer could do between
+    // two sweep rounds in practice.
+    const originalFile = path.join(dir, `${ORIGINAL}.jsonl`);
+    writeFileSync(originalFile, `${readFileSync(originalFile, 'utf8')}${record(EXTRA)}\n`, 'utf8');
+
+    // Round 2 hands deepen exactly one new id: EXTRA_SESSION, whose own head
+    // is EXTRA.
+    kin.deepen([EXTRA_SESSION]);
+
+    // Not recognised as the same work: the only place EXTRA now sits nested
+    // is the part of ORIGINAL's file appended after round 1's scan, which
+    // the cache never read.
+    expect(kin.sameWork(ORIGINAL, EXTRA_SESSION)).toBe(false);
+  });
 });
 
 /**
