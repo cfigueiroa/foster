@@ -1115,7 +1115,11 @@ program
     // keys carried — not just the two an earlier cut checked here, which let
     // a plan with only a pending order entry or only a view-prefs carry print
     // the generic restart line instead of pointing at `foster layout`.
-    const layoutPending = totalLayoutPending(report.layout) > 0;
+    //
+    // A sweep that marked rows goes through `foster layout` too, even with no
+    // layout pending: its gap is the one that writes back any mark the running
+    // app saves over in the meantime (`engine/marksBack.ts`).
+    const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
     const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
 
     if (opts.json) {
@@ -1472,8 +1476,19 @@ async function sweepRestart(
 }
 
 /**
+ * Whether this sweep put a mark on any row — which the running app may yet save
+ * back over, so the restart that finishes it goes through a gap that writes
+ * them again: `deferredPinsGap` in-process, `foster layout` when detached.
+ */
+function sweepMarked(report: SweepReport): boolean {
+  return [...report.branches.retitled, ...report.files.retitled].some(
+    (outcome) => outcome.status === 'retitled',
+  );
+}
+
+/**
  * The one write a sweep does make in its own restart gap: the pin moves its pin
- * pass had to defer because the app was open (ngine/pinMoves.ts). A sweep that
+ * pass had to defer because the app was open (`engine/pinMoves.ts`). A sweep that
  * restarts the app itself has the closed-app window those need right there, and
  * handing the user `foster layout --yes --restart` instead would cost a second
  * full restart for a single record. Groups and routines stay `foster layout`'s,
@@ -1489,10 +1504,7 @@ function deferredPinsGap(
   // The marks the app saved back over while the sweep ran are only knowable
   // now, once it has closed — so a sweep that wrote any mark opens the gap for
   // them even when no pin was deferred (`engine/marksBack.ts`).
-  const marked = [...report.branches.retitled, ...report.files.retitled].some(
-    (outcome) => outcome.status === 'retitled',
-  );
-  if (!report.pinFixes.deferred && !marked) return undefined;
+  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
   return () => {
     // A failure leaves the move pending for the next `foster layout`, the same
     // as `applyLayout` treats it — never a reason the restart itself failed.
@@ -1503,7 +1515,7 @@ function deferredPinsGap(
     }
     // One card at a time and never throwing: `retitleCards` records a failure
     // rather than raising it, and the next `foster layout` looks again.
-    retitleCards(planMarksBack(ledger.read(), target), { ledger });
+    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
   };
 }
 

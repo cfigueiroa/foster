@@ -511,7 +511,7 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     routines: planRoutines(store, target, options.now ?? Date.now()),
     viewPrefs: planLayoutViewCarry(store, target),
     pins: planPinMoves(store, options.ledgerEvents ?? [], target),
-    marks: planMarksBack(options.ledgerEvents ?? [], target),
+    marks: planMarksBack(options.ledgerEvents ?? [], target, store),
   };
 }
 

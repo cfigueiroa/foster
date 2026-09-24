@@ -50,15 +50,15 @@ function appSavesBack(file: string, title: string, isArchived = false): void {
 
 describe('planMarksBack', () => {
   it('has nothing to do while the mark still stands', () => {
-    const { ledger } = fixture();
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([]);
+    const { ledger, store } = fixture();
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([]);
   });
 
   it('writes a mark again when the card is back under a title it wore before', () => {
-    const { ledger, file } = fixture();
+    const { ledger, file, store } = fixture();
     appSavesBack(file, 'Work');
 
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([
       expect.objectContaining({
         path: file,
         title: MARKED,
@@ -70,26 +70,26 @@ describe('planMarksBack', () => {
   });
 
   it('leaves a card somebody renamed alone', () => {
-    const { ledger, file } = fixture();
+    const { ledger, file, store } = fixture();
     appSavesBack(file, 'A name somebody chose');
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([]);
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([]);
   });
 
   it('leaves a card that only came back out of the archived view alone', () => {
-    const { ledger, file } = fixture();
+    const { ledger, file, store } = fixture();
     // Title still the mark, flag lifted by hand: somebody opened the row.
     appSavesBack(file, MARKED, false);
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([]);
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([]);
   });
 
   it('only looks at the account it is asked about', () => {
-    const { ledger, file } = fixture();
+    const { ledger, file, store } = fixture();
     appSavesBack(file, 'Work');
-    expect(planMarksBack(ledger.read(), OLD_ACCOUNT)).toEqual([]);
+    expect(planMarksBack(ledger.read(), OLD_ACCOUNT, store)).toEqual([]);
   });
 
   it('follows the last write, not the first: a mark taken off stays off', () => {
-    const { ledger, file } = fixture();
+    const { ledger, file, store } = fixture();
     retitleCards(
       [
         {
@@ -106,9 +106,32 @@ describe('planMarksBack', () => {
     // The app saves the marked title back over the write that took it off.
     appSavesBack(file, MARKED, true);
 
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([
       expect.objectContaining({ title: 'Work', archived: false, as: 'tip' }),
     ]);
+  });
+});
+
+describe('planMarksBack — what the flag and the store say', () => {
+  it('files the row away again when an earlier write archived it and the last only re-marked it', () => {
+    const { ledger, file, store } = fixture();
+    // A later sweep re-stamps the mark and leaves the flag alone: no toArchived.
+    const restamped = '(outro arquivo, parou 19/09 09:00) Work';
+    retitleCards(
+      [{ path: file, target: NEW_ACCOUNT, native: true, title: restamped, as: 'other-file' }],
+      { ledger },
+    );
+    appSavesBack(file, 'Work', false);
+
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([
+      expect.objectContaining({ title: restamped, archived: true }),
+    ]);
+  });
+
+  it('leaves another installation’s cards alone, even for the same account', () => {
+    const { ledger, file } = fixture();
+    appSavesBack(file, 'Work');
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, makeStore())).toEqual([]);
   });
 });
 
@@ -127,6 +150,6 @@ describe('applyLayout — marks the app saved over', () => {
     expect(card.title).toBe(MARKED);
     expect(card.isArchived).toBe(true);
     // Settled: the next plan finds the mark standing and has nothing to do.
-    expect(planMarksBack(ledger.read(), NEW_ACCOUNT)).toEqual([]);
+    expect(planMarksBack(ledger.read(), NEW_ACCOUNT, store)).toEqual([]);
   });
 });

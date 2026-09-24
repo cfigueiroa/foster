@@ -1,6 +1,6 @@
 import { copyCwd, DEFAULT_PREFIX } from '../domain/fostering.js';
 import { blockingReasons } from '../domain/filter.js';
-import { comparablePath, listAccountDirs, storeIdentity } from '../domain/paths.js';
+import { comparablePath, listAccountDirs, sameAccount, storeIdentity } from '../domain/paths.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
@@ -523,7 +523,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   );
 
   const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
-  const scanned = scanStore(store, copySessionIds(ledger.read()));
+  const scanned = scanStore(store, copySessionIds(ledger.read()), SLIM);
   const run: SweepRun = {
     store,
     ledger,
@@ -556,14 +556,20 @@ export function runSweep(options: SweepOptions): SweepReport {
   // Nothing was written on a dry run, so nothing has changed and a second pass
   // would report exactly what the first one just did. Saying "finished" off
   // that would be a claim about a run that never happened.
-  let confirmation = dryRun ? undefined : confirm(run, scanned, syncTitles);
+  let check = dryRun ? undefined : confirm(run, scanned, syncTitles);
   let rounds = 1;
-  while (confirmation && !confirmation.exhausted && rounds < SWEEP_ROUNDS) {
-    const hereCards = scanAccount(store, target, copySessionIds(ledger.read()));
-    round = mergeRounds(round, runRound(run, scanned, hereCards, syncTitles, false));
-    confirmation = confirm(run, scanned, syncTitles);
+  while (check && !check.confirmation.exhausted && rounds < SWEEP_ROUNDS) {
+    const before = pendingOf(check.confirmation);
+    // The destination as the re-plan just read it: nothing has written since.
+    round = mergeRounds(round, runRound(run, scanned, check.hereCards, syncTitles, false));
+    check = confirm(run, scanned, syncTitles);
     rounds += 1;
+    // A round that left as much to do as it found is not converging — a write
+    // that fails every time, or two passes undoing each other. Another round
+    // would only write it again, so the run stops and says "Not finished".
+    if (pendingOf(check.confirmation) >= before) break;
   }
+  const confirmation = check?.confirmation;
   const { passes, files, worktreeClaims, titleSync } = round;
 
   // After every marking round, over what all of them marked: the pin list is
@@ -650,6 +656,21 @@ export function runSweep(options: SweepOptions): SweepReport {
  */
 export const SWEEP_ROUNDS = 3;
 
+/** Everything a re-plan says is still to write, as one number. */
+function pendingOf(confirmation: SweepConfirmation): number {
+  return (
+    confirmation.fosterable +
+    confirmation.branches +
+    confirmation.secondFiles +
+    confirmation.restorable +
+    confirmation.worktreeClaims +
+    (confirmation.titlesOutOfStep ?? 0)
+  );
+}
+
+/** The sweep holds every card of the store for its whole run — see `ScanOptions`. */
+const SLIM = { slim: true } as const;
+
 /** One round's writes, in the order a sweep has always made them. */
 export interface Round {
   passes: Passes;
@@ -679,7 +700,7 @@ function runRound(
   // title pass reads titles, and they are the ones those passes just changed.
   // Every other account is read from the scan this run began with — a sweep
   // writes into one directory only, so nothing it did can have moved them.
-  const settled = scanAccount(store, target, copySessionIds(ledger.read()));
+  const settled = scanAccount(store, target, copySessionIds(ledger.read()), SLIM);
   const cards = cardsAfter(scanned, target, settled);
 
   // Reading the ledger fresh: the passes above may just have appended
@@ -713,9 +734,7 @@ function cardsAfter(
   target: AccountRef,
   settled: DiscoveredSession[],
 ): CardsAfter {
-  const isTarget = (account: AccountRef): boolean =>
-    account.accountUuid === target.accountUuid &&
-    account.organizationUuid === target.organizationUuid;
+  const isTarget = (account: AccountRef): boolean => sameAccount(account, target);
   const byPath = new Map<string, CodeSessionData>();
   for (const session of scanned) {
     if (!isTarget(session.account)) byPath.set(comparablePath(session.path), session.data);
@@ -770,15 +789,19 @@ export function mergeRounds(first: Round, later: Round): Round {
   };
 }
 
+/**
+ * What a later round wrote or tried to, added; an earlier skip or failure for
+ * the same origin replaced by it, so a candidate that failed in every round is
+ * one failure, not one per round. Two brought copies of one origin both stay —
+ * a second file of a conversation is a second row on purpose.
+ */
 function mergeOutcomes(first: Outcome[], later: Outcome[]): Outcome[] {
   const done = later.filter((outcome) => outcome.status !== 'skipped');
   const nowDone = new Set(done.map((outcome) => outcome.originSessionId));
-  return [
-    ...first.filter(
-      (outcome) => outcome.status !== 'skipped' || !nowDone.has(outcome.originSessionId),
-    ),
-    ...done,
-  ];
+  const superseded = (outcome: Outcome): boolean =>
+    (outcome.status === 'skipped' || outcome.status === 'failed') &&
+    nowDone.has(outcome.originSessionId);
+  return [...first.filter((outcome) => !superseded(outcome)), ...done];
 }
 
 function wroteSomething(outcome: RetitleOutcome): boolean {
@@ -934,10 +957,10 @@ function confirm(
   run: SweepRun,
   scanned: DiscoveredSession[],
   syncTitles: boolean,
-): SweepConfirmation {
+): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events));
+  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
   const cards = cardsAfter(scanned, target, hereCards);
   const again = runPasses(run, hereCards, true);
 
@@ -966,21 +989,16 @@ function confirm(
     ? planTitleSync(store, ledger, target, undefined, [], cards.read).items.length
     : undefined;
 
-  return {
+  const confirmation: SweepConfirmation = {
     fosterable,
     branches,
     secondFiles,
     restorable,
     worktreeClaims,
     ...(titlesOutOfStep === undefined ? {} : { titlesOutOfStep }),
-    exhausted:
-      fosterable === 0 &&
-      branches === 0 &&
-      secondFiles === 0 &&
-      restorable === 0 &&
-      worktreeClaims === 0 &&
-      (titlesOutOfStep ?? 0) === 0,
+    exhausted: false,
   };
+  return { confirmation: { ...confirmation, exhausted: pendingOf(confirmation) === 0 }, hereCards };
 }
 
 function phase(outcomes: Outcome[]): SweepPhase {
@@ -1001,7 +1019,7 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
   const { store, ledger, target, kin, live } = run;
   const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events));
+  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
   const plans = planFileCards({
     hereCards,
     kin,

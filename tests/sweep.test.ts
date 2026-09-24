@@ -242,7 +242,9 @@ describe('runSweep', () => {
 
     sweep();
 
-    const written = scanAccount(store, NEW_ACCOUNT).find((entry) => entry.isCopy);
+    const written = scanAccount(store, NEW_ACCOUNT, undefined, { slim: true }).find(
+      (entry) => entry.isCopy,
+    );
     expect(written?.slim).toBe(true);
     const onDisk = JSON.parse(readFileSync(written!.path, 'utf8')) as Record<string, unknown>;
     expect(onDisk.remoteMcpServersConfig).toEqual(servers);

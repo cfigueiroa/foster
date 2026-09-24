@@ -3,9 +3,14 @@ import path from 'node:path';
 import { unfosterableReasons } from '../domain/fostering.js';
 import { isSessionFileName } from '../domain/naming.js';
 import { accountDir, listAccountDirs } from '../domain/paths.js';
-import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
+import type {
+  AccountRef,
+  CodeSessionData,
+  DiscoveredSession,
+  StoreLayout,
+} from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
-import { readSessionCard } from './sessionFile.js';
+import { readSessionCard, readSessionFile } from './sessionFile.js';
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -37,10 +42,22 @@ export type KnownCopies = ReadonlySet<string>;
 
 const NOTHING_KNOWN: KnownCopies = new Set<string>();
 
+/**
+ * How a scan reads each card. `slim` leaves `BULKY_CARD_FIELDS` out of what it
+ * keeps (`store/sessionFile.ts`) — for a caller that holds every card of the
+ * store for a long run, which is the sweep, and which puts them back with
+ * `withBulkyFields` before any write that copies a whole card. Off by default,
+ * so every other reader keeps the card exactly as the file holds it.
+ */
+export interface ScanOptions {
+  slim?: boolean;
+}
+
 export function scanAccount(
   store: StoreLayout,
   account: AccountRef,
   copies: KnownCopies = NOTHING_KNOWN,
+  options: ScanOptions = {},
 ): DiscoveredSession[] {
   const dir = accountDir(store, account);
   const out: DiscoveredSession[] = [];
@@ -49,7 +66,7 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const card = readSessionCard(file);
+    const card = options.slim ? readSessionCard(file) : wholeCard(file);
     if (!card) continue;
     const { data } = card;
 
@@ -85,10 +102,16 @@ export function scanAccount(
 export function scanStore(
   store: StoreLayout,
   copies: KnownCopies = NOTHING_KNOWN,
+  options: ScanOptions = {},
 ): DiscoveredSession[] {
   return markStranded(
-    listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies)),
+    listAccountDirs(store).flatMap((account) => scanAccount(store, account, copies, options)),
   );
+}
+
+function wholeCard(file: string): { data: CodeSessionData; slim: boolean } | undefined {
+  const data = readSessionFile(file);
+  return data ? { data, slim: false } : undefined;
 }
 
 /**

@@ -51,6 +51,16 @@ describe('mergeRounds', () => {
     ]);
   });
 
+  it('counts a candidate that failed in every round once', () => {
+    const merged = mergeRounds(
+      round({ fostered: [outcome('a', 'failed')] }),
+      round({ fostered: [outcome('a', 'failed')] }),
+    );
+    expect(merged.passes.fostered.map((o) => `${o.originSessionId}:${o.status}`)).toEqual([
+      'a:failed',
+    ]);
+  });
+
   it('keeps one entry per fork, with both rounds’ writes and the later reading of it', () => {
     const fork = (retitle: RetitleOutcome[], tipCard?: { sessionId: string; title: string }) => ({
       root: 'root-1',
