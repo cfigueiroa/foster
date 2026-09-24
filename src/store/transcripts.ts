@@ -1,4 +1,4 @@
-import { openSync, readSync, closeSync, readFileSync, statSync } from 'node:fs';
+import { openSync, readSync, closeSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { samePath } from '../domain/paths.js';
@@ -21,14 +21,22 @@ import { configDirCandidates } from './configDirs.js';
 const HEAD_BYTES = 256 * 1024;
 
 /**
- * How much to read to find the record a conversation starts from.
+ * How far to stream while hunting for the record a conversation starts from.
  *
- * Far less than the facts need: the answer is the first record carrying a `uuid`,
- * which is the first thing said. The budget is for the records in front of it —
- * a title, a mode, a queued prompt — none of which are large, and for the one
- * case that is, a first message someone pasted a file into.
+ * A fixed head read used to answer this from the first 64 KB alone, on the
+ * assumption that the records in front of the root — a title, a mode, a
+ * queued prompt — are never large. Measured on a real store: wrong for 369 of
+ * 10,587 transcripts, 107 of them because that first record alone runs past
+ * 64 KB (a first message someone pasted a file into), the rest because
+ * several small ones — queue operations, retitles — stack up in front of it.
+ * Every one of those answered "no root", which is not "there is none" but
+ * "not found in the part read" — and a fork built on that miss goes ungrouped
+ * rather than reporting the uncertainty. Streaming line by line until a uuid
+ * turns up costs nothing extra for the ordinary case, where it is the first
+ * or second line; the cap is only for a transcript that never gets one at
+ * all, so the search still ends.
  */
-const ROOT_BYTES = 64 * 1024;
+const ROOT_CAP_BYTES = 4 * 1024 * 1024;
 
 export function claudeProjectsDir(env: NodeJS.ProcessEnv = process.env): string {
   const configDir = env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), '.claude');
@@ -173,40 +181,278 @@ export function fileOpenedFrom(
  * comparison it would replace.
  */
 export function conversationRoot(file: string): string | undefined {
-  for (const record of headRecords(file, ROOT_BYTES)) {
-    if (typeof record.uuid === 'string' && record.uuid !== '') return record.uuid;
+  let consumed = 0;
+  for (const line of streamLines(file, 'utf8')) {
+    consumed += line.length + 1;
+    if (line.trim() !== '') {
+      try {
+        const record = JSON.parse(line) as Record<string, unknown>;
+        if (typeof record.uuid === 'string' && record.uuid !== '') return record.uuid;
+      } catch {
+        // Individual malformed lines are skipped; the search goes on.
+      }
+    }
+    if (consumed >= ROOT_CAP_BYTES) break;
   }
   return undefined;
 }
 
 /**
- * Which of `wanted` this transcript mentions as a record id.
+ * Which of `wanted` this transcript mentions as a record's own id.
  *
- * Deliberately not a JSON walk. The caller asks this of every transcript it can
- * see, and on a real store that is 6.7 GB: parsing costs 118 seconds, while
- * reading and matching the id shape costs under 5. Nothing here needs the
- * records — only whether an id occurs — so the parse is the whole expense and
- * none of the answer.
+ * Deliberately not a JSON walk for every line. The caller asks this of every
+ * transcript it can see, and on a real store that is 6.7 GB: parsing every
+ * record costs 118 seconds, while matching the id shape costs under 5.
+ * Nothing here needs the records — only whether an id occurs — so a first
+ * pass by pattern is the whole expense of the common case, which is finding
+ * nothing.
  *
- * Read as latin1 because the ids are ASCII and the decoder is the second cost
- * after the parse; a multi-byte character cannot forge or hide one.
+ * The pattern alone over-answers, though: a structured `toolUseResult` — an
+ * MCP result object, say — can quote another conversation's head as a nested
+ * value, at any depth, and the pattern cannot tell that from a record naming
+ * itself. Read literally, that turned a borrowed id into a false alias, which
+ * `deepen` then trusted enough to mark a whole conversation stale over one
+ * quoted record it never wrote. A hit against `wanted` is rare on a real
+ * store, so each one is confirmed with `recordFields` — the same structural
+ * reader `scanConversation` uses, which only reports a key found at a
+ * record's own top level — before it counts. The pattern is still what finds
+ * the hit; the structural read only ever narrows what the pattern found.
+ *
+ * Read in chunks, not the whole file: `readFileSync` here used to hand the
+ * largest transcripts to V8 as one string, and a file past its string-length
+ * ceiling (today's largest is 78 MB and growing) threw, was caught, and
+ * answered "mentions nothing" — the fork it belonged to simply disappeared
+ * rather than erroring loudly. A chunk costs one buffer, not the file's own
+ * size, however large the file grows.
+ *
+ * Kept at the byte level, one `matchAll` per chunk, rather than reusing
+ * `streamLines` for one `matchAll` per line: an early version did that, and
+ * over a real store re-deciding "is this a complete line yet" for every line
+ * of a multi-million-line corpus measured slower than the few big chunk
+ * reads this does instead (`SCAN_CHUNK_BYTES`) — see that constant's own
+ * comment for the numbers and their noise. `SCAN_OVERLAP_BYTES` is the
+ * boundary the pattern must be kept whole across: more than `"uuid":"` plus
+ * 36 hex-and-dash characters plus the closing quote, so a match cut in half
+ * by one read is whole again, from the carried tail, in the next. Carrying
+ * means a match inside the overlap is seen twice; `found` absorbs the repeat
+ * for free, and re-validating it a second time costs nothing a real hit
+ * would not have paid anyway. Validating a hit needs the whole line it sits
+ * in, which the chunk it was found in may not hold entirely — `ownerLine`
+ * seeks around the match's own byte offset for it, growing outward only
+ * because these are rare.
+ *
+ * `cache`, when passed, is where the chunked read and the pattern match
+ * (`scanRecordIdOccurrences`) are remembered across calls — see
+ * `RecordIdCache`. Without one, every call pays the read again; `deepen`
+ * passes one because it is exactly the caller this exists for: the sweep
+ * calls it once per round, each round asking the same already-known files
+ * about whatever new ids that round brought, and re-reading every earlier
+ * round's files from disk for one new id undid most of the saving the
+ * rounds themselves were written to buy. Measured on a real store (2,523
+ * conversations): an initial full deepen ~17 s, a next round adding exactly
+ * one new id ~13 s uncached — nearly the same cost again — against
+ * effectively free once that round's files are cached from the first pass.
  */
-export function idsMentionedIn(file: string, wanted: ReadonlySet<string>): string[] {
+export function idsMentionedIn(
+  file: string,
+  wanted: ReadonlySet<string>,
+  cache?: RecordIdCache,
+): string[] {
   if (wanted.size === 0) return [];
-  let text: string;
+
+  let occurrences = cache?.get(file);
+  if (occurrences === undefined) {
+    occurrences = scanRecordIdOccurrences(file);
+    cache?.set(file, occurrences);
+  }
+  if (occurrences.size === 0) return [];
+
+  let fd: number;
   try {
-    text = readFileSync(file, 'latin1');
+    fd = openSync(file, 'r');
   } catch {
     // Unreadable says nothing about lineage, exactly as a missing root does.
     return [];
   }
 
-  const found = new Set<string>();
-  for (const match of text.matchAll(RECORD_ID)) {
-    const id = match[1]!;
-    if (wanted.has(id)) found.add(id);
+  const found: string[] = [];
+  try {
+    const size = statSync(file).size;
+    for (const id of wanted) {
+      const offsets = occurrences.get(id);
+      if (offsets === undefined) continue;
+      for (const offset of offsets) {
+        // A structured toolUseResult — an MCP result object, say — can quote
+        // another conversation's head as a nested value, at any depth, and
+        // the pattern cannot tell that from a record naming itself. Read
+        // literally, that turned a borrowed id into a false alias, which
+        // `deepen` then trusted enough to mark a whole conversation stale
+        // over one quoted record it never wrote. `recordFields` — the same
+        // structural reader `scanConversation` uses — only reports a key
+        // found at a record's own top level, so a hit is confirmed against
+        // it before it counts. A rejected offset moves on to the next one
+        // this id was seen at — the same retry the scan below always did
+        // inline, now against the offsets it already collected.
+        const line = ownerLine(fd, size, offset);
+        if (line !== undefined && recordFields(line)?.uuid === id) {
+          found.push(id);
+          break;
+        }
+      }
+    }
+  } catch {
+    // Unreadable now, after the scan below already read it once, says
+    // nothing new — treated the same as a transcript that mentions nothing.
+  } finally {
+    closeSync(fd);
   }
-  return [...found];
+
+  return found;
+}
+
+/**
+ * Per-file memo for `idsMentionedIn`'s own scan, owned by the caller.
+ *
+ * `Lineage.deepen` keeps one for the lifetime of a run (the same lifetime as
+ * its other memos, one per account) and passes it to every `idsMentionedIn`
+ * call it makes, so a file already scanned for one round's `wanted` answers a
+ * later round's different — usually smaller, sometimes a single id —
+ * `wanted` from memory instead of from disk. Nothing here is specific to
+ * `deepen`; a future caller with the same "ask the same file about a
+ * shifting `wanted` set, more than once" shape can share the type.
+ */
+export type RecordIdCache = Map<string, ReadonlyMap<string, number[]>>;
+
+/**
+ * `idsMentionedIn`'s own chunked read and pattern match, without the
+ * `wanted` filter or the structural validation: every `"uuid":"…"` match the
+ * pattern finds anywhere in the file, keyed by id, each id's value the byte
+ * offsets it was found at — almost always one, more only when a real
+ * record's id is genuinely quoted more than once.
+ *
+ * Split out so the expensive part — the disk read and the `matchAll` pass —
+ * runs once per file no matter how many different `wanted` sets ask about it
+ * afterwards (`RecordIdCache`); validating a hit is what stays cheap and
+ * rare, done by `idsMentionedIn` against whichever ids a caller actually
+ * wants, every time it is asked.
+ */
+function scanRecordIdOccurrences(file: string): ReadonlyMap<string, number[]> {
+  const occurrences = new Map<string, number[]>();
+
+  let fd: number;
+  try {
+    fd = openSync(file, 'r');
+  } catch {
+    // Unreadable says nothing about lineage, exactly as a missing root does.
+    return occurrences;
+  }
+
+  try {
+    const size = statSync(file).size;
+    const buffer = Buffer.alloc(Math.min(SCAN_CHUNK_BYTES, size));
+    let position = 0;
+    // What the previous chunk's own tail read as latin1, carried forward so a
+    // pattern split across the boundary is complete in the next chunk too.
+    let carry = '';
+
+    while (position < size) {
+      const length = Math.min(SCAN_CHUNK_BYTES, size - position);
+      const read = readSync(fd, buffer, 0, length, position);
+      if (read <= 0) break;
+      const text = carry + buffer.subarray(0, read).toString('latin1');
+      const textStart = position - carry.length;
+
+      for (const match of text.matchAll(RECORD_ID)) {
+        const id = match[1]!;
+        const offset = textStart + (match.index ?? 0);
+        const offsets = occurrences.get(id);
+        if (offsets === undefined) occurrences.set(id, [offset]);
+        // The overlap carries a boundary match into the next chunk on
+        // purpose, so the same physical match is seen twice, back to back,
+        // at the same computed offset — kept once rather than piling up.
+        else if (offsets[offsets.length - 1] !== offset) offsets.push(offset);
+      }
+
+      position += read;
+      carry = text.length > SCAN_OVERLAP_BYTES ? text.slice(-SCAN_OVERLAP_BYTES) : text;
+    }
+  } catch {
+    // A transcript that vanished or turned unreadable mid-read is treated the
+    // same as one that mentions nothing found so far.
+  } finally {
+    closeSync(fd);
+  }
+
+  return occurrences;
+}
+
+/**
+ * How much to read at once while scanning for ids. Bigger than the 1 MiB
+ * `streamLines` uses, so fewer chunks pay the `matchAll` and string-
+ * concatenation cost over a large transcript — this and 1 MiB were both
+ * measured against one `readFileSync` per file over the real store this
+ * shipped against (2,759 transcripts, 7.8 GB, 356 wanted ids, interleaved
+ * runs so every version reads a warm disk cache): all three land within the
+ * same run-to-run noise on this machine, roughly ±30% call to call, so
+ * nothing here claims to have beaten the old whole-file read — only to not
+ * have lost to it, which is what the file-size ceiling below buys. Still a
+ * small fraction of that ceiling for a whole 78 MB (and growing) file.
+ */
+const SCAN_CHUNK_BYTES = 16 * 1024 * 1024;
+
+/**
+ * More than the longest thing `RECORD_ID` can match — `"uuid":"` (8) + 36 hex
+ * and dash characters + a closing quote (1) = 45 — so carrying this many
+ * bytes from one chunk's tail into the next always completes a pattern the
+ * boundary cut in half.
+ */
+const SCAN_OVERLAP_BYTES = 128;
+
+/** How far `ownerLine` looks on each side of a match before it gives up. */
+const LINE_PROBE_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The whole line a byte offset falls inside, read directly off disk.
+ *
+ * The chunk a match was found in rarely holds its whole line — a chunk is a
+ * fixed slice of bytes, not a slice of records — so this seeks around `at`
+ * instead of asking the caller to carry more than the pattern needs. Starts
+ * small and quadruples each retry, because every call here is already a rare
+ * hit against `wanted`; growing from nothing keeps the ordinary short line
+ * cheap without capping what an unusually long one can still be read as.
+ *
+ * Undefined when a boundary is never found within the cap, or the file
+ * cannot be read — a caller that cannot confirm a hit must treat it as
+ * unconfirmed, never as confirmed by default.
+ */
+function ownerLine(fd: number, size: number, at: number): string | undefined {
+  let radius = 4096;
+  for (;;) {
+    const start = Math.max(0, at - radius);
+    const end = Math.min(size, at + radius);
+    const length = end - start;
+    const buffer = Buffer.alloc(length);
+    let read: number;
+    try {
+      read = readSync(fd, buffer, 0, length, start);
+    } catch {
+      return undefined;
+    }
+    const text = buffer.subarray(0, read).toString('latin1');
+    const relative = at - start;
+    const lineStart = text.lastIndexOf('\n', relative);
+    const lineEnd = text.indexOf('\n', relative);
+    const gotStart = lineStart !== -1 || start === 0;
+    const gotEnd = lineEnd !== -1 || end === size;
+    if (gotStart && gotEnd) {
+      return text.slice(
+        lineStart === -1 ? 0 : lineStart + 1,
+        lineEnd === -1 ? text.length : lineEnd,
+      );
+    }
+    if (radius >= LINE_PROBE_MAX_BYTES) return undefined;
+    radius = Math.min(radius * 4, LINE_PROBE_MAX_BYTES);
+  }
 }
 
 /** A record's own id, as the transcript writes it. */
@@ -361,23 +607,51 @@ export interface LastAnswer {
  * answer, stopped the session — while `lastAssistantAt` excludes that record
  * (and a sidechain one) because it asks whether real work moved, not what was
  * last shown. See there for the bug that came from conflating the two.
+ *
+ * The tail read starts at `TAIL_CWD_BYTES` and widens when that window turns
+ * up nothing: measured on a real store, 22 of 7,721 transcripts have more
+ * than 256 KB of bookkeeping — queue operations, retitles — written after
+ * their last answer, which pushed it out of a fixed window entirely and read
+ * as a session that finished cleanly rather than one `revive` should offer.
+ * Each retry rereads the file at a larger size rather than tailing further
+ * from where the last one stopped, which costs an extra read only for the
+ * rare file that needs one; `MAX_TAIL_BYTES` is where it gives up instead of
+ * reading a hundreds-of-megabytes transcript for an answer that plainly is
+ * not there.
  */
 export function lastAnswer(file: string): LastAnswer | undefined {
-  const lines = tailLines(file);
-  if (lines === undefined) return undefined;
+  let bytes = TAIL_CWD_BYTES;
+  for (;;) {
+    const lines = tailLines(file, bytes);
+    if (lines === undefined) return undefined;
 
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const record = parseRecord(lines[index]!);
-    if (!record || record.type !== 'assistant' || record.isSidechain === true) continue;
-    const at = Date.parse(typeof record.timestamp === 'string' ? record.timestamp : '');
-    if (Number.isNaN(at)) continue;
-    if (record.isApiErrorMessage !== true) return { at };
-    const error = typeof record.error === 'string' ? record.error : 'unknown';
-    const text = textOf(record.message);
-    return { at, error, ...(text === undefined ? {} : { text }) };
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const record = parseRecord(lines[index]!);
+      if (!record || record.type !== 'assistant' || record.isSidechain === true) continue;
+      const at = Date.parse(typeof record.timestamp === 'string' ? record.timestamp : '');
+      if (Number.isNaN(at)) continue;
+      if (record.isApiErrorMessage !== true) return { at };
+      const error = typeof record.error === 'string' ? record.error : 'unknown';
+      const text = textOf(record.message);
+      return { at, error, ...(text === undefined ? {} : { text }) };
+    }
+
+    let size: number;
+    try {
+      size = statSync(file).size;
+    } catch {
+      return undefined;
+    }
+    if (bytes >= size || bytes >= MAX_TAIL_BYTES) return undefined;
+    bytes = Math.min(bytes * TAIL_GROWTH, MAX_TAIL_BYTES, size);
   }
-  return undefined;
 }
+
+/** How much larger each retry's window is, when the previous one found no answer. */
+const TAIL_GROWTH = 4;
+
+/** Give up widening past this many bytes rather than reading the whole file. */
+const MAX_TAIL_BYTES = 8 * 1024 * 1024;
 
 /** The text blocks of a message, joined — what the app showed for it. */
 function textOf(message: unknown): string | undefined {
