@@ -4,6 +4,7 @@ import type { LedgerState } from '../ledger/project.js';
 import type { RetitledCard } from '../ledger/types.js';
 import { fileOpenedFrom, scanConversation, type ConversationScan } from '../store/transcripts.js';
 import { weighScans, type ScanWeight } from './branches.js';
+import { byContinuation } from './fileCards.js';
 import type { Lineage } from './lineage.js';
 
 /**
@@ -137,7 +138,7 @@ export interface WhereRow {
   copiesMadeFromHere: number;
   /** What the ledger's own fold knows about a mark on this card, if any. */
   mark?: RetitledCard;
-  /** True for the row `byContinuation` below elects — the one to continue in. */
+  /** True for the row `byWorkingRow` below elects — the one to continue in. */
   working: boolean;
 }
 
@@ -171,12 +172,16 @@ function openedFile(files: readonly string[], cwd: string | undefined): string |
 }
 
 /**
- * Where the work was left, across the whole family — the same tie-break
- * `fileCards.ts`'s `byContinuation` and `branches.ts`'s `byAdvancement` each
- * use for one half of this question. Undefined weight sorts last: a row whose
- * file cannot be told is not evidence of anything, only unmeasured.
+ * Where the work was left, across the whole family — the exact election
+ * `fileCards.ts`'s `byContinuation` runs for the sweep, reused here rather
+ * than reimplemented so the two can never rank two rows in a different
+ * order for the same conversation. Undefined weight sorts last: a row whose
+ * file cannot be told is not evidence of anything, only unmeasured — the
+ * one case the shared comparator does not itself need to handle, since the
+ * sweep only ever calls it on rows it has already filtered down to the
+ * measurable ones.
  */
-function byContinuation(
+function byWorkingRow(
   a: { weight?: ScanWeight; sessionId: string },
   b: { weight?: ScanWeight; sessionId: string },
 ): number {
@@ -185,13 +190,7 @@ function byContinuation(
   }
   if (a.weight === undefined) return 1;
   if (b.weight === undefined) return -1;
-  const answered = (b.weight.lastAssistantAt ?? 0) - (a.weight.lastAssistantAt ?? 0);
-  if (answered !== 0) return answered;
-  const said = (b.weight.lastMessageAt ?? 0) - (a.weight.lastMessageAt ?? 0);
-  if (said !== 0) return said;
-  if (a.weight.only !== b.weight.only) return b.weight.only - a.weight.only;
-  if (a.weight.total !== b.weight.total) return b.weight.total - a.weight.total;
-  return a.sessionId.localeCompare(b.sessionId);
+  return byContinuation(a.weight, b.weight, a.sessionId, b.sessionId);
 }
 
 /**
@@ -301,7 +300,7 @@ export function buildWhereReport(
   });
 
   const ranked = [...rows].sort((a, b) =>
-    byContinuation(
+    byWorkingRow(
       { weight: a.file ? weights.get(a.file) : undefined, sessionId: a.sessionId },
       { weight: b.file ? weights.get(b.file) : undefined, sessionId: b.sessionId },
     ),
