@@ -1,8 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
-import { writeFileAtomic } from '../util/fsatomic.js';
-import { backupFile, type BackupOptions } from '../util/backups.js';
-import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
+import type { BackupOptions } from '../util/backups.js';
+import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
 
 /**
  * The Code sidebar's filter menu — the per-account half of it.
@@ -141,7 +140,8 @@ export function legacyViewKeysPresent(store: StoreLayout): string[] {
  *
  * Same discipline as `writeGroupScope`, one level shallower: read twice,
  * change only the named keys, verify nothing else at any level moved, back up
- * first regardless.
+ * first regardless. Both are `rewriteDesktopConfig`'s (`store/desktopConfig.ts`),
+ * the one rewrite path this shares with `writeAppPref` and `writeGroupScope`.
  *
  * Refused up front, before any of that, if the raw file holds a number
  * literal that `JSON.parse` / `JSON.stringify` would silently rewrite — see
@@ -152,78 +152,20 @@ export function writeEpitaxyPrefs(
   changes: Record<string, unknown>,
   options: BackupOptions = {},
 ): { backup: string } {
-  const raw = readFileSync(store.desktopConfigFile, 'utf8');
-  const lossy = nonCanonicalNumbers(raw)[0];
-  if (lossy) {
-    throw new Error(
-      `refusing to write: ${store.desktopConfigFile} holds a number literal that a JSON round-trip would rewrite (\`${lossy.literal}\`, at offset ${lossy.index}). Nothing was written.`,
-    );
-  }
-  const before = JSON.parse(raw) as Record<string, unknown>;
-  const after = JSON.parse(raw) as Record<string, unknown>;
-
-  const preferences = asObject(after.preferences);
-  const epitaxy = asObject(preferences.epitaxyPrefs);
-  for (const [key, value] of Object.entries(changes)) {
-    if (value === undefined) delete epitaxy[key];
-    else epitaxy[key] = value;
-  }
-  preferences.epitaxyPrefs = epitaxy;
-  after.preferences = preferences;
-
-  // Backed up under ~/.foster/backups, never next to the file it copies — see
-  // util/backups.ts. Taken before the write, whether or not the write below
-  // ends up refusing: a refusal still leaves a copy of what was there for
-  // whoever is looking at the "would have changed too" message.
-  const backup = backupFile(store.desktopConfigFile, 'epitaxyPrefs', options);
-
-  const text = JSON.stringify(after, null, 2);
-  const back = JSON.parse(text) as Record<string, unknown>;
-  const moved = neighboursThatMoved(before, back, new Set(Object.keys(changes)));
-  if (moved.length > 0) {
-    throw new Error(
-      `refusing to write: ${moved.join(', ')} would have changed too. Nothing was written; the backup is at ${backup}`,
-    );
-  }
-
-  writeFileAtomic(store.desktopConfigFile, text);
-  return { backup };
-}
-
-function asObject(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
-
-function neighboursThatMoved(
-  before: Record<string, unknown>,
-  after: Record<string, unknown>,
-  changedKeys: ReadonlySet<string>,
-): string[] {
-  const moved: string[] = [];
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (key === 'preferences') continue;
-    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) moved.push(key);
-  }
-
-  const wasPrefs = asObject(before.preferences);
-  const nowPrefs = asObject(after.preferences);
-  for (const key of new Set([...Object.keys(wasPrefs), ...Object.keys(nowPrefs)])) {
-    if (key === 'epitaxyPrefs') continue;
-    if (JSON.stringify(wasPrefs[key]) !== JSON.stringify(nowPrefs[key])) {
-      moved.push(`preferences.${key}`);
-    }
-  }
-
-  const wasEpitaxy = asObject(wasPrefs.epitaxyPrefs);
-  const nowEpitaxy = asObject(nowPrefs.epitaxyPrefs);
-  for (const key of new Set([...Object.keys(wasEpitaxy), ...Object.keys(nowEpitaxy)])) {
-    if (changedKeys.has(key)) continue;
-    if (JSON.stringify(wasEpitaxy[key]) !== JSON.stringify(nowEpitaxy[key])) {
-      moved.push(`preferences.epitaxyPrefs.${key}`);
-    }
-  }
-
-  return moved;
+  return rewriteDesktopConfig(
+    store,
+    'epitaxyPrefs',
+    Object.keys(changes).map((key) => ['preferences', 'epitaxyPrefs', key]),
+    (after) => {
+      const preferences = asObject(after.preferences);
+      const epitaxy = asObject(preferences.epitaxyPrefs);
+      for (const [key, value] of Object.entries(changes)) {
+        if (value === undefined) delete epitaxy[key];
+        else epitaxy[key] = value;
+      }
+      preferences.epitaxyPrefs = epitaxy;
+      after.preferences = preferences;
+    },
+    options,
+  );
 }
