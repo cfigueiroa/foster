@@ -122,4 +122,28 @@ describe('sweepFailedCount', () => {
 
     expect(sweepFailedCount(report)).toBe(2 + 1 + 3 + 1 + 4 + 5);
   });
+
+  // The gap review found: `branches.counts.failed` is `summariseOutcomes`
+  // of `branches.outcomes` (the copy/fostering outcomes), a different array
+  // from `branches.retitled` (the branch pass's own marks); `files` has no
+  // `counts` at all, only `files.retitled`. A write failure in either mark
+  // pass — an unreadable card, a write error (`engine/retitle.ts`) — used to
+  // vanish from this count, leaving `foster sweep --yes` exit 0 even though
+  // `render.ts` marked the failure with a red `x` in the text output.
+  it('counts a failed mark from the branch pass or the second-file pass, not just their outcomes', () => {
+    const report = reportWith({
+      branches: {
+        retitled: [retitled('failed'), retitled('retitled'), retitled('skipped')],
+        counts: { fostered: 0, skipped: 0, failed: 0 },
+      } as never,
+      files: {
+        retitled: [retitled('failed'), retitled('failed'), retitled('retitled')],
+        plans: [],
+        archived: 0,
+        otherFileTemplate: '',
+      } as never,
+    });
+
+    expect(sweepFailedCount(report)).toBe(3);
+  });
 });

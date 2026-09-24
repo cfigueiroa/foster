@@ -112,12 +112,18 @@ describe('foster consolidate --json (CLI wiring)', () => {
       entries: Array<{ status: string; repoint: { from: string; to: string } | null }>;
       moved: Array<{ status: string }>;
       removed: Array<{ status: string }>;
+      restart: { requested: boolean; done: boolean };
     };
     expect(parsed.entries).toHaveLength(1);
     expect(parsed.entries[0]!.status).toBe('consolidate');
     expect(parsed.entries[0]!.repoint).toMatchObject({ from: TRUNK, to: TIP });
     expect(parsed.moved).toHaveLength(1);
     expect(parsed.moved[0]!.status).toBe('repointed');
+    // No `--restart` on the command line: `restartAround` still runs (review
+    // finding, swarm package cli-json-exit) but short-circuits before touching
+    // the process table or the app, and the field says so rather than being
+    // silently absent the way it used to be.
+    expect(parsed.restart).toMatchObject({ requested: false, done: false });
 
     // The proof that this is not just a plan echoed back: the card on disk
     // was actually rewritten to point at the tip.
@@ -156,5 +162,51 @@ describe('foster consolidate --json (CLI wiring)', () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]!.status).toBe('consolidate');
     expect(readFileSync(cardPath, 'utf8')).toBe(before);
+  }, 30_000);
+
+  it('--undo --yes --json also writes before it reports, and carries the same restart field', () => {
+    const store = makeStore();
+    const cwd = configDir();
+    const ledgerPath = path.join(mkdtempSync(path.join(tmpdir(), 'foster-cs-cli-l3-')), 'l.jsonl');
+
+    const cardPath = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000ed', cliSessionId: TRUNK }),
+    );
+    writeSession(
+      store,
+      {
+        accountUuid: '00000000-0000-4000-8000-000000000001',
+        organizationUuid: '00000000-0000-4000-8000-000000000002',
+      },
+      session({ sessionId: '00000000-0000-4000-8000-0000000000ee', cliSessionId: TIP }),
+    );
+
+    const env = { store: store.root, ledger: ledgerPath, configDir: cwd };
+    const consolidated = runCli(
+      ['consolidate', '--to', NEW_ACCOUNT.accountUuid, '--yes', '--json'],
+      env,
+    );
+    expect(consolidated.status).toBe(0);
+    expect(JSON.parse(readFileSync(cardPath, 'utf8')).cliSessionId).toBe(TIP);
+
+    const result = runCli(['consolidate', '--undo', '--yes', '--json'], env);
+
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout) as {
+      outcomes: Array<{ status: string }>;
+      restart: { requested: boolean; done: boolean };
+    };
+    expect(parsed.outcomes).toHaveLength(1);
+    expect(parsed.outcomes[0]!.status).toBe('repointed');
+    // Same fix as the forward path: `--undo --yes --json` used to return
+    // before `finish` ever ran, so a `--restart` passed alongside it was
+    // silently dropped with no trace in the JSON.
+    expect(parsed.restart).toMatchObject({ requested: false, done: false });
+
+    // The write landed, not just the plan: the card is back on the trunk.
+    expect(JSON.parse(readFileSync(cardPath, 'utf8')).cliSessionId).toBe(TRUNK);
   }, 30_000);
 });

@@ -696,15 +696,31 @@ export function sweepMarked(report: Pick<SweepReport, 'branches' | 'files'>): bo
 /**
  * Every phase's own `failed` count, folded into one number a caller can turn
  * into an exit code without re-deriving what `sweepSummary` already prints.
+ *
+ * `branches.counts` and `files` deserve a second look before trusting them at
+ * face value: `branches.counts` is `summariseOutcomes(branches.outcomes)` —
+ * the copy/fostering outcomes of the branch pass — which is a different array
+ * from `branches.retitled`, the marks that same pass writes (`"(stale,
+ * stopped …)"`/`"(other branch, went on …)"`). `files` (the second-file pass)
+ * has no `counts` at all; its only outcomes are `files.retitled`. Either can
+ * carry `status: 'failed'` on its own — an unreadable card, a write error
+ * (`engine/retitle.ts`) — and `render.ts` already marks a failed retitle with
+ * a red `x` in the text output, so leaving them out here meant a real write
+ * failure in either mark pass left `foster sweep --yes` (text or `--json`)
+ * exiting 0.
  */
 export function sweepFailedCount(report: SweepReport): number {
+  const retitleFailures = (outcomes: RetitleOutcome[]): number =>
+    outcomes.filter((outcome) => outcome.status === 'failed').length;
   return (
     report.fostered.counts.failed +
     report.branches.counts.failed +
+    retitleFailures(report.branches.retitled) +
     report.restored.counts.failed +
     report.worktreeClaims.counts.failed +
     (report.titleSync?.counts.failed ?? 0) +
-    (report.dates?.counts.failed ?? 0)
+    (report.dates?.counts.failed ?? 0) +
+    retitleFailures(report.files.retitled)
   );
 }
 

@@ -729,6 +729,27 @@ sharing a name with a top-level one) stopped being caught by a set that was neve
 it. (`installations` in that set has never matched anything, before or after this fix — no command
 is actually named that; it names a description on `profile list`, an unrelated pre-existing gap.)
 
+**Review found two more, both fixed the same day.** `consolidate --yes --restart --json` (and
+`--undo --yes --restart --json`) wrote correctly — the fix above is otherwise sound — but returned
+before `finish` ever ran, the same shape `sweep --undo-retitles` had pre-existing (its own
+`--json`/`--restart` combination is `cli-restart`'s to fix, not touched here). `--restart` was
+silently dropped whenever `--json` was also passed: no error, no field saying so. Fixed by calling
+`restartAround` (already imported; no change to `restartAround`, `finish` or detach themselves)
+with no `duringGap` — the write already happened by this point, so this is exactly `sweep`'s own
+`sweepRestart` shape, never `layout`/`view set`'s write-in-the-gap one — and folding the result
+into the JSON as `restart`, on both the forward and `--undo` paths. `restartAround(store, false,
+...)` short-circuits before it ever reads the process table, so this costs nothing when `--restart`
+was not asked for; only `--restart --json` together used to be the case with no test at all.
+
+`sweepFailedCount` (added the same day sweep's own exit code was fixed, above) missed two of the
+places a write can fail: `branches.counts.failed` is `summariseOutcomes(branches.outcomes)` — the
+copy/fostering outcomes of the branch pass — a different array from `branches.retitled`, that same
+pass's own marks (`"(stale, stopped …)"`/`"(other branch, went on …)"`); `files` (the second-file
+pass) has no `counts` at all, only `files.retitled`. Either can carry `status: 'failed'` on a real
+write error (`engine/retitle.ts`), and the text output already marks one with a red `x`
+(`render.ts`), but the count backing the exit code never saw it — a failed mark in either pass left
+`foster sweep --yes` (text or `--json`) exiting 0. Both are now folded in.
+
 ## Before pushing
 
 ```bash

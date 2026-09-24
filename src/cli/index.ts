@@ -2186,8 +2186,17 @@ program
     const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
     if (failed > 0) process.exitCode = 1;
 
+    // Same shape as `sweep`/`layout`/`view set`: the write above already
+    // happened, so `--restart` here is only ever quit-then-start, never a
+    // write-in-the-gap — `restartAround` with no `duringGap` is exactly
+    // `sweepRestart`'s own call. Run and reported under `--json` too, so
+    // `--restart --json` together no longer drops the restart silently the
+    // way returning before `finish` (text-only, and never awaited on this
+    // branch) used to.
     if (opts.json) {
-      print({ entries: jsonEntries(), moved, removed });
+      const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+      print({ entries: jsonEntries(), moved, removed, restart });
+      if (opts.restart && !restart.done) process.exitCode = 1;
       return;
     }
 
@@ -2265,8 +2274,14 @@ async function undoConsolidation(
   // `opts.json && dryRun` combination returned above, before this call.
   const outcomes = repointCards(undoRequests(cards), { store, ledger, dryRun });
 
+  // Same fix as the main consolidate path above: the write already happened
+  // (this branch is only reached once `opts.json && dryRun` has returned
+  // above), so `--restart` is run and folded into the JSON here too, instead
+  // of being silently dropped by returning before `finish` below ever runs.
   if (opts.json) {
-    print(outcomes);
+    const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+    print({ outcomes, restart });
+    if (opts.restart && !restart.done) process.exitCode = 1;
     return;
   }
 
