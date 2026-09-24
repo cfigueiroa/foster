@@ -420,6 +420,32 @@ describe('the --restart write, through the real CLI action', () => {
     process.exitCode = undefined;
   });
 
+  it('reports closed: true when the (only) write throws inside the gap, because the app really was closed', async () => {
+    // Same ENOENT-throwing store as above, but --json and a single change —
+    // so `written` stays empty (the throw happens before anything is pushed
+    // onto it). The old bug used `written.length > 0` as a proxy for "the app
+    // was closed", which is wrong here: `quitDesktop` above resolved 'quit'
+    // before `writeAppPref` ever ran, so the app was closed regardless of
+    // whether the write itself landed.
+    const store = makeStore();
+    process.exitCode = undefined;
+
+    const output = await run(store, [
+      'pref',
+      'menuBarEnabled',
+      'false',
+      '--restart',
+      '--yes',
+      '--json',
+    ]);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    const parsed = JSON.parse(output) as { written: unknown[]; closed: boolean };
+    expect(parsed.written).toHaveLength(0);
+    expect(parsed.closed).toBe(true);
+    process.exitCode = undefined;
+  });
+
   it('names "foster app quit --terminate" when the tray is in the way, never the wrong "--terminate" flag', async () => {
     desktop.quitDesktop.mockResolvedValue({ outcome: 'needs-terminate', mainPid: 4242 });
     const store = storeWith({ preferences: { menuBarEnabled: true } });

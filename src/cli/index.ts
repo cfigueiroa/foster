@@ -1169,7 +1169,7 @@ program
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, yes: !dryRun });
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
 
@@ -1846,8 +1846,19 @@ function detachNotNeededNote(store: StoreLayout): string | undefined {
  * `--detach`'s two prerequisites, checked the same way by every write command
  * that offers it (`sweep`, `layout`, `view set`, `view copy`) — `app restart`
  * needs neither, since it already means "restart" and never means "dry run".
+ *
+ * Takes the already-computed `dryRun` (`opts.dryRun || !opts.yes`), never the
+ * raw `opts.yes` on its own: `sweep`, `layout`, `view set` and `view copy` all
+ * compute `dryRun` before calling this, and three of the four used to pass
+ * `opts` wholesale instead, reading `opts.yes` directly. `--dry-run` and
+ * `--yes` are declared as conflicting options, so the two only ever actually
+ * diverged if that Commander wiring were ever loosened — but a check that is
+ * only correct by leaning on a constraint declared somewhere else, rather
+ * than on the value the caller already worked out, is the kind of thing that
+ * silently breaks under refactoring. Passing `dryRun` itself removes the
+ * possibility outright.
  */
-function checkDetachPrereqs(opts: { detach?: boolean; restart?: boolean; yes?: boolean }): void {
+function checkDetachPrereqs(opts: { detach?: boolean; restart?: boolean; dryRun: boolean }): void {
   if (!opts.detach) return;
   const restartRefusal = detachNeedsRestart({
     detach: true,
@@ -1855,7 +1866,7 @@ function checkDetachPrereqs(opts: { detach?: boolean; restart?: boolean; yes?: b
     isRestartItself: false,
   });
   if (restartRefusal) throw new Error(restartRefusal);
-  const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
+  const yesRefusal = detachNeedsYes({ detach: true, yes: !opts.dryRun });
   if (yesRefusal) throw new Error(yesRefusal);
 }
 
@@ -3098,7 +3109,7 @@ addDetachOptions(layoutCmd)
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    checkDetachPrereqs(opts);
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -3433,7 +3444,7 @@ addDetachOptions(viewSetCmd)
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    checkDetachPrereqs(opts);
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -3578,7 +3589,7 @@ addDetachOptions(viewCopyCmd)
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    checkDetachPrereqs(opts);
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const accounts = listAccountDirs(store);
@@ -4659,10 +4670,11 @@ cacheCommand
   .command('clear')
   .summary('delete the persistent scan cache')
   .description(
-    'Remove every file under the persistent cache foster keeps to skip re-reading cards and\n' +
-      'transcripts that have not changed since the last run.\n\n' +
-      'Nothing here is a record of anything — the next scan simply reads from disk again and\n' +
-      'rebuilds it, the same as an entry `--no-cache` or a version mismatch already ignores.',
+    'Remove every file under the persistent cache foster keeps to skip re-reading\n' +
+      'cards and transcripts that have not changed since the last run.\n\n' +
+      'Nothing here is a record of anything — the next scan simply reads from disk\n' +
+      'again and rebuilds it, the same as an entry `--no-cache` or a version mismatch\n' +
+      'already ignores.',
   )
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -6156,16 +6168,18 @@ program
   .helpGroup('Reports:')
   .summary('where the bytes are: cards and transcripts, per account and per project')
   .description(
-    'Read-only measurement of everything on disk, across every account this store has:\n' +
-      'card and transcript bytes broken down by account and by working directory, how much\n' +
-      "of a card's own JSON is fields nothing in foster reads (BULKY_CARD_FIELDS — measured\n" +
-      'on a real store: 93% remoteMcpServersConfig), transcripts no card in any account\n' +
-      'still points at, transcript files that are byte-for-byte copies of each other, and\n' +
-      "session cards already over the app's own 10 MB load limit and so will not appear in it.\n\n" +
-      'Nothing here deletes anything, and nothing here decides a file is safe to remove —\n' +
-      "that judgement is `foster purge`'s, and it requires a tombstone this does not.\n" +
-      'Reading every card and every transcript on a large store takes a while; it stays\n' +
-      'read-only throughout, the same guarantee every other report in this tool gives.',
+    'Read-only measurement of everything on disk, across every account this store\n' +
+      'has: card and transcript bytes broken down by account and by working\n' +
+      "directory, how much of a card's own JSON is fields nothing in foster reads\n" +
+      '(BULKY_CARD_FIELDS — measured on a real store: 93% remoteMcpServersConfig),\n' +
+      'transcripts no card in any account still points at, transcript files that are\n' +
+      "byte-for-byte copies of each other, and session cards already over the app's\n" +
+      'own 10 MB load limit and so will not appear in it.\n\n' +
+      'Nothing here deletes anything, and nothing here decides a file is safe to\n' +
+      "remove — that judgement is `foster purge`'s, and it requires a tombstone this\n" +
+      'does not. Reading every card and every transcript on a large store takes a\n' +
+      'while; it stays read-only throughout, the same guarantee every other report in\n' +
+      'this tool gives.',
   )
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -6187,18 +6201,20 @@ program
   .helpGroup('Reports:')
   .summary('token usage, sessions and usage-limit stops, read from the transcripts')
   .description(
-    "Read every transcript this store can see for its assistant records' own `usage`\n" +
-      'fields (input, output and cache tokens, and the model that generated them), plus\n' +
-      "every place a conversation ended on the app's own usage-limit record — the same\n" +
-      'detection `foster revive` uses, over the whole transcript rather than only its last\n' +
-      'answer. Aggregated per account, per model and per week: a per-model weekly limit\n' +
-      'can lock an account before its general week does (measured on a real account: 53%\n' +
-      'on the week, 100% on one model), and the account-wide number alone never shows that.\n\n' +
-      'An account here means the account a *native* card of the conversation belongs to —\n' +
-      'a fostered copy only proves the conversation reached that sidebar, not that its\n' +
-      'tokens were spent under it. A conversation no card anywhere still claims natively\n' +
-      'counts as unattributed rather than guessed at. Nothing here calls the usage API —\n' +
-      '`foster usage` does that, for the account signed in now, live.',
+    "Read every transcript this store can see for its assistant records' own\n" +
+      '`usage` fields (input, output and cache tokens, and the model that generated\n' +
+      "them), plus every place a conversation ended on the app's own usage-limit\n" +
+      'record — the same detection `foster revive` uses, over the whole transcript\n' +
+      'rather than only its last answer. Aggregated per account, per model and per\n' +
+      'week: a per-model weekly limit can lock an account before its general week\n' +
+      'does (measured on a real account: 53% on the week, 100% on one model), and the\n' +
+      'account-wide number alone never shows that.\n\n' +
+      'An account here means the account a *native* card of the conversation belongs\n' +
+      'to — a fostered copy only proves the conversation reached that sidebar, not\n' +
+      'that its tokens were spent under it. A conversation no card anywhere still\n' +
+      'claims natively counts as unattributed rather than guessed at. Nothing here\n' +
+      'calls the usage API — `foster usage` does that, for the account signed in\n' +
+      'now, live.',
   )
   .option('--since <age>', 'how far back to read', '30d')
   .addOption(
@@ -7178,16 +7194,20 @@ cloud
   .command('list')
   .summary('list cloud sessions for one or every signed-in CLI account')
   .description(
-    'Calls the cloud-sessions API for every CLI config directory that is signed in — or just\n' +
-      "--client <name> — and shows each session's title, status, repository and last activity.\n\n" +
-      'Reads only, and never refreshes a token: an account whose access token has expired is\n' +
-      'reported as such, not renewed — refreshing rotates the refresh token in .credentials.json,\n' +
-      "which every other client sharing that account's login would be affected by. Run `claude` in\n" +
-      'that config directory yourself to refresh it.\n\n' +
-      'API keys are rejected outright by the API itself: cloud sessions need a claude.ai sign-in.\n\n' +
-      "--client matches by name only, against `foster clients`' own list — never a `foster client\n" +
-      'register`ed root: this reads a credential to call an external API with, and a registered\n' +
-      'fleet root reaching that by default is not something naming it here should quietly grant.',
+    'Calls the cloud-sessions API for every CLI config directory that is signed in\n' +
+      "— or just --client <name> — and shows each session's title, status,\n" +
+      'repository and last activity.\n\n' +
+      'Reads only, and never refreshes a token: an account whose access token has\n' +
+      'expired is reported as such, not renewed — refreshing rotates the refresh\n' +
+      "token in .credentials.json, which every other client sharing that account's\n" +
+      'login would be affected by. Run `claude` in that config directory yourself to\n' +
+      'refresh it.\n\n' +
+      'API keys are rejected outright by the API itself: cloud sessions need a\n' +
+      'claude.ai sign-in.\n\n' +
+      "--client matches by name only, against `foster clients`' own list — never a\n" +
+      '`foster client register`ed root: this reads a credential to call an external\n' +
+      'API with, and a registered fleet root reaching that by default is not\n' +
+      'something naming it here should quietly grant.',
   )
   .option(
     '--client <name>',
@@ -7276,15 +7296,18 @@ cloud
   .command('pull')
   .summary('bring one cloud session in as a Claude Desktop conversation')
   .description(
-    "Fetches one cloud session's history and writes it as a local Claude transcript plus a\n" +
-      'sidebar card — the same widening `import-codex` makes for a Codex CLI thread: neither\n' +
-      'session ran as a local Desktop conversation before this, so it fabricates both files. The\n' +
-      "transcript gets a freshly minted session id (a cloud session's own id is not shaped like\n" +
-      'the uuid a local one is) and the same "continued from another machine" notice the CLI\'s\n' +
-      'own --teleport adds.\n\n' +
-      'Dry run by default: nothing is written until --yes. --undo removes what a pull wrote.\n\n' +
-      'No git operations happen here — the repository and branch the session last ran against are\n' +
-      'printed as a hint; make sure --into already has them checked out.',
+    "Fetches one cloud session's history and writes it as a local Claude\n" +
+      'transcript plus a sidebar card — the same widening `import-codex` makes for\n' +
+      'a Codex CLI thread: neither session ran as a local Desktop conversation\n' +
+      'before this, so it fabricates both files. The transcript gets a freshly\n' +
+      "minted session id (a cloud session's own id is not shaped like the uuid a\n" +
+      'local one is) and the same "continued from another machine" notice the\n' +
+      "CLI's own --teleport adds.\n\n" +
+      'Dry run by default: nothing is written until --yes. --undo removes what a\n' +
+      'pull wrote.\n\n' +
+      'No git operations happen here — the repository and branch the session last\n' +
+      'ran against are printed as a hint; make sure --into already has them\n' +
+      'checked out.',
   )
   .argument('<id>', 'the cloud session id (cse_… / session_…), or a unique prefix')
   .option('--into <cwd>', 'the working directory the resumed conversation opens in')
