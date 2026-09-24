@@ -186,11 +186,11 @@ describe('planTitleSync', () => {
     // Both sides renamed to the same string, neither matching what foster wrote.
     // Measured on a real store: this was being printed as a conflict, and rows
     // like it were inflating the "renamed here" tally.
-    const f = fixture('⭐ Orquestrador rioprev', '⭐ Orquestrador rioprev', {
+    const f = fixture('⭐ Orquestrador acme', '⭐ Orquestrador acme', {
       origin: 'user',
       copy: 'user',
     });
-    fostered(f, 'Orquestrador de sessões e issues');
+    fostered(f, 'Orquestrador de sessões e tarefas');
 
     const plan = planTitleSync(f.store, f.ledger, HERE);
 
