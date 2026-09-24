@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { Command } from 'commander';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_PREFS,
   parsePrefValue,
@@ -8,8 +9,41 @@ import {
   writeAppPref,
 } from '../src/store/appPrefs.js';
 import type { StoreLayout } from '../src/domain/types.js';
-import { plannedChanges, resolve } from '../src/cli/appPrefCommand.js';
+import { plannedChanges, registerAppPref, resolve } from '../src/cli/appPrefCommand.js';
+import type * as Desktop from '../src/engine/desktop.js';
+import type * as Safety from '../src/engine/safety.js';
 import { makeStore } from './helpers/store.js';
+
+/**
+ * Doubles for the "--restart" end-to-end tests below. Nothing in this file may
+ * close or launch the real Claude Desktop — `quitDesktop`/`startDesktop` are
+ * stubbed the same way `tests/interactive.test.ts` stubs them, and
+ * `inspectDesktopFor` (what `restartPlan` reads) is driven per test rather than
+ * left to read the real process table.
+ */
+const desktop = vi.hoisted(() => ({
+  quitDesktop: vi.fn(),
+  startDesktop: vi.fn(),
+  inspectDesktopFor: vi.fn(),
+  hostedByDesktop: vi.fn(() => false),
+}));
+
+vi.mock('../src/engine/desktop.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof Desktop>();
+  return {
+    ...actual,
+    quitDesktop: desktop.quitDesktop,
+    startDesktop: desktop.startDesktop,
+    inspectDesktopFor: desktop.inspectDesktopFor,
+    hostedByDesktop: desktop.hostedByDesktop,
+  };
+});
+
+const safety = vi.hoisted(() => ({ running: false }));
+vi.mock('../src/engine/safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof Safety>();
+  return { ...actual, inspectApp: () => ({ running: safety.running, evidence: [] }) };
+});
 
 /**
  * The app's own settings, read and written where the app keeps them.
@@ -247,5 +281,91 @@ describe('resolving a change before the app is touched', () => {
       to: 6,
       parsed: 6,
     });
+  });
+});
+
+/**
+ * `--restart`, driven through the actual CLI action, not just the pure
+ * helpers above. Three bugs lived here until this went through
+ * `restartAround` (`src/ops/restart.ts`) the same way `layout`/`view` do:
+ * a write that threw after `quitDesktop` succeeded left `startDesktop` never
+ * called at all; the tray refusal told the user to "Re-run with --terminate",
+ * a flag this command has never had; and `startDesktop`'s own result was
+ * thrown away, so it printed "is up" whether or not it actually was.
+ */
+describe('the --restart write, through the real CLI action', () => {
+  beforeEach(() => {
+    desktop.quitDesktop.mockReset().mockResolvedValue({ outcome: 'quit' });
+    desktop.startDesktop.mockReset().mockResolvedValue(true);
+    desktop.inspectDesktopFor
+      .mockReset()
+      .mockReturnValue({ running: true, codeSessions: 0, selfHosted: false });
+    desktop.hostedByDesktop.mockReset().mockReturnValue(false);
+    safety.running = true;
+  });
+
+  function appFor(store: StoreLayout): Command {
+    const app = new Command();
+    app.exitOverride();
+    registerAppPref(app, () => ({ store }));
+    return app;
+  }
+
+  async function run(store: StoreLayout, args: string[]): Promise<string> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      await appFor(store).parseAsync(args, { from: 'user' });
+    } finally {
+      spy.mockRestore();
+    }
+    return lines.join('\n');
+  }
+
+  it('quits, writes, starts the app back up, and reports the write', async () => {
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    expect(desktop.startDesktop).toHaveBeenCalledOnce();
+    expect((settingsOf(store).preferences as Record<string, unknown>).menuBarEnabled).toBe(false);
+    expect(output).toContain('Claude Desktop is up.');
+  });
+
+  it('still starts the app back up when the write throws, instead of leaving it closed silently', async () => {
+    // A bare store with no claude_desktop_config.json at all: writeAppPref's
+    // own readFileSync throws ENOENT the first time it is called, inside
+    // restartAround's duringGap — a real throw, not a mocked one.
+    const store = makeStore();
+    process.exitCode = undefined;
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    // The bug: `startDesktop` used to never run at all here.
+    expect(desktop.startDesktop).toHaveBeenCalledOnce();
+    expect(output).not.toContain('Claude Desktop is up.');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
+
+  it('names "foster app quit --terminate" when the tray is in the way, never the wrong "--terminate" flag', async () => {
+    desktop.quitDesktop.mockResolvedValue({ outcome: 'needs-terminate', mainPid: 4242 });
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    process.exitCode = undefined;
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    // The old bug: this command has no --terminate option of its own, so
+    // "Re-run with --terminate" sent the user to an unknown option.
+    expect(output).not.toContain('Re-run with --terminate');
+    expect(output).toContain('foster app quit --terminate');
+    expect(desktop.startDesktop).not.toHaveBeenCalled();
+    expect((settingsOf(store).preferences as Record<string, unknown>).menuBarEnabled).toBe(true);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
   });
 });

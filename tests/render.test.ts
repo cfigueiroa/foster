@@ -209,7 +209,9 @@ describe('viewCopyRestartCommand', () => {
     const to = { accountUuid: ACCOUNT_B, organizationUuid: ORG_2 };
     const command = viewCopyRestartCommand(from, to);
 
-    expect(command).toBe(`foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --yes --restart`);
+    expect(command).toBe(
+      `foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --to-org ${ORG_2} --yes --restart`,
+    );
     expect(command).not.toContain('<accountUuid>');
   });
 });

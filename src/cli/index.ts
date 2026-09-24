@@ -110,7 +110,7 @@ import {
   whereCopiesAre,
 } from '../ledger/project.js';
 import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
-import { readConfig } from '../store/config.js';
+import { closingWindowQuits, readConfig } from '../store/config.js';
 import {
   readNativeSwitcherAvailability,
   type NativeSwitcherAvailability,
@@ -162,6 +162,7 @@ import {
   DETACH_DELAY_MAX,
   DETACH_DELAY_MIN,
   detachNeedsRestart,
+  detachNeedsTerminate,
   detachNeedsYes,
   launchDetached,
   liveWritersEnding,
@@ -170,11 +171,13 @@ import {
   otherLiveWriters,
   parseDetachDelay,
   planDetached,
+  restartCommandFromArgv,
   selfHostedCheck,
   sweepDetachArgv,
   tailLines,
   type DetachedPlan,
   type DetachLaunchResult,
+  type SweepRestartCarry,
 } from '../engine/detach.js';
 import { readProcesses } from '../util/processes.js';
 import {
@@ -1068,17 +1071,7 @@ program
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: !dryRun });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, yes: !dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
 
@@ -1086,7 +1079,7 @@ program
     // account and prior title an undo needs, the same way `consolidate --undo`
     // needs none of the fork-detection this command otherwise does.
     if (opts.undoRetitles) {
-      await undoRetitles(store, ledger, opts, dryRun);
+      await undoRetitles(store, ledger, { ...opts, detachDelay }, dryRun);
       return;
     }
 
@@ -1120,12 +1113,26 @@ program
     // layout pending: its gap is the one that writes back any mark the running
     // app saves over in the meantime (`engine/marksBack.ts`).
     const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
-    const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
+    // `--store`/`--ledger` are what picked this installation out; `--to`/
+    // `--to-org` are the account this sweep actually wrote into, spelled out
+    // rather than left to default (see `SweepRestartCarry`'s own doc comment).
+    // Without these a handed-over or detached `foster layout --yes --restart`
+    // silently ran against the *default* installation and whatever account
+    // happened to be current later — measured 24/09/2026, `foster --store work
+    // sweep --yes --restart --detach` restarting the wrong install entirely.
+    const restartCarry: SweepRestartCarry = {
+      store: this.optsWithGlobals<GlobalOptions>().store,
+      ledger: this.optsWithGlobals<GlobalOptions>().ledger,
+      to: target.accountUuid,
+      toOrg: target.organizationUuid,
+    };
+    const restartCommand = `foster ${sweepDetachArgv(layoutPending, restartCarry).join(' ')}`;
 
     if (opts.json) {
       if (opts.detach) {
         const outcome = await runDetach(
-          sweepDetachArgv(layoutPending),
+          store,
+          sweepDetachArgv(layoutPending, restartCarry),
           detachDelay,
           Boolean(opts.detachEvenWithLive),
         );
@@ -1187,7 +1194,8 @@ program
     // if the wait was mistaken for a hang and interrupted.
     if (opts.detach) {
       const outcome = await runDetach(
-        sweepDetachArgv(layoutPending),
+        store,
+        sweepDetachArgv(layoutPending, restartCarry),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
@@ -1223,7 +1231,15 @@ program
 async function undoRetitles(
   store: StoreLayout,
   ledger: Ledger,
-  opts: { to?: string; toOrg?: string; restart?: boolean; json?: boolean },
+  opts: {
+    to?: string;
+    toOrg?: string;
+    restart?: boolean;
+    detach?: boolean;
+    detachDelay: number;
+    detachEvenWithLive?: boolean;
+    json?: boolean;
+  },
   dryRun: boolean,
 ): Promise<void> {
   const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -1237,8 +1253,26 @@ async function undoRetitles(
 
   // The same run either way: `--json` describes what this call did, rather than
   // printing the ledger and returning before the write it was asked for.
+  //
+  // `--detach` used to be validated at the top of `sweep`'s own action and then
+  // simply never looked at again here — `foster sweep --undo-retitles --detach`
+  // wrote the undo and then fell into `finish()`, which cannot detach at all.
+  // `checkDetachPrereqs` already refused `--detach` without `--yes`, so by the
+  // time this is reached with `opts.detach` set, `dryRun` is false.
   if (opts.json) {
-    print({ target, dryRun, marked: cards.length, outcomes });
+    if (opts.detach) {
+      const outcome = await runDetach(
+        store,
+        process.argv.slice(2),
+        opts.detachDelay,
+        Boolean(opts.detachEvenWithLive),
+      );
+      print({ target, dryRun, marked: cards.length, outcomes, detach: detachJson(outcome) });
+      if (!outcome.ok) process.exitCode = 1;
+      return;
+    }
+    const restart = await restartAround(store, Boolean(opts.restart) && !dryRun, RESTART_COMMAND);
+    print({ target, dryRun, marked: cards.length, outcomes, restart });
     return;
   }
 
@@ -1264,6 +1298,17 @@ async function undoRetitles(
 
   const back = outcomes.filter((outcome) => outcome.status === 'retitled').length;
   console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+
+  if (opts.detach) {
+    const outcome = await runDetach(
+      store,
+      process.argv.slice(2),
+      opts.detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
   await finish(store, Boolean(opts.restart));
 }
 
@@ -1521,11 +1566,12 @@ function deferredPinsGap(
 
 /**
  * `--detach`'s whole implementation, shared by every command that offers it:
- * check for a live writer the restart would end (besides the session foster
- * runs in, which is expected to die with the app), write the `.vbs`, launch it
- * outside the app's process tree, and hand back what to print. Never throws —
- * a launch failure is a refusal like any other, so the caller always has one
- * shape to report.
+ * refuse a restart the tray would swallow before anything is written, check
+ * for a live writer the restart would end (besides the session foster runs in,
+ * which is expected to die with the app), write the `.vbs`, launch it outside
+ * the app's process tree, and hand back what to print. Never throws — a launch
+ * failure is a refusal like any other, so the caller always has one shape to
+ * report.
  */
 interface DetachOutcome {
   ok: boolean;
@@ -1537,10 +1583,21 @@ interface DetachOutcome {
 }
 
 async function runDetach(
+  store: StoreLayout,
   argv: string[],
   delaySeconds: number,
   evenWithLive: boolean,
 ): Promise<DetachOutcome> {
+  // Checked first, and against nothing more than the argv and the store's own
+  // tray setting: a detached restart with no way to actually end the app is a
+  // wasted wait and a log nobody reads (`detachNeedsTerminate`'s own doc
+  // comment has the measurement).
+  const terminateRefusal = detachNeedsTerminate({
+    closingWindowQuits: closingWindowQuits(store),
+    argv,
+  });
+  if (terminateRefusal) return { ok: false, reason: terminateRefusal };
+
   const roots = sessionRegistryRoots(process.env);
   const sessions = liveSessions(roots);
   const rows = readProcesses();
@@ -1568,24 +1625,44 @@ async function runDetach(
   }
 }
 
+/**
+ * The `--json` shape of a `DetachOutcome`, on its own so a command that folds
+ * the detach result into a larger object (`sweep --json`, `layout --json`)
+ * builds the same shape `printDetachResult` prints standalone, rather than
+ * three copies of the same six fields drifting apart.
+ */
+function detachJson(outcome: DetachOutcome):
+  | {
+      detached: true;
+      pid: number;
+      via: DetachLaunchResult['via'];
+      log: string;
+      vbs: string;
+      delaySeconds: number;
+      argv: string[];
+      ending?: string;
+    }
+  | { detached: false; error: string | undefined } {
+  if (outcome.ok && outcome.plan && outcome.launch) {
+    return {
+      detached: true,
+      pid: outcome.launch.pid,
+      via: outcome.launch.via,
+      log: outcome.plan.logPath,
+      vbs: outcome.plan.vbsPath,
+      delaySeconds: outcome.plan.delaySeconds,
+      argv: outcome.plan.argv,
+      ...(outcome.ending ? { ending: outcome.ending } : {}),
+    };
+  }
+  return { detached: false, error: outcome.reason };
+}
+
 /** `--detach`'s own report, text or `--json` — every command that offers it prints the same shape. */
 function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string): void {
   if (json) {
-    if (outcome.ok && outcome.plan && outcome.launch) {
-      print({
-        detached: true,
-        pid: outcome.launch.pid,
-        via: outcome.launch.via,
-        log: outcome.plan.logPath,
-        vbs: outcome.plan.vbsPath,
-        delaySeconds: outcome.plan.delaySeconds,
-        argv: outcome.plan.argv,
-        ...(outcome.ending ? { ending: outcome.ending } : {}),
-      });
-      return;
-    }
-    print({ detached: false, error: outcome.reason });
-    process.exitCode = 1;
+    print(detachJson(outcome));
+    if (!outcome.ok) process.exitCode = 1;
     return;
   }
 
@@ -1613,6 +1690,58 @@ function detachNotNeededNote(store: StoreLayout): string | undefined {
     ? 'Not inside a hosted session right now, so --detach was not needed — a plain restart would ' +
         'have done the same thing. Running it anyway.'
     : undefined;
+}
+
+/**
+ * `--detach`'s two prerequisites, checked the same way by every write command
+ * that offers it (`sweep`, `layout`, `view set`, `view copy`) — `app restart`
+ * needs neither, since it already means "restart" and never means "dry run".
+ */
+function checkDetachPrereqs(opts: { detach?: boolean; restart?: boolean; yes?: boolean }): void {
+  if (!opts.detach) return;
+  const restartRefusal = detachNeedsRestart({
+    detach: true,
+    restart: Boolean(opts.restart),
+    isRestartItself: false,
+  });
+  if (restartRefusal) throw new Error(restartRefusal);
+  const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
+  if (yesRefusal) throw new Error(yesRefusal);
+}
+
+/**
+ * The three `--detach*` options, identical on every command that offers them —
+ * `--restart`/`--terminate` stay each command's own, since their help text
+ * (and, for `app restart`, their very name) differs by what the command
+ * already does.
+ */
+function addDetachOptions(cmd: Command): Command {
+  return cmd
+    .option(
+      '--detach',
+      'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
+    )
+    .option(
+      '--detach-delay <seconds>',
+      `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
+    )
+    .option(
+      '--detach-even-with-live',
+      'detach anyway even if another live session would be ended by the restart',
+    );
+}
+
+/**
+ * Refuses a write that needs the app closed, found it running, and was not
+ * asked to restart it — the same check and the same words `layout`, `view
+ * set` and `view copy` each wrote out by hand.
+ */
+function refuseIfAppRunning(store: StoreLayout): void {
+  if (inspectApp(store).running) {
+    throw new Error(
+      'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
+    );
+  }
 }
 
 function reportSweepRestart(restart: SweepRestart): void {
@@ -2438,7 +2567,21 @@ function reportDuplicates(report: DuplicateReport): void {
   }
 }
 
-/** Shared tail of the two writing commands: restart now, or say why it matters. */
+/**
+ * Shared tail of every write-then-optionally-restart command that has no
+ * `--detach` of its own — `foster`, `restore`, `return`, `consolidate`,
+ * `import-codex`, and `sweep --undo-retitles` — restart now, through the same
+ * `restartAround` every `--detach`-capable command already shares, or say why
+ * it matters.
+ *
+ * Used to call `restartDesktop` directly, which throws `DesktopControlError`
+ * from inside a session Claude Desktop itself hosts. Every one of those
+ * commands had already written by the time `finish()` ran, so the thrown
+ * error reached `main()`'s generic handler and printed "Nothing was changed."
+ * over writes that had, in fact, happened. `restartAround` never throws: it
+ * reports what was written and hands over the command to finish the restart
+ * from outside the app instead.
+ */
 async function finish(store: StoreLayout, restart: boolean): Promise<void> {
   if (!restart) {
     console.log(
@@ -2446,9 +2589,14 @@ async function finish(store: StoreLayout, restart: boolean): Promise<void> {
     );
     return;
   }
-  // Named outright rather than as a flag to add here: --terminate belongs to
-  // "foster app restart", and the writing commands have no such option.
-  await restartDesktop(store, false, 'Run "foster app restart --terminate"');
+  const outcome = await restartAround(store, true, RESTART_COMMAND);
+  if (outcome.done) {
+    console.log(pc.bold('Claude Desktop is up, with the sidebar rebuilt.'));
+    return;
+  }
+  console.log(pc.yellow(outcome.reason ?? 'The restart did not finish.'));
+  console.log(`  ${outcome.command}`);
+  process.exitCode = 1;
 }
 
 const UNCLAIM_PREVIEW_LIMIT = 12;
@@ -2702,7 +2850,7 @@ function undoDatesCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bool
   console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
 }
 
-program
+const layoutCmd = program
   .command('layout')
   .helpGroup('After the sweep:')
   .summary('bring sidebar groups and routines into this account')
@@ -2728,19 +2876,8 @@ program
   .option(
     '--restart',
     'quit Claude Desktop, write, then start it again — the write happens in the gap',
-  )
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  );
+addDetachOptions(layoutCmd)
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
@@ -2761,16 +2898,7 @@ program
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs(opts);
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -2808,9 +2936,12 @@ program
       return;
     }
 
-    // Named here rather than in `restartAround`: the command that finishes the
-    // job restarts the app too, so there is still only one line to hand over.
-    const restartCommand = 'foster layout --yes --restart';
+    // Built from the actual argv, not a template: a bare `'foster layout --yes
+    // --restart'` dropped whatever `--store`/`--ledger`/`--to`/`--to-org` (or
+    // `--no-*`) this run actually carried, so the line handed over on a
+    // self-hosted refusal silently landed somewhere else, or applied
+    // everything instead of the subset this run asked for.
+    const restartCommand = restartCommandFromArgv(process.argv.slice(2));
 
     if (opts.detach) {
       // The write itself happens in the detached process, which re-runs this
@@ -2821,29 +2952,13 @@ program
       // the only plan that is ever real.
       for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
       if (opts.json) {
-        print({
-          target,
-          dryRun: false,
-          plan,
-          detach:
-            outcome.ok && outcome.plan && outcome.launch
-              ? {
-                  detached: true,
-                  pid: outcome.launch.pid,
-                  via: outcome.launch.via,
-                  log: outcome.plan.logPath,
-                  vbs: outcome.plan.vbsPath,
-                  delaySeconds: outcome.plan.delaySeconds,
-                  argv: outcome.plan.argv,
-                  ...(outcome.ending ? { ending: outcome.ending } : {}),
-                }
-              : { detached: false, error: outcome.reason },
-        });
+        print({ target, dryRun: false, plan, detach: detachJson(outcome) });
         if (!outcome.ok) process.exitCode = 1;
         return;
       }
@@ -2855,12 +2970,7 @@ program
       // Checked here rather than at the top, the same as `foster pin`: reading
       // and a dry run keep working while the app is up, and it is only the
       // write that cannot share the files with it.
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
 
       // Caught here, not left to the top-level handler: that only ever had the
       // bare error message to show, with no plan around it and no distinction
@@ -3071,7 +3181,7 @@ const view = program
     }
   });
 
-view
+const viewSetCmd = view
   .command('set')
   .summary('change one or more of the seven filters')
   .option('--status <value>', `${STATUS_WORDS.join('|')}`)
@@ -3083,19 +3193,8 @@ view
   .option('--activity-days <value>', '0|1|3|7|30')
   .option('--to <accountUuid>', 'write into this account instead')
   .option('--to-org <organizationUuid>', 'write into this organization')
-  .option('--restart', 'quit Claude Desktop, write, then start it again')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  .option('--restart', 'quit Claude Desktop, write, then start it again');
+addDetachOptions(viewSetCmd)
   .option('--yes', 'actually write; without it nothing is written')
   .action(async function (this: Command) {
     const { store } = context(this);
@@ -3115,16 +3214,7 @@ view
       detachEvenWithLive?: boolean;
       yes?: boolean;
     }>();
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs(opts);
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -3143,7 +3233,11 @@ view
       return;
     }
 
-    const restartCommand = 'foster view set --yes --restart';
+    // Built from the actual argv, not a template: a bare `'foster view set
+    // --yes --restart'` dropped every filter flag this run actually carried,
+    // so the command handed over on a self-hosted refusal said "Nothing to
+    // change." — measured 24/09/2026.
+    const restartCommand = restartCommandFromArgv(process.argv.slice(2));
 
     if (opts.detach) {
       // Same split as `foster layout`: this process only shows the plan and
@@ -3151,6 +3245,7 @@ view
       // (minus --detach*) from outside the app and does the write itself,
       // re-planned fresh once the app is actually closed.
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
@@ -3160,12 +3255,7 @@ view
     }
 
     if (!opts.restart) {
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
       applyViewSet(plan, { store });
       console.log(pc.bold('\nWritten.'));
       console.log(
@@ -3197,25 +3287,14 @@ view
     }
   });
 
-view
+const viewCopyCmd = view
   .command('copy')
   .summary("copy another account's per-account filters (env, empty groups, PR status)")
   .requiredOption('--from <accountUuid>', 'the account to copy from')
   .option('--to <accountUuid>', 'write into this account instead')
   .option('--to-org <organizationUuid>', 'write into this organization')
-  .option('--restart', 'quit Claude Desktop, write, then start it again')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  .option('--restart', 'quit Claude Desktop, write, then start it again');
+addDetachOptions(viewCopyCmd)
   .option('--yes', 'actually write; without it nothing is written')
   .action(async function (this: Command) {
     const { store } = context(this);
@@ -3229,16 +3308,7 @@ view
       detachEvenWithLive?: boolean;
       yes?: boolean;
     }>();
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs(opts);
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const accounts = listAccountDirs(store);
@@ -3264,6 +3334,7 @@ view
     const restartCommand = viewCopyRestartCommand(from, to);
     if (opts.detach) {
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
@@ -3272,12 +3343,7 @@ view
       return;
     }
     if (!opts.restart) {
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
       applyViewCopy(plan, { store });
       console.log(pc.bold('\nWritten.'));
       return;
@@ -6428,43 +6494,33 @@ app
     }
   });
 
-app
-  .command('restart')
-  .description('close Claude Desktop and start it again, rebuilding the sidebar')
-  .option('--terminate', 'end the process — required while the app keeps a tray icon')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
-  .action(async function (this: Command) {
-    const { store } = context(this);
-    const opts = this.opts<{
-      terminate?: boolean;
-      detach?: boolean;
-      detachDelay?: string;
-      detachEvenWithLive?: boolean;
-    }>();
-    if (opts.detach) {
-      const detachDelay = parseDetachDelay(opts.detachDelay);
-      if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
-      const outcome = await runDetach(
-        process.argv.slice(2),
-        detachDelay,
-        Boolean(opts.detachEvenWithLive),
-      );
-      printDetachResult(outcome, false, detachNotNeededNote(store));
-      return;
-    }
-    await restartDesktop(store, Boolean(opts.terminate));
-  });
+addDetachOptions(
+  app
+    .command('restart')
+    .description('close Claude Desktop and start it again, rebuilding the sidebar')
+    .option('--terminate', 'end the process — required while the app keeps a tray icon'),
+).action(async function (this: Command) {
+  const { store } = context(this);
+  const opts = this.opts<{
+    terminate?: boolean;
+    detach?: boolean;
+    detachDelay?: string;
+    detachEvenWithLive?: boolean;
+  }>();
+  if (opts.detach) {
+    const detachDelay = parseDetachDelay(opts.detachDelay);
+    if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
+    const outcome = await runDetach(
+      store,
+      process.argv.slice(2),
+      detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
+  await restartDesktop(store, Boolean(opts.terminate));
+});
 
 /**
  * The way out of a refusal, in the words of the command the user actually typed.

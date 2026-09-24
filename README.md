@@ -508,6 +508,22 @@ if restarting would end any session besides its own. `--detach-even-with-live` o
 pending, running or done, with the log's own tail — which is how a session that ended before the
 restart landed finds out whether it actually did.
 
+With the tray **on** — the default — `--detach` alone cannot finish: the detached re-run asks
+Claude Desktop to close the ordinary way, which the tray only hides, and the run ends having
+written nothing. `foster` refuses up front rather than spending the wait: on `app restart` add
+`--terminate` as well (it rides straight through to the detached re-run); the other commands
+have no `--terminate` of their own, so close Claude Desktop yourself first, or run
+`foster app restart --detach --terminate` instead. Checked directly against this machine's own
+default installation 24/09/2026: `menuBarEnabled` is unset there, meaning the app default (tray
+**on**) — so the bug was live on the very machine this codebase is developed on, and the fix was
+never validated by "try it and see" here alone.
+
+`--detach` carries `--store`/`--ledger` (and, for `sweep`, the account it just wrote into) into
+the command it detaches to — `foster --store work sweep --yes --restart --detach` used to hand
+the detached process a bare `foster layout --yes --restart` with no `--store` at all, which
+restarted the _default_ installation while `work` was the one actually swept. Measured
+24/09/2026, fixed the same day.
+
 Closing it is less polite than it should be, and `foster` says so rather than pretending otherwise.
 Claude Desktop's window-close handler quits the app **only when its tray icon is turned off**; with
 the tray on — the default — it cancels the close and hides the window. So asking politely would make
