@@ -693,12 +693,17 @@ than the CLI claims to support, and never on its own stated floor.
 `vitest.config.ts`'s coverage now includes `src/cli/**`, previously excluded — the exclusion made
 `npm run coverage` read 88% when the real figure, CLI entrypoints included, measured 66.6%
 statements (2026-09-24). The naive fix — pin `coverage.thresholds` to that exact measured level —
-does not hold: the same `npm run coverage`, run again with `HOME`/`USERPROFILE` pointed at an
-empty `mktemp -d` directory instead of a normal populated one, measured 66.59% statements, not
-66.6% — several `src/store` and `src/engine` paths branch on what actually exists under the real
-home directory, so the percentage is environment-dependent, not merely noisy at the last decimal.
-The configured thresholds (statements 66.3 / branches 60.2 / functions 71.3 / lines 67.6) sit
-below the lower of the two measurements, with margin for a third environment neither matches —
-the GitHub Actions runner's own `$HOME` — so a genuine drop still fails CI without the floor
+does not hold, and not just at the last decimal: several `src/store` and `src/engine` paths branch
+on what actually exists under the home directory and on OS, so the percentage genuinely moves with
+the environment `npm run coverage` runs in. Measured the same day, all real: a normal populated
+Windows `$HOME` (66.60 / 60.52 / 71.51 / 67.82 — statements/branches/functions/lines), an empty
+`mktemp`'d Windows `$HOME` + `%USERPROFILE%` (66.59 / 60.46 / 71.51 / 67.84), GitHub Actions
+`windows-latest` (66.49 / 60.35 / 71.46 / 67.78), and GitHub Actions `ubuntu-latest` — the real low
+point — at 66.31 / 60.16 / 71.23 / 67.61. A first pass at this floor was pinned to the two Windows
+numbers and failed both `ubuntu-latest` cells the first time this PR actually ran in CI (`check`
+had never run `npm run coverage` before, so nothing had caught this). The configured thresholds
+(statements 66.0 / branches 59.8 / functions 71.0 / lines 67.3) sit with margin under the
+`ubuntu-latest` figures, the real low point among the four measurements, not under whichever
+environment happened to be measured most recently: a genuine drop still fails CI without the floor
 itself flaking on environment alone; raise it as coverage improves by more than that margin, never
 lower it to let a real drop through.

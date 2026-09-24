@@ -1873,11 +1873,13 @@ installs or executes; and the coverage floor itself.
 
 `npm run coverage` measures `src/**/*.ts` including `src/cli/**` (excluding it made the number
 optimistic — 88% became 66.6% once the CLI entrypoints were counted), and `vitest.config.ts` sets a
-coverage floor with margin below that real level — measured coverage is environment-dependent (a
-run with an empty `$HOME` reads a few tenths of a point lower than a normal one, since several
-code paths branch on what actually exists under the home directory), so the floor sits under the
-lower of the two rather than pinned to either exactly: a genuine drop still fails CI, an
-improvement is free to raise it, and the floor is never lowered just to make a drop pass.
+coverage floor with margin below the real level — measured coverage here is genuinely
+environment-dependent, not just noisy: several code paths branch on what actually exists under the
+home directory and on OS, and GitHub Actions' `ubuntu-latest` reads a few tenths of a point lower
+across the board than a developer's own Windows machine or `windows-latest`. The floor sits under
+the real low point of that range (`ubuntu-latest`), not under whichever environment was measured
+most recently: a genuine drop still fails CI, an improvement is free to raise it, and the floor is
+never lowered just to make a drop pass.
 
 ### Releasing
 
