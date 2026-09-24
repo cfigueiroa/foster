@@ -64,6 +64,14 @@ export function defaultLedgerPath(env: NodeJS.ProcessEnv = process.env): string 
   return path.join(base, 'ledger.jsonl');
 }
 
+function statSyncOrUndefined(file: string): { size: number; mtimeMs: number } | undefined {
+  try {
+    return statSync(file);
+  } catch {
+    return undefined;
+  }
+}
+
 /** What `read()` last parsed, and the stat that says whether it is still current. */
 interface ReadCache {
   events: LedgerEvent[];
@@ -127,6 +135,17 @@ export class Ledger {
       // that stops recurring after the first one is caught.
       this.ensureTrailingNewline();
     }
+    // Taken *before* the write, so it describes the file this instance's cache
+    // actually claims to represent. A second writer — another `foster`
+    // process, a hand edit, a detached restart script, all of which this
+    // ledger is meant to tolerate (see the class docstring) — can append
+    // between this instance's last read()/append() and this call; if it did,
+    // this stat will already disagree with `this.cache`, and pushing `full`
+    // onto the cached array below would silently drop that other writer's
+    // event forever (the post-write stat would then make the cache match the
+    // real file exactly, so no future read() would ever re-fetch it).
+    const preStat = this.cache ? statSyncOrUndefined(this.file) : undefined;
+
     appendFileSync(this.file, `${JSON.stringify(full)}\n`, 'utf8');
 
     // Kept in step with the write rather than dropped: growing the cached array
@@ -136,16 +155,28 @@ export class Ledger {
     // whole thing exists to avoid — worse, on every write in a batch that both
     // reads and writes the ledger many times over (a sweep round).
     if (this.cache) {
-      this.cache.events.push(full);
-      try {
-        const stat = statSync(this.file);
-        this.cache.size = stat.size;
-        this.cache.mtimeMs = stat.mtimeMs;
-      } catch {
-        // Cannot happen right after a successful append, but if the file somehow
-        // is not there to stat, dropping the cache is the safe fallback: the next
-        // read() just reparses, same as an instance that never cached anything.
+      const staleBeforeWrite =
+        !preStat || preStat.size !== this.cache.size || preStat.mtimeMs !== this.cache.mtimeMs;
+      if (staleBeforeWrite) {
+        // Someone else wrote to this file since this instance last saw it.
+        // The in-memory array is missing whatever they added, so pushing
+        // `full` onto it would produce a view with this instance's own event
+        // but not theirs — worse than no cache at all. Drop it; the next
+        // read() reparses from disk and picks up everything.
         this.cache = undefined;
+      } else {
+        this.cache.events.push(full);
+        const stat = statSyncOrUndefined(this.file);
+        if (stat) {
+          this.cache.size = stat.size;
+          this.cache.mtimeMs = stat.mtimeMs;
+        } else {
+          // Cannot happen right after a successful append, but if the file
+          // somehow is not there to stat, dropping the cache is the safe
+          // fallback: the next read() just reparses, same as an instance that
+          // never cached anything.
+          this.cache = undefined;
+        }
       }
     }
     return full;

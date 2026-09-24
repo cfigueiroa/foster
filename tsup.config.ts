@@ -13,22 +13,22 @@ export default defineConfig({
     // Bundled CommonJS dependencies still call require() for Node builtins, which
     // does not exist in an ESM output — createRequire gives them a working one.
     //
-    // module.enableCompileCache persists V8's compiled bytecode for this file to
-    // disk (a default OS temp/cache location) and reuses it on the next launch —
-    // real gain for a CLI invoked over and over in a single short-lived process
-    // each time, which is exactly foster's shape. A namespace import rather than
-    // `import { enableCompileCache }`: the named form is a static binding, and on
-    // a Node below the version that added the function it would fail the whole
-    // module at load with "does not provide an export named", not just no-op.
-    // The namespace object always exists; the optional call on it is what
-    // actually guards Node 20's minimum-supported minor versions, several of
-    // which predate this API.
+    // No `module.enableCompileCache()` here: measured (built bundle, `foster
+    // --version` timed over multiple 20-run trials, with a warmed persistent
+    // NODE_COMPILE_CACHE dir to mirror real repeated-launch conditions) to make
+    // no difference to ordinary invocations. `enableCompileCache()` only caches
+    // compilation of modules loaded *after* the call — it cannot cache the very
+    // script it runs inside, which V8 has already fully parsed and compiled by
+    // the time any of that script's own top-level statements execute. Since
+    // this bundle is a single self-contained file (see `noExternal` above), the
+    // only thing calling it here could ever help is `src/agent/sdk.ts`'s own
+    // `import()` of the Agent SDK and zod — the one place this codebase
+    // dynamically imports anything at all, and not on the hot path of an
+    // ordinary command (doctor/stores/clients/sweep/...).
     js: [
       '#!/usr/bin/env node',
       "import { createRequire as __nodeCreateRequire } from 'node:module';",
       'const require = __nodeCreateRequire(import.meta.url);',
-      "import * as __nodeModule from 'node:module';",
-      '__nodeModule.enableCompileCache?.();',
     ].join('\n'),
   },
 });

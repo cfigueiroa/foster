@@ -656,7 +656,14 @@ per sweep round (`ops/sweep.ts`), up to three rounds, plus once per copy in the 
 instance (a second `foster` process, a hand edit) still forces a reread. `append()` keeps the cache
 in step by pushing the new event onto the same array and re-stating for the new key, instead of
 dropping it, so a run that both reads and writes the ledger many times (a sweep round) reparses at
-most once. `read()` hands back the live cached array, never a defensive copy — checked across
+most once — but only once it has checked the file's size/mtime _before_ the write against what the
+cache still claims: without that check, an event a second writer appended between this instance's
+last `read()`/`append()` and this `append()` call would be silently dropped from this instance's
+view forever, because the write's own post-append `statSync` would then make the cache's key match
+the real file exactly and no later `read()` would ever re-fetch it to notice. A mismatch drops the
+cache instead of growing it, so the next `read()` reparses from disk and picks up everything,
+including the other writer's event (`tests/ledger.test.ts`, "does not lose a concurrent writer's
+event..."). `read()` hands back the live cached array, never a defensive copy — checked across
 `src/`, nothing mutates what it returns, only iterates it.
 
 `project()` (`ledger/project.ts`) memoizes its own fold over the same array, by identity and
@@ -694,12 +701,18 @@ that print an account by name — not every command — from #52, well before th
 on those commands is one PowerShell spawn to unseal the Desktop's DPAPI-sealed token
 (`store/credential.ts:183`), which has no process-table equivalent to cache.
 
-The bundle's banner (`tsup.config.ts`) now also calls `module.enableCompileCache?.()` — a namespace
-import and optional call rather than `import { enableCompileCache }`, because the named form is a
-static binding and fails the whole module at load on a Node old enough not to export it, where the
-optional call on a namespace object simply no-ops. This persists V8's compiled bytecode for the
-bundle across runs, which is where a CLI invoked as a new short-lived process each time actually
-spends the saving — not measured in isolation here, folded into the `doctor` timings below.
+Considered and dropped: `module.enableCompileCache()` in the bundle's banner. It persists V8's
+compiled bytecode for modules loaded _after_ the call, which sounded like a real saving for a CLI
+that is a new short-lived process each time — but it cannot cache the compilation of the script it
+is running inside, which V8 has already fully parsed and compiled before any of that script's own
+top-level statements execute. Measured directly: the built bundle's `foster --version`, timed over
+multiple 20-run trials with a warmed persistent `NODE_COMPILE_CACHE` dir (the real-world
+repeated-launch case the banner was meant for), was statistically indistinguishable with and
+without the call. Since this bundle is a single self-contained file (`noExternal` above), the only
+thing it could ever help is `src/agent/sdk.ts`'s own `import()` of the Agent SDK and zod — the
+sole dynamic `import()` in this codebase, and not on the hot path of an ordinary command
+(doctor/stores/clients/sweep/...) — so it was not worth the added banner complexity and the claim
+was not worth keeping in this file.
 
 `tests/setup.ts` now points `HOME`/`USERPROFILE` at a fresh `mkdtemp` directory before any test
 file's own imports run. `configDirCandidates`, `inUseConfigDir` and the rest of

@@ -172,6 +172,46 @@ describe('Ledger', () => {
       expect(after).toHaveLength(2);
       expect(after[0]).toMatchObject({ originSessionId: 'local_origin-1' });
     });
+
+    it("does not lose a concurrent writer's event when this instance appends without re-reading first", () => {
+      // Two `Ledger` instances over the same file, the way two `foster`
+      // processes (or a long-lived sweep instance and a detached restart
+      // helper) would share one ledger.
+      const ledgerA = makeLedger();
+      const ledgerB = new Ledger(ledgerA.path);
+
+      ledgerA.append(fostered);
+      ledgerA.read(); // primes ledgerA's cache at 1 event.
+
+      // ledgerB appends directly to the file, bypassing ledgerA entirely —
+      // ledgerA's cache is now stale, but nothing has told it so yet.
+      ledgerB.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      // ledgerA appends without an intervening read(). Its cache-growth path
+      // must notice the file moved under it instead of blindly pushing onto
+      // a 1-event array and mistaking the result for the truth.
+      ledgerA.append({
+        ...fostered,
+        originSessionId: 'local_origin-3',
+        copySessionId: 'local_copy-3',
+      });
+
+      expect(
+        ledgerA.read().map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2', 'local_origin-3']);
+
+      // A fresh instance over the same file must agree — this is not a quirk
+      // of ledgerA recovering, it is the actual content of the file.
+      expect(
+        new Ledger(ledgerA.path)
+          .read()
+          .map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2', 'local_origin-3']);
+    });
   });
 });
 
