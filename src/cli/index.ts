@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
+import { forLedgerSighting } from '../domain/identity.js';
 import {
   candidateStoreRoots,
   comparablePath,
@@ -3636,14 +3637,15 @@ program
     // Written down so the next run still knows it after the app has forgotten —
     // but only when it adds something. A reading command that appended on every
     // invocation would fill an append-only log with identical lines.
-    if (cached && worthRecording(cached, known)) {
+    const toRecord = cached ? forLedgerSighting(cached) : undefined;
+    if (toRecord && worthRecording(toRecord, known)) {
       ledger.append({
         kind: 'account_identity_seen',
         accountUuid,
-        ...(cached.email ? { email: cached.email } : {}),
-        ...(cached.name ? { name: cached.name } : {}),
-        ...(cached.plan ? { plan: cached.plan } : {}),
-        ...(cached.profile ? { profile: cached.profile } : {}),
+        ...(toRecord.email ? { email: toRecord.email } : {}),
+        ...(toRecord.name ? { name: toRecord.name } : {}),
+        ...(toRecord.plan ? { plan: toRecord.plan } : {}),
+        ...(toRecord.profile ? { profile: toRecord.profile } : {}),
       });
     }
 
@@ -3849,7 +3851,7 @@ function identifyReason(
 /** Writes down the current account's profile when it says something the ledger does not. */
 function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {
   const fresh = freshIdentityOf(rows);
-  const identity = fresh?.identity;
+  const identity = fresh?.identity ? forLedgerSighting(fresh.identity) : undefined;
   if (!fresh || !identity) return;
   if (!worthRecording(identity, project(ledger.read()).identities.get(fresh.accountUuid))) return;
 
@@ -5046,14 +5048,14 @@ program
   .argument('<cliSessionId>', 'the conversation id')
   .argument('<prompt...>', 'what to say to it')
   .option('--timeout <seconds>', 'give up after this long', '300')
-  .action(function (this: Command, cliSessionId: string, prompt: string[]) {
+  .action(async function (this: Command, cliSessionId: string, prompt: string[]) {
     const opts = this.opts<{ timeout: string }>();
     const timeout = Number(opts.timeout);
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new Error(`--timeout must be a positive number of seconds, not "${opts.timeout}".`);
     }
 
-    const result = resumeConversation(cliSessionId, prompt.join(' '), {
+    const result = await resumeConversation(cliSessionId, prompt.join(' '), {
       timeoutMs: timeout * 1000,
     });
     if ('refused' in result) {
