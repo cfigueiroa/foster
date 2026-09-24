@@ -27,6 +27,7 @@ describe('restartAround — finding #3: the app is always started back up', () =
     expect(result).toEqual({
       requested: true,
       done: true,
+      closed: true,
       command: 'foster layout --yes --restart',
     });
   });
@@ -92,6 +93,88 @@ describe('restartAround — finding #3: the app is always started back up', () =
     expect(quit).not.toHaveBeenCalled();
     expect(start).not.toHaveBeenCalled();
     expect(result.done).toBe(false);
+  });
+});
+
+describe('restartAround — closed reports whether the app actually went down', () => {
+  it('is true even when duringGap throws before writing anything of its own', async () => {
+    // Mirrors `foster app pref --restart` with a single change whose write
+    // throws immediately: nothing is ever recorded by the caller, but the
+    // app was already closed by the time duringGap ran.
+    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'quit' }));
+    const start = vi.fn(async () => true);
+    const duringGap = vi.fn(async () => {
+      throw new Error('the first write failed');
+    });
+
+    const result = await restartAround(store, true, 'foster app pref --restart --yes', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
+
+    expect(result.done).toBe(false);
+    expect(result.closed).toBe(true);
+  });
+
+  it('is true when start throws after a clean quit and a clean duringGap', async () => {
+    const quit = vi.fn(async (): Promise<QuitResult> => ({ outcome: 'quit' }));
+    const start = vi.fn(async (): Promise<boolean> => {
+      throw new Error('start blew up');
+    });
+    const duringGap = vi.fn(async () => {});
+
+    const result = await restartAround(store, true, 'foster layout --yes --restart', duringGap, {
+      plan: () => possiblePlan(true),
+      quit,
+      start,
+    });
+
+    expect(result.done).toBe(false);
+    expect(result.closed).toBe(true);
+  });
+
+  it('is false when the plan says restarting is not possible', async () => {
+    const result = await restartAround(store, true, 'foster app restart', undefined, {
+      plan: () => ({
+        possible: false,
+        running: true,
+        reason: 'foster is running inside Claude Desktop',
+        command: 'foster app restart',
+      }),
+      quit: vi.fn(),
+      start: vi.fn(),
+    });
+
+    expect(result.closed).toBe(false);
+  });
+
+  it('is false when the tray refuses to actually quit', async () => {
+    const quit = vi.fn(
+      async (): Promise<QuitResult> => ({ outcome: 'hides-to-tray' }) as QuitResult,
+    );
+    const result = await restartAround(store, true, 'foster app restart', undefined, {
+      plan: () => possiblePlan(true),
+      quit,
+      start: vi.fn(async () => true),
+    });
+
+    expect(result.closed).toBe(false);
+  });
+
+  it('is false when quit itself throws', async () => {
+    const quit = vi.fn(async (): Promise<QuitResult> => {
+      throw new Error('quit blew up');
+    });
+    const result = await restartAround(store, true, 'foster app restart', undefined, {
+      plan: () => possiblePlan(true),
+      quit,
+      start: vi.fn(async () => true),
+    });
+
+    expect(result.done).toBe(false);
+    expect(result.closed).toBe(false);
+    expect(result.reason).toContain('quit blew up');
   });
 });
 

@@ -214,13 +214,14 @@ export function registerAppPref(
         restartCommandFromArgv(process.argv.slice(2)),
         async () => writeAll(),
       );
-      // `written.length > 0` is proxy for "the gap actually ran": `restartAround`
-      // only calls `duringGap` once the quit itself succeeded, so it is also
-      // proxy for "the app was closed" — true even when a later `start` failure
-      // is what kept `restart.done` false, unlike a refusal before the app was
-      // ever touched (`needs-terminate`, still running), where nothing was
-      // written and the app was never closed either.
-      const closed = written.length > 0;
+      // `restart.closed` is `restartAround`'s own account of whether the app
+      // actually went down, set the instant `duringGap` becomes safe to run —
+      // not a proxy like `written.length > 0`, which was wrong whenever the
+      // very *first* write inside the gap was the one that threw: the app had
+      // already been closed by then, but nothing had been pushed onto
+      // `written` yet, so the old proxy reported `closed: false` over a gap
+      // that had, in fact, opened.
+      const closed = restart.closed;
       if (restart.done) {
         if (opts.json) {
           console.log(JSON.stringify({ guarded, written, closed, restarted: true }, null, 2));
