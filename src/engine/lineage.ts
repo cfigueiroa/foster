@@ -2,12 +2,15 @@ import type { WorktreeReach } from '../domain/fostering.js';
 import type { ReachCheck } from '../domain/filter.js';
 import type { CodeSessionData } from '../domain/types.js';
 import {
+  cachedScanConversation,
+  cachedScanConversationFiles,
+  type TranscriptCache,
+} from '../store/cache/transcriptCache.js';
+import {
   conversationRoot,
   fileOpenedFrom,
   idsMentionedIn,
   indexAllTranscripts,
-  scanConversation,
-  scanConversationFiles,
   transcriptRoots,
   type ConversationScan,
   type RecordIdCache,
@@ -132,7 +135,7 @@ export function useTranscriptRoots(dirs: string[] | undefined): void {
   installedRoots = dirs;
 }
 
-export function lineageAt(projectsDirs: string[]): Lineage {
+export function lineageAt(projectsDirs: string[], cache?: TranscriptCache): Lineage {
   let index: Map<string, string[]> | undefined;
   const roots = new Map<string, string | undefined>();
   const scans = new Map<string, ConversationScan | undefined>();
@@ -247,7 +250,7 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       if (scans.has(cliSessionId)) return scans.get(cliSessionId);
 
       const files = filesOf(cliSessionId);
-      const scan = files.length === 0 ? undefined : scanConversationFiles(files);
+      const scan = files.length === 0 ? undefined : cachedScanConversationFiles(files, cache);
       scans.set(cliSessionId, scan);
       return scan;
     },
@@ -260,7 +263,7 @@ export function lineageAt(projectsDirs: string[]): Lineage {
       if (file === undefined) return undefined;
       let scan = perFile.get(file);
       if (scan === undefined) {
-        scan = scanConversation(file);
+        scan = cachedScanConversation(file, cache);
         perFile.set(file, scan);
       }
       return scan;
@@ -335,8 +338,12 @@ export function lineageAt(projectsDirs: string[]): Lineage {
  * orphan search takes — so a sweep asked to look in one more place reads its
  * transcripts through the one index too.
  */
-export function lineage(env: NodeJS.ProcessEnv = process.env, extra: string[] = []): Lineage {
-  return lineageAt(installedRoots ?? transcriptRoots(env, extra));
+export function lineage(
+  env: NodeJS.ProcessEnv = process.env,
+  extra: string[] = [],
+  cache?: TranscriptCache,
+): Lineage {
+  return lineageAt(installedRoots ?? transcriptRoots(env, extra), cache);
 }
 
 /**

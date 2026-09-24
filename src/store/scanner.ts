@@ -10,7 +10,10 @@ import type {
   StoreLayout,
 } from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
-import { readSessionCard, readSessionFile } from './sessionFile.js';
+import type { SlimCardCache } from './cache/cardCache.js';
+import { readSessionCardCached } from './cache/cardCache.js';
+import { readSessionFile } from './sessionFile.js';
+
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -49,11 +52,19 @@ const NOTHING_KNOWN: KnownCopies = new Set<string>();
  * `withBulkyFields` before any write that copies a whole card. Off by default,
  * so every other reader keeps the card exactly as the file holds it.
  *
- * `cache` is the other half of that same long run: see `ScanCache` below.
+ * `cache` is the other half of that same long run: see `ScanCache` below — a
+ * per-run, in-memory memo of the parsed card, for either scan type.
+ * `persistentCache`, consulted only when `slim` is true (from `ScanCache`
+ * itself, or directly when there is no `ScanCache`), is a *cross-run*
+ * `SlimCardCache` (`store/cache/`) that answers for a card whose file has not
+ * changed size or mtime since a previous run last read it, instead of reading
+ * and parsing it again. With neither cache passed this is exactly the
+ * uncached read, so passing nothing changes nothing about what a scan finds.
  */
 export interface ScanOptions {
   slim?: boolean;
   cache?: ScanCache;
+  persistentCache?: SlimCardCache;
 }
 
 interface CachedCard {
@@ -96,6 +107,7 @@ export class ScanCache {
   read(
     file: string,
     slim: boolean,
+    persistentCache?: SlimCardCache,
   ): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
     let stat: { mtimeMs: number; size: number };
     try {
@@ -111,7 +123,7 @@ export class ScanCache {
       if (slim || !cached.card.slim) return { card: cached.card, size: stat.size };
     }
 
-    const card = slim ? readSessionCard(file) : wholeCard(file);
+    const card = slim ? readSessionCardCached(file, persistentCache) : wholeCard(file);
     if (!card) {
       this.entries.delete(file);
       return undefined;
@@ -124,8 +136,9 @@ export class ScanCache {
 function readUncached(
   file: string,
   slim: boolean,
+  persistentCache?: SlimCardCache,
 ): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
-  const card = slim ? readSessionCard(file) : wholeCard(file);
+  const card = slim ? readSessionCardCached(file, persistentCache) : wholeCard(file);
   if (!card) return undefined;
   return { card, size: sizeOf(file) };
 }
@@ -144,7 +157,9 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const read = options.cache ? options.cache.read(file, slim) : readUncached(file, slim);
+    const read = options.cache
+      ? options.cache.read(file, slim, options.persistentCache)
+      : readUncached(file, slim, options.persistentCache);
     if (!read) continue;
     const { card, size } = read;
     const { data } = card;

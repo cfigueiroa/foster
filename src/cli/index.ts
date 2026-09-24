@@ -136,6 +136,14 @@ import {
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanStore, summarise } from '../store/scanner.js';
 import {
+  cacheDisabled,
+  cacheStats,
+  clearCache,
+  defaultCacheDir,
+  openFosterCache,
+  type FosterCache,
+} from '../store/cache/index.js';
+import {
   defaultRescueDeps,
   findStranded,
   openResumeTabs,
@@ -302,6 +310,7 @@ import {
 interface GlobalOptions {
   store?: string;
   ledger?: string;
+  cache?: boolean;
 }
 
 const program = new Command();
@@ -314,6 +323,10 @@ program
   .version(VERSION)
   .option('--store <path>', 'path to the Claude Desktop userData directory')
   .option('--ledger <path>', "path to foster's ledger file")
+  .option(
+    '--no-cache',
+    'skip the persistent scan cache under <FOSTER_HOME>/cache (same as FOSTER_NO_CACHE=1)',
+  )
   // Running the bare command opens the guided menu; the subcommands below stay
   // available for scripting and for anyone who prefers one-shot invocations.
   .action(async function (this: Command) {
@@ -332,6 +345,18 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
+}
+
+/**
+ * Open the persistent scan cache for a command that reads one, or nothing when
+ * `--no-cache` (or `FOSTER_NO_CACHE`) says to skip it. Commander turns
+ * `--no-cache` into `cache: false`; every other case — flag absent, or
+ * `--cache` explicitly, which commander also derives from the same
+ * declaration — leaves the environment variable the only voice left.
+ */
+function openCacheFor(command: Command): FosterCache | undefined {
+  const opts = command.optsWithGlobals<GlobalOptions>();
+  return openFosterCache(process.env, opts.cache === false);
 }
 
 /**
@@ -595,6 +620,8 @@ program
     // first one already gave, inside the same few hundred milliseconds.
     const app = inspectApp(store, undefined, cachedProcesses);
 
+    const cache = cacheStats(defaultCacheDir(process.env));
+
     if (opts.json) {
       print({
         version: VERSION,
@@ -609,6 +636,13 @@ program
         // Read from `fcache`, an undocumented cache the app can reshape at any
         // update — 'unknown' here is the expected steady state, not an error.
         nativeMultiAccountSwitcher: readNativeSwitcherAvailability(store),
+        cache: {
+          dir: cache.dir,
+          disabled: cacheDisabled(process.env, opts.cache === false),
+          files: cache.files,
+          bytes: cache.bytes,
+          newestMtimeMs: cache.newestMtimeMs ?? null,
+        },
       });
       return;
     }
@@ -749,6 +783,20 @@ program
             '  If no sign-in is in flight: foster app login --restore --yes',
         ),
       );
+    }
+
+    console.log(pc.bold('Cache'));
+    if (cacheDisabled(process.env, opts.cache === false)) {
+      console.log(pc.dim('  disabled (--no-cache or FOSTER_NO_CACHE)'));
+    } else if (!cache.files) {
+      console.log(pc.dim(`  empty — ${cache.dir}`));
+    } else {
+      console.log(
+        `  ${formatBytes(cache.bytes)} across ${cache.files} file(s), newest ${
+          cache.newestMtimeMs === undefined ? 'unknown' : formatDate(cache.newestMtimeMs)
+        }`,
+      );
+      console.log(pc.dim(`  ${cache.dir} — foster cache clear to empty it`));
     }
 
     console.log(pc.bold('State'));
@@ -1098,118 +1146,152 @@ program
     }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
-    const report = runSweep({
-      store,
-      ledger,
-      target,
-      prefix: opts.prefix,
-      staleTemplate: opts.stalePrefix,
-      divergedTemplate: opts.branchPrefix,
-      otherFileTemplate: opts.otherFilePrefix,
-      syncTitles: Boolean(opts.syncTitles),
-      dates: Boolean(opts.dates),
-      dryRun,
-      configDirs: opts.configDir ?? [],
-    });
-
-    // Named here, not in `sweepRestart` itself: a layout is planned but never
-    // applied by the sweep, so the command handed over on a restart has to be
-    // the one that actually finishes the job — `foster layout` restarts the
-    // app too, so there is still only one command to run outside it.
-    //
-    // `totalLayoutPending` reads every count the preview carries — groups
-    // created, cards assigned, order entries added, routines brought, view
-    // keys carried — not just the two an earlier cut checked here, which let
-    // a plan with only a pending order entry or only a view-prefs carry print
-    // the generic restart line instead of pointing at `foster layout`.
-    //
-    // A sweep that marked rows goes through `foster layout` too, even with no
-    // layout pending: its gap is the one that writes back any mark the running
-    // app saves over in the meantime (`engine/marksBack.ts`).
-    const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
-    const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
-
-    if (opts.json) {
-      if (opts.detach) {
-        const outcome = await runDetach(
-          sweepDetachArgv(layoutPending),
-          detachDelay,
-          Boolean(opts.detachEvenWithLive),
-        );
-        print({
-          ...sweepJson(report),
-          detach:
-            outcome.ok && outcome.plan && outcome.launch
-              ? {
-                  detached: true,
-                  pid: outcome.launch.pid,
-                  via: outcome.launch.via,
-                  log: outcome.plan.logPath,
-                  vbs: outcome.plan.vbsPath,
-                  delaySeconds: outcome.plan.delaySeconds,
-                  argv: outcome.plan.argv,
-                  ...(outcome.ending ? { ending: outcome.ending } : {}),
-                }
-              : { detached: false, error: outcome.reason },
-        });
-        if (!outcome.ok) process.exitCode = 1;
-        return;
-      }
-      // The one output that has to wait: it is a single object, so the restart
-      // has to have happened before any of it can be written.
-      const restart = await sweepRestart(
-        store,
-        Boolean(opts.restart) && !dryRun,
-        restartCommand,
-        deferredPinsGap(store, ledger, target, report),
-      );
-      print({ ...sweepJson(report), restart });
-      return;
+    // Opened once for the whole command and saved in `finally`: every path
+    // below this — dry run, --json, --detach, an error thrown mid-restart —
+    // must still bank whatever this run's scans learned, or the next run pays
+    // the cold cost again for nothing.
+    const cache = openCacheFor(this);
+    try {
+      await runSweepCommand(store, ledger, target, opts, dryRun, detachDelay, cache);
+    } finally {
+      cache?.save();
     }
+  });
 
-    const labels = labelsOf(ledger);
-    console.log(
-      pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
-    );
+async function runSweepCommand(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  opts: {
+    prefix: string;
+    stalePrefix: string;
+    branchPrefix: string;
+    otherFilePrefix: string;
+    syncTitles?: boolean;
+    dates?: boolean;
+    restart?: boolean;
+    detach?: boolean;
+    detachEvenWithLive?: boolean;
+    json?: boolean;
+    configDir?: string[];
+  },
+  dryRun: boolean,
+  detachDelay: number,
+  cache: FosterCache | undefined,
+): Promise<void> {
+  const report = runSweep({
+    store,
+    ledger,
+    target,
+    prefix: opts.prefix,
+    staleTemplate: opts.stalePrefix,
+    divergedTemplate: opts.branchPrefix,
+    otherFileTemplate: opts.otherFilePrefix,
+    syncTitles: Boolean(opts.syncTitles),
+    dates: Boolean(opts.dates),
+    dryRun,
+    configDirs: opts.configDir ?? [],
+    cache,
+  });
 
-    printPhase('Fostering, archived included', report.fostered.outcomes);
-    printBranches(report.branches);
-    printFileCards(report.files);
-    printPhase('Restoring what the app deleted', report.restored.outcomes);
-    printWorktreeClaims(report.worktreeClaims, dryRun);
-    if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+  // Named here, not in `sweepRestart` itself: a layout is planned but never
+  // applied by the sweep, so the command handed over on a restart has to be
+  // the one that actually finishes the job — `foster layout` restarts the
+  // app too, so there is still only one command to run outside it.
+  //
+  // `totalLayoutPending` reads every count the preview carries — groups
+  // created, cards assigned, order entries added, routines brought, view
+  // keys carried — not just the two an earlier cut checked here, which let
+  // a plan with only a pending order entry or only a view-prefs carry print
+  // the generic restart line instead of pointing at `foster layout`.
+  //
+  // A sweep that marked rows goes through `foster layout` too, even with no
+  // layout pending: its gap is the one that writes back any mark the running
+  // app saves over in the meantime (`engine/marksBack.ts`).
+  const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
+  const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
 
-    console.log('');
-    for (const line of sweepSummary(report)) console.log(line);
-
-    if (dryRun) {
-      console.log(pc.dim('\nRe-run with --yes to write.'));
-      return;
-    }
-
-    // Last, and only now. Restarting waits up to half a minute for the app to
-    // close and a minute more for it to take the store again, and doing that
-    // before the report meant a sweep that had already written a few hundred
-    // files sat silent for the whole of it — with nothing on screen naming them
-    // if the wait was mistaken for a hang and interrupted.
+  if (opts.json) {
     if (opts.detach) {
       const outcome = await runDetach(
         sweepDetachArgv(layoutPending),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
-      printDetachResult(outcome, false, detachNotNeededNote(store));
+      print({
+        ...sweepJson(report),
+        detach:
+          outcome.ok && outcome.plan && outcome.launch
+            ? {
+                detached: true,
+                pid: outcome.launch.pid,
+                via: outcome.launch.via,
+                log: outcome.plan.logPath,
+                vbs: outcome.plan.vbsPath,
+                delaySeconds: outcome.plan.delaySeconds,
+                argv: outcome.plan.argv,
+                ...(outcome.ending ? { ending: outcome.ending } : {}),
+              }
+            : { detached: false, error: outcome.reason },
+      });
+      if (!outcome.ok) process.exitCode = 1;
       return;
     }
-    reportSweepRestart(
-      await sweepRestart(
-        store,
-        Boolean(opts.restart),
-        restartCommand,
-        deferredPinsGap(store, ledger, target, report),
-      ),
+    // The one output that has to wait: it is a single object, so the restart
+    // has to have happened before any of it can be written.
+    const restart = await sweepRestart(
+      store,
+      Boolean(opts.restart) && !dryRun,
+      restartCommand,
+      deferredPinsGap(store, ledger, target, report),
     );
-  });
+    print({ ...sweepJson(report), restart });
+    return;
+  }
+
+  const labels = labelsOf(ledger);
+  console.log(
+    pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
+  );
+
+  printPhase('Fostering, archived included', report.fostered.outcomes);
+  printBranches(report.branches);
+  printFileCards(report.files);
+  printPhase('Restoring what the app deleted', report.restored.outcomes);
+  printWorktreeClaims(report.worktreeClaims, dryRun);
+  if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+
+  console.log('');
+  for (const line of sweepSummary(report)) console.log(line);
+
+  if (dryRun) {
+    console.log(pc.dim('\nRe-run with --yes to write.'));
+    return;
+  }
+
+  // Last, and only now. Restarting waits up to half a minute for the app to
+  // close and a minute more for it to take the store again, and doing that
+  // before the report meant a sweep that had already written a few hundred
+  // files sat silent for the whole of it — with nothing on screen naming them
+  // if the wait was mistaken for a hang and interrupted.
+  if (opts.detach) {
+    const outcome = await runDetach(
+      sweepDetachArgv(layoutPending),
+      detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
+  reportSweepRestart(
+    await sweepRestart(
+      store,
+      Boolean(opts.restart),
+      restartCommand,
+      deferredPinsGap(store, ledger, target, report),
+    ),
+  );
+}
 
 /**
  * Put the marked cards of one account back to the title and archived flag the
@@ -4265,6 +4347,32 @@ program
     const outcome = applyPointer(plan);
     if (!outcome.ok) process.exitCode = 1;
     console.log(outcome.ok ? outcome.message : pc.red(outcome.message));
+  });
+
+const cacheCommand = program
+  .command('cache')
+  .helpGroup('After the sweep:')
+  .description('the persistent scan cache under <FOSTER_HOME>/cache');
+
+cacheCommand
+  .command('clear')
+  .summary('delete the persistent scan cache')
+  .description(
+    'Remove every file under the persistent cache foster keeps to skip re-reading cards and\n' +
+      'transcripts that have not changed since the last run.\n\n' +
+      'Nothing here is a record of anything — the next scan simply reads from disk again and\n' +
+      'rebuilds it, the same as an entry `--no-cache` or a version mismatch already ignores.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const opts = this.opts<{ json?: boolean }>();
+    const dir = defaultCacheDir(process.env);
+    const removed = clearCache(dir);
+    if (opts.json) {
+      print({ dir, removed });
+      return;
+    }
+    console.log(`Removed ${removed} file${removed === 1 ? '' : 's'} from ${dir}.`);
   });
 
 const client = program
