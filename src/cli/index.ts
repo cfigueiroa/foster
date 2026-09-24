@@ -1,5 +1,5 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
@@ -198,9 +198,17 @@ import {
 import {
   firstPrompt,
   indexTranscripts,
+  readTranscriptFacts,
   transcriptRoots,
   viewTranscript,
 } from '../store/transcripts.js';
+import { grepTranscripts } from '../engine/grep.js';
+import { resolveConversation } from '../engine/resolveConversation.js';
+import {
+  readConversationRecords,
+  renderConversation,
+  type ExportFormat,
+} from '../engine/exportConversation.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, parseSince, selectByIds, type SessionFilter } from '../domain/filter.js';
@@ -4990,6 +4998,201 @@ program
     // card in any sidebar — that is what made them purgeable — so the app's view
     // is exactly as it was.
     console.log(pc.dim("The app's deletion markers were left where they are."));
+  });
+
+program
+  .command('grep')
+  .helpGroup('Live sessions:')
+  .summary('search every transcript this machine holds, by what was actually said')
+  .description(
+    "A regex over every client's transcripts — every conversation any account on\n" +
+      'this machine ever ran, archived and deleted included, because a transcript\n' +
+      "outlives the card that opened it. Each hit is matched against a message's\n" +
+      'decoded text, never the raw JSONL, so it cannot fire on a `\\n` inside a JSON\n' +
+      'escape or a uuid quoted inside a tool result. `--role` narrows to only what a\n' +
+      'person typed or only what the assistant answered; with neither, both count and\n' +
+      "the app's own bookkeeping records never do.\n\n" +
+      'Every hit is grouped by conversation and shown with the card(s) — title,\n' +
+      'account, archived — that open it; a conversation with no card left is shown\n' +
+      'with none, which is what a deleted conversation nothing points at looks like.',
+  )
+  .argument('<regex>', 'a JavaScript-flavoured regex, case-sensitive; a plain phrase works too')
+  .option('--account <accountUuid>', 'only conversations with a card in this account')
+  .option('--since <age>', 'skip a transcript whose file is older than this, e.g. 7d, 24h')
+  .option(
+    '--cwd <fragment>',
+    "case-insensitive substring of the conversation's own working directory",
+  )
+  .option('--role <role>', 'only "user" or only "assistant" records')
+  .option('--limit <n>', 'stop once this many conversations have matched')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command, regexArg: string) {
+    const { store } = context(this);
+    const opts = this.opts<{
+      account?: string;
+      since?: string;
+      cwd?: string;
+      role?: string;
+      limit?: string;
+      json?: boolean;
+    }>();
+
+    if (opts.role !== undefined && opts.role !== 'user' && opts.role !== 'assistant') {
+      throw new Error(`--role must be "user" or "assistant", not "${opts.role}".`);
+    }
+
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(regexArg);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`"${regexArg}" is not a valid regex: ${message}`);
+    }
+
+    let since: number | undefined;
+    if (opts.since !== undefined) {
+      since = parseSince(opts.since);
+      if (since === undefined) {
+        throw new Error(`Could not read --since "${opts.since}". Try 24h, 7d or 2w.`);
+      }
+    }
+
+    let accountUuid: string | undefined;
+    if (opts.account !== undefined) {
+      accountUuid = matchAccountPrefix(listAccountDirs(store), opts.account, '--account')[0]!
+        .accountUuid;
+    }
+
+    let limit: number | undefined;
+    if (opts.limit !== undefined) {
+      limit = Number(opts.limit);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error(`--limit must be a positive integer, not "${opts.limit}".`);
+      }
+    }
+
+    const startedAt = Date.now();
+    const results = grepTranscripts(store, pattern, {
+      ...(accountUuid !== undefined ? { accountUuid } : {}),
+      ...(since !== undefined ? { since } : {}),
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts.role === 'user' || opts.role === 'assistant' ? { role: opts.role } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    if (opts.json) {
+      print({
+        pattern: regexArg,
+        elapsedMs,
+        conversations: results.map((conversation) => ({
+          cliSessionId: conversation.cliSessionId,
+          cwd: conversation.cwd ?? null,
+          hits: conversation.hits,
+          cards: conversation.cards.map((card) => ({
+            accountUuid: card.account.accountUuid,
+            organizationUuid: card.account.organizationUuid,
+            sessionId: card.sessionId,
+            title: card.title ?? null,
+            isArchived: card.isArchived,
+          })),
+        })),
+      });
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log(`No matches for ${regexArg}.`);
+      console.log(pc.dim(`Searched in ${elapsedMs}ms.`));
+      return;
+    }
+
+    for (const conversation of results) {
+      const title = conversation.cards[0]?.title ?? pc.dim('(no card left — deleted or copy-only)');
+      console.log(`${pc.bold(title)}  ${pc.dim(shortId(conversation.cliSessionId))}`);
+      if (conversation.cwd) console.log(pc.dim(`  ${conversation.cwd}`));
+      for (const card of conversation.cards) {
+        console.log(
+          pc.dim(
+            `  card in ${card.account.accountUuid.slice(0, 8)}${card.isArchived ? ' (archived)' : ''}`,
+          ),
+        );
+      }
+      for (const hit of conversation.hits) {
+        console.log(`    ${hit.role.padEnd(9)} ${formatDate(hit.at)}  ${hit.snippet}`);
+      }
+      console.log('');
+    }
+    console.log(pc.bold(`${results.length} conversation(s) matched.`));
+    console.log(pc.dim(`Searched in ${elapsedMs}ms.`));
+  });
+
+program
+  .command('export')
+  .helpGroup('Live sessions:')
+  .summary('render one conversation to Markdown, HTML or JSONL')
+  .description(
+    'Render one conversation, unioning every file it occupies (see AGENTS.md, "One\n' +
+      'conversation can be two files") in timeline order and deduplicated by record\n' +
+      'id. `md` shows user/assistant turns as headings with tool calls collapsed to\n' +
+      'one line each; `html` is the same, self-contained; `jsonl` is every record\n' +
+      'the conversation holds, deduplicated and ordered, exactly as a transcript\n' +
+      'itself is written.\n\n' +
+      'The conversation is resolved the way `--store` resolves a name: a conversation\n' +
+      'id, exact or an unambiguous prefix — tried even against one with no card left,\n' +
+      'since a deleted conversation naming its own id is the ordinary case here —\n' +
+      "then a card's own id, then a case-insensitive fragment of a title. More than\n" +
+      'one candidate at any step is refused rather than guessed at.',
+  )
+  .argument('<id>', 'a conversation id, a card id, or a fragment of its title')
+  .option('--format <format>', 'md, html or jsonl', 'md')
+  .option('--out <file>', 'write here instead of stdout')
+  .action(function (this: Command, id: string) {
+    const { store } = context(this);
+    const opts = this.opts<{ format: string; out?: string }>();
+    if (opts.format !== 'md' && opts.format !== 'html' && opts.format !== 'jsonl') {
+      throw new Error(`--format must be md, html or jsonl, not "${opts.format}".`);
+    }
+    const format = opts.format as ExportFormat;
+
+    const resolved = resolveConversation(id, store, listAccountDirs(store));
+    if (resolved.files.length === 0) {
+      throw new Error(
+        `${resolved.cliSessionId} has no transcript on disk — only a conversation that ` +
+          'ran on this machine can be exported.',
+      );
+    }
+
+    const card = resolved.cards.find((session) => session.data.title !== undefined);
+    const facts =
+      card === undefined
+        ? readTranscriptFacts(resolved.files[0]!, resolved.cliSessionId)
+        : undefined;
+    const records = readConversationRecords(resolved.files);
+    const rendered = renderConversation(
+      records,
+      {
+        cliSessionId: resolved.cliSessionId,
+        ...(card?.data.title !== undefined
+          ? { title: card.data.title }
+          : facts?.title !== undefined
+            ? { title: facts.title }
+            : {}),
+        ...(card?.data.cwd !== undefined
+          ? { cwd: card.data.cwd }
+          : facts?.cwd !== undefined
+            ? { cwd: facts.cwd }
+            : {}),
+      },
+      format,
+    );
+
+    if (opts.out) {
+      writeFileSync(opts.out, rendered, 'utf8');
+      console.error(pc.dim(`Wrote ${records.length} record(s) to ${opts.out}.`));
+      return;
+    }
+    console.log(rendered);
   });
 
 program

@@ -372,7 +372,7 @@ export function lastAnswer(file: string): LastAnswer | undefined {
 }
 
 /** The text blocks of a message, joined — what the app showed for it. */
-function textOf(message: unknown): string | undefined {
+export function textOf(message: unknown): string | undefined {
   if (typeof message !== 'object' || message === null) return undefined;
   const content = (message as { content?: unknown }).content;
   if (typeof content === 'string') return content;
@@ -771,8 +771,11 @@ const CHUNK_BYTES = 1024 * 1024;
  *
  * What it is not safe for is handing text back. A caller that wants the words of
  * a record wants `utf8`, and every caller that does asks for it.
+ *
+ * Exported for `engine/grep.ts`, the one other caller that needs a chunked,
+ * latin1-safe read over a whole corpus rather than one file's head or tail.
  */
-function* streamLines(file: string, encoding: BufferEncoding = 'utf8'): Generator<string> {
+export function* streamLines(file: string, encoding: BufferEncoding = 'utf8'): Generator<string> {
   let fd: number;
   try {
     fd = openSync(file, 'r');

@@ -1146,6 +1146,8 @@ foster rescue    # conversations stranded by a crash, and the resumes that bring
 foster unstarted # background-task requests whose session died before answering once
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
+foster grep      # search every transcript on this machine by what was actually said
+foster export    # render one conversation to Markdown, HTML or JSONL
 
 # The app
 foster app       # status | quit | start | restart — drive Claude Desktop itself

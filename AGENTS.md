@@ -418,6 +418,74 @@ resume prompt. Two facts that save wasted turns (both measured on a live store):
   with `archive_session`; it never reconnects. None of this can run from the CLI: the app
   creates the fresh card on its own, and the session tools only exist inside the app.
 
+## `foster grep`: a regex over every transcript, not the raw JSONL
+
+`foster grep <regex> [--account <a>] [--since <age>] [--cwd <fragment>] [--role user|assistant]
+[--json] [--limit <n>]` searches every transcript reachable from every client `configDirCandidates`
+finds — every conversation any account on this machine ever ran, archived and deleted included,
+because a transcript outlives the card that opened it (`store/transcripts.ts`'s own point). Each hit
+is matched against a `user`/`assistant` message's _decoded_ text — `textOf(record.message)` — never
+against the raw JSONL, so a search cannot fire on a `\n` inside a JSON escape or a `uuid` quoted
+inside a tool result; a tool call's own name and arguments are never message text and never match.
+
+Two passes per file, coarse then real, in the shape `idsMentionedIn` already reads a transcript in
+for lineage. What makes the coarse pass fast enough for a corpus this size is _how_ coarse it is:
+one `Buffer#includes` — raw bytes, no decode — against the whole file at once, before the file is
+ever split into lines; only a file that fails it is skipped, unopened for anything more. A pattern
+with real regex syntax (anything `[.*+?^${}()|[\]\\]` matches) falls back to one `RegExp#test` scan
+instead, which still stops at its first hit rather than collecting every one the way `idsMentionedIn`
+does. Only a line the coarse pass flags is ever `JSON.parse`d, and the real match is asked of the
+message text `textOf` pulls out of it, decoded with the same `Buffer.from(line,
+'latin1').toString('utf8')` round trip `recordFields`' comments describe — the latin1 read never
+changed a byte, so writing those char codes back out and decoding _that_ as UTF-8 reconstructs
+exactly what was on disk.
+
+Measured 24/09/2026 against a real corpus — two client directories, 11,202 transcripts, 13.6 GB:
+a term absent from all of it (the case that matters, since a search worth running is usually for
+something rare) answered in 7–9 s. The first cut of this — `readFileSync(file, 'latin1')`, which
+allocates a JS string the length of every byte before any check runs — cost 30 s for the same
+query; reading as a `Buffer` and only decoding a file the coarse check flags cut that in half again,
+close to the ~10.6 s a bare read of 13.6 GB off this disk costs with nothing else happening at all.
+
+The one cost that stayed high: attaching "the card(s) that open it" — title, account, archived —
+needs a `scanStore` of the whole Desktop store, and on this machine that is **25 accounts, 25,174
+cards**, over 13 s on its own, dwarfing the search. `grepTranscripts` (`engine/grep.ts`) runs the
+whole transcript search _before_ ever calling `scanStore`, and skips it outright when nothing
+matched — so the common case, a rare term that matches nothing, never pays it; a term with real
+hits (measured: `rioprev`, this machine's own project name) does, and takes on the order of the
+scan's own cost on top, which is a store-specific number a smaller install would not see.
+
+`--account` narrows the _report_ to conversations with a card in that account (a `resolveStoreArg`-
+style accountUuid prefix, via `matchAccountPrefix`) — it does not narrow which transcripts get
+searched, since a conversation's card and its transcript live in different trees entirely. `--cwd`
+and the conversation's own working directory shown in a JSON result both come from
+`readTranscriptFacts` of the first file a conversation occupies, asked only once a conversation has
+a hit — the same "cost tied to what was found, not to the corpus" reasoning. `--since` is a plain
+`stat().mtimeMs` check per file, ahead of ever opening one.
+
+## `foster export`: one conversation, unioned and rendered
+
+`foster export <id|title fragment> [--format md|html|jsonl] [--out <file>]` renders one conversation.
+The id is resolved the way `--store` resolves a name (`resolveStoreArg`'s own order): a conversation
+id — `cliSessionId` — exact or an unambiguous prefix, tried even against a conversation with no card
+left anywhere, because a deleted conversation naming its own id is the ordinary case here; then a
+card's own id, the app's `local_<uuid>`; then a case-insensitive fragment of a title. More than one
+candidate at any step refuses rather than guesses, naming every candidate. No `foster where` exists
+on `main` yet to share this with, so it lives on its own in `engine/resolveConversation.ts` — the
+shape a future `where` would want too.
+
+Rendering unions every file the conversation occupies (AGENTS.md's own "One conversation can be two
+files", above) rather than trusting whichever one `resolveConversation` happened to be pointed at —
+`readConversationRecords` (`engine/exportConversation.ts`) reads every file whole, deduplicates by
+`uuid` (a record written to two files by construction is the same record), and orders by timestamp,
+which is what makes the render read as one conversation rather than two interleaved fragments. `md`
+shows `user`/`assistant` turns as headings, a tool call collapsed to one line (`> tool: <name>`) and
+nothing dumped from its raw input; `html` is the same, in one self-contained file — no external
+stylesheet or script, so it opens on its own; `jsonl` is every record, deduplicated and ordered, exactly
+the shape a real transcript already is, which is what makes it round-trip back through anything that
+reads a transcript. `--out` writes to a file; without it the render goes to stdout so the command
+pipes cleanly, the same convention `transcript` already uses.
+
 ## What `foster agent` does and does not cover
 
 `foster agent "<task>" --yes` exposes ten tools: `scan_accounts`, `list_sessions`,
