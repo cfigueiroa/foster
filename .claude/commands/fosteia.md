@@ -198,10 +198,37 @@ session in another conversation used to make this refuse and leave the restart f
 the user chose to have it go ahead. The command names every other session it is ending, in its
 own output, before it launches — they end with the app, the way this one does.
 
+## After the restart: `foster verify`
+
+This session is gone by the time the detached restart actually runs, so this is not a command
+for it to run — it is the last step of the whole job, for whoever opens a **new** session once
+`foster detached --last` (mentioned in the report above) confirms the write landed:
+
+```
+foster verify
+```
+
+Read-only. It says whether the app saved any of what the sweep and the layout run just wrote
+back over itself — a title/archived-flag mark undone, a pin that never landed, or (rarer) sidebar
+groups reset to none after having been applied before. Exits non-zero when it found anything
+undone, and names what. If it does, `foster layout --yes --restart --detach
+--detach-even-with-live` (the same command as "Finish it" above) writes it again — that is a
+fresh run of this whole command's last step, not something to patch by hand.
+
 ## Proving nothing was left behind
 
-If asked afterward to prove the sweep actually brought a specific conversation — "did it all come
-through?" — three things look like proof and are not:
+Two commands now do what this whole section used to be a hand-run recipe for — read them first:
+
+- **One specific conversation** — "did it all come through?" — is `foster where <query>`
+  (a session id, a `cliSessionId` prefix, or a title fragment). It searches every store and
+  account foster knows about, not just the destination, and says which row is the one to
+  continue in.
+- **Every conversation the sweep should have brought** is `foster sweep --prove`, run in place
+  of (or after) an ordinary `foster sweep`. It exits non-zero and names every conversation the
+  destination cannot fully reach, excluding the documented never-fosterable classes.
+
+Everything below this line is the manual version those two replace, kept for the reasoning —
+three things look like proof and are not, and both commands above exist because of them:
 
 - **`foster list --json`** marks `fosterable: true` for a conversation that is already in the
   destination under a _different_ card. It lists what exists elsewhere, not what is still
