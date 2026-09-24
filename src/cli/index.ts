@@ -18,6 +18,7 @@ import {
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
 import { lineage } from '../engine/lineage.js';
 import { registerAppPref } from './appPrefCommand.js';
+import { commandPath } from './commandPath.js';
 import { complainAboutLink } from '../engine/linkShape.js';
 import { sidebarOf } from '../engine/sidebar.js';
 import {
@@ -228,9 +229,12 @@ import {
 } from '../ops/foster.js';
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
 import {
+  deferredSweepGap,
   RESTART_COMMAND,
   restartPlan,
   runSweep,
+  sweepFailedCount,
+  sweepMarked,
   type BranchesPhase,
   type FileCardsPhase,
   type SweepReport,
@@ -251,8 +255,6 @@ import {
   type ApplyLayoutResult,
   type LayoutPlan,
 } from '../engine/layout.js';
-import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
-import { planMarksBack } from '../engine/marksBack.js';
 import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
@@ -388,7 +390,7 @@ const NAMES_ACCOUNTS = new Set([
 // Before the command, never during it: a name that arrives late would land in
 // the middle of the output it was meant to be part of.
 program.hook('preAction', async (_program, command) => {
-  if (!NAMES_ACCOUNTS.has(command.name())) return;
+  if (!NAMES_ACCOUNTS.has(commandPath(command))) return;
   try {
     const { store, ledger } = context(command);
     await identifyHeldAccounts(store, ledger);
@@ -622,6 +624,10 @@ program
     // this they read it twice — a second PowerShell spawn for an answer the
     // first one already gave, inside the same few hundred milliseconds.
     const app = inspectApp(store, undefined, cachedProcesses);
+    // Read-only, same as the text output below: a routed handler is the
+    // fingerprint of an `app login` that has not yet been put back.
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
 
     const cache = cacheStats(defaultCacheDir(process.env));
 
@@ -646,6 +652,9 @@ program
           bytes: cache.bytes,
           newestMtimeMs: cache.newestMtimeMs ?? null,
         },
+        // The "claude:// links are still armed/routed" warning the text output
+        // prints below, as data: `--json` used to omit this entirely.
+        handler,
       });
       return;
     }
@@ -724,7 +733,6 @@ program
     // store, which account" without a second command — AGENTS.md says to start
     // here for exactly that reason.
     console.log(pc.bold('Profiles'));
-    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     const profiles = knownStores(ledger.read());
     const labels = labelsOf(ledger);
     if (profiles.length === 0) {
@@ -736,8 +744,8 @@ program
     // Read-only: nothing here writes. A routed handler is the fingerprint of an
     // `app login` that has not yet been put back — whether it is still running
     // in another terminal or was interrupted, doctor cannot tell, so it points
-    // at the one command that resolves either case.
-    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    // at the one command that resolves either case. Computed above, alongside
+    // `ledger`, so `--json` can report it too.
     if (handler.key !== undefined) {
       console.log(pc.dim(`  packaged ProgID ${handler.key} (via ${handler.progIdSource})`));
       if (handler.current !== undefined) {
@@ -1201,6 +1209,11 @@ async function runSweepCommand(
     cache,
   });
 
+  // A dry run writes nothing, so a `failed` count in its report describes a
+  // planning problem, not a write that did not land — not the exit-code
+  // signal `--yes` gets.
+  if (!dryRun && sweepFailedCount(report) > 0) process.exitCode = 1;
+
   // Named here, not in `sweepRestart` itself: a layout is planned but never
   // applied by the sweep, so the command handed over on a restart has to be
   // the one that actually finishes the job — `foster layout` restarts the
@@ -1251,7 +1264,7 @@ async function runSweepCommand(
       store,
       Boolean(opts.restart) && !dryRun,
       restartCommand,
-      deferredPinsGap(store, ledger, target, report),
+      deferredSweepGap(store, ledger, target, report),
     );
     print({ ...sweepJson(report), restart });
     return;
@@ -1297,7 +1310,7 @@ async function runSweepCommand(
       store,
       Boolean(opts.restart),
       restartCommand,
-      deferredPinsGap(store, ledger, target, report),
+      deferredSweepGap(store, ledger, target, report),
     ),
   );
 }
@@ -1610,49 +1623,10 @@ async function sweepRestart(
   return restartAround(store, requested, command, duringGap);
 }
 
-/**
- * Whether this sweep put a mark on any row — which the running app may yet save
- * back over, so the restart that finishes it goes through a gap that writes
- * them again: `deferredPinsGap` in-process, `foster layout` when detached.
- */
-function sweepMarked(report: SweepReport): boolean {
-  return [...report.branches.retitled, ...report.files.retitled].some(
-    (outcome) => outcome.status === 'retitled',
-  );
-}
-
-/**
- * The one write a sweep does make in its own restart gap: the pin moves its pin
- * pass had to defer because the app was open (`engine/pinMoves.ts`). A sweep that
- * restarts the app itself has the closed-app window those need right there, and
- * handing the user `foster layout --yes --restart` instead would cost a second
- * full restart for a single record. Groups and routines stay `foster layout`'s,
- * as ever. `undefined` when nothing was deferred, so an ordinary restart is
- * unchanged.
- */
-function deferredPinsGap(
-  store: StoreLayout,
-  ledger: Ledger,
-  target: AccountRef,
-  report: SweepReport,
-): (() => void) | undefined {
-  // The marks the app saved back over while the sweep ran are only knowable
-  // now, once it has closed — so a sweep that wrote any mark opens the gap for
-  // them even when no pin was deferred (`engine/marksBack.ts`).
-  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
-  return () => {
-    // A failure leaves the move pending for the next `foster layout`, the same
-    // as `applyLayout` treats it — never a reason the restart itself failed.
-    try {
-      applyPinMoves(store, ledger, planPinMoves(store, ledger.read(), target));
-    } catch {
-      // still pending
-    }
-    // One card at a time and never throwing: `retitleCards` records a failure
-    // rather than raising it, and the next `foster layout` looks again.
-    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
-  };
-}
+// `sweepMarked` and `deferredPinsGap` (now `deferredSweepGap`) moved to
+// `ops/sweep.ts` so the TUI's own sweep flow (`src/cli/flows.ts`) can share
+// them instead of recomputing a narrower version of the same thing — see the
+// doc comments there.
 
 /**
  * `--detach`'s whole implementation, shared by every command that offers it:
@@ -2114,6 +2088,7 @@ sourceOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
+  if (counts.failed > 0) process.exitCode = 1;
   if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
   if (forkNote) console.log(forkNote);
   if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
@@ -2213,6 +2188,7 @@ program
     }
 
     console.log(pc.bold(`\n${counts.fostered} restored, ${counts.failed} failed.`));
+    if (counts.failed > 0) process.exitCode = 1;
     await finish(store, Boolean(opts.restart));
   });
 
@@ -2283,6 +2259,7 @@ program
     }
 
     console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
+    if (counts.failed > 0) process.exitCode = 1;
     if (continued.length > 0)
       console.log(
         pc.dim(`
@@ -2355,20 +2332,29 @@ program
     const acting = entries.filter((entry) => entry.status === 'consolidate');
     const diverged = entries.filter((entry) => entry.status === 'diverged');
     const appMade = entries.filter((entry) => entry.status === 'app-made');
+    const jsonEntries = (): Record<string, unknown>[] =>
+      entries.filter((entry) => entry.status !== 'settled').map(consolidationJson);
 
-    if (opts.json) {
-      print(entries.filter((entry) => entry.status !== 'settled').map(consolidationJson));
+    // Same order as `unclaim`/`dates`/`sweep --undo-retitles`: on a dry run
+    // nothing has been written, so the plan is all `--json` has to show. With
+    // `--yes` the write happens first (below) and `--json` reports what was
+    // actually done, rather than degrading to a dry-run preview a scripted
+    // caller would mistake for the real thing.
+    if (opts.json && dryRun) {
+      print(jsonEntries());
       return;
     }
 
-    if (acting.length === 0 && diverged.length === 0 && appMade.length === 0) {
-      console.log('Nothing is forked here — every conversation has one card per account.');
-      return;
-    }
+    if (!opts.json) {
+      if (acting.length === 0 && diverged.length === 0 && appMade.length === 0) {
+        console.log('Nothing is forked here — every conversation has one card per account.');
+        return;
+      }
 
-    for (const entry of acting) console.log(consolidationLines(entry).join('\n'));
-    for (const entry of diverged) console.log(divergedLines(entry).join('\n'));
-    for (const entry of appMade) console.log(appMadeLines(entry).join('\n'));
+      for (const entry of acting) console.log(consolidationLines(entry).join('\n'));
+      for (const entry of diverged) console.log(divergedLines(entry).join('\n'));
+      for (const entry of appMade) console.log(appMadeLines(entry).join('\n'));
+    }
 
     const rows = acting.length;
     const moves = acting.filter((entry) => entry.repoint).length;
@@ -2415,11 +2401,27 @@ program
       { store, ledger },
     );
 
+    const counts = summariseOutcomes(removed);
+    const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
+    if (failed > 0) process.exitCode = 1;
+
+    // Same shape as `sweep`/`layout`/`view set`: the write above already
+    // happened, so `--restart` here is only ever quit-then-start, never a
+    // write-in-the-gap — `restartAround` with no `duringGap` is exactly
+    // `sweepRestart`'s own call. Run and reported under `--json` too, so
+    // `--restart --json` together no longer drops the restart silently the
+    // way returning before `finish` (text-only, and never awaited on this
+    // branch) used to.
+    if (opts.json) {
+      const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+      print({ entries: jsonEntries(), moved, removed, restart });
+      if (opts.restart && !restart.done) process.exitCode = 1;
+      return;
+    }
+
     for (const outcome of moved) console.log(repointLine(outcome));
     for (const outcome of removed) console.log(outcomeLine(outcome));
 
-    const counts = summariseOutcomes(removed);
-    const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
     console.log(
       pc.bold(
         `\n${moved.filter((o) => o.status === 'repointed').length} moved, ` +
@@ -2469,17 +2471,39 @@ async function undoConsolidation(
     cards = hits;
   }
 
-  if (opts.json) {
+  // Same order as `unclaim`/`dates`/`sweep --undo-retitles`: the write (if
+  // any) happens before `--json` is checked, so `--undo --yes --json` reports
+  // what was actually put back rather than the bare card list a dry run would
+  // show.
+  if (opts.json && dryRun) {
     print(cards);
     return;
   }
 
   if (cards.length === 0) {
+    if (opts.json) {
+      print([]);
+      return;
+    }
     console.log('No cards are repointed — there is nothing to put back.');
     return;
   }
 
+  // `dryRun` can still be true here (the text-mode preview) — only the
+  // `opts.json && dryRun` combination returned above, before this call.
   const outcomes = repointCards(undoRequests(cards), { store, ledger, dryRun });
+
+  // Same fix as the main consolidate path above: the write already happened
+  // (this branch is only reached once `opts.json && dryRun` has returned
+  // above), so `--restart` is run and folded into the JSON here too, instead
+  // of being silently dropped by returning before `finish` below ever runs.
+  if (opts.json) {
+    const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+    print({ outcomes, restart });
+    if (opts.restart && !restart.done) process.exitCode = 1;
+    return;
+  }
+
   for (const outcome of outcomes) console.log(repointLine(outcome));
 
   if (dryRun) {
@@ -3040,7 +3064,13 @@ addDetachOptions(layoutCmd)
       // and launches that; `--restart` re-plans fresh once the app is
       // actually closed, same as the in-process path below, because that is
       // the only plan that is ever real.
-      for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+      //
+      // Text only: `--json` prints the same plan inside the object below, and
+      // printing these lines first as well would hand a scripted caller a
+      // stream that is half plain text and half JSON.
+      if (!opts.json) {
+        for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+      }
       const outcome = await runDetach(
         store,
         process.argv.slice(2),
@@ -3285,10 +3315,20 @@ const viewSetCmd = view
   .option('--to-org <organizationUuid>', 'write into this organization')
   .option('--restart', 'quit Claude Desktop, write, then start it again');
 addDetachOptions(viewSetCmd)
+  .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
     const { store } = context(this);
-    const opts = this.opts<{
+    // `optsWithGlobals`, not `opts`: the parent `view` command declares `--to`
+    // and `--json` of its own (for the bare `foster view`), and Commander
+    // resolves a flag against the first command in the chain that declares it
+    // — here, the parent, silently, whichever side of `set` on the command
+    // line it lands. `this.opts()` alone came back with neither `to` nor (once
+    // `--json` was added here) `json` at all; `optsWithGlobals` merges every
+    // ancestor's own opts in, so the flag reaches this action no matter which
+    // level actually parsed it.
+    const opts = this.optsWithGlobals<{
       status?: string;
       groupBy?: string;
       sort?: string;
@@ -3302,8 +3342,11 @@ addDetachOptions(viewSetCmd)
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      json?: boolean;
       yes?: boolean;
+      dryRun?: boolean;
     }>();
+    const dryRun = opts.dryRun || !opts.yes;
     checkDetachPrereqs(opts);
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
@@ -3312,13 +3355,20 @@ addDetachOptions(viewSetCmd)
     const plan = planViewSet(store, target, request);
 
     if (plan.changes.length === 0) {
+      if (opts.json) {
+        print({ target, dryRun, plan });
+        return;
+      }
       console.log('Nothing to change.');
       return;
     }
 
-    printViewChanges(plan.changes, plan.impliedStatusActive);
-
-    if (!opts.yes) {
+    if (dryRun) {
+      if (opts.json) {
+        print({ target, dryRun: true, plan });
+        return;
+      }
+      printViewChanges(plan.changes, plan.impliedStatusActive);
       console.log(pc.dim('\nRe-run with --yes to write.'));
       return;
     }
@@ -3334,12 +3384,35 @@ addDetachOptions(viewSetCmd)
       // launches the detached one, which re-runs the identical invocation
       // (minus --detach*) from outside the app and does the write itself,
       // re-planned fresh once the app is actually closed.
+      if (!opts.json) printViewChanges(plan.changes, plan.impliedStatusActive);
       const outcome = await runDetach(
         store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
+      if (opts.json) {
+        print({
+          target,
+          dryRun: false,
+          plan,
+          detach:
+            outcome.ok && outcome.plan && outcome.launch
+              ? {
+                  detached: true,
+                  pid: outcome.launch.pid,
+                  via: outcome.launch.via,
+                  log: outcome.plan.logPath,
+                  vbs: outcome.plan.vbsPath,
+                  delaySeconds: outcome.plan.delaySeconds,
+                  argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
+                }
+              : { detached: false, error: outcome.reason },
+        });
+        if (!outcome.ok) process.exitCode = 1;
+        return;
+      }
       printDetachResult(outcome, false, detachNotNeededNote(store));
       return;
     }
@@ -3347,6 +3420,11 @@ addDetachOptions(viewSetCmd)
     if (!opts.restart) {
       refuseIfAppRunning(store);
       applyViewSet(plan, { store });
+      if (opts.json) {
+        print({ target, dryRun: false, plan });
+        return;
+      }
+      printViewChanges(plan.changes, plan.impliedStatusActive);
       console.log(pc.bold('\nWritten.'));
       console.log(
         pc.dim('Invisible until the app re-reads its files: restart Claude Desktop, or --restart.'),
@@ -3362,6 +3440,14 @@ addDetachOptions(viewSetCmd)
       freshPlan = planViewSet(store, target, request);
       if (freshPlan.changes.length > 0) applyViewSet(freshPlan, { store });
     });
+
+    if (opts.json) {
+      print({ target, dryRun: false, plan, freshPlan, restart });
+      if (!restart.done) process.exitCode = 1;
+      return;
+    }
+
+    printViewChanges(plan.changes, plan.impliedStatusActive);
     if (restart.done) {
       if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
         console.log(
@@ -3385,10 +3471,15 @@ const viewCopyCmd = view
   .option('--to-org <organizationUuid>', 'write into this organization')
   .option('--restart', 'quit Claude Desktop, write, then start it again');
 addDetachOptions(viewCopyCmd)
+  .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
     const { store } = context(this);
-    const opts = this.opts<{
+    // `optsWithGlobals`, not `opts` — same reason as `view set` above: the
+    // parent `view` command's own `--to` and `--json` otherwise claim the
+    // flag before it ever reaches this action.
+    const opts = this.optsWithGlobals<{
       from: string;
       to?: string;
       toOrg?: string;
@@ -3396,8 +3487,11 @@ addDetachOptions(viewCopyCmd)
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      json?: boolean;
       yes?: boolean;
+      dryRun?: boolean;
     }>();
+    const dryRun = opts.dryRun || !opts.yes;
     checkDetachPrereqs(opts);
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
@@ -3411,30 +3505,67 @@ addDetachOptions(viewCopyCmd)
 
     const plan: ViewCopyPlan = planViewCopy(store, from, to);
     if (plan.changes.length === 0) {
+      if (opts.json) {
+        print({ from, to, dryRun, plan });
+        return;
+      }
       console.log('Nothing to copy: already the same.');
       return;
     }
-    printViewChanges(plan.changes, false);
 
-    if (!opts.yes) {
+    if (dryRun) {
+      if (opts.json) {
+        print({ from, to, dryRun: true, plan });
+        return;
+      }
+      printViewChanges(plan.changes, false);
       console.log(pc.dim('\nRe-run with --yes to write.'));
       return;
     }
 
     const restartCommand = viewCopyRestartCommand(from, to);
     if (opts.detach) {
+      if (!opts.json) printViewChanges(plan.changes, false);
       const outcome = await runDetach(
         store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
+      if (opts.json) {
+        print({
+          from,
+          to,
+          dryRun: false,
+          plan,
+          detach:
+            outcome.ok && outcome.plan && outcome.launch
+              ? {
+                  detached: true,
+                  pid: outcome.launch.pid,
+                  via: outcome.launch.via,
+                  log: outcome.plan.logPath,
+                  vbs: outcome.plan.vbsPath,
+                  delaySeconds: outcome.plan.delaySeconds,
+                  argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
+                }
+              : { detached: false, error: outcome.reason },
+        });
+        if (!outcome.ok) process.exitCode = 1;
+        return;
+      }
       printDetachResult(outcome, false, detachNotNeededNote(store));
       return;
     }
     if (!opts.restart) {
       refuseIfAppRunning(store);
       applyViewCopy(plan, { store });
+      if (opts.json) {
+        print({ from, to, dryRun: false, plan });
+        return;
+      }
+      printViewChanges(plan.changes, false);
       console.log(pc.bold('\nWritten.'));
       return;
     }
@@ -3446,6 +3577,14 @@ addDetachOptions(viewCopyCmd)
       freshPlan = planViewCopy(store, from, to);
       if (freshPlan.changes.length > 0) applyViewCopy(freshPlan, { store });
     });
+
+    if (opts.json) {
+      print({ from, to, dryRun: false, plan, freshPlan, restart });
+      if (!restart.done) process.exitCode = 1;
+      return;
+    }
+
+    printViewChanges(plan.changes, false);
     if (restart.done) {
       if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
         console.log(pc.yellow('\nThe plan changed once the app closed — this is what was copied:'));
@@ -3937,11 +4076,17 @@ program
         (uuid) => uuid,
       );
       if (match.kind === 'none') {
-        console.log(`No account here starts with ${accountArg}.`);
+        const message = `No account here starts with ${accountArg}.`;
+        if (opts.json) print({ error: 'no-match', accountUuid: accountArg, message });
+        else console.log(message);
+        process.exitCode = 1;
         return;
       }
       if (match.kind === 'ambiguous') {
-        console.log(`${accountArg} matches more than one account; use more of the id.`);
+        const message = `${accountArg} matches more than one account; use more of the id.`;
+        if (opts.json) print({ error: 'ambiguous', accountUuid: accountArg, message });
+        else console.log(message);
+        process.exitCode = 1;
         return;
       }
       targets = [match.id];
@@ -3951,7 +4096,10 @@ program
         .filter((row) => !row.identity && row.accountUuid !== signedIn)
         .map((row) => row.accountUuid);
     } else {
-      console.log('Name an account, or pass --all. `foster accounts` lists them.');
+      const message = 'Name an account, or pass --all. `foster accounts` lists them.';
+      if (opts.json) print({ error: 'no-target', message });
+      else console.log(message);
+      process.exitCode = 1;
       return;
     }
 
@@ -4671,6 +4819,10 @@ client
 
     const outcome = openTerminalTab(plan);
     if (opts.json) {
+      // Same condition text mode uses below: `not-windows` is not a failure —
+      // it is the expected answer on a machine `client open` cannot drive —
+      // so only `failed` sets the exit code a scripted caller would check.
+      if (outcome.outcome === 'failed') process.exitCode = 1;
       return print({
         ok: outcome.outcome === 'opened',
         outcome: outcome.outcome,

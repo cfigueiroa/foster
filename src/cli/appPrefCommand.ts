@@ -89,20 +89,45 @@ export function registerAppPref(
       // Everything is parsed and checked before the app is touched. A typo in the
       // third of three values must not be discovered with the app already closed.
       const planned = changes.map((change) => resolve(store, change));
+      const guarded = planned.filter((item) => item.spec.guard).map((item) => item.name);
 
-      for (const item of planned) {
-        if (item.spec.guard) {
-          console.log(
-            pc.yellow(
-              `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
-                'trusted folders, private-network access or computer control. Changing it here does\n' +
-                "what the app's own screen would do, without the screen that explains it.",
-            ),
-          );
+      if (!opts.json) {
+        for (const item of planned) {
+          if (item.spec.guard) {
+            console.log(
+              pc.yellow(
+                `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
+                  'trusted folders, private-network access or computer control. Changing it here does\n' +
+                  "what the app's own screen would do, without the screen that explains it.",
+              ),
+            );
+          }
         }
       }
 
       if (!opts.yes) {
+        // `--json` describes the same plan a write would report, under a
+        // `dryRun` flag, rather than the plain-text preview this used to print
+        // regardless of `--json` — the write path below had the identical gap.
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                dryRun: true,
+                guarded,
+                changes: planned.map((item) => ({
+                  name: item.name,
+                  from: item.from,
+                  to: item.to,
+                  unset: item.unset,
+                })),
+              },
+              null,
+              2,
+            ),
+          );
+          return;
+        }
         for (const item of planned) {
           console.log(
             `Would set ${pc.bold(item.name)}: ${format(item.from)} -> ${format(item.to)}` +
@@ -132,20 +157,46 @@ export function registerAppPref(
         );
       }
 
-      if (!running) {
+      const written: Array<{
+        name: string;
+        from: unknown;
+        to: unknown;
+        unset: boolean;
+        backup: string;
+      }> = [];
+      const writeAll = (): void => {
         for (const item of planned) {
           const { write, backup } = writeAppPref(store, item.name, item.parsed, {
             ...(item.unset ? { unset: true } : {}),
           });
-          console.log(
-            `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
-              (write.unset ? pc.dim(' (default)') : ''),
-          );
-          console.log(pc.dim(`  backup: ${backup}`));
+          written.push({
+            name: write.name,
+            from: write.from,
+            to: write.to,
+            unset: Boolean(write.unset),
+            backup,
+          });
+          if (!opts.json) {
+            console.log(
+              `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
+                (write.unset ? pc.dim(' (default)') : ''),
+            );
+            console.log(pc.dim(`  backup: ${backup}`));
+          }
         }
-        console.log(
-          pc.dim('The app reads this at start-up; it will see the change when it opens.'),
-        );
+      };
+
+      if (!running) {
+        writeAll();
+        if (opts.json) {
+          console.log(
+            JSON.stringify({ guarded, written, closed: false, restarted: false }, null, 2),
+          );
+        } else {
+          console.log(
+            pc.dim('The app reads this at start-up; it will see the change when it opens.'),
+          );
+        }
         return;
       }
 
@@ -161,25 +212,42 @@ export function registerAppPref(
         store,
         true,
         restartCommandFromArgv(process.argv.slice(2)),
-        async () => {
-          for (const item of planned) {
-            const { write, backup } = writeAppPref(store, item.name, item.parsed, {
-              ...(item.unset ? { unset: true } : {}),
-            });
-            console.log(
-              `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
-                (write.unset ? pc.dim(' (default)') : ''),
-            );
-            console.log(pc.dim(`  backup: ${backup}`));
-          }
-        },
+        async () => writeAll(),
       );
+      // `written.length > 0` is proxy for "the gap actually ran": `restartAround`
+      // only calls `duringGap` once the quit itself succeeded, so it is also
+      // proxy for "the app was closed" — true even when a later `start` failure
+      // is what kept `restart.done` false, unlike a refusal before the app was
+      // ever touched (`needs-terminate`, still running), where nothing was
+      // written and the app was never closed either.
+      const closed = written.length > 0;
       if (restart.done) {
-        console.log('Claude Desktop is up.');
+        if (opts.json) {
+          console.log(JSON.stringify({ guarded, written, closed, restarted: true }, null, 2));
+        } else {
+          console.log('Claude Desktop is up.');
+        }
         return;
       }
-      console.log(pc.yellow(restart.reason ?? 'The restart did not finish.'));
-      console.log(`  ${restart.command}`);
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            {
+              guarded,
+              written,
+              closed,
+              restarted: false,
+              error: restart.reason,
+              command: restart.command,
+            },
+            null,
+            2,
+          ),
+        );
+      } else {
+        console.log(pc.yellow(restart.reason ?? 'The restart did not finish.'));
+        console.log(`  ${restart.command}`);
+      }
       process.exitCode = 1;
     });
 }
