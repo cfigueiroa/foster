@@ -3,7 +3,7 @@ import { sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type ScanCache } from '../store/scanner.js';
 import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
 import { firstLine } from '../util/fs.js';
 
@@ -87,6 +87,7 @@ export function planPinMoves(
   events: readonly LedgerEvent[],
   target: AccountRef,
   read: (store: StoreLayout) => PinState | undefined = readPinState,
+  cache?: ScanCache,
 ): PinMovesPlan {
   const pending = pendingPinMoves(events, target);
   if (pending.length === 0) return { moves: [], settled: [] };
@@ -99,8 +100,10 @@ export function planPinMoves(
     return { moves: [], settled: [], unreadable: message };
   }
 
+  // Only `sessionId` and `isArchived` are read below, neither a bulky field —
+  // `slim` (and the run's own cache, when there is one) costs nothing here.
   const shown = new Set(
-    scanAccount(store, target)
+    scanAccount(store, target, undefined, { slim: true, cache })
       .filter((card) => !card.data.isArchived)
       .map((card) => card.data.sessionId),
   );

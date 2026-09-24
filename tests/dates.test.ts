@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  candidatesFromStore,
   dateCards,
   planDates,
   requestsFromPlan,
@@ -10,8 +11,10 @@ import {
   type DateCandidate,
 } from '../src/engine/dates.js';
 import { lineageAt } from '../src/engine/lineage.js';
+import type { Lineage } from '../src/engine/lineage.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listDated, project } from '../src/ledger/project.js';
+import { ScanCache } from '../src/store/scanner.js';
 import { transcriptRoots } from '../src/store/transcripts.js';
 import type { CodeSessionData } from '../src/domain/types.js';
 import { NEW_ACCOUNT, makeStore, session, writeSession } from './helpers/store.js';
@@ -269,5 +272,47 @@ describe('undoDateRequests', () => {
 
     expect(readCard(file).lastActivityAt).toBe(T0);
     expect(listDated(project(ledger.read()))).toHaveLength(0);
+  });
+});
+
+describe('candidatesFromStore', () => {
+  it('builds its own lineage from transcriptRoots when none is given, as before', () => {
+    const { store } = fixture(T0);
+    const { candidates, scanOf } = candidatesFromStore(store, { env: transcriptEnv(T1) });
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ cliSessionId: CLI_ID, native: true });
+    expect(scanOf(CLI_ID)?.lastAssistantAt).toBe(T1);
+  });
+
+  it('reuses a lineage handed to it instead of building a second one', () => {
+    const { store } = fixture(T0);
+    // A `kin` that answers every question with a fixed, made-up scan — proof
+    // that `candidatesFromStore` asked *this* lineage rather than building its
+    // own from `transcriptEnv`'s (empty, here) transcript roots.
+    const stub: Lineage = {
+      rootOf: () => undefined,
+      sameWork: () => false,
+      scanOf: () => ({ uuids: new Set(['stub']), lastAssistantAt: T1 + 60_000 }),
+      reachOf: () => undefined,
+      deepen: () => {},
+      transcripts: () => new Map(),
+    };
+
+    const { scanOf } = candidatesFromStore(store, { env: {}, kin: stub });
+    expect(scanOf(CLI_ID)).toMatchObject({ lastAssistantAt: T1 + 60_000 });
+  });
+
+  it('reads the store through a shared cache without changing what it finds', () => {
+    const { store } = fixture(T0);
+    const cache = new ScanCache();
+
+    const first = candidatesFromStore(store, { env: transcriptEnv(T1), cache });
+    const second = candidatesFromStore(store, { env: transcriptEnv(T1), cache });
+
+    // A cache shared across two calls must answer the same question both
+    // times — see `tests/scanner.test.ts`'s `ScanCache` suite for the proof
+    // that the second call is actually served from memory.
+    expect(second.candidates).toEqual(first.candidates);
   });
 });

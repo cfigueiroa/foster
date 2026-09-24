@@ -248,6 +248,29 @@ writer that spreads a scanned card's `data` into a file must do the same. `planU
 `planTitleSync` take the cards the sweep already read instead of re-reading each off disk. With
 `/fosteia`'s flags, a dry run went from 131 s to 45 s.
 
+A further round, 24/09/2026, on the same real store (25,178 cards): `planLayout` was still its own
+gap in that accounting. `planGroups`/`cardReader` (`engine/layout.ts`) called `scanAccount` on the
+target and on every source account WHOLE, on top of the SLIM scan the sweep had just taken — a
+standalone timing probe against the real store measured 3.1–3.6 s a call, every one of them. Only
+`sessionId`, `cliSessionId`, `title`, `isArchived` and `lastActivityAt` are ever read off what
+`planGroups` gets back, none of them a bulky field, so it now reads SLIM and takes the run's own
+`ScanCache` (new, `store/scanner.ts`) — a file the sweep already read is served from memory instead
+of read and `JSON.parse`d again, and only a file whose `mtime`/`size` moved since (a pass in this
+same run wrote it) is read fresh. The same probe measured a warm call at 260–310 ms — about the same
+plan, twelve times faster. `runDates` (`ops/sweep.ts`) shares the same cache for its own store-wide
+scan, and now takes the sweep's own `kin` instead of building a second `Lineage` from
+`transcriptRoots(env)` alone, which had been missing the sweep's `configDirs`. `sweep --dates`
+(dry run, real store) went from 127 s to 95–101 s across repeated runs; a plain `sweep` (no
+`--dates`, so `runDates` never runs) showed no measurable change, because the always-present
+transcript walk `kin` does for fork detection dwarfs what `planLayout` alone ever cost. Two more
+places kept re-deriving what one card's row already gives them: `engine/sidebar.ts` used to walk
+every card of the target per candidate for `reason`/`shows`/`unreached`, now three small indices
+(exact id, lower-cased id, and a lazily built one by conversation root — `kin.rootOf` is never
+asked for just to build an index, which broke the one caller whose `Lineage` answers only
+`reachOf`) plus a memoised `unreached` `held` set per (id, except); `engine/lineage.ts`'s
+`canonical` no longer allocates a cycle-guard `Set` for a root with no alias at all, which is the
+common case by far.
+
 `--restart` restarts Claude Desktop at the end, which is what makes the copies visible. When
 foster is running inside the app it will not do that (see below) and the output ends with the
 command to run elsewhere instead.

@@ -96,11 +96,6 @@ export interface BranchStanding {
 
 const BRANCH_HERE = 'this account already has a branch of that conversation';
 
-/** Session ids are compared without case, as they are everywhere else here. */
-function sameId(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
-}
-
 export function sidebarOf(
   store: StoreLayout,
   account: AccountRef,
@@ -117,10 +112,61 @@ export function sidebarOf(
 export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sidebar {
   const cards: SidebarCard[] = [];
 
+  // Two ways this same list of cards gets asked about, each for a different
+  // key: the id exactly as written (`reason`'s "exact" match) and the id
+  // folded to lower case (`shows`, `unreached` — everywhere else ids are
+  // compared case-insensitively). Built once here and kept current by `add`,
+  // rather than walked fresh out of `cards` on every question a candidate
+  // asks — measured on a real store, `reason`/`unreached` alone asked it of
+  // ~25,260 candidates against a target account that can itself hold
+  // thousands of rows.
+  const byExactId = new Map<string, SidebarCard[]>();
+  const byIdLower = new Map<string, SidebarCard[]>();
+  // `unreached`'s `held` set, memoised per (id, except) — it never depends on
+  // `cwd`, so the same conversation asked about from two working directories
+  // shares one answer. Invalidated by `add` for whichever id just grew a card.
+  const heldCache = new Map<string, Map<string, Set<string>>>();
+
+  const workOf = (cliSessionId: string): string => kin.rootOf(cliSessionId) ?? cliSessionId;
+
+  // Grouped by conversation root, for `reason`'s branch fallback, `standing`
+  // and `extras` — built lazily, since it is the one index that has to call
+  // `kin.rootOf` for every card, and a caller asking only `unreached` (the
+  // worktree-claim pass, for one) never needs a root computed at all.
+  // Rebuilt from scratch on first use after `add`, not touched otherwise.
+  let byWork: Map<string, SidebarCard[]> | undefined;
+
+  const workIndex = (): Map<string, SidebarCard[]> => {
+    if (byWork) return byWork;
+    const built = new Map<string, SidebarCard[]>();
+    for (const card of cards) {
+      const key = workOf(card.cliSessionId);
+      const existing = built.get(key);
+      if (existing) existing.push(card);
+      else built.set(key, [card]);
+    }
+    byWork = built;
+    return built;
+  };
+
+  const index = (list: Map<string, SidebarCard[]>, key: string, card: SidebarCard): void => {
+    const existing = list.get(key);
+    if (existing) existing.push(card);
+    else list.set(key, [card]);
+  };
+
+  const add = (card: SidebarCard): void => {
+    cards.push(card);
+    index(byExactId, card.cliSessionId, card);
+    index(byIdLower, card.cliSessionId.toLowerCase(), card);
+    byWork = undefined;
+    heldCache.delete(card.cliSessionId.toLowerCase());
+  };
+
   for (const session of sessions) {
     const id = session.data.cliSessionId;
     if (!id) continue;
-    cards.push({
+    add({
       sessionId: session.data.sessionId,
       isCopy: session.isCopy,
       cliSessionId: id,
@@ -129,27 +175,45 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
     });
   }
 
-  const add = (card: SidebarCard): void => {
-    cards.push(card);
-  };
-
-  const workOf = (cliSessionId: string): string => kin.rootOf(cliSessionId) ?? cliSessionId;
-
   const how = (card: SidebarCard): string => {
     if (card.isCopy) return 'this account already has a copy of that conversation';
     if (card.archived) return 'this account already has that conversation, archived';
     return 'this account already has that conversation';
   };
 
+  const heldFor = (idLower: string, except: string | undefined): Set<string> => {
+    let byExcept = heldCache.get(idLower);
+    if (!byExcept) {
+      byExcept = new Map();
+      heldCache.set(idLower, byExcept);
+    }
+    const exceptKey = except ?? '';
+    const cached = byExcept.get(exceptKey);
+    if (cached) return cached;
+
+    const held = new Set<string>();
+    for (const card of byIdLower.get(idLower) ?? []) {
+      if (except !== undefined && card.sessionId === except) continue;
+      // A row whose file cannot be told is not evidence of reaching nothing —
+      // counting it as such would offer a copy on no evidence at all. The
+      // conversation's whole record set is the conservative stand-in.
+      const reach = kin.reachOf(card.cliSessionId, card.cwd) ?? kin.scanOf(card.cliSessionId);
+      if (reach === undefined) continue;
+      for (const uuid of reach.uuids) held.add(uuid);
+    }
+    byExcept.set(exceptKey, held);
+    return held;
+  };
+
   return {
     reason(cliSessionId) {
       if (cliSessionId === undefined) return undefined;
-      const exact = cards.filter((card) => card.cliSessionId === cliSessionId);
-      if (exact.length > 0) return how(exact[exact.length - 1]!);
+      const exact = byExactId.get(cliSessionId);
+      if (exact && exact.length > 0) return how(exact[exact.length - 1]!);
       const work = kin.rootOf(cliSessionId);
       if (work === undefined) return undefined;
-      const group = cards.filter((card) => workOf(card.cliSessionId) === work);
-      if (group.length === 0) return undefined;
+      const group = workIndex().get(work);
+      if (!group || group.length === 0) return undefined;
       return group[0]!.archived ? `${BRANCH_HERE}, archived` : BRANCH_HERE;
     },
 
@@ -165,8 +229,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
 
     shows(cliSessionId) {
       if (cliSessionId === undefined) return false;
-      const wanted = cliSessionId.toLowerCase();
-      return cards.some((card) => card.cliSessionId.toLowerCase() === wanted);
+      return byIdLower.has(cliSessionId.toLowerCase());
     },
 
     unreached(cliSessionId, cwd, except) {
@@ -174,18 +237,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
       const offered = kin.reachOf(cliSessionId, cwd);
       if (offered === undefined) return 0;
 
-      const held = new Set<string>();
-      for (const card of cards) {
-        if (!sameId(card.cliSessionId, cliSessionId)) continue;
-        if (except !== undefined && card.sessionId === except) continue;
-        // A row whose file cannot be told is not evidence of reaching nothing —
-        // counting it as such would offer a copy on no evidence at all. The
-        // conversation's whole record set is the conservative stand-in.
-        const reach = kin.reachOf(card.cliSessionId, card.cwd) ?? kin.scanOf(card.cliSessionId);
-        if (reach === undefined) continue;
-        for (const uuid of reach.uuids) held.add(uuid);
-      }
-
+      const held = heldFor(cliSessionId.toLowerCase(), except);
       let beyond = 0;
       for (const uuid of offered.uuids) if (!held.has(uuid)) beyond += 1;
       return beyond;
@@ -197,8 +249,7 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
       if (work === undefined) return undefined;
 
       const theirs = new Set(
-        cards
-          .filter((card) => workOf(card.cliSessionId) === work)
+        (workIndex().get(work) ?? [])
           .map((card) => card.cliSessionId)
           .filter((id) => id !== cliSessionId),
       );
@@ -220,14 +271,8 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
     },
 
     extras() {
-      const groups = new Map<string, SidebarCard[]>();
-      for (const card of cards) {
-        const key = workOf(card.cliSessionId);
-        groups.set(key, [...(groups.get(key) ?? []), card]);
-      }
-
       const surplus = new Map<string, 'copy' | 'branch'>();
-      for (const rows of groups.values()) {
+      for (const rows of workIndex().values()) {
         if (rows.length < 2) continue;
         const keep = survivor(rows, kin);
         for (const row of rows) {
@@ -242,15 +287,8 @@ export function sidebarFrom(sessions: DiscoveredSession[], kin: Lineage): Sideba
     },
 
     appMade() {
-      const byConversation = new Map<string, SidebarCard[]>();
-      for (const card of cards) {
-        byConversation.set(card.cliSessionId, [
-          ...(byConversation.get(card.cliSessionId) ?? []),
-          card,
-        ]);
-      }
       let count = 0;
-      for (const rows of byConversation.values()) {
+      for (const rows of byExactId.values()) {
         if (rows.length > 1 && rows.every((row) => !row.isCopy)) count++;
       }
       return count;

@@ -48,9 +48,79 @@ const NOTHING_KNOWN: KnownCopies = new Set<string>();
  * store for a long run, which is the sweep, and which puts them back with
  * `withBulkyFields` before any write that copies a whole card. Off by default,
  * so every other reader keeps the card exactly as the file holds it.
+ *
+ * `cache` is the other half of that same long run: see `ScanCache` below.
  */
 export interface ScanOptions {
   slim?: boolean;
+  cache?: ScanCache;
+}
+
+interface CachedCard {
+  mtimeMs: number;
+  size: number;
+  card: { data: CodeSessionData; slim: boolean };
+}
+
+/**
+ * What a scan actually pays for is the read and the `JSON.parse`, not the
+ * directory listing or the per-card classification (`isCopy`, `reasons`) —
+ * those depend on `copies`, which can grow mid-run as a sweep's own passes
+ * foster new cards, so they are always recomputed fresh. The parsed card
+ * itself is what this remembers, keyed by path and invalidated the moment a
+ * file's `mtime`/`size` no longer match what was cached — which is every
+ * file a sweep did not just write, still true after several re-reads of the
+ * same account.
+ *
+ * A cache entry answers a `slim` request whether it was itself read slim or
+ * whole (the bulky fields are simply unused), but never answers a `whole`
+ * request from a `slim` entry — those fields are gone from it for good, so
+ * that case reads the file again and upgrades the entry in place.
+ *
+ * One instance lives for one run and is never shared across runs or
+ * processes — a fresh `ScanCache` is exactly as safe as passing none at all.
+ * See `ops/sweep.ts`, which is the only caller that keeps one alive across
+ * several scans.
+ */
+export class ScanCache {
+  private readonly entries = new Map<string, CachedCard>();
+
+  /** The card at `file`, read fresh only when the cache cannot serve it. */
+  read(
+    file: string,
+    slim: boolean,
+  ): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
+    let stat: { mtimeMs: number; size: number };
+    try {
+      const s = statSync(file);
+      stat = { mtimeMs: s.mtimeMs, size: s.size };
+    } catch {
+      this.entries.delete(file);
+      return undefined;
+    }
+
+    const cached = this.entries.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      if (slim || !cached.card.slim) return { card: cached.card, size: stat.size };
+    }
+
+    const card = slim ? readSessionCard(file) : wholeCard(file);
+    if (!card) {
+      this.entries.delete(file);
+      return undefined;
+    }
+    this.entries.set(file, { mtimeMs: stat.mtimeMs, size: stat.size, card });
+    return { card, size: stat.size };
+  }
+}
+
+function readUncached(
+  file: string,
+  slim: boolean,
+): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
+  const card = slim ? readSessionCard(file) : wholeCard(file);
+  if (!card) return undefined;
+  return { card, size: sizeOf(file) };
 }
 
 export function scanAccount(
@@ -61,13 +131,15 @@ export function scanAccount(
 ): DiscoveredSession[] {
   const dir = accountDir(store, account);
   const out: DiscoveredSession[] = [];
+  const slim = options.slim ?? false;
 
   for (const entry of safeReaddir(dir)) {
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const card = options.slim ? readSessionCard(file) : wholeCard(file);
-    if (!card) continue;
+    const read = options.cache ? options.cache.read(file, slim) : readUncached(file, slim);
+    if (!read) continue;
+    const { card, size } = read;
     const { data } = card;
 
     // A copy foster wrote, not a session the app created. Classifying before
@@ -80,7 +152,7 @@ export function scanAccount(
     // The app skips any session file over its size limit while loading, with only
     // a line in its log to show for it. Copying one would write a file that never
     // appears and never explains why, so it is excluded here instead.
-    if (sizeOf(file) > SESSION_FILE_MAX_BYTES) reasons.push('too-large');
+    if (size > SESSION_FILE_MAX_BYTES) reasons.push('too-large');
 
     // Always false here. One account cannot answer whether a conversation still
     // has a card of its own — the original may be sitting in the account next

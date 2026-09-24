@@ -3,10 +3,10 @@ import type { Ledger } from '../ledger/log.js';
 import type { DatedCard } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { transcriptRoots, type ConversationScan } from '../store/transcripts.js';
-import { scanStore } from '../store/scanner.js';
+import { scanStore, type ScanCache } from '../store/scanner.js';
 import { errorMessage } from '../util/fs.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
-import { lineageAt } from './lineage.js';
+import { lineageAt, type Lineage } from './lineage.js';
 
 /**
  * Rewrite a card's `lastActivityAt` to match its transcript, and nothing else.
@@ -288,6 +288,18 @@ export function requestsFromPlan(items: DatePlanItem[]): DateRequest[] {
     }));
 }
 
+export interface CandidatesFromStoreOptions {
+  env?: NodeJS.ProcessEnv;
+  /**
+   * Reuse a lineage already built this run instead of a fresh one from
+   * `transcriptRoots(env)` — a sweep's own `kin`, built with its `configDirs`,
+   * rather than a second lineage that does not know about them.
+   */
+  kin?: Lineage;
+  /** Reuse a scan cache already holding this run's cards. */
+  cache?: ScanCache;
+}
+
 /**
  * Every card in the store worth checking, paired with the transcript reader
  * that answers `planDates`'s question — the wiring `foster dates` uses.
@@ -299,12 +311,15 @@ export function requestsFromPlan(items: DatePlanItem[]): DateRequest[] {
  */
 export function candidatesFromStore(
   store: StoreLayout,
-  env: NodeJS.ProcessEnv = process.env,
+  options: CandidatesFromStoreOptions = {},
 ): { candidates: DateCandidate[]; scanOf: (cliSessionId: string) => ConversationScan | undefined } {
-  const kin = lineageAt(transcriptRoots(env));
+  const kin = options.kin ?? lineageAt(transcriptRoots(options.env ?? process.env));
   const candidates: DateCandidate[] = [];
 
-  for (const found of scanStore(store)) {
+  // None of the fields read below is a bulky one, so `slim` costs nothing —
+  // and lets a scan shared with the rest of a sweep serve this one from its
+  // cache instead of reading the store a second time.
+  for (const found of scanStore(store, undefined, { slim: true, cache: options.cache })) {
     const cliSessionId = found.data.cliSessionId;
     if (!cliSessionId) continue;
     candidates.push({
