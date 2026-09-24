@@ -6,4 +6,4 @@
  * already on disk means "ignore it and rebuild", never an error: see
  * `cardCache.ts` and `transcriptCache.ts` for where this is checked.
  */
-export const CACHE_SCHEMA = 1;
+export const CACHE_SCHEMA = 2;

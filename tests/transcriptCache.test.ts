@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { TranscriptCache } from '../src/store/cache/transcriptCache.js';
-import { idsMentionedIn, scanConversation } from '../src/store/transcripts.js';
+import { scanConversation } from '../src/store/transcripts.js';
 
 /**
- * `TranscriptCache` stands in for `scanConversation` and `idsMentionedIn`
- * without ever answering differently than they would — the whole point of a
- * cache that decides forks and re-titles is that a warm run cannot be allowed
- * to say something a cold one would not have. Every scenario here compares the
- * cached answer against the live function on the same bytes.
+ * `TranscriptCache` stands in for `scanConversation` without ever answering
+ * differently than it would — the whole point of a cache that decides forks
+ * and re-titles is that a warm run cannot be allowed to say something a cold
+ * one would not have. Every scenario here compares the cached answer against
+ * the live function on the same bytes.
  */
 
 function dir(): string {
@@ -31,8 +31,8 @@ function line(uuid: string, extra: Record<string, unknown> = {}): string {
   });
 }
 
-function assistantLine(uuid: string, at: string): string {
-  return JSON.stringify({ uuid, type: 'assistant', timestamp: at });
+function assistantLine(uuid: string, at: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ uuid, type: 'assistant', timestamp: at, ...extra });
 }
 
 function transcriptFile(base: string, name: string, lines: string[]): string {
@@ -65,10 +65,8 @@ describe('TranscriptCache.scanConversation', () => {
     const base = dir();
     // A record whose own uuid is OWN_A, quoting MENTIONED somewhere nested —
     // the shape a tool result embedding another record's id would take. The
-    // pattern alone cannot tell that from MENTIONED naming its own record;
-    // `idsMentionedIn` (`store/transcripts.ts`) confirms every hit against
-    // `recordFields` before counting it, live or served from this cache —
-    // see `idsMentionedIn`'s own doc comment on this class.
+    // pattern this cache's `recordFields` reads by is structural, not a raw
+    // match, so a nested id never lands in `scan.uuids`.
     const file = transcriptFile(base, 'a.jsonl', [
       line(OWN_A, { toolUseResult: { nested: { uuid: MENTIONED } } }),
     ]);
@@ -76,12 +74,6 @@ describe('TranscriptCache.scanConversation', () => {
 
     const scan = cache.scanConversation(file);
     expect([...scan.uuids]).toEqual([OWN_A]);
-
-    const wanted = new Set([OWN_A, MENTIONED]);
-    expect(toSorted(cache.idsMentionedIn(file, wanted))).toEqual(
-      toSorted(idsMentionedIn(file, wanted)),
-    );
-    expect(toSorted(cache.idsMentionedIn(file, wanted))).toEqual([OWN_A]);
   });
 
   it('a hit on an unchanged file answers without needing the entry to change', () => {
@@ -114,37 +106,6 @@ describe('TranscriptCache.scanConversation', () => {
     expect(cached.lastMessageAt).toBe(live.lastMessageAt);
     expect(cached.lastAssistantAt).toBe(live.lastAssistantAt);
     expect(toSorted(cached.uuids)).toEqual(toSorted([OWN_A, OWN_B, OWN_C]));
-  });
-
-  it('growth resume still finds a genuine mention only in the new bytes', () => {
-    const base = dir();
-    const file = transcriptFile(base, 'a.jsonl', [line(OWN_A)]);
-    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
-    cache.scanConversation(file);
-
-    // MENTIONED appears as a record's own uuid here — a genuine, structurally
-    // valid hit `idsMentionedIn` counts, unlike the nested case above — and
-    // only in the bytes appended after the first scan.
-    writeFileSync(file, `${[line(OWN_A), line(MENTIONED)].join('\n')}\n`, 'utf8');
-
-    const wanted = new Set([MENTIONED]);
-    expect(cache.idsMentionedIn(file, wanted)).toEqual([MENTIONED]);
-  });
-
-  it('growth resume does not mistake a nested id in the new bytes for a mention either', () => {
-    const base = dir();
-    const file = transcriptFile(base, 'a.jsonl', [line(OWN_A)]);
-    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
-    cache.scanConversation(file);
-
-    writeFileSync(
-      file,
-      `${[line(OWN_A), line(OWN_B, { toolUseResult: { uuid: MENTIONED } })].join('\n')}\n`,
-      'utf8',
-    );
-
-    const wanted = new Set([MENTIONED]);
-    expect(cache.idsMentionedIn(file, wanted)).toEqual([]);
   });
 
   it('a rewrite that keeps growing but changes earlier bytes forces a full rescan', () => {
@@ -337,5 +298,139 @@ describe('cache-vs-live agreement, deliberately ignoring mtime resolution', () =
     const cached = cache.scanConversation(file);
     const live = scanConversation(file);
     expect(toSorted(cached.uuids)).toEqual(toSorted(live.uuids));
+  });
+});
+
+/**
+ * The record-accumulation rule (`accumulateScanRecord`, `store/transcripts.ts`)
+ * used to be duplicated between `scanConversation` and the cache's own
+ * `scanOwnRange`, and the copy fell behind on two fixes: it took the *last*
+ * timestamp read for `lastMessageAt` instead of the max, and let a
+ * usage-limit or sidechain assistant record set `lastAssistantAt`. Cold and
+ * warm cache runs agreed with each other — both ran the same buggy copy — but
+ * neither agreed with a `--no-cache` run against the live function. These
+ * scenarios exercise exactly the record shapes that used to expose the
+ * drift: a usage-limit record, a sidechain record, and records read out of
+ * timestamp order, cold, warm (a second read of the same bytes), and after
+ * the file has grown.
+ */
+describe('cache/live parity: usage-limit, sidechain, and out-of-order records', () => {
+  it('a sidechain assistant record read last never becomes lastAssistantAt', () => {
+    const base = dir();
+    const file = transcriptFile(base, 'a.jsonl', [
+      line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+      assistantLine(OWN_B, '2026-09-24T10:10:00.000Z'), // the real answer
+      // A subagent's turn, timestamped after the real answer and read last —
+      // the shape that made the old cache copy overwrite lastAssistantAt.
+      assistantLine(OWN_C, '2026-09-24T10:20:00.000Z', { isSidechain: true }),
+    ]);
+    const live = scanConversation(file);
+    expect(live.lastAssistantAt).toBe(Date.parse('2026-09-24T10:10:00.000Z'));
+    // The sidechain record's own timestamp still counts toward lastMessageAt.
+    expect(live.lastMessageAt).toBe(Date.parse('2026-09-24T10:20:00.000Z'));
+
+    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
+    const cold = cache.scanConversation(file);
+    expect(cold).toEqual(live);
+    const warm = cache.scanConversation(file);
+    expect(warm).toEqual(live);
+  });
+
+  it('a usage-limit assistant record read last never becomes lastAssistantAt', () => {
+    const base = dir();
+    const file = transcriptFile(base, 'a.jsonl', [
+      line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+      assistantLine(OWN_B, '2026-09-24T10:10:00.000Z'), // the real answer
+      // The app's own synthetic rate-limit record, timestamped after the real
+      // answer and read last.
+      assistantLine(OWN_C, '2026-09-24T10:20:00.000Z', { isApiErrorMessage: true }),
+    ]);
+    const live = scanConversation(file);
+    expect(live.lastAssistantAt).toBe(Date.parse('2026-09-24T10:10:00.000Z'));
+
+    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
+    const cold = cache.scanConversation(file);
+    expect(cold).toEqual(live);
+    const warm = cache.scanConversation(file);
+    expect(warm).toEqual(live);
+  });
+
+  it('out-of-order timestamps take the max, not the last record read, cold and warm', () => {
+    const base = dir();
+    const file = transcriptFile(base, 'a.jsonl', [
+      assistantLine(OWN_A, '2026-09-24T10:10:00.000Z'), // the latest moment
+      line(OWN_B, { timestamp: '2026-09-24T10:02:00.000Z' }), // read last, but earlier
+    ]);
+    const live = scanConversation(file);
+    expect(live.lastMessageAt).toBe(Date.parse('2026-09-24T10:10:00.000Z'));
+    expect(live.lastAssistantAt).toBe(Date.parse('2026-09-24T10:10:00.000Z'));
+
+    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
+    const cold = cache.scanConversation(file);
+    expect(cold).toEqual(live);
+    const warm = cache.scanConversation(file);
+    expect(warm).toEqual(live);
+  });
+
+  it('a grown range whose own last record is not its latest resumes exactly like a live scan', () => {
+    const base = dir();
+    const file = transcriptFile(base, 'a.jsonl', [
+      line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+      assistantLine(OWN_B, '2026-09-24T10:10:00.000Z', { isSidechain: true }),
+    ]);
+    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
+    cache.scanConversation(file);
+
+    // Growth appends a range whose own real answer (OWN_C, 10:30) is not the
+    // last record scanned — a user record with an earlier timestamp (OWN_D,
+    // 10:15) follows it — exactly the shape that exposed the bug only in the
+    // *resumed* range, not the whole-file re-scan a shrink or rewrite forces.
+    writeFileSync(
+      file,
+      `${[
+        line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+        assistantLine(OWN_B, '2026-09-24T10:10:00.000Z', { isSidechain: true }),
+        assistantLine(OWN_C, '2026-09-24T10:30:00.000Z'),
+        line('00000000-0000-4000-8000-00000000a004', { timestamp: '2026-09-24T10:15:00.000Z' }),
+      ].join('\n')}\n`,
+      'utf8',
+    );
+
+    const cached = cache.scanConversation(file);
+    const live = scanConversation(file);
+    expect(cached).toEqual(live);
+    expect(cached.lastAssistantAt).toBe(Date.parse('2026-09-24T10:30:00.000Z'));
+    expect(cached.lastMessageAt).toBe(Date.parse('2026-09-24T10:30:00.000Z'));
+  });
+
+  it('a persisted, reloaded entry still matches live after a growth spanning usage-limit and sidechain records', () => {
+    const base = dir();
+    const file = transcriptFile(base, 'a.jsonl', [
+      line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+    ]);
+    const cacheFile = path.join(base, 'cache.bin');
+
+    const first = new TranscriptCache(cacheFile);
+    first.scanConversation(file);
+    first.save();
+
+    writeFileSync(
+      file,
+      `${[
+        line(OWN_A, { timestamp: '2026-09-24T10:00:00.000Z' }),
+        assistantLine(OWN_B, '2026-09-24T10:10:00.000Z'),
+        assistantLine(OWN_C, '2026-09-24T10:25:00.000Z', { isApiErrorMessage: true }),
+        assistantLine('00000000-0000-4000-8000-00000000a005', '2026-09-24T10:05:00.000Z', {
+          isSidechain: true,
+        }),
+      ].join('\n')}\n`,
+      'utf8',
+    );
+
+    const second = new TranscriptCache(cacheFile);
+    const cached = second.scanConversation(file);
+    const live = scanConversation(file);
+    expect(cached).toEqual(live);
+    expect(cached.lastAssistantAt).toBe(Date.parse('2026-09-24T10:10:00.000Z'));
   });
 });
