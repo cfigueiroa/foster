@@ -654,7 +654,7 @@ const TAIL_GROWTH = 4;
 const MAX_TAIL_BYTES = 8 * 1024 * 1024;
 
 /** The text blocks of a message, joined — what the app showed for it. */
-function textOf(message: unknown): string | undefined {
+export function textOf(message: unknown): string | undefined {
   if (typeof message !== 'object' || message === null) return undefined;
   const content = (message as { content?: unknown }).content;
   if (typeof content === 'string') return content;
@@ -1104,8 +1104,12 @@ const CHUNK_BYTES = 1024 * 1024;
  *
  * What it is not safe for is handing text back. A caller that wants the words of
  * a record wants `utf8`, and every caller that does asks for it.
+ *
+ * Exported for `scanConversation` above, the only caller so far; `engine/grep.ts`
+ * does not use it — it reads a whole file at once instead (see its own comments
+ * for why a chunked read does not fit the coarse-then-real shape it needs).
  */
-function* streamLines(file: string, encoding: BufferEncoding = 'utf8'): Generator<string> {
+export function* streamLines(file: string, encoding: BufferEncoding = 'utf8'): Generator<string> {
   let fd: number;
   try {
     fd = openSync(file, 'r');
