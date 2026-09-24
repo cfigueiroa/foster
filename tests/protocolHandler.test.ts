@@ -9,10 +9,13 @@ import {
   findProtocolProgId,
   inspectHandler,
   parseParameters,
+  parseRegistryReadOutput,
   parseSubkeyNames,
   planLogin,
+  registryReadScript,
   restoreHandler,
   runLogin,
+  toPsRegistryPath,
   type HandlerIo,
   type LoginPlan,
 } from '../src/engine/protocolHandler.js';
@@ -254,6 +257,51 @@ describe('containerBlocker', () => {
     expect(containerBlocker({ CLAUDE_CODE_ENTRYPOINT: 'claude-desktop' })).toContain(
       'must run from a terminal outside Claude Desktop',
     );
+  });
+});
+
+describe('toPsRegistryPath', () => {
+  it('turns the HKCU spelling this module writes keys with into the PS provider path', () => {
+    expect(toPsRegistryPath(`HKCU\\Software\\Classes\\${PROG_ID}\\Shell\\open`)).toBe(
+      `HKCU:\\Software\\Classes\\${PROG_ID}\\Shell\\open`,
+    );
+  });
+});
+
+describe('registryReadScript and parseRegistryReadOutput', () => {
+  // Together these replace a `reg.exe query` + `encoding: 'utf8'` decode that
+  // silently mangled any non-ASCII byte in the value: `reg.exe` writes its
+  // console output in the OS's OEM code page, not UTF-8, and a profile
+  // directory (what `Parameters` carries, inside `--user-data-dir=<path>`) is
+  // exactly the kind of string someone names with an accent in it.
+
+  it('embeds the key and name as single-quoted PowerShell literals', () => {
+    const script = registryReadScript(OPEN_KEY, 'Parameters');
+    expect(script).toContain(
+      `-LiteralPath 'HKCU:\\Software\\Classes\\${PROG_ID}\\Shell\\open' -Name 'Parameters'`,
+    );
+  });
+
+  it('doubles an embedded single quote in the key, the one escape a PS literal needs', () => {
+    const script = registryReadScript("HKCU\\Software\\Classes\\o'brien", 'Parameters');
+    expect(script).toContain("'HKCU:\\Software\\Classes\\o''brien'");
+  });
+
+  it('round-trips a non-ASCII value through the OK:<base64> shape unmangled', () => {
+    // Stands in for the exact bug: a profile path with an accented
+    // character, encoded to UTF-8 bytes and back, the way the script and
+    // `parseRegistryReadOutput` do it between them — never through a code
+    // page that could disagree about what byte means what character.
+    const value = '--user-data-dir=D:\\Claude-café "%1"';
+    const encoded = `OK:${Buffer.from(value, 'utf8').toString('base64')}`;
+
+    expect(parseRegistryReadOutput(encoded)).toEqual({ value });
+  });
+
+  it('reports MISS, and any stray whitespace around it, as no value', () => {
+    expect(parseRegistryReadOutput('MISS')).toEqual({});
+    expect(parseRegistryReadOutput('  MISS\r\n')).toEqual({});
+    expect(parseRegistryReadOutput('')).toEqual({});
   });
 });
 
@@ -1104,6 +1152,53 @@ describe('runLogin', () => {
     expect(result.outcome).toBe('handler-rewritten');
     expect(result.restored).toBe(false);
     expect(writes).toEqual([plan.armed]);
+  });
+
+  it('still restores when the read-back after arming cannot be trusted, then rethrows', async () => {
+    // Reproduces the shape of the OEM/UTF-8 decode bug `readValue` now
+    // avoids in production (`registryHandlerIo`): the write always lands,
+    // but every read of the *armed* value specifically comes back mangled —
+    // a stand-in for whatever a future `HandlerIo` might still get wrong.
+    // Before this fix, `runLogin` threw right here and returned, having
+    // already pointed the machine-wide handler at `plan.armed` with no
+    // restore attempted at all.
+    const plan = basePlan();
+    const log: string[] = [];
+    let parameters = PLAIN_PARAMETERS;
+    const io: HandlerIo = {
+      listSubkeys: () => [PROG_ID],
+      keyExists: () => true,
+      readValue: (key, name) => {
+        if (key !== OPEN_KEY || name !== 'Parameters') return {};
+        return { value: parameters === plan.armed ? 'mangled-readback' : parameters };
+      },
+      writeValue: (key, name, value) => {
+        log.push(`write:${key}:${name}=${value}`);
+        if (key === OPEN_KEY && name === 'Parameters') parameters = value;
+      },
+      protocolProgId: () => undefined,
+      searchData: () => [],
+    };
+
+    await expect(
+      runLogin(plan, {
+        io,
+        append: fakeAppend(log),
+        readState: () => ({ hasTokenCache: false }),
+        now: () => 0,
+        sleep: async () => {},
+      }),
+    ).rejects.toThrow('could not arm the handler');
+
+    // The restore write still ran — and it landed and reads back correctly,
+    // since only a read of the *armed* value was ever mangled.
+    expect(parameters).toBe(PLAIN_PARAMETERS);
+    expect(log).toEqual([
+      'append:handler_armed',
+      `write:${OPEN_KEY}:Parameters=${plan.armed}`,
+      `write:${OPEN_KEY}:Parameters=${PLAIN_PARAMETERS}`,
+      'append:handler_restored',
+    ]);
   });
 });
 

@@ -245,12 +245,37 @@ describe('planLaunch: the command line', () => {
     expect(plan.args).toEqual(
       expect.arrayContaining(['-w', '0', 'new-tab', '--title', 'work·you@example.com', '-d']),
     );
-    const commandIndex = plan.args!.indexOf('-Command');
-    expect(commandIndex).toBeGreaterThan(-1);
-    const psCommand = plan.args![commandIndex + 1]!;
+    // The real argv never carries the pwsh command as text — see the
+    // `-EncodedCommand` test below for why — so this reads the cleartext
+    // `planLaunch` keeps on the plan for display, same as `formatLaunchCommand` does.
+    const psCommand = plan.psCommand!;
     expect(psCommand).toContain('Get-ChildItem Env:CLAUDE* | Remove-Item');
     expect(psCommand).toContain(`$env:CLAUDE_CONFIG_DIR='${dir}'`);
     expect(psCommand).toContain("claude '--resume' 'abc-123'");
+  });
+
+  it('hands the pwsh command to `wt` as -EncodedCommand, never as -Command text', () => {
+    // `wt` splits its own command line on a literal `;` to chain actions,
+    // even inside a quoted argv element — so a `;`-joined pwsh command (this
+    // one always is, see `buildPsCommand`) handed over as `-Command "<text>"`
+    // risks `wt` treating part of it as a second, unrecognized command and
+    // the new tab coming up without `CLAUDE_CONFIG_DIR` ever set.
+    // `-EncodedCommand`'s base64 payload has no `;` for anything upstream of
+    // PowerShell's own decoder to split on.
+    const h = home();
+    const dir = path.join(h, '.claude-work');
+    signIn(dir, 'you@example.com');
+
+    const plan = planLaunch('work', baseOpts({ home: h, claudeArgs: ['--resume', 'abc-123'] }));
+
+    expect(plan.args).not.toContain('-Command');
+    const encodedIndex = plan.args!.indexOf('-EncodedCommand');
+    expect(encodedIndex).toBeGreaterThan(-1);
+    const encoded = plan.args![encodedIndex + 1]!;
+    expect(encoded).not.toMatch(/[;"]/);
+    const decoded = Buffer.from(encoded, 'base64').toString('utf16le');
+    expect(decoded).toBe(plan.psCommand);
+    expect(decoded).toContain(`$env:CLAUDE_CONFIG_DIR='${dir}'`);
   });
 
   it('single-quotes every claude argument unconditionally, so PowerShell syntax cannot run', () => {
@@ -264,7 +289,7 @@ describe('planLaunch: the command line', () => {
     const plan = planLaunch('work', baseOpts({ home: h, claudeArgs: ['$(calc.exe)'] }));
 
     expect(plan.blockers).toEqual([]);
-    const psCommand = plan.args![plan.args!.indexOf('-Command') + 1]!;
+    const psCommand = plan.psCommand!;
     expect(psCommand).toContain("claude '$(calc.exe)'");
     expect(psCommand).not.toContain('claude $(calc.exe)');
   });
@@ -276,7 +301,7 @@ describe('planLaunch: the command line', () => {
 
     const plan = planLaunch("o'brien", baseOpts({ home: h }));
 
-    const psCommand = plan.args![plan.args!.indexOf('-Command') + 1]!;
+    const psCommand = plan.psCommand!;
     expect(psCommand).toContain(`CLAUDE_CONFIG_DIR='${dir.replace(/'/g, "''")}'`);
   });
 
@@ -296,6 +321,30 @@ describe('planLaunch: the command line', () => {
 
     expect(plan.blockers).toHaveLength(1);
     expect(plan.blockers[0]).toContain('quote or control character');
+  });
+
+  it('strips a semicolon out of the --title argument, not just the pwsh payload', () => {
+    // `hasQuoteOrControlChar` screens `"` and control characters, never `;`
+    // — a directory Windows will actually let you create can hold one, and
+    // `slug` (this directory's own basename, via `clientNameOf`) feeds
+    // straight into `--title` unsanitized. `wt` splits its command line on
+    // a literal `;` even inside a quoted argv element (the same fact
+    // `buildPsCommand`'s `-EncodedCommand` switch works around for the pwsh
+    // payload), so an untouched `;` here reopens the same hole for the
+    // `--title` argument this PR closed for everything else — the new tab
+    // could come up with no `CLAUDE_CONFIG_DIR` set at all.
+    const h = home();
+    const dir = path.join(scratch(), 'evilclient;pwn me');
+    mkdirSync(dir, { recursive: true });
+
+    const plan = planLaunch(dir, baseOpts({ home: h }));
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.title).toBeDefined();
+    expect(plan.title).not.toMatch(/;/);
+    const titleIndex = plan.args!.indexOf('--title');
+    expect(titleIndex).toBeGreaterThan(-1);
+    expect(plan.args![titleIndex + 1]).not.toMatch(/;/);
   });
 
   it('gives a hyphenated title, so `wt` does not split it on a space', () => {

@@ -7,6 +7,7 @@ import {
   findStranded,
   openResumeTabs,
   resumeCommandFor,
+  sanitizeTitle,
   type RescueDeps,
   type StrandedConversation,
 } from '../src/engine/rescue.js';
@@ -243,6 +244,29 @@ describe('openResumeTabs', () => {
       throw new Error('no terminal');
     });
     expect(outcomes[0]!.outcome).toBe('failed');
+  });
+});
+
+describe('sanitizeTitle', () => {
+  // The card title feeding `--title` is untrusted data read off disk, not
+  // something foster wrote — see `launch.ts`'s `buildPsCommand` comment for
+  // the same fact about `wt`'s own `;`-splitting measured there.
+  it('replaces a semicolon, the one character `wt` splits its command line on', () => {
+    expect(sanitizeTitle('normal; new-tab --title pwned')).toBe('normal- new-tab --title pwned');
+  });
+
+  it('replaces a literal double quote, the character CreateProcess itself quotes argv with', () => {
+    expect(sanitizeTitle('evil"title')).toBe('evil-title');
+  });
+
+  it('replaces control characters, newlines included', () => {
+    expect(sanitizeTitle('line one\nline two\ttabbed')).toBe('line one-line two-tabbed');
+  });
+
+  it('leaves an ordinary title untouched', () => {
+    expect(sanitizeTitle('(other file, stopped 24/09 10:00) fix the thing')).toBe(
+      '(other file, stopped 24/09 10:00) fix the thing',
+    );
   });
 });
 

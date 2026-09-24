@@ -121,6 +121,7 @@ import { listClients, type ClaudeClient } from '../store/clients.js';
 import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { processTableProvenance, type ProcessTableProvenance } from '../util/processes.js';
+import { armAbortOnSignals } from '../util/signals.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -6373,9 +6374,13 @@ app
       }
     }
 
+    // A second Ctrl+C, or closing the window outright, must still reach the
+    // restore in `runLogin`'s own `finally` rather than killing the process
+    // out from under it — see `armAbortOnSignals` for why a bare
+    // `process.once('SIGINT', ...)` (what this used to be) does not, on
+    // either count.
     const controller = new AbortController();
-    const onSigint = () => controller.abort();
-    process.once('SIGINT', onSigint);
+    const disarm = armAbortOnSignals(controller);
     let result;
     try {
       result = await runLogin(plan, {
@@ -6416,7 +6421,7 @@ app
         signal: controller.signal,
       });
     } finally {
-      process.removeListener('SIGINT', onSigint);
+      disarm();
     }
 
     console.log(result.message);

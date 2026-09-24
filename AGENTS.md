@@ -114,11 +114,30 @@ both. Not measured as of 05/09/2026:
 
 - **P7** — whether `wt -w 0 new-tab` inherits the _target_ window's own environment rather than the
   one this process hands the new one. If it does, a `CLAUDE_CONFIG_DIR` already set there would leak
-  into the new tab's shell before the `-Command` ever runs — so both the scrubbed spawn environment
-  and a second `CLAUDE*` cleanup inside the `-Command` itself apply, not just one.
+  into the new tab's shell before the pwsh command ever runs — so both the scrubbed spawn environment
+  and a second `CLAUDE*` cleanup inside the pwsh command itself apply, not just one.
 - **P11** — whether opening a terminal directly on a fleet junction's active target competes with
   that fleet's own rotation. This stays a warning, not a refusal, and there is no `--fleet` flag to
   make it stricter.
+
+A third thing in the same neighbourhood, also unmeasured against a real `wt` (opening one from a
+script is exactly the irreversible-if-wrong action this whole module exists to avoid), but closed
+off rather than left as a warning: `wt`'s own command-line parser splits on a literal `;` to chain
+multiple actions (`wt new-tab ; split-pane ...`), and per `wt`'s own docs that split is not scoped
+by argv boundaries — a `;` sitting inside what `CreateProcess` delivered as one quoted argument can
+still end the `new-tab` action early. The pwsh command this module builds is a `;`-joined sequence
+of statements by construction, so handing it to `wt` as `pwsh -Command "<script>"` risks the
+`$env:CLAUDE_CONFIG_DIR=...` statement landing on the losing side of that split — the new tab could
+come up on the CLI's already-cached default account rather than the one `client open` resolved,
+with nothing on screen to say so. `planLaunch` (`src/engine/launch.ts`) never hands `wt` that text:
+the pwsh command is base64-encoded UTF-16LE (`encodePsCommand`, `src/util/powershell.ts`) and passed
+as `pwsh -EncodedCommand <base64>`, which has no `;` of its own for `wt` to split on. `--print`
+still shows the readable command (`plan.psCommand`) — only the real argv changes.
+
+`foster rescue --open`'s per-conversation tab has the same `wt` exposure through a different door:
+its `--title` is filled from a card's own title, read off disk and therefore untrusted the same way
+any other file content is. `sanitizeTitle` (`src/engine/rescue.ts`) replaces a semicolon, a literal
+double quote, and any control character in it before it ever reaches `wt`'s argv.
 
 `foster clients --fragment` gives every client its own entry in the Windows Terminal menu instead,
 by printing a fragment (JSON) for the Terminal to pick up. Create the fragment folder once, then
@@ -746,6 +765,40 @@ single-use code** — not in `app login`'s own output, not in `app link`, not an
 transcript could keep it. `foster app login --restore --yes` is the way out of a login left routed
 by a crash or a stray Ctrl+C; `foster doctor` reports the ProgID found and warns when `Parameters`
 is still routed to a profile.
+
+Reading `Parameters` back used to shell out to `reg.exe query` and decode its stdout as `utf8`.
+`reg.exe` writes console output in the OS's OEM code page, not UTF-8, and `--user-data-dir=<profile>`
+carries whatever the profile directory is spelled — a name with an accent or another non-ASCII
+character in it decoded wrong, so the read-back in `runLogin` never matched what `writeValue` had
+just written correctly (the write itself goes through `execFileSync`'s argv, which Windows always
+delivers as UTF-16 regardless of code page — only the read was ever wrong). `registryHandlerIo.readValue`
+(`src/engine/protocolHandler.ts`) now reads through PowerShell's own registry provider instead
+(`Get-ItemPropertyValue`, run via `-EncodedCommand` for the same reason `client open` uses it — see
+above) and hands the value back base64-of-UTF-8, which has no code page of its own to get wrong.
+Not reproduced against a real non-ASCII profile path on this machine (every profile registered here
+happens to be plain ASCII); the fix and its test (`parseRegistryReadOutput` in
+`tests/protocolHandler.test.ts`) work from the documented fact that `reg.exe`'s console output is
+code-page-encoded, not from a repro.
+
+Before this, a mismatched read-back — this bug, or any other reason the two strings disagreed — threw
+`could not arm the handler` and returned from `runLogin` _after_ `io.writeValue` had already pointed
+the machine-wide handler at the arming profile, with everything that would have put `previous` back
+sitting below the throw, unreached: the handler stayed armed with nothing to undo it short of
+`foster app login --restore`. The arm-write's own read-back check, and the whole wait that follows
+it, now sit inside one `try`/`finally` (`runLogin`), so a restore is attempted on every way out of
+that block — the mismatched-read-back throw included — except the one case where restoring would be
+wrong: `handler-rewritten`, meaning the poll loop already found something _other than_ the armed
+value sitting in the key, which is somebody else's change to leave alone.
+
+The CLI's own `app login` action (`src/cli/index.ts`) had a matching gap on the way out: Ctrl+C was
+caught with `process.once('SIGINT', ...)`, which Node auto-removes after it fires once — so a
+second Ctrl+C from someone impatient had no listener left and fell through to Node's default SIGINT
+handling, which ends the process immediately, before `runLogin`'s own `finally` above ever runs.
+Closing the terminal window outright was never caught at all: Windows delivers that as `SIGHUP` (or
+`SIGBREAK` for Ctrl+Break), and with no listener for either, Node's default action is the same
+immediate termination. `armAbortOnSignals` (`src/util/signals.ts`) arms all three with `.on`, never
+`.once`, behind one shared guard so the abort fires exactly once regardless of how many of them go
+off or in what order, and stays armed for as many signals as arrive.
 
 ## Quoting a profile path for `Invoke-CommandInDesktopPackage`
 
