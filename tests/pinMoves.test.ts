@@ -43,6 +43,7 @@ function fakePinState(ids: string[]): PinState {
     document: {},
     highestSequence: 0n,
     notices: [],
+    tablesUnreadable: [],
   };
 }
 
