@@ -1,5 +1,6 @@
-import { blockingReasons } from '../domain/filter.js';
+import { blockingReasons, carriedOn, type ReachCheck } from '../domain/filter.js';
 import type { AccountRef, DiscoveredSession, Unfosterable } from '../domain/types.js';
+import { forksOf } from '../engine/branches.js';
 import type { Lineage } from '../engine/lineage.js';
 import { NEVER_COMES } from './sweep.js';
 
@@ -27,6 +28,20 @@ import { NEVER_COMES } from './sweep.js';
  * branch pass does not: one id split across two working directories, and
  * whether the target's cards for it, together, reach every record either file
  * holds.
+ *
+ * One thing this does borrow from the branch pass, deliberately: credit for a
+ * fork sibling. A branch whose own records are all shared history — nothing
+ * `only` its own, in `branches.ts`'s terms — is a branch the branch pass never
+ * brings a row for once *any* sibling of the family is here, because that
+ * shared history rides along on whichever branch did arrive (`planBranchCards`,
+ * the `kind === 'stale' && branch.only === 0` case). Measuring branch A alone
+ * against only the target's own branch-A cards would call that a total gap —
+ * every one of its records missing — when the target reaches them all through
+ * a sibling row it already has. So a gap's `reached` set is widened with
+ * whatever the target's cards for A's fork siblings themselves reach,
+ * intersected back with A's own records: an id genuinely split across two
+ * *branches* is credited the same way one already split across two *working
+ * directories* is, just above.
  */
 
 export interface ProveGap {
@@ -85,6 +100,13 @@ export function provePlan(
   const gaps: ProveGap[] = [];
   const neverFosterable: ProveNeverFosterable[] = [];
 
+  // One grouping, every id in the store, so fork membership can be asked of
+  // any of them below — the same `Forks` the branch pass itself builds
+  // (`forksOf`, `ops/sweep.ts`'s `runPasses`), just over every carded id
+  // rather than only this run's candidates.
+  const allIds = [...byId.values()].map((group) => group[0]!.data.cliSessionId!);
+  const forks = forksOf(allIds, kin);
+
   for (const [, cards] of byId) {
     // `Lineage`'s transcript index is keyed by the exact filename on disk
     // (`indexAllTranscripts`), an exact-match lookup with no case folding —
@@ -103,6 +125,28 @@ export function provePlan(
       const reach = kin.reachOf(id, card.data.cwd) ?? scan;
       for (const uuid of reach.uuids) reached.add(uuid);
     }
+
+    // Credit for a fork sibling the target already holds — see the module
+    // docstring. Only records this id's own scan actually carries are added,
+    // so `reached` stays a subset of `scan.uuids` and a size comparison
+    // against `total` below still means what it always did.
+    const fork = forks.of(id);
+    if (fork) {
+      for (const branch of fork.branches) {
+        const siblingId = branch.cliSessionId;
+        if (siblingId.toLowerCase() === id.toLowerCase()) continue;
+        const siblingCards = byId.get(siblingId.toLowerCase());
+        if (!siblingCards) continue;
+        for (const card of siblingCards.filter((c) => sameCard(c, target))) {
+          const siblingReach = kin.reachOf(siblingId, card.data.cwd) ?? kin.scanOf(siblingId);
+          if (!siblingReach) continue;
+          for (const uuid of siblingReach.uuids) {
+            if (scan.uuids.has(uuid)) reached.add(uuid);
+          }
+        }
+      }
+    }
+
     const missing = total - reached.size;
     if (missing <= 0) continue;
 
@@ -114,16 +158,43 @@ export function provePlan(
     // reported as a gap on that basis rather than guessed into either bucket.
     const sources = cards.filter((card) => !sameCard(card, target));
     if (sources.length > 0) {
-      const blocked = sources.map((card) => blockingReasons(card, { includeArchived: true }));
-      const allBlocked = blocked.every((reasons) => NEVER_COMES.some((r) => reasons.includes(r)));
-      if (allBlocked) {
-        const reason = NEVER_COMES.find((r) => blocked.some((reasons) => reasons.includes(r)))!;
-        neverFosterable.push({
-          cliSessionId: id,
-          ...(cards[0]?.data.title === undefined ? {} : { title: cards[0].data.title }),
-          reason,
-        });
-        continue;
+      // A card that is itself just a copy — this id's own conversation has a
+      // card of its own elsewhere — is not a candidate the ordinary pass ever
+      // offers (`applyFilter`'s `copyWithCard` exclusion, `domain/filter.ts`):
+      // fostering copies a copy of the *original*, not a copy of a copy. Such
+      // a card is not what a gap here is asking "why wasn't this brought?"
+      // of, so it does not stand in the way of calling the group
+      // never-fosterable — unless it carried on past what the target already
+      // reaches (`carriedOn`, the same #49 exception `applyFilter` grants),
+      // in which case it is a real source and the group is a genuine gap.
+      const hereCheck: ReachCheck = {
+        unreached(cliSessionId, cwd) {
+          if (cliSessionId === undefined) return 0;
+          const offered = kin.reachOf(cliSessionId, cwd);
+          if (offered === undefined) return 0;
+          let beyond = 0;
+          for (const uuid of offered.uuids) if (!reached.has(uuid)) beyond += 1;
+          return beyond;
+        },
+      };
+      const relevantSources = sources.filter(
+        (card) => !(card.isCopy && !card.isStranded && !carriedOn(card, hereCheck)),
+      );
+
+      if (relevantSources.length > 0) {
+        const blocked = relevantSources.map((card) =>
+          blockingReasons(card, { includeArchived: true }),
+        );
+        const allBlocked = blocked.every((reasons) => NEVER_COMES.some((r) => reasons.includes(r)));
+        if (allBlocked) {
+          const reason = NEVER_COMES.find((r) => blocked.some((reasons) => reasons.includes(r)))!;
+          neverFosterable.push({
+            cliSessionId: id,
+            ...(cards[0]?.data.title === undefined ? {} : { title: cards[0].data.title }),
+            reason,
+          });
+          continue;
+        }
       }
     }
 

@@ -191,6 +191,24 @@ export interface SweepOptions {
    * have been before this existed.
    */
   cache?: FosterCache;
+  /**
+   * Handed the `Lineage` and the whole-store scan this run built, the moment
+   * both exist — before any pass has written anything.
+   *
+   * The one way out of paying for either twice. `foster sweep --prove` used to
+   * open a second `Lineage` (a fresh read of every transcript's head) and a
+   * second whole-store scan just to call `provePlan`, on top of the ones this
+   * function had just built for its own passes — measured on a real store,
+   * that doubled a sweep's own ~32s to ~60s for `--prove` alone. A callback
+   * rather than a return value: `SweepReport` is what `--json` prints, and
+   * neither `Lineage` nor a few thousand `DiscoveredSession`s belongs in that.
+   *
+   * Read-only for the callback: the scan is this run's own working copy, and a
+   * pass has not run yet when it fires, so nothing here is stale by the time a
+   * caller acts on it — `provePlan` reads it fresh, exactly as it would a scan
+   * it took itself.
+   */
+  onScan?: (context: { kin: Lineage; scanned: readonly DiscoveredSession[] }) => void;
 }
 
 export interface SweepPhase {
@@ -566,6 +584,9 @@ export function runSweep(options: SweepOptions): SweepReport {
     copySessionIds(ledger.read()),
     slimOptions(scanCache, cardCache),
   );
+  // Before any pass runs, so a caller asking for `--prove` gets the scan this
+  // run itself is about to act on, not a stale one from before a write.
+  options.onScan?.({ kin, scanned });
   const run: SweepRun = {
     store,
     ledger,
