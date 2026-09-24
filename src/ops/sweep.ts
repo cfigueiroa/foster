@@ -60,7 +60,13 @@ import { copySessionIds, project } from '../ledger/project.js';
 import type { FosterCache } from '../store/cache/index.js';
 import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
-import { fromAccounts, scanAccount, ScanCache, scanStore, type ScanOptions } from '../store/scanner.js';
+import {
+  fromAccounts,
+  scanAccount,
+  ScanCache,
+  scanStore,
+  type ScanOptions,
+} from '../store/scanner.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
@@ -555,7 +561,11 @@ export function runSweep(options: SweepOptions): SweepReport {
     ? lineageAt(options.projectsDirs, transcriptCache)
     : lineage(env, configDirs, transcriptCache);
   const scanCache = new ScanCache();
-  const scanned = scanStore(store, copySessionIds(ledger.read()), slimOptions(scanCache, cardCache));
+  const scanned = scanStore(
+    store,
+    copySessionIds(ledger.read()),
+    slimOptions(scanCache, cardCache),
+  );
   const run: SweepRun = {
     store,
     ledger,

@@ -6664,7 +6664,6 @@ function printVerify(report: VerifyReport): void {
   );
 }
 
-
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {
   return bytes === undefined ? '' : formatBytes(bytes);

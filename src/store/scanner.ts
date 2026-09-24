@@ -14,7 +14,6 @@ import type { SlimCardCache } from './cache/cardCache.js';
 import { readSessionCardCached } from './cache/cardCache.js';
 import { readSessionFile } from './sessionFile.js';
 
-
 /**
  * Read-only view of the Claude Desktop store.
  *
