@@ -783,6 +783,42 @@ widens the read (×4 each retry, capped at 8 MB) when a window comes back with n
 a transcript like the cited 22 is found rather than missed; the ordinary transcript, whose answer is
 already in the first 256 KB, pays nothing extra.
 
+## `foster disk` and `foster stats`: read-only reports across every account
+
+Neither writes anything, and neither decides what is safe to remove — that judgement stays
+`purge`'s (`src/engine/diskUsage.ts`, `src/engine/stats.ts`, both self-contained: no import from
+`store/orphans.ts` or `store/transcripts.ts`'s private `streamLines`, on purpose, so a parallel
+change to either module cannot land under these two without a review noticing).
+
+`foster disk` scans a full (non-slim) `scanStore` once and measures bytes per account and per
+`projectDirName` bucket, for cards and for the transcripts each account's cards reach. It also
+measures `BULKY_CARD_FIELDS` — the field's own `JSON.stringify` length, not a share of the whole
+card — and reports it per field; measured 24/09/2026 on a real store (25,178 cards grown to
+1011 MB, one grown since the field was added): 97%, `remoteMcpServersConfig` at 951 MB of it. An
+"orphan" here is broader than `findOrphanedConversations`: a transcript no card in any account
+(and no Cowork session — `agentSessionReferences` is duplicated locally rather than imported, see
+above) points at, counted with or without a tombstone. Duplicate transcripts are found by
+grouping same-size files first and hashing only those groups (`sha256`, streamed in 1 MB chunks,
+same technique as `store/transcripts.ts`'s `streamLines`) — measured on a real store: five pairs,
+every one a repository/worktree split of one conversation that never diverged after the branch
+was cut, the same shape `fileCards.ts` already handles from the sidebar-row side.
+
+`foster stats` reads every transcript's assistant records for `message.usage` and for the usage-
+limit stop `foster revive` already detects (`USAGE_LIMIT` imported from `engine/revive.ts`, not
+redefined) — over the _whole_ transcript, not just the tail `lastAnswer` reads, since the report
+wants every stop a conversation hit, not only its last. The line-prefilter (`'"usage"'` or the
+literal `rate_limit` substring, checked before `JSON.parse`) is the same trick
+`recordFields`/`idsMentionedIn` use elsewhere in this codebase for the same reason: most lines in
+a transcript are tool calls and results, and skipping the parse for lines that cannot match is
+the whole saving. A conversation is attributed to the account whose _native_ card names it —
+`ownersOf` — because a fostered copy only proves the conversation reached that sidebar, not that
+the tokens were spent under it; one no card anywhere claims natively is bucketed `unattributed`,
+never guessed at. Cross-checked 24/09/2026 against an independent Python re-parse of the same
+transcripts: card and transcript byte totals matched exactly, the usage-limit stop count matched
+exactly (1635 of 1635), and the one file whose token sum first looked off was a session still
+being written to _during_ the comparison — a live-growing file read twice moments apart, not a
+parsing bug; both readers agreed to the token once the file stopped moving.
+
 ## Rescuing "cannot reach your computer" cards
 
 `foster rescue` lists them; `--open` opens a terminal tab per conversation, stopped at the
