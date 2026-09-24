@@ -41,8 +41,8 @@ be a loss to delete — see the section below.
 ## The persistent scan cache, and why it is safe to lose
 
 `~/.foster/cache` holds two files: `cards.ndjson` (slim `readSessionCard` results,
-`store/cache/cardCache.ts`) and `transcripts.bin` (`scanConversation` and `idsMentionedIn`
-results, `store/cache/transcriptCache.ts`). Both are keyed on a file's absolute path plus its size
+`store/cache/cardCache.ts`) and `transcripts.bin` (`scanConversation` results — each file's own
+uuids plus its two timestamps, `store/cache/transcriptCache.ts`). Both are keyed on a file's absolute path plus its size
 and mtime — the transcript cache additionally resumes from a stored byte offset on growth, after
 verifying the last 4 KB before that offset still reads the same, so an actively-growing JSONL log
 is read once and topped up rather than reread whole every run. Neither file is a registry: nothing
@@ -65,28 +65,20 @@ Residual risk, stated once here rather than at every call site: a card or transc
 with the exact same size inside the same mtime tick as its previous write reads as unchanged.
 Nothing keyed on size and mtime alone can tell that apart from no change at all.
 
-A first design combined the transcript cache's two halves into one entry, computing and keeping
-`idsMentionedIn`'s superset for every file `scanConversation` touched instead of only the handful
-`Lineage.deepen` ever asks about. Measured the same day: that ran a real dry-run sweep out of the
-default heap (`Ineffective mark-compacts near heap limit`) on a store the uncached sweep read in
-78 s. The two are independent caches now, growth-resumed separately, so a `scanConversation`-only
-run never pays for or retains data nobody asked for.
-
-`TranscriptCache.idsMentionedIn`'s own persisted entry only proves an id-shaped string occurs
-somewhere in a file — it does not survive far enough to say whether an occurrence is a record's own
-`uuid` or a copy quoted inside another one, the nested-alias case "Lineage precision" (above) fixed
-for the live `idsMentionedIn`. Serving a cache hit without the same structural check would have
-quietly brought that bug back for anything routed through this cache. It is now never trusted on
-its own: a candidate the persisted entry turns up is handed to the live, `recordFields`-validated
-`idsMentionedIn`, over only the (typically tiny) set of ids the cache actually narrowed things down
-to — never the whole file's own `wanted` set, so a miss still costs nothing beyond the persisted
-lookup. `Lineage.deepen` itself does not call through this cache for mentions at all: it uses the
-live `idsMentionedIn` together with its own per-run `RecordIdCache` (see "Lineage precision"),
-which already remembers a file's scan for the lifetime of one sweep and needs no cross-run
-persistence to make repeated rounds cheap. `TranscriptCache`'s mention half stays available for a
-future caller with a genuinely cross-run "ask the same file about a shifting id set" shape, now
-correct as well as persisted; only `scanConversation`/`scanConversationFiles` are wired into
-`Lineage` today, for `scanOf`/`reachOf`'s much larger population.
+A first design combined this cache with a persistent, on-disk twin of `idsMentionedIn`
+(`store/transcripts.ts`) in one entry, computing and keeping its superset for every file
+`scanConversation` touched instead of only the handful `Lineage.deepen` ever asks about. Measured
+the same day: that ran a real dry-run sweep out of the default heap (`Ineffective mark-compacts
+near heap limit`) on a store the uncached sweep read in 78 s. Splitting it into two independent,
+growth-resumed caches fixed the heap problem, but the persisted `idsMentionedIn` half never
+gained a caller: `Lineage.deepen`, the only place anything asks "does this transcript mention
+this id", has carried its own in-memory `RecordIdCache` (`store/transcripts.ts`, see "Lineage
+precision") since before this milestone, and was never wired to the persisted one. Removed
+2026-09 — `TranscriptCache`'s own class doc records why: a cache entry nothing reads is dead
+weight on every `save()`, not a feature kept in reserve. `transcripts.bin` now holds only
+`scanConversation`'s result, and `RecordIdCache` stays exactly what its name says: a per-run
+memo, rebuilt every sweep from the live, `recordFields`-validated `idsMentionedIn`, with no
+cross-run persistence and nothing under `~/.foster/cache` behind it.
 
 ## The ledger's `account_identity_seen`: what it holds
 
@@ -873,8 +865,9 @@ needs a `scanStore` of the whole Desktop store, and on this machine that is **25
 cards**, over 13 s on its own, dwarfing the search. `grepTranscripts` (`engine/grep.ts`) runs the
 whole transcript search _before_ ever calling `scanStore`, and skips it outright when nothing
 matched — so the common case, a rare term that matches nothing, never pays it; a term with real
-hits (measured: `rioprev`, this machine's own project name) does, and takes on the order of the
-scan's own cost on top, which is a store-specific number a smaller install would not see.
+hits (measured against a term that matched one of this machine's own real project names) does,
+and takes on the order of the scan's own cost on top, which is a store-specific number a smaller
+install would not see.
 
 `--account` narrows the _report_ to conversations with a card in that account (a `resolveStoreArg`-
 style accountUuid prefix, via `matchAccountPrefix`) — it does not narrow which transcripts get

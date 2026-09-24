@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -80,8 +80,4 @@ export function clearCache(dir: string): number {
     }
   }
   return removed;
-}
-
-export function ensureCacheDir(dir: string): void {
-  mkdirSync(dir, { recursive: true });
 }
