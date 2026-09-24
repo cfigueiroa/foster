@@ -427,9 +427,25 @@ export function listWorktreeReleased(state: LedgerState): WorktreeReleasedCard[]
   return [...state.worktreeReleased.values()].sort((a, b) => a.releasedAt - b.releasedAt);
 }
 
-/** Codex rollouts imported and not yet undone, oldest import first. */
+/** Codex rollouts and cloud sessions imported and not yet undone, oldest import first. */
 export function listImported(state: LedgerState): ImportedConversation[] {
   return [...state.imported.values()].sort((a, b) => a.importedAt - b.importedAt);
+}
+
+/**
+ * `listImported`, scoped to one importer's own conversations — `source`
+ * absent on an entry means `'codex'` (see `ImportedConversation.source`).
+ *
+ * Both importers fold into the same `state.imported` map, keyed on
+ * `rolloutId` alone, so a bare `--undo` (no `--session` filter) must ask for
+ * its own source explicitly rather than sweeping up the other importer's
+ * conversations just because they happen to share the map.
+ */
+export function listImportedFrom(
+  state: LedgerState,
+  source: 'codex' | 'cloud',
+): ImportedConversation[] {
+  return listImported(state).filter((i) => (i.source ?? 'codex') === source);
 }
 
 /**

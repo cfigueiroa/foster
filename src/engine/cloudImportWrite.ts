@@ -7,7 +7,7 @@ import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.j
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerState } from '../ledger/project.js';
 import { claudeProjectsDir, projectDirName } from '../store/transcripts.js';
-import { writeFileAtomic } from '../util/fsatomic.js';
+import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
 import { VERSION } from '../version.js';
 import type { CloudRepoHint, CloudSessionDetail, TeleportEvent } from './cloudApi.js';
 import { serialiseCloudTranscript, teleportEventsToTranscript } from './cloudTranscript.js';
@@ -182,6 +182,18 @@ export function pullCloudSession(
     outcome.title = card.title;
 
     if (dryRun) return { ...outcome, status: 'imported' };
+
+    // A changed re-pull can land at different paths than the first pull did —
+    // `--into` (and so `transcriptPath`) or `--to` (and so `cardPath`) is a
+    // fresh CLI flag on every invocation, unlike a Codex rollout's own `cwd`,
+    // which `codexImportWrite.ts` derives from the rollout itself and so never
+    // drifts across re-imports. Left behind, the old pair would go untracked —
+    // `state.imported` only remembers the newest paths — and `--undo` would
+    // never reach it. Remove whichever of the two moved.
+    if (already) {
+      if (already.transcriptPath !== transcriptPath) removeSafely(already.transcriptPath);
+      if (already.cardPath !== cardPath) removeSafely(already.cardPath);
+    }
 
     mkdirSync(path.dirname(transcriptPath), { recursive: true });
     writeFileAtomic(transcriptPath, serialised);

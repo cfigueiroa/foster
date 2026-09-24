@@ -15,8 +15,13 @@ const TARGET: AccountRef = {
   accountUuid: '11111111-1111-4111-8111-111111111111',
   organizationUuid: '11111111-1111-4111-8111-111111111112',
 };
+const OTHER_TARGET: AccountRef = {
+  accountUuid: '22222222-2222-4222-8222-222222222221',
+  organizationUuid: '22222222-2222-4222-8222-222222222222',
+};
 const CLOUD_ID = 'cse_00000000000000000000000001';
 const CWD = '/repo/demo';
+const OTHER_CWD = '/repo/other';
 
 let store: StoreLayout;
 let ledger: Ledger;
@@ -75,13 +80,18 @@ function events(): TeleportEvent[] {
   ];
 }
 
-function run(dryRun: boolean, overrides: Partial<CloudSessionDetail> = {}, evs = events()) {
+function run(
+  dryRun: boolean,
+  overrides: Partial<CloudSessionDetail> = {},
+  evs = events(),
+  opts: { cwd?: string; target?: AccountRef } = {},
+) {
   return pullCloudSession(CLOUD_ID, detail(overrides), evs, {
     store,
     ledger,
     state: project(ledger.read()),
-    target: TARGET,
-    cwd: CWD,
+    target: opts.target ?? TARGET,
+    cwd: opts.cwd ?? CWD,
     dryRun,
     env,
     now: 1_700_000_000_000,
@@ -169,6 +179,64 @@ describe('pullCloudSession', () => {
     expect(listImported(project(ledger.read()))).toHaveLength(1);
     const lines = readFileSync(outcome.transcriptPath!, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(4); // 3 real records + the continuation notice
+  });
+
+  it('removes the previous transcript when a changed re-pull lands under a different --into cwd', () => {
+    const first = run(false);
+    expect(existsSync(first.transcriptPath!)).toBe(true);
+
+    const changed = events();
+    changed.push({
+      eventId: 'a2',
+      eventType: 'assistant',
+      payload: {
+        type: 'assistant',
+        uuid: 'a2',
+        parentUuid: 'a1',
+        isSidechain: false,
+        sessionId: 'old-session-id',
+        timestamp: '2026-09-01T00:06:00.000Z',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'more work' }] },
+      },
+    });
+    const second = run(false, {}, changed, { cwd: OTHER_CWD });
+    expect(second.status).toBe('imported');
+    expect(second.transcriptPath).not.toBe(first.transcriptPath);
+    // The old transcript (under the first --into) is gone, not orphaned...
+    expect(existsSync(first.transcriptPath!)).toBe(false);
+    // ...and the new one (under the second --into) is what --undo now finds.
+    expect(existsSync(second.transcriptPath!)).toBe(true);
+    const imported = listImported(project(ledger.read()));
+    expect(imported).toHaveLength(1);
+    expect(imported[0]!.transcriptPath).toBe(second.transcriptPath);
+  });
+
+  it('removes the previous card when a changed re-pull lands under a different --to account', () => {
+    const first = run(false);
+    expect(existsSync(first.cardPath!)).toBe(true);
+
+    const changed = events();
+    changed.push({
+      eventId: 'a2',
+      eventType: 'assistant',
+      payload: {
+        type: 'assistant',
+        uuid: 'a2',
+        parentUuid: 'a1',
+        isSidechain: false,
+        sessionId: 'old-session-id',
+        timestamp: '2026-09-01T00:06:00.000Z',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'more work' }] },
+      },
+    });
+    const second = run(false, {}, changed, { target: OTHER_TARGET });
+    expect(second.status).toBe('imported');
+    expect(second.cardPath).not.toBe(first.cardPath);
+    expect(existsSync(first.cardPath!)).toBe(false);
+    expect(existsSync(second.cardPath!)).toBe(true);
+    const imported = listImported(project(ledger.read()));
+    expect(imported).toHaveLength(1);
+    expect(imported[0]!.cardPath).toBe(second.cardPath);
   });
 
   it('drops sidechain records and marks the card archived when the session is archived', () => {

@@ -707,6 +707,26 @@ single-session detail, one session's full teleport-events) went to a local scrat
 never committed; the fixtures in `tests/cloud*.test.ts` have every id, path and message text replaced
 with synthetic values. Treat any future manual probe of these endpoints the same way.
 
+**`X-Trusted-Device-Token` is a known, deliberate gap, not an oversight.** The bundle sends it on
+`teleport-events` and its `session_ingress` fallback when one is available (`bot`, `Bkn` in the
+2.1.278 build), but it is not a value sitting in `.credentials.json` or `.claude.json` for foster to
+read and forward: it comes from `getTrustedDeviceToken()`, a function dynamically imported from a
+separate bundled chunk and itself gated behind a feature flag (`isViolinWoodEnabled`) read from yet
+another chunk — machine attestation the CLI computes itself, not a stored credential. Confirmed
+24/09/2026 by locating `getTrustedDeviceToken`'s call site in the same `bin/claude.exe` build this
+module's module comment measures against; reproducing it would mean reverse-engineering an
+attestation scheme, not reading a file foster already opens. `cloud list`/`cloud pull` proceed
+without it, so an account whose organization requires device trust gets `untrusted_device` (403)
+from `teleport-events` — reported the same way any other `CloudApiError` is, not silently swallowed.
+
+**`--client` never reaches a `foster client register`ed fleet root**, `--container` children
+included — only `foster clients`' own name list (`resolveCloudClient`, same reasoning
+`listClients`' `registeredDirs` argument documents for `identify`: a default that quietly grew to
+cover registered roots would hand a fleet credential to an external API call without anyone naming
+that root here on purpose). `--config-dir <path>` is not accepted by `cloud` either. A registered
+root's credential is reachable only by pointing `CLAUDE_CONFIG_DIR` at it directly and running
+`foster cloud` from inside that shell.
+
 ## Before pushing
 
 ```bash

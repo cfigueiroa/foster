@@ -103,7 +103,7 @@ import {
   listActive,
   listDated,
   listRepointed,
-  listImported,
+  listImportedFrom,
   listRetitled,
   listWorktreeReleased,
   project,
@@ -5926,9 +5926,13 @@ program
     const state = project(ledger.read());
     const dryRun = !opts.yes;
 
-    // --undo: remove what an import wrote.
+    // --undo: remove what an import wrote. Scoped to this importer's own
+    // conversations — `foster cloud pull` writes into the same `state.imported`
+    // map (see `ImportedConversation.source`), and a bare `import-codex --undo`
+    // must never sweep up cloud-pulled ones just because it ran with no
+    // `--session` filter.
     if (opts.undo) {
-      let imports = listImported(state);
+      let imports = listImportedFrom(state, 'codex');
       if (opts.session?.length) {
         const { matched, unmatched } = matchCodexIds(imports, (i) => i.rolloutId, opts.session);
         if (unmatched.length > 0) {
@@ -6061,9 +6065,15 @@ cloud
       'reported as such, not renewed — refreshing rotates the refresh token in .credentials.json,\n' +
       "which every other client sharing that account's login would be affected by. Run `claude` in\n" +
       'that config directory yourself to refresh it.\n\n' +
-      'API keys are rejected outright by the API itself: cloud sessions need a claude.ai sign-in.',
+      'API keys are rejected outright by the API itself: cloud sessions need a claude.ai sign-in.\n\n' +
+      "--client matches by name only, against `foster clients`' own list — never a `foster client\n" +
+      'register`ed root: this reads a credential to call an external API with, and a registered\n' +
+      'fleet root reaching that by default is not something naming it here should quietly grant.',
   )
-  .option('--client <name>', 'only this client (as `foster clients` names it)')
+  .option(
+    '--client <name>',
+    'only this client (as `foster clients` names it) — registered fleet roots are out of scope, see above',
+  )
   .option('--all', 'every signed-in client — the default; only useful to say so explicitly')
   .option('--json', 'machine-readable output')
   .action(async function (this: Command) {
@@ -6161,7 +6171,8 @@ cloud
   .option('--into <cwd>', 'the working directory the resumed conversation opens in')
   .option(
     '--client <name>',
-    'the CLI client to fetch with, and to write the transcript under — defaults to the client in use',
+    'the CLI client to fetch with, and to write the transcript under — defaults to the client in ' +
+      'use; matches by name only, never a registered fleet root (see `cloud list --help`)',
   )
   .option('--to <accountUuid>', 'pull into this account instead of the one signed in')
   .option('--to-org <organizationUuid>', 'pull into this organization')
@@ -6184,7 +6195,7 @@ cloud
 
     if (opts.undo) {
       const { matched, unmatched } = matchCodexIds(
-        listImported(state).filter((i) => i.source === 'cloud'),
+        listImportedFrom(state, 'cloud'),
         (i) => i.rolloutId,
         [id],
       );
