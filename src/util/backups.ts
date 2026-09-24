@@ -26,7 +26,7 @@ import path from 'node:path';
  * asks for the name `COPYFILE_EXCL`-only, so a name reused anyway — a clock
  * that jumped backwards, or a `now()` fixture two callers happen to share in a
  * test — fails loudly instead of quietly overwriting the earlier backup, and
- * is retried once under a new suffix rather than left to throw.
+ * is retried up to five times under a new suffix rather than left to throw.
  */
 
 let counter = 0;
@@ -58,9 +58,9 @@ export interface BackupOptions {
  *
  * The destination is opened with `COPYFILE_EXCL` — it fails rather than
  * silently overwrites an existing file at that name — and on `EEXIST` this
- * retries once under a new, still-fresh suffix rather than throwing: the name
- * is meant to be unique on its own, so a collision is the rare case worth one
- * more try, not a reason to give up the backup.
+ * retries up to five times under a new, still-fresh suffix rather than
+ * throwing: the name is meant to be unique on its own, so a collision is the
+ * rare case worth a few more tries, not a reason to give up the backup.
  */
 export function backupFile(source: string, kind: string, options: BackupOptions = {}): string {
   const now = options.now?.() ?? new Date();

@@ -627,7 +627,8 @@ That backup naming had its own bug: `util/backups.ts`'s destination name was
 a detached `foster layout --restart` and the in-app process it is restarting around can both
 compute a backup in the same millisecond, and `copyFileSync` silently overwrote whichever landed
 second. `backupFile` now folds `process.pid` into the name and opens the destination
-`COPYFILE_EXCL`-only, retrying once under a `-r<n>` suffix on `EEXIST` rather than overwriting.
+`COPYFILE_EXCL`-only, retrying up to five times under a `-r<n>` suffix on `EEXIST` rather than
+overwriting.
 
 ## The sidebar's filter menu: two stores
 
