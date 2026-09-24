@@ -24,7 +24,8 @@ import { forksOf } from '../engine/branches.js';
 import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
-import { applyPinMoves, type PinMove } from '../engine/pinMoves.js';
+import { applyPinMoves, planPinMoves, type PinMove } from '../engine/pinMoves.js';
+import { planMarksBack } from '../engine/marksBack.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -32,7 +33,7 @@ import {
   type OutcomeStatus,
 } from '../engine/executor.js';
 import { lineage, lineageAt, worktreeReachOf, type Lineage } from '../engine/lineage.js';
-import type { RetitleOutcome } from '../engine/retitle.js';
+import { retitleCards, type RetitleOutcome } from '../engine/retitle.js';
 import { inspectApp } from '../engine/safety.js';
 import { sidebarFrom } from '../engine/sidebar.js';
 import {
@@ -656,8 +657,17 @@ export function runSweep(options: SweepOptions): SweepReport {
  */
 export const SWEEP_ROUNDS = 3;
 
-/** Everything a re-plan says is still to write, as one number. */
-function pendingOf(confirmation: SweepConfirmation): number {
+/**
+ * Everything a re-plan says is still to write, as one number.
+ *
+ * Exported for the same reason `sweepMarked` below is: the TUI's own sweep
+ * flow (`src/cli/flows.ts`) used to decide "nothing to sweep" and "anything
+ * changed" with its own, narrower arithmetic that left out `files.retitled`
+ * (the second-file "(other file…)" marks) and `titleSync` — so a sweep whose
+ * only pending work was a second-file mark read as nothing to do, though
+ * `foster sweep --yes` would have written it.
+ */
+export function pendingOf(confirmation: SweepConfirmation): number {
   return (
     confirmation.fosterable +
     confirmation.branches +
@@ -666,6 +676,75 @@ function pendingOf(confirmation: SweepConfirmation): number {
     confirmation.worktreeClaims +
     (confirmation.titlesOutOfStep ?? 0)
   );
+}
+
+/**
+ * Whether a sweep report put a mark on any row — which the running app may yet
+ * save back over, so the restart that finishes it goes through a gap that
+ * writes them again: `deferredSweepGap` in-process, `foster layout` when
+ * detached.
+ *
+ * Shared by the CLI command and the TUI's own sweep flow — see `pendingOf`
+ * above for why the TUI needs it too.
+ */
+export function sweepMarked(report: Pick<SweepReport, 'branches' | 'files'>): boolean {
+  return [...report.branches.retitled, ...report.files.retitled].some(
+    (outcome) => outcome.status === 'retitled',
+  );
+}
+
+/**
+ * Every phase's own `failed` count, folded into one number a caller can turn
+ * into an exit code without re-deriving what `sweepSummary` already prints.
+ */
+export function sweepFailedCount(report: SweepReport): number {
+  return (
+    report.fostered.counts.failed +
+    report.branches.counts.failed +
+    report.restored.counts.failed +
+    report.worktreeClaims.counts.failed +
+    (report.titleSync?.counts.failed ?? 0) +
+    (report.dates?.counts.failed ?? 0)
+  );
+}
+
+/**
+ * The one write a sweep does make in its own restart gap: the pin moves its
+ * pin pass had to defer because the app was open (`engine/pinMoves.ts`), and
+ * any mark the running app saved back over while the sweep ran
+ * (`engine/marksBack.ts`). A sweep that restarts the app itself has the
+ * closed-app window those need right there, and handing the user `foster
+ * layout --yes --restart` instead would cost a second full restart for a
+ * single record. Groups and routines stay `foster layout`'s, as ever.
+ * `undefined` when nothing was deferred, so an ordinary restart is unchanged.
+ *
+ * Shared by the CLI's `foster sweep --restart` and the TUI's own sweep flow,
+ * which used to offer the restart with no gap at all — the pin moves and
+ * marks a real `foster sweep --yes --restart` would have written back stayed
+ * pending until the next `foster layout`.
+ */
+export function deferredSweepGap(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  report: SweepReport,
+): (() => void) | undefined {
+  // The marks the app saved back over while the sweep ran are only knowable
+  // now, once it has closed — so a sweep that wrote any mark opens the gap for
+  // them even when no pin was deferred.
+  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
+  return () => {
+    // A failure leaves the move pending for the next `foster layout`, the same
+    // as `applyLayout` treats it — never a reason the restart itself failed.
+    try {
+      applyPinMoves(store, ledger, planPinMoves(store, ledger.read(), target));
+    } catch {
+      // still pending
+    }
+    // One card at a time and never throwing: `retitleCards` records a failure
+    // rather than raising it, and the next `foster layout` looks again.
+    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
+  };
 }
 
 /** The sweep holds every card of the store for its whole run — see `ScanOptions`. */

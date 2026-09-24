@@ -645,6 +645,90 @@ the target has none — the same "target already has one, leave it" rule groups 
 machine-wide half needs no copying, since one Local Storage record already covers every account on
 the installation.
 
+## `--json` that tells the truth, and a Commander option can be silently unreachable
+
+Measured 24/09/2026, fixed together (0.62.0 development).
+
+**`consolidate --yes --json` (and `consolidate --undo --yes --json`) used to print the plan and
+return before `repointCards`/`returnFosterings` ever ran** — `--yes --json` together wrote
+nothing, silently, and exited 0. The fix follows the order `unclaim`/`dates`/`sweep
+--undo-retitles` already used: with `--json` and a dry run, print the plan; with `--json` and
+`--yes`, do the write first and shape the JSON from what was actually written
+(`tests/consolidateCli.test.ts` proves the write landed on disk, not just in the printed plan —
+`index.ts` runs the program on import, so this is a real subprocess test, not a call into the
+engine functions `consolidate.test.ts` already covers).
+
+**A parent command's own option can make an identically-named option on its subcommand
+unreachable, silently, regardless of where the flag lands on the command line.** `view` (the bare
+command) already declared `--to` and `--json`; `view set`/`view copy` also each declared their
+own `--to`, and — once this milestone added it — their own `--json`. Commander resolves a flag
+against the first command in the chain that declares it, so `foster view set --to X --json`
+handed both flags to the _parent_, and `set`'s own `this.opts()` came back with neither `to` nor
+`json` at all — proven with a minimal two-line Commander repro before it was trusted, not assumed
+from reading the parser's docs. `--to` on `view set`/`view copy` had been silently broken this way
+since it was added, with no test to catch it: a `--to` that named a real account was accepted and
+then quietly ignored, falling back to the signed-in one. The fix is `this.optsWithGlobals()` in
+place of `this.opts()` on both actions — it merges every ancestor command's own opts in, so the
+flag reaches the action no matter which level actually parsed it, and needs no change to either
+command's option declarations. `tests/viewCli.test.ts` guards both the new `--json` and the
+`--to` fix, as a subprocess for the same reason `consolidateCli.test.ts` is one. No other command
+in this CLI has a parent with its own `.option()` and a subcommand redeclaring the same name —
+checked directly against the source, not assumed — so this pattern exists nowhere else here.
+
+**`layout --detach --json` printed the plan as plain text before checking `opts.json`**,
+so `--detach --json` together produced a stream that was half plain text, half JSON. The text
+lines are now printed only when `--json` was not passed, matching every other branch of that
+command.
+
+**Exit codes**: `sweep`, `foster`, `restore`, `return` and `consolidate` used to exit 0 even when
+their own `counts.failed` was greater than zero — a caller checking only the exit code had no way
+to tell a partially-failed run from a clean one. Each now sets `process.exitCode = 1` on a real
+(non-dry-run) failure, without changing what is printed; `sweep`'s own failures are spread across
+several phases (`fostered`, `branches`, `restored`, `worktreeClaims`, `titleSync`, `dates`), folded
+into one count by the new `sweepFailedCount` (`src/ops/sweep.ts`). `identify <unknown prefix>`
+printed plain text and exited 0 even under `--json`; it now respects `--json` (an `{error, message}`
+object) and exits 1, for the "no match", "ambiguous" and "name an account or pass --all" cases
+alike. `client open --json` reported `ok: false` on a failed launch without setting the exit code
+the text output already did for the same case (`outcome.outcome === 'failed'`; `not-windows` was
+never a failure and still isn't).
+
+`doctor --json` omitted the claude:// handler state entirely — the "still armed"/"still routed"
+warning `foster doctor`'s text output prints is exactly the fact AGENTS.md elsewhere promises
+`doctor` reports, and `--json` simply never carried it. It is now included as `handler`
+(`inspectHandler`'s own shape), computed once and shared by both outputs.
+
+`foster app pref --set ... --yes --json` (and the dry-run preview) printed only the plain-text
+lines regardless of `--json` — a scripted caller had no way to read back what was actually
+written, or that a preference was one of the guarded ones. Both paths now carry a JSON object
+(`guarded`, `changes`/`written`, and on the real write, `closed`/`restarted`) instead of silence.
+
+**The TUI's own sweep flow** (`sweepFlow`, `src/cli/flows.ts`) decided "nothing to sweep" and,
+after writing, "did anything change" from a narrower count than `foster sweep --yes` itself uses —
+left out `files.retitled` (the second-file "(other file…)" marks) and `titleSync`. A run whose
+only pending work was one of those read as "Nothing to sweep: everything that can be in this
+account already is." even though `foster sweep --yes` would have written it. Fixed by counting
+both, the same way `sweepMarked` (moved from `src/cli/index.ts` to `src/ops/sweep.ts` and exported,
+alongside `pendingOf` and the new `sweepFailedCount`) already does for the CLI's own restart gap.
+That gap itself — `deferredSweepGap` (renamed from `deferredPinsGap`, same file) — is now shared
+with the TUI flow too: `offerRestart`/`restartFlow` (`src/cli/desktopUi.ts`) take an optional
+`duringGap` callback, run once the app is closed and before it starts again, so a sweep run from
+the TUI writes back deferred pin moves and app-undone marks the same closed-app window
+`foster sweep --restart` already used — previously it left them pending for the next
+`foster layout`.
+
+**The `preAction` hook matched a command by `command.name()` alone** — the bare leaf name — so
+`foster app status` (a subcommand of `app`) tripped `identifyHeldAccounts` (a network call) every
+time, purely because a _different_, top-level `status` command is the one `NAMES_ACCOUNTS` means
+to cover; both leaves are named `status`. Fixed with `commandPath` (`src/cli/commandPath.ts`,
+pulled into its own module so it is testable — `index.ts` runs the program on import and so cannot
+be driven directly in a test, `tests/helpGroups.test.ts`'s own note), which walks a command's
+`.parent` chain and joins the names with spaces (`app status` vs. `status`). Checked against every
+name in `NAMES_ACCOUNTS`: all nine are top-level commands whose path equals their bare name, so
+none of them changed behaviour — only `app status` (and, by the same fix, any future subcommand
+sharing a name with a top-level one) stopped being caught by a set that was never meant to include
+it. (`installations` in that set has never matched anything, before or after this fix — no command
+is actually named that; it names a description on `profile list`, an unrelated pre-existing gap.)
+
 ## Before pushing
 
 ```bash

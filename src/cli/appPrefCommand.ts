@@ -87,20 +87,45 @@ export function registerAppPref(
       // Everything is parsed and checked before the app is touched. A typo in the
       // third of three values must not be discovered with the app already closed.
       const planned = changes.map((change) => resolve(store, change));
+      const guarded = planned.filter((item) => item.spec.guard).map((item) => item.name);
 
-      for (const item of planned) {
-        if (item.spec.guard) {
-          console.log(
-            pc.yellow(
-              `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
-                'trusted folders, private-network access or computer control. Changing it here does\n' +
-                "what the app's own screen would do, without the screen that explains it.",
-            ),
-          );
+      if (!opts.json) {
+        for (const item of planned) {
+          if (item.spec.guard) {
+            console.log(
+              pc.yellow(
+                `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
+                  'trusted folders, private-network access or computer control. Changing it here does\n' +
+                  "what the app's own screen would do, without the screen that explains it.",
+              ),
+            );
+          }
         }
       }
 
       if (!opts.yes) {
+        // `--json` describes the same plan a write would report, under a
+        // `dryRun` flag, rather than the plain-text preview this used to print
+        // regardless of `--json` — the write path below had the identical gap.
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                dryRun: true,
+                guarded,
+                changes: planned.map((item) => ({
+                  name: item.name,
+                  from: item.from,
+                  to: item.to,
+                  unset: item.unset,
+                })),
+              },
+              null,
+              2,
+            ),
+          );
+          return;
+        }
         for (const item of planned) {
           console.log(
             `Would set ${pc.bold(item.name)}: ${format(item.from)} -> ${format(item.to)}` +
@@ -134,7 +159,17 @@ export function registerAppPref(
       if (running) {
         const result = await quitDesktop(store);
         if (result.outcome === 'needs-terminate' || result.outcome === 'hides-to-tray') {
-          console.log(pc.yellow(trayNote('Re-run with --terminate')));
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                { error: 'needs-terminate', message: trayNote('Re-run with --terminate') },
+                null,
+                2,
+              ),
+            );
+          } else {
+            console.log(pc.yellow(trayNote('Re-run with --terminate')));
+          }
           process.exitCode = 1;
           return;
         }
@@ -142,27 +177,52 @@ export function registerAppPref(
           throw new Error('Claude Desktop is still running; nothing was written.');
         }
         closed = true;
-        console.log('Claude Desktop is closed.');
+        if (!opts.json) console.log('Claude Desktop is closed.');
       }
 
+      const written: Array<{
+        name: string;
+        from: unknown;
+        to: unknown;
+        unset: boolean;
+        backup: string;
+      }> = [];
       for (const item of planned) {
         const { write, backup } = writeAppPref(store, item.name, item.parsed, {
           ...(item.unset ? { unset: true } : {}),
         });
-        console.log(
-          `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
-            (write.unset ? pc.dim(' (default)') : ''),
-        );
-        console.log(pc.dim(`  backup: ${backup}`));
+        written.push({
+          name: write.name,
+          from: write.from,
+          to: write.to,
+          unset: Boolean(write.unset),
+          backup,
+        });
+        if (!opts.json) {
+          console.log(
+            `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
+              (write.unset ? pc.dim(' (default)') : ''),
+          );
+          console.log(pc.dim(`  backup: ${backup}`));
+        }
       }
 
+      let restarted = false;
       if (closed) {
         await startDesktop(store);
-        console.log('Claude Desktop is up.');
-      } else {
+        restarted = true;
+        if (!opts.json) console.log('Claude Desktop is up.');
+      } else if (!opts.json) {
         console.log(
           pc.dim('The app reads this at start-up; it will see the change when it opens.'),
         );
+      }
+
+      // Same gap the write path used to leave: `--yes --json` together printed
+      // nothing but the plain-text lines above, so a scripted caller had no way
+      // to read back what was actually written.
+      if (opts.json) {
+        console.log(JSON.stringify({ guarded, written, closed, restarted }, null, 2));
       }
     });
 }
