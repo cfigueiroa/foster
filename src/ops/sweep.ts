@@ -58,7 +58,7 @@ import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
 import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
-import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import { fromAccounts, scanAccount, ScanCache, scanStore } from '../store/scanner.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
@@ -493,6 +493,16 @@ interface SweepRun {
   kin: Lineage;
   /** The sources' cards, classified by the ledger. Never written to, so read once. */
   fromSources: DiscoveredSession[];
+  /**
+   * Every card this run has read, by path — shared across the initial scan
+   * and every re-scan of the target this run makes. A file whose `mtime`/
+   * `size` have not moved since is served from memory rather than read and
+   * parsed again; one that a pass in this same run just wrote is not.
+   * Measured on a real store: `planLayout` alone re-read every card of the
+   * store *whole* on top of the SLIM scan the sweep had just taken, and the
+   * target account was read up to nine times over in a three-round run.
+   */
+  scanCache: ScanCache;
 }
 
 interface Passes {
@@ -523,7 +533,8 @@ export function runSweep(options: SweepOptions): SweepReport {
   );
 
   const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
-  const scanned = scanStore(store, copySessionIds(ledger.read()), SLIM);
+  const scanCache = new ScanCache();
+  const scanned = scanStore(store, copySessionIds(ledger.read()), { ...SLIM, cache: scanCache });
   const run: SweepRun = {
     store,
     ledger,
@@ -538,6 +549,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     live,
     kin,
     fromSources: fromAccounts(scanned, sources),
+    scanCache,
   };
 
   // Counted before anything is written, from the unfiltered scan: the same set of
@@ -590,7 +602,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   // cards point at, and it is the one pass that writes to native cards in bulk
   // — so it runs after everything else has settled, on the store as those
   // passes left it.
-  const dates = options.dates ? runDates(store, ledger, dryRun, env) : undefined;
+  const dates = options.dates ? runDates(run, dryRun) : undefined;
 
   // Read-only and cheap: `foster layout` reads two small files per account
   // rather than any transcript, so planning it alongside costs nothing worth
@@ -603,7 +615,12 @@ export function runSweep(options: SweepOptions): SweepReport {
   // scope or task must not cost `planLayout` the rest of what it could plan.
   let layout: SweepLayoutPreview;
   try {
-    const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
+    const layoutPlan = planLayout({
+      store,
+      target,
+      ledgerEvents: ledger.read(),
+      cache: run.scanCache,
+    });
     layout = pendingLayoutCounts(layoutPlan);
   } catch (error) {
     layout = {
@@ -700,7 +717,10 @@ function runRound(
   // title pass reads titles, and they are the ones those passes just changed.
   // Every other account is read from the scan this run began with — a sweep
   // writes into one directory only, so nothing it did can have moved them.
-  const settled = scanAccount(store, target, copySessionIds(ledger.read()), SLIM);
+  const settled = scanAccount(store, target, copySessionIds(ledger.read()), {
+    ...SLIM,
+    cache: run.scanCache,
+  });
   const cards = cardsAfter(scanned, target, settled);
 
   // Reading the ledger fresh: the passes above may just have appended
@@ -960,7 +980,10 @@ function confirm(
 ): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(store, target, copySessionIds(events), {
+    ...SLIM,
+    cache: run.scanCache,
+  });
   const cards = cardsAfter(scanned, target, hereCards);
   const again = runPasses(run, hereCards, true);
 
@@ -1019,7 +1042,10 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
   const { store, ledger, target, kin, live } = run;
   const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(store, target, copySessionIds(events), {
+    ...SLIM,
+    cache: run.scanCache,
+  });
   const plans = planFileCards({
     hereCards,
     kin,
@@ -1278,14 +1304,16 @@ function runWorktreeClaims(
  * not care which account holds the card — a row sinking in the sidebar is
  * sinking wherever it lives. `planDates` decides direction: never backwards, so
  * a card ahead of its transcript is left alone.
+ *
+ * Takes the sweep's own `run` rather than rebuilding what it already has:
+ * `candidatesFromStore` on its own builds a second `Lineage` from
+ * `transcriptRoots(env)` alone, missing the `configDirs` the sweep's `kin`
+ * was built with, and rescans the store from disk with none of this run's
+ * cache. Reusing both fixes the inconsistency and the re-read together.
  */
-function runDates(
-  store: StoreLayout,
-  ledger: Ledger,
-  dryRun: boolean,
-  env: NodeJS.ProcessEnv,
-): DatesPhase {
-  const { candidates, scanOf } = candidatesFromStore(store, env);
+function runDates(run: SweepRun, dryRun: boolean): DatesPhase {
+  const { store, ledger, kin, scanCache } = run;
+  const { candidates, scanOf } = candidatesFromStore(store, { kin, cache: scanCache });
   const items = planDates(candidates, scanOf);
   const advancing = items.filter((item) => item.status === 'advance');
 

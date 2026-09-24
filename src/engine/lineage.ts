@@ -207,8 +207,16 @@ export function lineageAt(projectsDirs: string[]): Lineage {
    * Guarded against a cycle rather than assumed free of one: two transcripts
    * can each hold the other's first record, and a chain that returns to where
    * it started must stop somewhere rather than spin.
+   *
+   * `rootOf` calls this for every id asked about — a sweep on a real store
+   * measured that at tens of thousands of calls in a single run — and almost
+   * none of them are ever aliased at all (`deepen` only ever adds one for an
+   * actual fork). The common case, no alias at `root`, returns before the
+   * cycle-guard `Set` is ever allocated; the loop below runs unchanged for a
+   * root that does have one.
    */
   const canonical = (root: string): string => {
+    if (alias.get(root) === undefined) return root;
     let at = root;
     const seen = new Set<string>([at]);
     for (;;) {

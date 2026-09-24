@@ -133,6 +133,14 @@ export interface DiscoveredSession {
   path: string;
   /** The account directory it was found in — the only thing binding it to an account. */
   account: AccountRef;
+  /**
+   * When this session came from a run that scanned with a `ScanCache`
+   * (`store/scanner.ts`), this is the very same object on every re-scan that
+   * hits the cache — never a fresh parse. Treat it as read-only: an in-place
+   * write (`data.title = x`, `Object.assign(data, ...)`) would silently
+   * corrupt every later read of this card for the rest of that run. Always
+   * spread into a new object (`{ ...data, title: x }`) instead.
+   */
   data: CodeSessionData;
   /**
    * Bytes of transcript behind a session that has no card of its own to show it.

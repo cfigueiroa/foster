@@ -12,7 +12,7 @@ import {
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type ScanCache } from '../store/scanner.js';
 import {
   groupCardId,
   readGroupScopes,
@@ -160,15 +160,29 @@ function resolveTarget(
 /**
  * Cards for an account, cached per scope key — several assignments in one
  * source scope, and every group's `order` list, ask about the same directory.
+ *
+ * Only `sessionId`, `cliSessionId`, `title`, `isArchived` and `lastActivityAt`
+ * are ever read off what this returns (`resolveTarget`, the loop below), none
+ * of them a bulky field, so every read here is `slim` — cheap on its own, and
+ * free of a disk read at all when `scanCache` already holds the file from the
+ * sweep's own scan moments earlier.
  */
-function cardReader(store: StoreLayout): (key: string) => DiscoveredSession[] {
+function cardReader(
+  store: StoreLayout,
+  scanCache?: ScanCache,
+): (key: string) => DiscoveredSession[] {
   const cache = new Map<string, DiscoveredSession[]>();
   return (key: string): DiscoveredSession[] => {
     const cached = cache.get(key);
     if (cached) return cached;
     const [accountUuid, organizationUuid] = key.split('/');
     const cards =
-      accountUuid && organizationUuid ? scanAccount(store, { accountUuid, organizationUuid }) : [];
+      accountUuid && organizationUuid
+        ? scanAccount(store, { accountUuid, organizationUuid }, undefined, {
+            slim: true,
+            cache: scanCache,
+          })
+        : [];
     cache.set(key, cards);
     return cards;
   };
@@ -178,6 +192,7 @@ function planGroups(
   store: StoreLayout,
   target: AccountRef,
   ledgerEvents: readonly LedgerEvent[],
+  scanCache?: ScanCache,
 ): GroupsPlan {
   const scopes = readGroupScopes(store);
   const targetKey = scopeKey(target);
@@ -185,8 +200,8 @@ function planGroups(
   const sourceEntries = Object.entries(scopes).filter(([key]) => key !== targetKey);
 
   const templates = [...templatesSeen(ledgerEvents), ...DEFAULT_TEMPLATES];
-  const targetCards = scanAccount(store, target);
-  const cardsOf = cardReader(store);
+  const targetCards = scanAccount(store, target, undefined, { slim: true, cache: scanCache });
+  const cardsOf = cardReader(store, scanCache);
   const cardById = (key: string, sessionId: string): DiscoveredSession | undefined =>
     cardsOf(key).find((card) => card.data.sessionId === sessionId);
 
@@ -501,16 +516,23 @@ export interface PlanLayoutOptions {
    * `templatesSeen`. Every default template is always checked regardless.
    */
   ledgerEvents?: readonly LedgerEvent[];
+  /**
+   * A cache already holding this run's cards — a sweep's own, reused instead
+   * of reading the store from disk a second time. Standalone `foster layout`
+   * has no such scan and leaves this out; every scan here then reads the
+   * store fresh, exactly as before this was added.
+   */
+  cache?: ScanCache;
 }
 
 export function planLayout(options: PlanLayoutOptions): LayoutPlan {
-  const { store, target } = options;
+  const { store, target, cache } = options;
   return {
     target,
-    groups: planGroups(store, target, options.ledgerEvents ?? []),
+    groups: planGroups(store, target, options.ledgerEvents ?? [], cache),
     routines: planRoutines(store, target, options.now ?? Date.now()),
     viewPrefs: planLayoutViewCarry(store, target),
-    pins: planPinMoves(store, options.ledgerEvents ?? [], target),
+    pins: planPinMoves(store, options.ledgerEvents ?? [], target, undefined, cache),
     marks: planMarksBack(options.ledgerEvents ?? [], target, store),
   };
 }

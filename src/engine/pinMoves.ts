@@ -3,7 +3,7 @@ import { sameAccount } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type ScanCache } from '../store/scanner.js';
 import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
 import { firstLine } from '../util/fs.js';
 
@@ -90,6 +90,7 @@ export function planPinMoves(
   events: readonly LedgerEvent[],
   target: AccountRef,
   read: (store: StoreLayout) => PinState | undefined = readPinState,
+  cache?: ScanCache,
 ): PinMovesPlan {
   const pending = pendingPinMoves(events, target);
   if (pending.length === 0) return { moves: [], settled: [] };
@@ -102,7 +103,10 @@ export function planPinMoves(
     return { moves: [], settled: [], unreadable: message };
   }
 
-  const cards = scanAccount(store, target);
+  // `redirectToVisible` below also reads `cliSessionId`, `lastActivityAt` and
+  // `title` off these cards, none of them a bulky field — `slim` (and the
+  // run's own cache, when there is one) costs nothing here either.
+  const cards = scanAccount(store, target, undefined, { slim: true, cache });
   const shown = new Set(
     cards.filter((card) => !card.data.isArchived).map((card) => card.data.sessionId),
   );
