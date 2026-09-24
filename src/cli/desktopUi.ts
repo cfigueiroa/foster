@@ -178,11 +178,20 @@ async function startFlow(ui: Ui, store: StoreLayout): Promise<boolean> {
   }
 }
 
-async function restartFlow(ui: Ui, store: StoreLayout, state: DesktopState): Promise<void> {
+async function restartFlow(
+  ui: Ui,
+  store: StoreLayout,
+  state: DesktopState,
+  duringGap?: () => void | Promise<void>,
+): Promise<void> {
   if (state.running) {
     if (!(await confirmShutdown(ui, state, 'restart'))) return;
     if (!(await closeDesktop(ui, store))) return;
   }
+  // The app is closed either way at this point — freshly, or because it never
+  // ran — so this is the one window `duringGap` needs, the same window
+  // `restartAround` (`src/ops/restart.ts`) opens for the CLI's own commands.
+  if (duringGap) await duringGap();
   await startFlow(ui, store);
 }
 
@@ -191,8 +200,18 @@ async function restartFlow(ui: Ui, store: StoreLayout, state: DesktopState): Pro
  *
  * The old code printed a note telling the user to restart the app themselves,
  * which is a strange thing for a program that can do it.
+ *
+ * `duringGap`, when given, runs once the app is closed and before it starts
+ * again — the same closed-app window a sweep's own `--restart` writes pin
+ * moves and mark-backs into (`deferredSweepGap`, `src/ops/sweep.ts`). Without
+ * it those stayed pending here until the next `foster layout`.
  */
-export async function offerRestart(ui: Ui, store: StoreLayout, why: string): Promise<void> {
+export async function offerRestart(
+  ui: Ui,
+  store: StoreLayout,
+  why: string,
+  duringGap?: () => void | Promise<void>,
+): Promise<void> {
   const running = inspectApp(store).running;
   ui.note(why, 'Not visible yet');
 
@@ -207,10 +226,11 @@ export async function offerRestart(ui: Ui, store: StoreLayout, why: string): Pro
   if (isCancel(choice) || choice === 'later') return;
 
   if (!running) {
+    if (duringGap) await duringGap();
     await startFlow(ui, store);
     return;
   }
-  await restartFlow(ui, store, inspectDesktopFor(storeIdentity(store.root)));
+  await restartFlow(ui, store, inspectDesktopFor(storeIdentity(store.root)), duringGap);
 }
 
 function explainRefresh(ui: Ui, store: StoreLayout, target: AccountRef): void {

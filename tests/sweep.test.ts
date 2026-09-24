@@ -201,6 +201,40 @@ describe('runSweep', () => {
     expect(copies().map((data) => data.cliSessionId)).toContain(DELETED_CLI);
   });
 
+  it('hands `onScan` the run’s own Lineage and whole-store scan before any pass writes', () => {
+    // `foster sweep --prove` used to open a second `Lineage` (a full
+    // transcript walk) and a second whole-store scan just to call
+    // `provePlan`, on top of the ones `runSweep` had already built for its
+    // own passes — doubling a sweep's own time. `onScan` is the seam that
+    // lets a caller reuse them instead; this pins down that it fires with
+    // the pre-write scan, exactly once, before the fostering pass runs.
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: ORDINARY, title: 'In Recents' }));
+
+    let calls = 0;
+    let seen:
+      { kin: unknown; scanned: readonly { account: { accountUuid: string } }[] } | undefined;
+    const report = sweep(false, {
+      onScan: (context) => {
+        calls += 1;
+        seen = context;
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(seen).toBeDefined();
+    expect(seen!.kin).toBeDefined();
+    // The moment `onScan` fired, nothing had been written to the target yet —
+    // its own scan is the one this run took before the fostering pass ran,
+    // not a fresh one taken after.
+    expect(
+      seen!.scanned.filter((card) => card.account.accountUuid === NEW_ACCOUNT.accountUuid),
+    ).toEqual([]);
+    // The run itself still fostered the session, same as ever — `onScan`
+    // only reports what things looked like at the start.
+    expect(report.fostered.counts.fostered).toBe(1);
+    expect(copies()).toHaveLength(1);
+  });
+
   it('confirms it is finished, so nobody has to re-run it to find out', () => {
     writeSession(store, OLD_ACCOUNT, session({ sessionId: ORDINARY, title: 'In Recents' }));
     writeSession(
@@ -805,6 +839,82 @@ describe('one row per branch', () => {
     sweep(false, { staleTemplate: '(defasada, parou {when}) ' });
 
     expect(card(TRUNK_CARD).title).toBe(`(defasada, parou ${STAMP}) Macs`);
+  });
+});
+
+/**
+ * Since #63 a tip can legitimately have two rows here already, one per file of
+ * its own conversation — `fileCards.ts` marked one of them "(other file…)" and
+ * archived it on some earlier run, and the clean row sits alongside it. The
+ * branch pass used to name `held[0]`, whichever the scan happened to list
+ * first, as the tip's row for the sweep's pin pass to point a deferred pin
+ * move at — so a pin could be handed the archived row's id, and
+ * `pinMoves.ts`'s "the target must be visible" check then gave up on it for
+ * good (see `tests/pinMoves.test.ts` for the write side of that fix).
+ */
+describe('a tip already held in two rows', () => {
+  const MARKED_TIP_CARD = '00000000-0000-4000-8000-0000000000c4';
+  const CLEAN_TIP_CARD = '00000000-0000-4000-8000-0000000000c5';
+
+  it('names the clean row, not scan order, as the tip’s row', () => {
+    fork();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: TRUNK_CARD, cliSessionId: TRUNK, title: 'Macs' }),
+    );
+
+    // The archived "other file" row — written first, so a scan that just took
+    // `held[0]` would offer it.
+    const marked = '(other file, stopped 01/09 18:10) Macs';
+    const markedFile = writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: MARKED_TIP_CARD, cliSessionId: TIP, title: marked, isArchived: true }),
+    );
+    ledger.append({
+      kind: 'card_retitled',
+      sessionId: `local_${MARKED_TIP_CARD}`,
+      target: NEW_ACCOUNT,
+      path: markedFile,
+      from: 'Macs',
+      to: marked,
+      fromArchived: false,
+      toArchived: true,
+      native: true,
+      as: 'other-file',
+    });
+    // The clean row, in the sidebar.
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: CLEAN_TIP_CARD, cliSessionId: TIP, title: 'Macs' }),
+    );
+
+    const report = sweep();
+
+    const branchFork = report.branches.forks.find((entry) => entry.tip === TIP)!;
+    expect(branchFork.tipCard).toMatchObject({
+      sessionId: `local_${CLEAN_TIP_CARD}`,
+      title: 'Macs',
+    });
+    // The archived row's own mark is `fileCards.ts`'s to speak about, not this
+    // pass's — it is left exactly as it is, not stripped and not renamed.
+    expect(card(MARKED_TIP_CARD)).toMatchObject({ title: marked, isArchived: true });
+
+    // Idempotency: `held[0]` was scan order, which a second run has no reason
+    // to repeat the same way — the fix has to pick the clean row on its own
+    // terms every time, not just the first.
+    const again = sweep();
+    const againFork = again.branches.forks.find((entry) => entry.tip === TIP)!;
+    expect(againFork.tipCard).toMatchObject({
+      sessionId: `local_${CLEAN_TIP_CARD}`,
+      title: 'Macs',
+    });
+    expect(again.branches.retitled.filter((outcome) => outcome.status === 'retitled')).toHaveLength(
+      0,
+    );
+    expect(card(MARKED_TIP_CARD)).toMatchObject({ title: marked, isArchived: true });
   });
 });
 

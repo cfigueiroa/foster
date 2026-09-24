@@ -1,7 +1,9 @@
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { hostedByDesktop, quitDesktop, startDesktop, trayNote } from '../engine/desktop.js';
+import { hostedByDesktop } from '../engine/desktop.js';
+import { restartCommandFromArgv } from '../engine/detach.js';
 import { inspectApp } from '../engine/safety.js';
+import { restartAround } from '../ops/restart.js';
 import {
   parsePrefValue,
   readAppPrefs,
@@ -87,20 +89,45 @@ export function registerAppPref(
       // Everything is parsed and checked before the app is touched. A typo in the
       // third of three values must not be discovered with the app already closed.
       const planned = changes.map((change) => resolve(store, change));
+      const guarded = planned.filter((item) => item.spec.guard).map((item) => item.name);
 
-      for (const item of planned) {
-        if (item.spec.guard) {
-          console.log(
-            pc.yellow(
-              `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
-                'trusted folders, private-network access or computer control. Changing it here does\n' +
-                "what the app's own screen would do, without the screen that explains it.",
-            ),
-          );
+      if (!opts.json) {
+        for (const item of planned) {
+          if (item.spec.guard) {
+            console.log(
+              pc.yellow(
+                `${item.name} is one of the settings the app puts in the way on purpose — permissions,\n` +
+                  'trusted folders, private-network access or computer control. Changing it here does\n' +
+                  "what the app's own screen would do, without the screen that explains it.",
+              ),
+            );
+          }
         }
       }
 
       if (!opts.yes) {
+        // `--json` describes the same plan a write would report, under a
+        // `dryRun` flag, rather than the plain-text preview this used to print
+        // regardless of `--json` — the write path below had the identical gap.
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                dryRun: true,
+                guarded,
+                changes: planned.map((item) => ({
+                  name: item.name,
+                  from: item.from,
+                  to: item.to,
+                  unset: item.unset,
+                })),
+              },
+              null,
+              2,
+            ),
+          );
+          return;
+        }
         for (const item of planned) {
           console.log(
             `Would set ${pc.bold(item.name)}: ${format(item.from)} -> ${format(item.to)}` +
@@ -130,40 +157,99 @@ export function registerAppPref(
         );
       }
 
-      let closed = false;
-      if (running) {
-        const result = await quitDesktop(store);
-        if (result.outcome === 'needs-terminate' || result.outcome === 'hides-to-tray') {
-          console.log(pc.yellow(trayNote('Re-run with --terminate')));
-          process.exitCode = 1;
-          return;
+      const written: Array<{
+        name: string;
+        from: unknown;
+        to: unknown;
+        unset: boolean;
+        backup: string;
+      }> = [];
+      const writeAll = (): void => {
+        for (const item of planned) {
+          const { write, backup } = writeAppPref(store, item.name, item.parsed, {
+            ...(item.unset ? { unset: true } : {}),
+          });
+          written.push({
+            name: write.name,
+            from: write.from,
+            to: write.to,
+            unset: Boolean(write.unset),
+            backup,
+          });
+          if (!opts.json) {
+            console.log(
+              `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
+                (write.unset ? pc.dim(' (default)') : ''),
+            );
+            console.log(pc.dim(`  backup: ${backup}`));
+          }
         }
-        if (result.outcome !== 'quit' && result.outcome !== 'not-running') {
-          throw new Error('Claude Desktop is still running; nothing was written.');
+      };
+
+      if (!running) {
+        writeAll();
+        if (opts.json) {
+          console.log(
+            JSON.stringify({ guarded, written, closed: false, restarted: false }, null, 2),
+          );
+        } else {
+          console.log(
+            pc.dim('The app reads this at start-up; it will see the change when it opens.'),
+          );
         }
-        closed = true;
-        console.log('Claude Desktop is closed.');
+        return;
       }
 
-      for (const item of planned) {
-        const { write, backup } = writeAppPref(store, item.name, item.parsed, {
-          ...(item.unset ? { unset: true } : {}),
-        });
+      // `--restart` from here on. Went through `quitDesktop` and `startDesktop`
+      // by hand until this: a `writeAppPref` that threw after the app had
+      // already quit left `startDesktop` never called, and the app closed with
+      // nothing said about it; the tray refusal named "--terminate", a flag
+      // this command has never had (that one belongs to "foster app restart");
+      // and `startDesktop`'s own result was thrown away, so this printed "is
+      // up" whether or not it actually was. `restartAround` is the one place
+      // that already gets all three right, the same as `layout`/`view` do.
+      const restart = await restartAround(
+        store,
+        true,
+        restartCommandFromArgv(process.argv.slice(2)),
+        async () => writeAll(),
+      );
+      // `restart.closed` is `restartAround`'s own account of whether the app
+      // actually went down, set the instant `duringGap` becomes safe to run —
+      // not a proxy like `written.length > 0`, which was wrong whenever the
+      // very *first* write inside the gap was the one that threw: the app had
+      // already been closed by then, but nothing had been pushed onto
+      // `written` yet, so the old proxy reported `closed: false` over a gap
+      // that had, in fact, opened.
+      const closed = restart.closed;
+      if (restart.done) {
+        if (opts.json) {
+          console.log(JSON.stringify({ guarded, written, closed, restarted: true }, null, 2));
+        } else {
+          console.log('Claude Desktop is up.');
+        }
+        return;
+      }
+      if (opts.json) {
         console.log(
-          `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
-            (write.unset ? pc.dim(' (default)') : ''),
+          JSON.stringify(
+            {
+              guarded,
+              written,
+              closed,
+              restarted: false,
+              error: restart.reason,
+              command: restart.command,
+            },
+            null,
+            2,
+          ),
         );
-        console.log(pc.dim(`  backup: ${backup}`));
-      }
-
-      if (closed) {
-        await startDesktop(store);
-        console.log('Claude Desktop is up.');
       } else {
-        console.log(
-          pc.dim('The app reads this at start-up; it will see the change when it opens.'),
-        );
+        console.log(pc.yellow(restart.reason ?? 'The restart did not finish.'));
+        console.log(`  ${restart.command}`);
       }
+      process.exitCode = 1;
     });
 }
 

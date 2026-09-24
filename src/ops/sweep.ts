@@ -24,7 +24,8 @@ import { forksOf } from '../engine/branches.js';
 import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/fileCards.js';
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
-import { applyPinMoves, type PinMove } from '../engine/pinMoves.js';
+import { applyPinMoves, planPinMoves, type PinMove } from '../engine/pinMoves.js';
+import { planMarksBack } from '../engine/marksBack.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -32,7 +33,7 @@ import {
   type OutcomeStatus,
 } from '../engine/executor.js';
 import { lineage, lineageAt, worktreeReachOf, type Lineage } from '../engine/lineage.js';
-import type { RetitleOutcome } from '../engine/retitle.js';
+import { retitleCards, type RetitleOutcome } from '../engine/retitle.js';
 import { inspectApp } from '../engine/safety.js';
 import { sidebarFrom } from '../engine/sidebar.js';
 import {
@@ -56,9 +57,16 @@ import {
 } from '../engine/unclaim.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
+import type { FosterCache } from '../store/cache/index.js';
 import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
-import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import {
+  fromAccounts,
+  scanAccount,
+  ScanCache,
+  scanStore,
+  type ScanOptions,
+} from '../store/scanner.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
@@ -175,6 +183,32 @@ export interface SweepOptions {
    * synthetic table instead of the real machine deciding whether it passes.
    */
   list?: ProcessLister;
+  /**
+   * The persistent scan cache (`store/cache/`), opened and — once the run is
+   * over — saved by the caller. `runSweep` only ever reads and writes through
+   * it; opening one is `--no-cache`'s business, in `cli/index.ts`. With none
+   * given, every scan and every transcript read here is exactly what it would
+   * have been before this existed.
+   */
+  cache?: FosterCache;
+  /**
+   * Handed the `Lineage` and the whole-store scan this run built, the moment
+   * both exist — before any pass has written anything.
+   *
+   * The one way out of paying for either twice. `foster sweep --prove` used to
+   * open a second `Lineage` (a fresh read of every transcript's head) and a
+   * second whole-store scan just to call `provePlan`, on top of the ones this
+   * function had just built for its own passes — measured on a real store,
+   * that doubled a sweep's own ~32s to ~60s for `--prove` alone. A callback
+   * rather than a return value: `SweepReport` is what `--json` prints, and
+   * neither `Lineage` nor a few thousand `DiscoveredSession`s belongs in that.
+   *
+   * Read-only for the callback: the scan is this run's own working copy, and a
+   * pass has not run yet when it fires, so nothing here is stale by the time a
+   * caller acts on it — `provePlan` reads it fresh, exactly as it would a scan
+   * it took itself.
+   */
+  onScan?: (context: { kin: Lineage; scanned: readonly DiscoveredSession[] }) => void;
 }
 
 export interface SweepPhase {
@@ -493,6 +527,23 @@ interface SweepRun {
   kin: Lineage;
   /** The sources' cards, classified by the ledger. Never written to, so read once. */
   fromSources: DiscoveredSession[];
+  /**
+   * Every card this run has read, by path — shared across the initial scan
+   * and every re-scan of the target this run makes. A file whose `mtime`/
+   * `size` have not moved since is served from memory rather than read and
+   * parsed again; one that a pass in this same run just wrote is not.
+   * Measured on a real store: `planLayout` alone re-read every card of the
+   * store *whole* on top of the SLIM scan the sweep had just taken, and the
+   * target account was read up to nine times over in a three-round run.
+   */
+  scanCache: ScanCache;
+  /**
+   * The slim-card half of the persistent cache, when one was opened for this
+   * run — what `scanCache` itself falls back to on a miss, so a card unread
+   * so far *this* run can still be served from a previous run's answer
+   * instead of a fresh parse.
+   */
+  cardCache: FosterCache['cards'] | undefined;
 }
 
 interface Passes {
@@ -522,8 +573,20 @@ export function runSweep(options: SweepOptions): SweepReport {
       !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
   );
 
-  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
-  const scanned = scanStore(store, copySessionIds(ledger.read()), SLIM);
+  const cardCache = options.cache?.cards;
+  const transcriptCache = options.cache?.transcripts;
+  const kin = options.projectsDirs
+    ? lineageAt(options.projectsDirs, transcriptCache)
+    : lineage(env, configDirs, transcriptCache);
+  const scanCache = new ScanCache();
+  const scanned = scanStore(
+    store,
+    copySessionIds(ledger.read()),
+    slimOptions(scanCache, cardCache),
+  );
+  // Before any pass runs, so a caller asking for `--prove` gets the scan this
+  // run itself is about to act on, not a stale one from before a write.
+  options.onScan?.({ kin, scanned });
   const run: SweepRun = {
     store,
     ledger,
@@ -537,7 +600,9 @@ export function runSweep(options: SweepOptions): SweepReport {
     env,
     live,
     kin,
+    cardCache,
     fromSources: fromAccounts(scanned, sources),
+    scanCache,
   };
 
   // Counted before anything is written, from the unfiltered scan: the same set of
@@ -590,7 +655,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   // cards point at, and it is the one pass that writes to native cards in bulk
   // — so it runs after everything else has settled, on the store as those
   // passes left it.
-  const dates = options.dates ? runDates(store, ledger, dryRun, env) : undefined;
+  const dates = options.dates ? runDates(run, dryRun) : undefined;
 
   // Read-only and cheap: `foster layout` reads two small files per account
   // rather than any transcript, so planning it alongside costs nothing worth
@@ -603,7 +668,12 @@ export function runSweep(options: SweepOptions): SweepReport {
   // scope or task must not cost `planLayout` the rest of what it could plan.
   let layout: SweepLayoutPreview;
   try {
-    const layoutPlan = planLayout({ store, target, ledgerEvents: ledger.read() });
+    const layoutPlan = planLayout({
+      store,
+      target,
+      ledgerEvents: ledger.read(),
+      cache: run.scanCache,
+    });
     layout = pendingLayoutCounts(layoutPlan);
   } catch (error) {
     layout = {
@@ -656,8 +726,17 @@ export function runSweep(options: SweepOptions): SweepReport {
  */
 export const SWEEP_ROUNDS = 3;
 
-/** Everything a re-plan says is still to write, as one number. */
-function pendingOf(confirmation: SweepConfirmation): number {
+/**
+ * Everything a re-plan says is still to write, as one number.
+ *
+ * Exported for the same reason `sweepMarked` below is: the TUI's own sweep
+ * flow (`src/cli/flows.ts`) used to decide "nothing to sweep" and "anything
+ * changed" with its own, narrower arithmetic that left out `files.retitled`
+ * (the second-file "(other file…)" marks) and `titleSync` — so a sweep whose
+ * only pending work was a second-file mark read as nothing to do, though
+ * `foster sweep --yes` would have written it.
+ */
+export function pendingOf(confirmation: SweepConfirmation): number {
   return (
     confirmation.fosterable +
     confirmation.branches +
@@ -668,8 +747,107 @@ function pendingOf(confirmation: SweepConfirmation): number {
   );
 }
 
-/** The sweep holds every card of the store for its whole run — see `ScanOptions`. */
-const SLIM = { slim: true } as const;
+/**
+ * Whether a sweep report put a mark on any row — which the running app may yet
+ * save back over, so the restart that finishes it goes through a gap that
+ * writes them again: `deferredSweepGap` in-process, `foster layout` when
+ * detached.
+ *
+ * Shared by the CLI command and the TUI's own sweep flow — see `pendingOf`
+ * above for why the TUI needs it too.
+ */
+export function sweepMarked(report: Pick<SweepReport, 'branches' | 'files'>): boolean {
+  return [...report.branches.retitled, ...report.files.retitled].some(
+    (outcome) => outcome.status === 'retitled',
+  );
+}
+
+/**
+ * Every phase's own `failed` count, folded into one number a caller can turn
+ * into an exit code without re-deriving what `sweepSummary` already prints.
+ *
+ * `branches.counts` and `files` deserve a second look before trusting them at
+ * face value: `branches.counts` is `summariseOutcomes(branches.outcomes)` —
+ * the copy/fostering outcomes of the branch pass — which is a different array
+ * from `branches.retitled`, the marks that same pass writes (`"(stale,
+ * stopped …)"`/`"(other branch, went on …)"`). `files` (the second-file pass)
+ * has no `counts` at all; its only outcomes are `files.retitled`. Either can
+ * carry `status: 'failed'` on its own — an unreadable card, a write error
+ * (`engine/retitle.ts`) — and `render.ts` already marks a failed retitle with
+ * a red `x` in the text output, so leaving them out here meant a real write
+ * failure in either mark pass left `foster sweep --yes` (text or `--json`)
+ * exiting 0.
+ */
+export function sweepFailedCount(report: SweepReport): number {
+  const retitleFailures = (outcomes: RetitleOutcome[]): number =>
+    outcomes.filter((outcome) => outcome.status === 'failed').length;
+  return (
+    report.fostered.counts.failed +
+    report.branches.counts.failed +
+    retitleFailures(report.branches.retitled) +
+    report.restored.counts.failed +
+    report.worktreeClaims.counts.failed +
+    (report.titleSync?.counts.failed ?? 0) +
+    (report.dates?.counts.failed ?? 0) +
+    retitleFailures(report.files.retitled)
+  );
+}
+
+/**
+ * The one write a sweep does make in its own restart gap: the pin moves its
+ * pin pass had to defer because the app was open (`engine/pinMoves.ts`), and
+ * any mark the running app saved back over while the sweep ran
+ * (`engine/marksBack.ts`). A sweep that restarts the app itself has the
+ * closed-app window those need right there, and handing the user `foster
+ * layout --yes --restart` instead would cost a second full restart for a
+ * single record. Groups and routines stay `foster layout`'s, as ever.
+ * `undefined` when nothing was deferred, so an ordinary restart is unchanged.
+ *
+ * Shared by the CLI's `foster sweep --restart` and the TUI's own sweep flow,
+ * which used to offer the restart with no gap at all — the pin moves and
+ * marks a real `foster sweep --yes --restart` would have written back stayed
+ * pending until the next `foster layout`.
+ */
+export function deferredSweepGap(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  report: SweepReport,
+): (() => void) | undefined {
+  // The marks the app saved back over while the sweep ran are only knowable
+  // now, once it has closed — so a sweep that wrote any mark opens the gap for
+  // them even when no pin was deferred.
+  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
+  return () => {
+    // A failure leaves the move pending for the next `foster layout`, the same
+    // as `applyLayout` treats it — never a reason the restart itself failed.
+    try {
+      applyPinMoves(store, ledger, planPinMoves(store, ledger.read(), target));
+    } catch {
+      // still pending
+    }
+    // One card at a time and never throwing: `retitleCards` records a failure
+    // rather than raising it, and the next `foster layout` looks again.
+    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
+  };
+}
+
+/**
+ * The sweep holds every card of the store for its whole run — see
+ * `ScanOptions`. `scanCache` is this run's own in-memory memo (every re-scan
+ * of the target this run makes shares it); `cardCache` is the persisted,
+ * cross-run half, which `scanCache` itself falls back to on a miss.
+ */
+function slimOptions(
+  scanCache: ScanCache | undefined,
+  cardCache: FosterCache['cards'] | undefined,
+): ScanOptions {
+  return {
+    slim: true,
+    ...(scanCache ? { cache: scanCache } : {}),
+    ...(cardCache ? { persistentCache: cardCache } : {}),
+  };
+}
 
 /** One round's writes, in the order a sweep has always made them. */
 export interface Round {
@@ -700,7 +878,12 @@ function runRound(
   // title pass reads titles, and they are the ones those passes just changed.
   // Every other account is read from the scan this run began with — a sweep
   // writes into one directory only, so nothing it did can have moved them.
-  const settled = scanAccount(store, target, copySessionIds(ledger.read()), SLIM);
+  const settled = scanAccount(
+    store,
+    target,
+    copySessionIds(ledger.read()),
+    slimOptions(run.scanCache, run.cardCache),
+  );
   const cards = cardsAfter(scanned, target, settled);
 
   // Reading the ledger fresh: the passes above may just have appended
@@ -960,7 +1143,12 @@ function confirm(
 ): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(
+    store,
+    target,
+    copySessionIds(events),
+    slimOptions(run.scanCache, run.cardCache),
+  );
   const cards = cardsAfter(scanned, target, hereCards);
   const again = runPasses(run, hereCards, true);
 
@@ -1019,7 +1207,12 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
   const { store, ledger, target, kin, live } = run;
   const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(
+    store,
+    target,
+    copySessionIds(events),
+    slimOptions(run.scanCache, run.cardCache),
+  );
   const plans = planFileCards({
     hereCards,
     kin,
@@ -1278,14 +1471,16 @@ function runWorktreeClaims(
  * not care which account holds the card — a row sinking in the sidebar is
  * sinking wherever it lives. `planDates` decides direction: never backwards, so
  * a card ahead of its transcript is left alone.
+ *
+ * Takes the sweep's own `run` rather than rebuilding what it already has:
+ * `candidatesFromStore` on its own builds a second `Lineage` from
+ * `transcriptRoots(env)` alone, missing the `configDirs` the sweep's `kin`
+ * was built with, and rescans the store from disk with none of this run's
+ * cache. Reusing both fixes the inconsistency and the re-read together.
  */
-function runDates(
-  store: StoreLayout,
-  ledger: Ledger,
-  dryRun: boolean,
-  env: NodeJS.ProcessEnv,
-): DatesPhase {
-  const { candidates, scanOf } = candidatesFromStore(store, env);
+function runDates(run: SweepRun, dryRun: boolean): DatesPhase {
+  const { store, ledger, kin, scanCache } = run;
+  const { candidates, scanOf } = candidatesFromStore(store, { kin, cache: scanCache });
   const items = planDates(candidates, scanOf);
   const advancing = items.filter((item) => item.status === 'advance');
 

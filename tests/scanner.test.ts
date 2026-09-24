@@ -1,10 +1,11 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildFosterCopy } from '../src/domain/fostering.js';
 import { accountDir } from '../src/domain/paths.js';
 import {
   scanAccount,
+  ScanCache,
   scanSources,
   scanStore,
   SESSION_FILE_MAX_BYTES,
@@ -233,5 +234,138 @@ describe('a copy that is the last card its conversation has', () => {
     // Both are copies and neither conversation has an own card: both are the
     // last card, and the destination check is what stops the pair.
     expect(scanStore(store).every((found) => found.isStranded)).toBe(true);
+  });
+});
+
+/**
+ * `ScanCache` — the sweep's own re-scans (`ops/sweep.ts`, `engine/layout.ts`,
+ * `engine/dates.ts`) share one of these across a run, so a file a scan already
+ * read is served from memory rather than read and `JSON.parse`d again, unless
+ * its `mtime`/`size` say it changed since.
+ */
+describe('ScanCache', () => {
+  it('serves a card unchanged since it was cached, without reading it again', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c1', title: 'First' }),
+    );
+    const cache = new ScanCache();
+
+    const first = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+    const second = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+
+    // Identity, not just equality: the second scan handed back the very same
+    // parsed object the first one cached — proof the file was not read and
+    // `JSON.parse`d a second time, since nothing on disk moved in between.
+    expect(second.data).toBe(first.data);
+    expect(second.data.title).toBe('First');
+  });
+
+  it('re-reads a card whose mtime or size has moved since it was cached', () => {
+    const store = makeStore();
+    const file = writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c2', title: 'Before' }),
+    );
+    const cache = new ScanCache();
+
+    scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...JSON.parse(readFileSync(file, 'utf8')),
+        title: 'After',
+      }),
+      'utf8',
+    );
+
+    const [found] = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    expect(found!.data.title).toBe('After');
+  });
+
+  it('a slim read can be served from a cache entry read whole', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000c3',
+        remoteMcpServersConfig: 'bulky',
+      }),
+    );
+    const cache = new ScanCache();
+
+    // First, a whole read — the field is still there.
+    const whole = scanAccount(store, OLD_ACCOUNT, undefined, { cache })[0]!;
+    expect(whole.data.remoteMcpServersConfig).toBe('bulky');
+    expect(whole.slim).toBeUndefined();
+
+    // Then a slim request against the same cache: served from the whole entry
+    // rather than read again, so the field a slim read would normally drop is
+    // still there — a superset is a correct answer to "give me at least this".
+    const [slimAsked] = scanAccount(store, OLD_ACCOUNT, undefined, { cache, slim: true });
+    expect(slimAsked!.data.remoteMcpServersConfig).toBe('bulky');
+  });
+
+  it('a whole read is never served from a cache entry read slim', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000c4',
+        remoteMcpServersConfig: 'bulky',
+      }),
+    );
+    const cache = new ScanCache();
+
+    const [slim] = scanAccount(store, OLD_ACCOUNT, undefined, { cache, slim: true });
+    expect(slim!.data.remoteMcpServersConfig).toBeUndefined();
+    expect(slim!.slim).toBe(true);
+
+    // A later whole request must not be handed the slim entry's incomplete
+    // data — it has to read the file again to get the field back.
+    const [whole] = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    expect(whole!.data.remoteMcpServersConfig).toBe('bulky');
+    expect(whole!.slim).toBeUndefined();
+  });
+
+  it('drops a card that has been deleted since it was cached', () => {
+    const store = makeStore();
+    const file = writeSession(store, OLD_ACCOUNT, session());
+    const cache = new ScanCache();
+
+    expect(scanAccount(store, OLD_ACCOUNT, undefined, { cache })).toHaveLength(1);
+
+    rmSync(file);
+
+    expect(scanAccount(store, OLD_ACCOUNT, undefined, { cache })).toHaveLength(0);
+  });
+
+  it('never serves one account’s cache to another — same cache instance, two directories', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c5', title: 'Old account' }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: '00000000-0000-4000-8000-0000000000c6', title: 'New account' }),
+    );
+    const cache = new ScanCache();
+
+    const old = scanAccount(store, OLD_ACCOUNT, undefined, { cache });
+    const fresh = scanAccount(store, NEW_ACCOUNT, undefined, { cache });
+
+    expect(old).toHaveLength(1);
+    expect(fresh).toHaveLength(1);
+    expect(old[0]!.data.title).toBe('Old account');
+    expect(fresh[0]!.data.title).toBe('New account');
   });
 });

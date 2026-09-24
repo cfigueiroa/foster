@@ -4,8 +4,10 @@ import path from 'node:path';
 import { isSelfHostedBy, isSelfSession, type LiveCliSession } from '../store/liveSessions.js';
 import {
   execFileSyncRunner,
+  readProcesses,
   systemExePath,
   type CommandRunner,
+  type ProcessLister,
   type ProcessRow,
 } from '../util/processes.js';
 import { fileExists, safeReaddir } from '../util/fs.js';
@@ -112,7 +114,7 @@ function detachedDir(env: NodeJS.ProcessEnv): string {
  * every caller may simply hand this its own raw argv rather than reconstruct
  * one by hand from the options it parsed.
  */
-function stripDetachFlags(argv: string[]): string[] {
+export function stripDetachFlags(argv: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
@@ -127,6 +129,25 @@ function stripDetachFlags(argv: string[]): string[] {
   return out;
 }
 
+/**
+ * The command to hand over when a write could not restart the app itself: the
+ * same invocation actually typed, `--detach`/`--detach-delay*`/
+ * `--detach-even-with-live` dropped (they mean nothing without a live process
+ * to detach from) and `--yes`/`--restart` guaranteed present. `view set` used
+ * to hand over the bare template `'foster view set --yes --restart'`, which
+ * dropped every filter flag the run actually carried and left "Nothing to
+ * change." for whoever ran it; `layout` and `sweep` had the same shape of gap
+ * for `--store`/`--ledger`/`--to`/`--to-org`. Echoing the real argv is what
+ * `--detach` itself already does (`stripDetachFlags` above) — this is the same
+ * idea for the line printed instead of run.
+ */
+export function restartCommandFromArgv(argv: string[]): string {
+  const stripped = stripDetachFlags(argv);
+  const withYes = stripped.includes('--yes') ? stripped : [...stripped, '--yes'];
+  const withRestart = withYes.includes('--restart') ? withYes : [...withYes, '--restart'];
+  return `foster ${withRestart.join(' ')}`;
+}
+
 /** Local time, second resolution — matches the run this launcher is a record of. */
 function localStamp(now: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -136,10 +157,43 @@ function localStamp(now: Date): string {
   );
 }
 
-/** The leading run of non-flag tokens (`app restart` → `app-restart`), for a readable filename. */
+/**
+ * A leading run of `--store <value>` / `--ledger <value>` (or `--store=value`
+ * / `--ledger=value`) tokens, stripped from the front of an argv — the two
+ * global options a command line may carry ahead of its own verb (see
+ * AGENTS.md's own documented convention, e.g. `foster --store "D:\Claude-Work"
+ * app restart --terminate`). Only a *leading* run is stripped: once a token
+ * that is not one of these two options is seen, everything from there on is
+ * left untouched, so this never mistakes an unrelated argument deeper in the
+ * line for the verb.
+ */
+export function stripLeadingGlobalOptions(argv: string[]): string[] {
+  let i = 0;
+  while (i < argv.length) {
+    const arg = argv[i];
+    if (arg === '--store' || arg === '--ledger') {
+      i += 2;
+      continue;
+    }
+    if (arg !== undefined && (arg.startsWith('--store=') || arg.startsWith('--ledger='))) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return argv.slice(i);
+}
+
+/**
+ * The leading run of non-flag tokens (`app restart` → `app-restart`), for a
+ * readable filename — a leading `--store`/`--ledger` pair is skipped first, so
+ * `sweepDetachArgv`'s own `--store`-forwarding (see its doc comment) still
+ * names the file after the real verb (`layout`, `app-restart`) instead of
+ * falling back to the generic `run`.
+ */
 function verbOf(argv: string[]): string {
   const words: string[] = [];
-  for (const token of argv) {
+  for (const token of stripLeadingGlobalOptions(argv)) {
     if (token.startsWith('-')) break;
     words.push(token);
   }
@@ -233,12 +287,49 @@ export function planDetached(options: PlanDetachedOptions): DetachedPlan {
     }
   }
 
+  // Measured 24/09/2026: a process WMI's `Win32_Process.Create` starts does not
+  // inherit the *calling* process's environment — a marker set only in this
+  // shell's own `$env:` never reached a child launched that way, though the
+  // logged-on user's persistent variables did. `FOSTER_HOME` set the same way
+  // (a test harness, or a relocated ledger for one shell) would otherwise be
+  // silently dropped the moment the restart detaches: the re-run would read
+  // and write the *default* `~/.foster`, not the one this invocation meant.
+  // Set explicitly in the launch line whenever this process has one, so the
+  // detached re-run sees exactly what this one did.
+  const fosterHome = env.FOSTER_HOME;
+  if (fosterHome !== undefined && CMD_UNSAFE.test(fosterHome)) {
+    throw new Error(
+      `--detach cannot carry FOSTER_HOME through the launch line: ${JSON.stringify(fosterHome)} ` +
+        'contains a character the cmd.exe line would misread. Run it undetached, or relocate FOSTER_HOME.',
+    );
+  }
+
   const dir = detachedDir(env);
   const nowValue = now();
   const stamp = freshStamp(dir, localStamp(nowValue), verbOf(cleanArgv));
   const verb = verbOf(cleanArgv);
   const vbsPath = path.join(dir, `${stamp}-${verb}.vbs`);
   const logPath = path.join(dir, `${stamp}-${verb}.log`);
+
+  // `cleanArgv` above is checked because it comes from whoever invoked
+  // `foster ... --detach`; these three come from the machine's own
+  // environment and this build's own paths (`logPath` folds in `FOSTER_HOME`;
+  // `execPath` and `scriptPath` are `process.execPath` and `process.argv[1]`)
+  // — no less able to carry a `%` or a `"` that would break the cmd.exe
+  // compound line this builds. A `%` in `FOSTER_HOME` passed silently before
+  // this check existed.
+  for (const [name, value] of [
+    ['the log path (FOSTER_HOME)', logPath],
+    ['the node executable path', execPath],
+    ['the running script path', scriptPath],
+  ] as const) {
+    if (CMD_UNSAFE.test(value)) {
+      throw new Error(
+        `--detach cannot run: ${name} contains a character the cmd.exe line would misread: ` +
+          `${JSON.stringify(value)}.`,
+      );
+    }
+  }
 
   const pingCount = delaySeconds + 1;
   const quotedLog = quoteForCmd(logPath);
@@ -249,9 +340,10 @@ export function planDetached(options: PlanDetachedOptions): DetachedPlan {
   const runLine = argsForRun
     ? `${quotedExec} ${quotedScript} ${argsForRun}`
     : `${quotedExec} ${quotedScript}`;
+  const setFosterHome = fosterHome !== undefined ? `set FOSTER_HOME=${fosterHome}& ` : '';
 
   const cmdLine =
-    `cmd.exe /c "ping -n ${pingCount} 127.0.0.1 >nul & ` +
+    `cmd.exe /c "${setFosterHome}ping -n ${pingCount} 127.0.0.1 >nul & ` +
     `echo ==== ${stamp} start: ${argsForLog} >> ${quotedLog} & ` +
     `${runLine} >> ${quotedLog} 2>&1 & ` +
     `echo ==== end >> ${quotedLog}"`;
@@ -287,17 +379,43 @@ function parseWmicCreatePid(stdout: string): number | undefined {
 }
 
 /**
+ * A `wscript.exe` already running the exact `.vbs` this `commandLine`
+ * (`wscript.exe "<vbsPath>"`) names — from the process table `launchWithFallback`
+ * below is given.
+ *
+ * `Invoke-CimMethod ... Create` submits the request to WMI and the process it
+ * creates lives independently of the PowerShell client that asked for it: a
+ * client that times out waiting for the reply does not undo a `Create` that
+ * had already gone through by the time the timeout fired. Falling straight to
+ * the `wmic` fallback on that timeout, as this used to unconditionally,
+ * risked launching a SECOND detached process — two quit/restart cycles, the
+ * first one started by the call this treated as failed. Checked only when
+ * `launchWithFallback` actually asks (a PowerShell timeout, never a `missing`
+ * or outright `failed` result, which never got far enough to plausibly have
+ * submitted anything).
+ */
+function findLaunchedWscript(commandLine: string, rows: ProcessRow[]): ProcessRow | undefined {
+  const vbsPath = /"([^"]+)"/.exec(commandLine)?.[1];
+  if (!vbsPath) return undefined;
+  return rows.find(
+    (row) => row.name.toLowerCase() === 'wscript.exe' && row.commandLine.includes(vbsPath),
+  );
+}
+
+/**
  * The default launcher: PowerShell's `Invoke-CimMethod ... Win32_Process Create`
  * first, `wmic process call create` if that fails — the same order and the same
  * reason `readProcesses` falls back (`src/util/processes.ts`): PowerShell can
  * hang at start-up on this machine rather than fail quickly. `run` is the same
  * `CommandRunner` seam `src/util/processes.ts` tests inject, so this fallback is
- * exercised without ever spawning PowerShell or wmic for real.
+ * exercised without ever spawning PowerShell or wmic for real. `list` is the
+ * same seam for the process-table check a timeout triggers, below.
  */
 export function launchWithFallback(
   commandLine: string,
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = execFileSyncRunner,
+  list: ProcessLister = readProcesses,
 ): DetachLaunchResult {
   const escapedForPs = commandLine.replace(/'/g, "''");
   const psScript =
@@ -319,6 +437,10 @@ export function launchWithFallback(
     psFailure.push(
       `PowerShell ${psOutcome.reason}${psOutcome.detail ? `: ${psOutcome.detail}` : ''}`,
     );
+    if (psOutcome.reason === 'timeout') {
+      const already = findLaunchedWscript(commandLine, list());
+      if (already) return { pid: already.pid, via: 'PowerShell' };
+    }
   }
 
   const wmicExe = systemExePath('wbem\\wmic.exe', env);
@@ -355,7 +477,14 @@ export function launchDetached(
   }
   const env = deps.env ?? process.env;
   mkdirSync(path.dirname(plan.vbsPath), { recursive: true });
-  writeFileSync(plan.vbsPath, plan.vbsText, 'utf8');
+  // wscript.exe reads a .vbs with no byte-order mark as the system's ANSI code
+  // page, not UTF-8 — a non-ASCII FOSTER_HOME or node install path (the same
+  // "ô" case util/processes.ts measures) silently breaks the script with no
+  // log line at all, because the corruption is in the very first statements
+  // that would open the log. UTF-16LE with a BOM is what wscript recognises
+  // unambiguously; `'\uFEFF' + text` encoded as 'utf16le' writes the BOM as
+  // its own correct little-endian bytes (FF FE), not the UTF-8 spelling of it.
+  writeFileSync(plan.vbsPath, `\uFEFF${plan.vbsText}`, 'utf16le');
   const launch =
     deps.launch ??
     ((commandLine: string, e: NodeJS.ProcessEnv) => launchWithFallback(commandLine, e));
@@ -422,6 +551,54 @@ export function detachNeedsYes(input: { detach: boolean; yes: boolean }): string
   return 'A detached run with nothing to write is pointless: --detach needs --yes too.';
 }
 
+/**
+ * `--detach` is a no-op with the tray enabled — the app's default — unless the
+ * re-run it launches can actually end the process.
+ *
+ * The detached process re-runs the same command from outside the app, which
+ * eventually calls `quitDesktop` the ordinary way: with the tray on,
+ * `closingWindowQuits` is false, and `quitDesktop` without `terminate` returns
+ * `needs-terminate` rather than closing anything (`src/engine/desktop.ts`).
+ * Nothing after that ever runs — the write this restart existed for, the start
+ * that would bring the app back — and the only trace is a `.log` nobody is
+ * watching. Refusing here, before the `.vbs` is even written, is cheaper than a
+ * wasted wait. Checked directly against this machine's own default
+ * installation 24/09/2026: `menuBarEnabled` is unset there — absent means the
+ * app default, tray **on** — so `--detach` alone was silently broken on the
+ * very machine this codebase is developed on; only a profile that had
+ * explicitly turned the tray off would ever have seen it work.
+ *
+ * `--terminate` is not stripped by `stripDetachFlags` — only `app restart`
+ * accepts it, but once it is on the command line it rides straight through to
+ * the re-run, so the fix here is to ask for it rather than to invent a way to
+ * add it to commands that were never given one.
+ *
+ * `isAppRestart` used to read `argv[0]`/`argv[1]` positionally, which missed
+ * every `app restart` invoked as `foster --store <x> app restart --detach` —
+ * this repo's own documented convention (AGENTS.md, README.md) puts the
+ * global `--store`/`--ledger` options *before* the verb, so `argv[0]` was
+ * `'--store'`, not `'app'`, and the refusal silently dropped the `--store`
+ * the caller actually needed. `stripLeadingGlobalOptions` strips that prefix
+ * first, the same fix `sweepDetachArgv` needed for forwarding it onward.
+ */
+export function detachNeedsTerminate(input: {
+  closingWindowQuits: boolean;
+  argv: string[];
+}): string | undefined {
+  if (input.closingWindowQuits) return undefined;
+  if (stripDetachFlags(input.argv).includes('--terminate')) return undefined;
+  const verbArgv = stripLeadingGlobalOptions(stripDetachFlags(input.argv));
+  const isAppRestart = verbArgv[0] === 'app' && verbArgv[1] === 'restart';
+  return (
+    'Claude Desktop keeps a tray icon here: closing its window only hides it, so a detached ' +
+    'restart would run, find the app still up, and finish nothing.\n' +
+    (isAppRestart
+      ? 'Add --terminate as well, to end the process instead of asking it to close.'
+      : 'Only "foster app restart" can end it outright — close Claude Desktop yourself first, ' +
+        'then re-run this, or run "foster app restart --detach --terminate" instead.')
+  );
+}
+
 export const DETACH_DELAY_DEFAULT = 20;
 export const DETACH_DELAY_MIN = 5;
 export const DETACH_DELAY_MAX = 300;
@@ -441,9 +618,48 @@ export function parseDetachDelay(raw: string | undefined): number | { error: str
   return value;
 }
 
-/** Sweep's own choice between the two commands it can hand over, reused for what it detaches. */
-export function sweepDetachArgv(layoutPending: boolean): string[] {
-  return layoutPending ? ['layout', '--yes', '--restart'] : ['app', 'restart'];
+/**
+ * What a sweep's own restart carries into the command it hands over or detaches
+ * to: the global options that picked this installation and ledger out of every
+ * other one, plus the exact account the sweep just wrote into.
+ */
+export interface SweepRestartCarry {
+  store?: string;
+  ledger?: string;
+  /** The resolved target's own uuids — spelled out, not left to default, the
+   *  same reasoning as `viewCopyRestartCommand`: a command run later, after
+   *  whatever is signed in has changed, must still land on the account this
+   *  sweep actually wrote. Only meaningful (and only added) when the handed-
+   *  over command is `layout`, which is the only one of the two that takes a
+   *  destination at all. */
+  to?: string;
+  toOrg?: string;
+}
+
+/**
+ * Sweep's own choice between the two commands it can hand over, reused for what
+ * it detaches.
+ *
+ * Built from scratch until this fixed it (measured 24/09/2026): `foster --store
+ * work sweep --yes --restart --detach` handed the detached process a bare
+ * `['layout', '--yes', '--restart']` or `['app', 'restart']`, with no `--store`
+ * at all — so the restart it actually ran landed on the *default* installation,
+ * silently, while the sweep itself had written into `work`. `carry` is what a
+ * sweep read off its own global options and its own resolved target; it is
+ * threaded through unconditionally rather than only when `--store`/`--to` were
+ * given, because the account signed in when the detached process finally runs
+ * — minutes later, after the app has quit and started again — is not
+ * guaranteed to be the one that was current when the sweep ran.
+ */
+export function sweepDetachArgv(layoutPending: boolean, carry: SweepRestartCarry = {}): string[] {
+  const global: string[] = [];
+  if (carry.store) global.push('--store', carry.store);
+  if (carry.ledger) global.push('--ledger', carry.ledger);
+  if (!layoutPending) return [...global, 'app', 'restart'];
+  const destination: string[] = [];
+  if (carry.to) destination.push('--to', carry.to);
+  if (carry.toOrg) destination.push('--to-org', carry.toOrg);
+  return [...global, 'layout', '--yes', '--restart', ...destination];
 }
 
 // ---------------------------------------------------------------------------

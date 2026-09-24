@@ -21,10 +21,22 @@ import path from 'node:path';
  * precisely the torn read this function exists to prevent.
  */
 export function writeFileAtomic(target: string, contents: string): void {
+  writeBufferAtomic(target, Buffer.from(contents, 'utf8'));
+}
+
+/**
+ * The same temp-then-rename write as `writeFileAtomic`, for bytes rather than
+ * text — the persistent scan cache (`store/cache/`) is the one binary format
+ * this is for, and every reason above applies to it just the same.
+ */
+export function writeFileAtomicBinary(target: string, contents: Buffer): void {
+  writeBufferAtomic(target, contents);
+}
+
+function writeBufferAtomic(target: string, buffer: Buffer): void {
   const tmp = path.join(path.dirname(target), `.foster-tmp-${process.pid}-${randomUUID()}`);
   const fd = openSync(tmp, 'wx');
   try {
-    const buffer = Buffer.from(contents, 'utf8');
     // writeSync may report a short write; keep going until the buffer is drained.
     let written = 0;
     while (written < buffer.length) {

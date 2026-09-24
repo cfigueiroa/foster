@@ -172,8 +172,16 @@ function handle(offset: number, size: number): Buffer {
 }
 
 function withTrailer(block: Buffer, compression: number): Buffer {
-  // One byte of compression type, four of checksum.
-  return Buffer.concat([block, Buffer.from([compression]), Buffer.alloc(4)]);
+  // One byte of compression type, then a real masked crc32c over the block's own
+  // bytes followed by that type byte — table/format.cc's `crc32c::Value(data, n
+  // + 1)`. A zeroed checksum here used to pass only because `readBlock` never
+  // checked it; once it does, every table this helper builds needs a checksum
+  // that actually matches, or `makeTable`'s own output would fail to read.
+  const type = Buffer.from([compression]);
+  const crc = referenceMask(referenceCrc32c(Buffer.concat([block, type])));
+  const trailer = Buffer.alloc(4);
+  trailer.writeUInt32LE(crc, 0);
+  return Buffer.concat([block, type, trailer]);
 }
 
 export function makeTable(records: [Buffer, Buffer][], { compress = false } = {}): Buffer {

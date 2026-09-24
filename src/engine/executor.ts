@@ -250,29 +250,47 @@ export function fosterSessions(sessions: DiscoveredSession[], options: FosterOpt
       continue;
     }
 
-    // The legacy key is consulted second, so a fostering written before the
+    // Every copy filed under this key — ordinarily one, but the #63 path below
+    // (the second-file `bring()` a few dozen lines down) can leave two active at
+    // once, and both have to be asked before falling through to a fresh copy.
+    // The legacy key is folded in too, so a fostering written before the
     // conversation was recorded still answers for the card it was made from.
-    const active =
-      state.active.get(key) ??
-      (session.data.cliSessionId ? state.active.get(fosteringKey(originId, target)) : undefined);
-    if (active) {
-      const skip = resolveExisting(active, {
-        explicit,
-        dryRun,
-        ledger,
-        kin,
-        here,
-        cliSessionId: session.data.cliSessionId,
-        cwd: copyCwd(session.data, reach),
-      });
+    const activeCopyIds = new Set<string>([
+      ...(state.activeByKey.get(key) ?? []),
+      ...(session.data.cliSessionId
+        ? (state.activeByKey.get(fosteringKey(originId, target)) ?? [])
+        : []),
+    ]);
+    if (activeCopyIds.size > 0) {
+      let skip: Pick<Outcome, 'status' | 'detail' | 'copyPath'> | undefined;
+      for (const copyId of activeCopyIds) {
+        const active = state.active.get(copyId);
+        if (!active) continue;
+        skip = resolveExisting(active, {
+          explicit,
+          dryRun,
+          ledger,
+          kin,
+          here,
+          cliSessionId: session.data.cliSessionId,
+          cwd: copyCwd(session.data, reach),
+        });
+        // The first copy that still counts as active settles it: a second copy
+        // is only ever worth making when nothing already here reaches its work.
+        if (skip) break;
+      }
       if (skip) {
         outcomes.push({ originSessionId: originId, title, ...skip });
         continue;
       }
-      // Reconciled: the ledger no longer counts it as active, so fall through and
-      // make the copy the caller asked for.
-      state.active.delete(key);
-      state.active.delete(fosteringKey(originId, target));
+      // Reconciled — none of the copies filed under this key still count as
+      // active, so fall through and make the copy the caller asked for. Local
+      // to this run only, same as the single-copy case always was: a real
+      // `returned` event was appended above for whichever copies needed one,
+      // and this is just what keeps the rest of this batch from re-asking.
+      for (const copyId of activeCopyIds) state.active.delete(copyId);
+      state.activeByKey.delete(key);
+      state.activeByKey.delete(fosteringKey(originId, target));
     }
 
     // Asked after the ledger, which knows about foster's own copies, and about

@@ -441,10 +441,29 @@ function eachBlockEntry(block: Buffer, visit: (key: Buffer, value: Buffer) => vo
 const TABLE_MAGIC = Buffer.from([0x57, 0xfb, 0x80, 0x8b, 0x24, 0x75, 0x47, 0xdb]);
 const FOOTER_SIZE = 48;
 
+/** One byte of compression type and four of checksum follow every block's contents. */
+const BLOCK_TRAILER_SIZE = 5;
+
 function readBlock(table: Buffer, offset: number, size: number): Buffer {
+  if (offset + size + BLOCK_TRAILER_SIZE > table.length) {
+    throw new LevelDbFormatError(`block at offset ${offset} runs past the end of the table`);
+  }
   const contents = table.subarray(offset, offset + size);
-  // One byte of compression type and four of checksum follow every block.
-  const compression = table[offset + size];
+  const compression = table[offset + size]!;
+
+  // The checksum covers the block's own bytes followed by the compression type
+  // byte — table/format.cc's `ReadBlock`: `crc32c::Value(data, n + 1)` over the
+  // `n` content bytes plus the trailer's first byte. This used to be read and
+  // discarded without ever being compared, despite the module docstring's claim
+  // that every block is "read, verified" — a flipped bit or a torn write in a
+  // sorted table therefore looked like a perfectly ordinary, if perhaps oddly
+  // shaped, record instead of the corruption it was.
+  const storedCrc = table.readUInt32LE(offset + size + 1);
+  const expected = crc32c(Buffer.concat([contents, Buffer.from([compression])]));
+  if (unmaskCrc(storedCrc) !== expected) {
+    throw new LevelDbFormatError(`block at offset ${offset} failed its checksum`);
+  }
+
   if (compression === 0) return contents;
   if (compression === 1) return snappyDecompress(contents);
   throw new LevelDbFormatError(

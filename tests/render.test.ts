@@ -7,12 +7,14 @@ import {
   formatRoutineFireAt,
   groupByAccount,
   neverComesLine,
+  proveLines,
   sweepSummary,
   unclaimOutcomeLine,
   unclaimPlanLine,
   viewCopyRestartCommand,
 } from '../src/cli/render.js';
 import type { NeverComes, NeverComeSession, SweepReport } from '../src/ops/sweep.js';
+import type { ProveReport } from '../src/ops/prove.js';
 import type { UnclaimItem, UnclaimOutcome } from '../src/engine/unclaim.js';
 import { totalLayoutPending } from '../src/engine/layout.js';
 
@@ -209,7 +211,9 @@ describe('viewCopyRestartCommand', () => {
     const to = { accountUuid: ACCOUNT_B, organizationUuid: ORG_2 };
     const command = viewCopyRestartCommand(from, to);
 
-    expect(command).toBe(`foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --yes --restart`);
+    expect(command).toBe(
+      `foster view copy --from ${ACCOUNT_A} --to ${ACCOUNT_B} --to-org ${ORG_2} --yes --restart`,
+    );
     expect(command).not.toContain('<accountUuid>');
   });
 });
@@ -622,5 +626,75 @@ describe('neverComesLine', () => {
 
   it('stays empty when there is no gap at all', () => {
     expect(neverComesLine(never([]))).toBe('');
+  });
+});
+
+describe('proveLines', () => {
+  const baseReport = (overrides: Partial<ProveReport> = {}): ProveReport => ({
+    conversations: 2,
+    gaps: [],
+    neverFosterable: [],
+    complete: true,
+    ...overrides,
+  });
+
+  it('prints a short id on a never-fosterable line, the same way a gap line does', () => {
+    // Two different conversations can share a title — measured on a real
+    // store (D2, 21 of 29 `--prove` gaps false alarms) — and a
+    // never-fosterable line naming only the title made that pair read as one
+    // entry printed twice. The id is what tells them apart.
+    const lines = proveLines(
+      baseReport({
+        neverFosterable: [
+          {
+            cliSessionId: '00000000-0000-4000-8000-0000000000d1',
+            title: 'Sweep fixes',
+            reason: 'scheduled-task',
+          },
+          {
+            cliSessionId: '11111111-1111-4111-8111-1111111111d2',
+            title: 'Sweep fixes',
+            reason: 'spawned-task',
+          },
+        ],
+      }),
+    ).map(plain);
+
+    const text = lines.join('\n');
+    expect(text).toContain('00000000');
+    expect(text).toContain('11111111');
+    // The two lines must differ from each other, or the id addition changed
+    // nothing about telling the pair apart.
+    const named = lines.filter((line) => line.includes('Sweep fixes'));
+    expect(named).toHaveLength(2);
+    expect(named[0]).not.toBe(named[1]);
+  });
+
+  it('reports completion with no gap section when the report is complete', () => {
+    const text = proveLines(baseReport()).map(plain).join('\n');
+    expect(text).toContain('fully reachable');
+    expect(text).not.toContain('cannot fully reach');
+  });
+
+  it('names every gap with its own short id, same as a never-fosterable line', () => {
+    const text = proveLines(
+      baseReport({
+        complete: false,
+        gaps: [
+          {
+            cliSessionId: '00000000-0000-4000-8000-0000000000d3',
+            title: 'Gap one',
+            totalRecords: 5,
+            reachedByTarget: 3,
+            missing: 2,
+          },
+        ],
+      }),
+    )
+      .map(plain)
+      .join('\n');
+
+    expect(text).toContain('00000000');
+    expect(text).toContain('reaches 3 of 5');
   });
 });

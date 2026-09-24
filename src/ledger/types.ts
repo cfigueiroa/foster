@@ -546,20 +546,36 @@ export interface WorktreeReleaseUndoneEvent extends BaseEvent {
 }
 
 /**
- * A Codex CLI rollout brought in as a Claude conversation — the write half of
- * issue #19. Unlike every other write foster records, this one names no Claude
- * origin: the conversation ran in Codex, not in Claude Desktop, so what it
- * carries is the rollout it came from and the two files foster wrote from it
- * (the transcript under ~/.claude/projects and the sidebar card).
+ * An outside conversation brought in as a Claude conversation — a Codex CLI
+ * rollout (issue #19) or, since `foster cloud pull`, a Claude Code cloud
+ * session. Unlike every other write foster records, this one names no Claude
+ * Desktop origin: the conversation did not run as a local Desktop conversation
+ * before this, so what it carries is the source it came from and the two files
+ * foster wrote from it (the transcript under ~/.claude/projects and the
+ * sidebar card).
  *
- * Keyed on `rolloutId` in the fold, so a second import of the same rollout is a
- * no-op and `--undo` can find both files to remove. `contentHash` lets a rollout
- * that has since grown be told from one that has not.
+ * Keyed on `rolloutId` in the fold, so a second import of the same source is a
+ * no-op and `--undo` can find both files to remove. `contentHash` lets a source
+ * that has since grown or changed be told from one that has not.
  */
 export interface ConversationImportedEvent extends BaseEvent {
   kind: 'conversation_imported';
-  /** The Codex thread id — the key this is folded and deduped on, and the transcript's cliSessionId. */
+  /**
+   * Which importer wrote this. Absent means `'codex'` — see `FosterImportMark.source`.
+   */
+  source?: 'codex' | 'cloud';
+  /**
+   * The Codex thread id, or the cloud session's own id (`cse_…`/`session_…`) —
+   * the key this is folded and deduped on. For a Codex import this is also the
+   * transcript's `cliSessionId`; a cloud pull mints a fresh uuid for that
+   * instead (see `cloudTranscript.ts`), because a cloud id is not shaped like
+   * one the app would accept as a session id.
+   */
   rolloutId: string;
+  /**
+   * The rollout file path (Codex), or a human-readable "cloud session <id>"
+   * description (cloud sessions have no local source file).
+   */
   sourceRolloutPath: string;
   contentHash: string;
   cliVersion?: string;
@@ -568,7 +584,7 @@ export interface ConversationImportedEvent extends BaseEvent {
   cardPath: string;
   /** The transcript foster wrote under ~/.claude/projects. */
   transcriptPath: string;
-  /** The card's own session id (`local_<rolloutId>`). */
+  /** The card's own session id (`local_<the transcript's own cliSessionId>`). */
   sessionId: string;
   title?: string;
 }
@@ -786,11 +802,14 @@ export interface WorktreeReleasedCard {
 }
 
 /**
- * A Codex rollout currently imported and not yet undone, keyed by `rolloutId` —
- * the folded projection of `conversation_imported`. Holds the two paths foster
- * wrote so `--undo` can remove them and `--list` can say what is already in.
+ * A Codex rollout or cloud session currently imported and not yet undone,
+ * keyed by `rolloutId` — the folded projection of `conversation_imported`.
+ * Holds the two paths foster wrote so `--undo` can remove them and `--list`
+ * can say what is already in.
  */
 export interface ImportedConversation {
+  /** Absent means `'codex'` — see `FosterImportMark.source`. */
+  source?: 'codex' | 'cloud';
   rolloutId: string;
   sourceRolloutPath: string;
   contentHash: string;

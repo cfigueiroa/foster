@@ -12,6 +12,7 @@ import type { BranchStanding } from '../engine/sidebar.js';
 import type { PurgeOutcome, PurgeStatus } from '../engine/purge.js';
 import type { AccountRef, DiscoveredSession, Unfosterable } from '../domain/types.js';
 import type { NeverComes, SweepReport } from '../ops/sweep.js';
+import type { ProveReport } from '../ops/prove.js';
 import {
   LayoutWriteError,
   totalLayoutPending,
@@ -63,9 +64,20 @@ export function formatRoutineFireAt(ms: number | undefined, now: Date = new Date
  * placeholder nobody could run — see finding #14/(f). `--to` is spelled out
  * too, not left to default: a restart that runs later, after whatever is
  * signed in has changed, must still land on the same target this run was for.
+ *
+ * `--to-org` used to be missing (#140-ish): an account holding two
+ * organizations makes `--to <uuid>` alone ambiguous (`resolveDestination`
+ * refuses it, naming both), so the handed-over command could not actually be
+ * run as printed. `--from` has no such flag to spell out — `view copy` never
+ * grew a `--from-org` — so an ambiguous `--from` stays a refusal this
+ * function cannot route around; it only ever gets as far as the target it
+ * already resolved.
  */
 export function viewCopyRestartCommand(from: AccountRef, to: AccountRef): string {
-  return `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} --yes --restart`;
+  return (
+    `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} ` +
+    `--to-org ${to.organizationUuid} --yes --restart`
+  );
 }
 
 /**
@@ -1088,6 +1100,51 @@ export function sweepSummary(report: SweepReport): string[] {
           'so finish there first — foster live names the process and its directory.',
       ),
     );
+  }
+
+  return lines;
+}
+
+/**
+ * `foster sweep --prove`'s report, one `console.log` call per array entry —
+ * kept a pure function, the way every other sweep-facing render here is, so
+ * the words are testable without driving the CLI itself (`index.ts` runs the
+ * program on import; see `tests/helpGroups.test.ts`).
+ *
+ * A gap line and a never-fosterable line both carry the conversation's short
+ * id, the same way `outcomeLine`/`sessionLine` do elsewhere: two different
+ * conversations can share a title, and a never-fosterable line with no id at
+ * all made a genuine pair look like one entry printed twice.
+ */
+export function proveLines(prove: ProveReport): string[] {
+  const lines: string[] = [pc.bold(`\nProof: ${prove.conversations} conversation(s) checked`)];
+
+  if (prove.complete) {
+    lines.push(pc.dim('  every one is fully reachable from this account.'));
+  } else {
+    lines.push(pc.red(`  ${prove.gaps.length} conversation(s) this account cannot fully reach:`));
+    for (const gap of prove.gaps) {
+      lines.push(
+        `    ${pc.red('!')} ${gap.title ?? pc.dim('(untitled)')} ${pc.dim(`(${shortId(gap.cliSessionId)})`)}\n` +
+          `        reaches ${gap.reachedByTarget} of ${gap.totalRecords} — ${gap.missing} record(s) short`,
+      );
+    }
+  }
+
+  if (prove.neverFosterable.length > 0) {
+    lines.push(
+      pc.dim(
+        `  ${prove.neverFosterable.length} more never had a way in (scheduled task, never opened, ` +
+          'or too large) — not counted above:',
+      ),
+    );
+    for (const item of prove.neverFosterable) {
+      lines.push(
+        pc.dim(
+          `      ${item.title ?? '(untitled)'} (${shortId(item.cliSessionId)}) — ${item.reason}`,
+        ),
+      );
+    }
   }
 
   return lines;

@@ -385,6 +385,16 @@ export interface StaleEntry {
   sessionId?: string;
   cwd?: string;
   why: string;
+  /**
+   * What this file said about its writer at scan time — re-checked right
+   * before `pruneRegistry` deletes it, because the file name is only a pid and
+   * Windows can recycle one between the scan and the delete. A session that
+   * starts in that window and is handed the same pid writes a new, perfectly
+   * live `<pid>.json` under this exact name; deleting it on the strength of the
+   * old scan would strip that session's own fork protection the moment it
+   * registers.
+   */
+  identity: WriterIdentity;
 }
 
 /**
@@ -407,7 +417,7 @@ export function staleRegistryEntries(
   alive: (pid: number) => boolean = pidAlive,
   list: ProcessLister = cachedProcesses,
 ): StaleEntry[] {
-  const found: { described: Omit<StaleEntry, 'why'>; identity: WriterIdentity }[] = [
+  const found: { described: Omit<StaleEntry, 'why' | 'identity'>; identity: WriterIdentity }[] = [
     ...registryEntries(roots).map((entry) => ({
       described: {
         file: entry.registryFile,
@@ -428,22 +438,67 @@ export function staleRegistryEntries(
   const stale: StaleEntry[] = [];
   for (const { described, identity } of found) {
     if (!alive(identity.pid)) {
-      stale.push({ ...described, why: `pid ${identity.pid} is gone` });
+      stale.push({ ...described, why: `pid ${identity.pid} is gone`, identity });
       continue;
     }
     const { verdict, note } = inspectWriter(identity, rows);
     if (verdict === 'mismatch') {
-      stale.push({ ...described, why: note ?? `pid ${identity.pid} was reused` });
+      stale.push({ ...described, why: note ?? `pid ${identity.pid} was reused`, identity });
     }
   }
   return stale;
 }
 
-/** Removes registry files, reporting the ones that would not go. */
+/** What a registry or peer-key file at this path says about its writer right now, or `undefined`. */
+function currentIdentity(file: string): WriterIdentity | undefined {
+  const name = path.basename(file);
+  if (name.endsWith('.json')) return readRegistryFile(file)?.identity;
+  if (name.endsWith('.key')) return readPeerKey(file, name);
+  return undefined;
+}
+
+/**
+ * Whether a file's identity has changed since it was judged stale.
+ *
+ * `pid` is implied by the filename and never differs. `procStartedAt` — the
+ * writer's own creation time, when the record carries one — is the strongest
+ * signal: two different processes essentially cannot share both a pid and a
+ * creation instant, so any difference here means somebody else wrote this file
+ * since the scan. Failing that, `recordedAt` (the record's own timestamp, or
+ * the file's mtime when it has none) stands in; an unchanged file reads back
+ * the same value for it, millisecond for millisecond, and a rewrite does not.
+ */
+function identityChanged(before: WriterIdentity, after: WriterIdentity): boolean {
+  if (before.procStartedAt !== undefined || after.procStartedAt !== undefined) {
+    return before.procStartedAt !== after.procStartedAt;
+  }
+  return before.recordedAt !== after.recordedAt;
+}
+
+/**
+ * Removes registry files, reporting the ones that would not go.
+ *
+ * Each file is re-read immediately before it is deleted, and the delete is
+ * skipped — not attempted — when what it says now no longer matches what made
+ * it stale in the first place (#leveldb-integrity). Windows reissues a pid as
+ * soon as its old holder has exited, and the gap between `staleRegistryEntries`
+ * scanning this file and this function reaching it is exactly long enough for
+ * a new `claude` process to be handed that pid and register itself under the
+ * very name being deleted — at which point the file describes a live writer
+ * again, and unlinking it drops that writer's fork protection the moment it
+ * takes effect.
+ */
 export function pruneRegistry(stale: StaleEntry[]): { removed: string[]; failed: string[] } {
   const removed: string[] = [];
   const failed: string[] = [];
-  for (const { file } of stale) {
+  for (const { file, identity } of stale) {
+    const fresh = currentIdentity(file);
+    if (fresh && identityChanged(identity, fresh)) {
+      // Something else wrote this file since the scan; leave it rather than
+      // delete a registration that may now be live.
+      failed.push(file);
+      continue;
+    }
     try {
       unlinkSync(file);
       removed.push(file);

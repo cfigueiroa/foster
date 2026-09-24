@@ -24,6 +24,7 @@ import {
   readLocalStorageValue,
 } from '../src/store/localStorage.js';
 import type { ScheduledTasksFile } from '../src/store/routines.js';
+import { ScanCache, scanStore } from '../src/store/scanner.js';
 import type { ProcessRow } from '../src/util/processes.js';
 import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
@@ -1624,5 +1625,81 @@ describe('layoutPlanSummary (#R2)', () => {
     const third = layoutPlanSummary(planLayout({ store, target: NEW_ACCOUNT }));
     expect(third).not.toEqual(first);
     expect(third.cardsAssigned).toBe(0);
+  });
+});
+
+/**
+ * `planLayout`'s `cache` option — a sweep's own `ScanCache`, reused instead of
+ * reading the store from disk a second time (`ops/sweep.ts`). Plans with and
+ * without it must agree exactly, and a card a write touches after the cache
+ * already holds it must still be read fresh — the cache is keyed by
+ * `mtime`/`size`, never trusted past the moment either one moves.
+ */
+describe('planLayout — the sweep’s scan cache', () => {
+  function twoAccountFixture(): StoreLayout {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_src1', cliSessionId: 'conv-1' }));
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'local_tgt1', cliSessionId: 'conv-1', title: 'Target row' }),
+    );
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'Código & CI' }],
+        assignments: { [groupCardId('local_src1')]: 'cg-src' },
+      },
+    });
+    return store;
+  }
+
+  it('plans exactly the same with a cache as without one', () => {
+    const store = twoAccountFixture();
+
+    const withoutCache = planLayout({ store, target: NEW_ACCOUNT });
+    const withCache = planLayout({ store, target: NEW_ACCOUNT, cache: new ScanCache() });
+
+    // `groupId` is a fresh `randomUUID()` each time a group is minted, so two
+    // independent plans never agree on it even with nothing else different —
+    // everything else about the plan must still match exactly.
+    const strip = (plan: typeof withoutCache.groups) => ({
+      ...plan,
+      items: plan.items.map(({ groupId: _groupId, ...rest }) => rest),
+    });
+    expect(strip(withCache.groups)).toEqual(strip(withoutCache.groups));
+  });
+
+  it('reuses a cache already populated by an earlier scan of the same store', () => {
+    const store = twoAccountFixture();
+    const cache = new ScanCache();
+
+    // Simulates the sweep's own initial whole-store scan, taken before
+    // `planLayout` is ever called.
+    scanStore(store, undefined, { slim: true, cache });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, cache });
+    expect(plan.groups.items[0]!.assign).toEqual([
+      { cardId: groupCardId('local_tgt1'), title: 'Target row' },
+    ]);
+  });
+
+  it('still sees a card fresh after a write, even though the cache already held it', () => {
+    const store = twoAccountFixture();
+    const cache = new ScanCache();
+
+    // Pre-populate the cache — the sweep's own scan, taken at the start of a
+    // run, before any pass has written anything.
+    scanStore(store, undefined, { slim: true, cache });
+
+    // A write lands on the target card in between — the same shape a
+    // fostering pass or a retitle leaves behind mid-sweep.
+    const targetFile = path.join(accountDir(store, NEW_ACCOUNT), 'local_tgt1.json');
+    const data = JSON.parse(readFileSync(targetFile, 'utf8')) as Record<string, unknown>;
+    writeFileSync(targetFile, JSON.stringify({ ...data, title: 'Renamed mid-run' }), 'utf8');
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, cache });
+    expect(plan.groups.items[0]!.assign).toEqual([
+      { cardId: groupCardId('local_tgt1'), title: 'Renamed mid-run' },
+    ]);
   });
 });

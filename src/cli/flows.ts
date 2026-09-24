@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { isCancel, type Ui } from '../tui/ui.js';
 import { DEFAULT_PREFIX, EXAMPLE_PREFIX } from '../domain/fostering.js';
+import { forLedgerSighting } from '../domain/identity.js';
 import { listAccountDirs, samePath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -32,7 +33,7 @@ import { scanAccount, type KnownCopies } from '../store/scanner.js';
 import { applyFilter, byRecency, parseSince, type ReachCheck } from '../domain/filter.js';
 import { liveConversationIds, scanFosterable } from '../ops/foster.js';
 import { partitionByStore } from '../ops/active.js';
-import { restartPlan, runSweep } from '../ops/sweep.js';
+import { deferredSweepGap, restartPlan, runSweep } from '../ops/sweep.js';
 import { applyLabel } from '../ops/label.js';
 import {
   aborted,
@@ -127,14 +128,15 @@ export async function labelAccount(
   // unrecorded is exactly the one the ledger cannot offer after the switch,
   // when the cache describes the new account and this screen is asked about
   // the old one.
-  if (cached && worthRecording(cached, remembered)) {
+  const toRecord = cached ? forLedgerSighting(cached) : undefined;
+  if (toRecord && worthRecording(toRecord, remembered)) {
     ledger.append({
       kind: 'account_identity_seen',
       accountUuid: picked,
-      ...(cached.email ? { email: cached.email } : {}),
-      ...(cached.name ? { name: cached.name } : {}),
-      ...(cached.plan ? { plan: cached.plan } : {}),
-      ...(cached.profile ? { profile: cached.profile } : {}),
+      ...(toRecord.email ? { email: toRecord.email } : {}),
+      ...(toRecord.name ? { name: toRecord.name } : {}),
+      ...(toRecord.plan ? { plan: toRecord.plan } : {}),
+      ...(toRecord.profile ? { profile: toRecord.profile } : {}),
     });
   }
 
@@ -868,10 +870,28 @@ export async function sweepFlow(
   const wouldBranch =
     plan.branches.counts.fostered +
     plan.branches.retitled.filter((outcome) => outcome.status === 'retitled').length;
+  // Left out until now: a conversation shown here twice — the second-file
+  // pass's own "(other file…)" marks — and, when asked for, a title brought
+  // back into step with its original. Neither moves any of the counts above,
+  // so a sweep whose only pending work was one of these read as "Nothing to
+  // sweep" even though `foster sweep --yes` would have written it (`sweepMarked`
+  // covers the first; the second is `titleSync`, which this flow never turns
+  // on itself but a fixture or a future flag could).
+  const wouldMarkSecondFile = plan.files.retitled.filter(
+    (outcome) => outcome.status === 'retitled',
+  ).length;
+  const wouldSyncTitles = plan.titleSync?.items.length ?? 0;
   const wouldRelease = plan.worktreeClaims.items.length;
   const never = neverComesLine(plan.neverComes);
 
-  if (wouldFoster === 0 && wouldRestore === 0 && wouldBranch === 0 && wouldRelease === 0) {
+  if (
+    wouldFoster === 0 &&
+    wouldRestore === 0 &&
+    wouldBranch === 0 &&
+    wouldMarkSecondFile === 0 &&
+    wouldSyncTitles === 0 &&
+    wouldRelease === 0
+  ) {
     ui.log.info('Nothing to sweep: everything that can be in this account already is.');
     // Still said. "Nothing to do" and "nothing to do, and 13 sessions will never
     // come" are different states, and only one of them explains a gap the user
@@ -886,6 +906,12 @@ export async function sweepFlow(
       `${wouldBranch} row(s) to add or mark for branches of forked conversations.`,
       `${wouldRestore} deleted conversation(s) to bring back.`,
       `${wouldRelease} cop${wouldRelease === 1 ? 'y' : 'ies'} to release from a stale worktree claim.`,
+      ...(wouldMarkSecondFile > 0
+        ? [`${wouldMarkSecondFile} row(s) to mark as a second file of a conversation shown twice.`]
+        : []),
+      ...(wouldSyncTitles > 0
+        ? [`${wouldSyncTitles} title(s) to bring into step with their original.`]
+        : []),
       '',
       'Archived ones stay archived: they arrive in the app’s archived view, not in',
       'Recents. A forked conversation gets one row per branch: the branch that',
@@ -923,10 +949,16 @@ export async function sweepFlow(
     }
 
     ui.note(sweepSummary(report).join('\n\n'), 'Swept');
+    // Same gap `wouldBranch` above had: a run that only wrote second-file marks
+    // or synced titles moved none of the first four counters, and used to be
+    // read as nothing having changed — skipping the restart offer below even
+    // though a real write had just landed on disk.
     const changed =
       report.fostered.counts.fostered +
       report.branches.counts.fostered +
       report.branches.retitled.filter((outcome) => outcome.status === 'retitled').length +
+      report.files.retitled.filter((outcome) => outcome.status === 'retitled').length +
+      (report.titleSync?.counts.synced ?? 0) +
       report.restored.counts.fostered +
       report.worktreeClaims.counts.released;
     if (changed === 0) return;
@@ -941,10 +973,14 @@ export async function sweepFlow(
       );
       return;
     }
+    // The same closed-app gap `foster sweep --restart` writes pin moves and
+    // mark-backs into (AGENTS.md, "Pins ride the same gap") — offered here too,
+    // rather than leaving them pending for the next `foster layout`.
     await offerRestart(
       ui,
       store,
       'The sidebar is built when the app starts, so it has not changed yet.',
+      deferredSweepGap(store, ledger, current, report),
     );
   } catch (error) {
     if (error instanceof AppRunningError) ui.log.error(error.message);

@@ -1,11 +1,17 @@
-import { appendFileSync, mkdtempSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
-import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
-import type { ActiveFostering } from '../src/ledger/types.js';
+import {
+  isFostered,
+  listActive,
+  listImportedFrom,
+  project,
+  selectByTarget,
+} from '../src/ledger/project.js';
+import type { ActiveFostering, LedgerEvent } from '../src/ledger/types.js';
 import type { AccountRef } from '../src/domain/types.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
@@ -78,6 +84,141 @@ describe('Ledger', () => {
     expect(events).toHaveLength(2);
     expect(events.map((event) => event.kind)).toEqual(['fostered', 'fostered']);
   });
+
+  describe('caching', () => {
+    it('rereads on the first call and reuses the cache while the file is unchanged', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+
+      const first = ledger.read();
+      // Same array reference, not merely an equal one — the identity is what
+      // lets project() (ledger/project.ts) memoize its own fold over it.
+      expect(ledger.read()).toBe(first);
+    });
+
+    it('rereads once the file changes underneath it', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const first = ledger.read();
+
+      // Written directly, bypassing this instance's own append — the way a
+      // second `foster` process, or a hand edit, would change the file.
+      appendFileSync(
+        ledger.path,
+        `${JSON.stringify({
+          ...fostered,
+          v: 1,
+          ts: 2,
+          toolVersion: '0.1.0',
+          originSessionId: 'local_origin-2',
+          copySessionId: 'local_copy-2',
+        })}\n`,
+        'utf8',
+      );
+
+      const second = ledger.read();
+      expect(second).not.toBe(first);
+      expect(second).toHaveLength(2);
+    });
+
+    it('grows the cached array in place on append, instead of dropping it', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const first = ledger.read();
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const second = ledger.read();
+      expect(second).toBe(first);
+      expect(second).toHaveLength(2);
+    });
+
+    it('fixes a missing trailing newline before its first append, so a torn line does not glue to the next event', () => {
+      const ledger = makeLedger();
+      // A ledger left without a trailing newline — the shape a killed process or
+      // power loss leaves, whether or not the last line's JSON is itself intact.
+      // Written directly: this is damage from outside this instance, not
+      // something its own append ever produces on its own.
+      writeFileSync(
+        ledger.path,
+        JSON.stringify({ ...fostered, v: 1, ts: 1, toolVersion: '0.1.0' }),
+        'utf8',
+      );
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const events = ledger.read();
+      expect(events).toHaveLength(2);
+      expect(
+        events.map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2']);
+    });
+
+    it('does not touch a file that already ends in a newline', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const before = ledger.read();
+      expect(before).toHaveLength(1);
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const after = ledger.read();
+      expect(after).toHaveLength(2);
+      expect(after[0]).toMatchObject({ originSessionId: 'local_origin-1' });
+    });
+
+    it("does not lose a concurrent writer's event when this instance appends without re-reading first", () => {
+      // Two `Ledger` instances over the same file, the way two `foster`
+      // processes (or a long-lived sweep instance and a detached restart
+      // helper) would share one ledger.
+      const ledgerA = makeLedger();
+      const ledgerB = new Ledger(ledgerA.path);
+
+      ledgerA.append(fostered);
+      ledgerA.read(); // primes ledgerA's cache at 1 event.
+
+      // ledgerB appends directly to the file, bypassing ledgerA entirely —
+      // ledgerA's cache is now stale, but nothing has told it so yet.
+      ledgerB.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      // ledgerA appends without an intervening read(). Its cache-growth path
+      // must notice the file moved under it instead of blindly pushing onto
+      // a 1-event array and mistaking the result for the truth.
+      ledgerA.append({
+        ...fostered,
+        originSessionId: 'local_origin-3',
+        copySessionId: 'local_copy-3',
+      });
+
+      expect(
+        ledgerA.read().map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2', 'local_origin-3']);
+
+      // A fresh instance over the same file must agree — this is not a quirk
+      // of ledgerA recovering, it is the actual content of the file.
+      expect(
+        new Ledger(ledgerA.path)
+          .read()
+          .map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2', 'local_origin-3']);
+    });
+  });
 });
 
 describe('projection', () => {
@@ -86,6 +227,47 @@ describe('projection', () => {
 
     expect(listActive(state)).toHaveLength(1);
     expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(true);
+  });
+
+  /**
+   * `project()` memoizes its fold over a given events array (identity + length)
+   * so a sweep's many `project(ledger.read())` calls over an unchanged ledger
+   * redo the fold once. `fosterSessions` (engine/executor.ts) and
+   * `identifyHeldAccounts` (cli/index.ts) both mutate the state they get back —
+   * deleting a reconciled fostering, adding a newly-seen identity — to keep a
+   * single run's own view current as it goes. Memoizing without defending
+   * against that would leak one call's mutation into the next call's state
+   * whenever the two share a cache entry (no ledger write in between), which is
+   * exactly the dry-run-batch shape those two callers run in.
+   */
+  it('does not leak a mutation of the returned state into a later call over the same events', () => {
+    const events: LedgerEvent[] = [{ ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' }];
+
+    const first = project(events);
+    expect(listActive(first)).toHaveLength(1);
+    first.active.clear();
+    expect(listActive(first)).toHaveLength(0);
+
+    // A second call over the identical array — the shape `Ledger.read()`
+    // produces when nothing has appended in between — must not see the clear
+    // above: each caller gets its own Maps to do with as it pleases.
+    const second = project(events);
+    expect(listActive(second)).toHaveLength(1);
+  });
+
+  it('still reflects a growing array after the cached fold is invalidated by length', () => {
+    const events: LedgerEvent[] = [{ ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' }];
+    expect(listActive(project(events))).toHaveLength(1);
+
+    events.push({
+      ...fostered,
+      v: 1,
+      ts: 20,
+      toolVersion: '0.1.0',
+      originSessionId: 'local_origin-2',
+      copySessionId: 'local_copy-2',
+    });
+    expect(listActive(project(events))).toHaveLength(2);
   });
 
   it('removes it again on return', () => {
@@ -106,22 +288,77 @@ describe('projection', () => {
     expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(false);
   });
 
-  it('keys idempotency on origin session and target account, not on the copy id', () => {
-    // Re-fostering mints a different copy id, so the file itself can never be the key.
+  it(
+    'keeps both copies active when a second fostered event shares a key — #63, the ' +
+      'second-file path',
+    () => {
+      // `resolveExisting` (engine/executor.ts) legitimately writes a second
+      // `fostered` event under the very key the first one used, when the first
+      // copy is still on disk but the offered card's own file reaches records it
+      // cannot (a second file of one conversation). Both copies are current, so
+      // folding this must keep both — keying `active` on the fostering key
+      // instead of on the copy id used to let the second event overwrite the
+      // first, silently orphaning it: measured against the real ledger, 275
+      // `fostered` events did this.
+      const state = project([
+        { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
+        { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', copySessionId: 'local_copy-2' },
+      ]);
+
+      expect(listActive(state)).toHaveLength(2);
+      expect(
+        listActive(state)
+          .map((f) => f.copySessionId)
+          .sort(),
+      ).toEqual(['local_copy-1', 'local_copy-2']);
+      expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(true);
+    },
+  );
+
+  it('returns both copies filed under one key — neither hides the other', () => {
     const state = project([
       { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
       { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', copySessionId: 'local_copy-2' },
+      {
+        kind: 'returned',
+        v: 1,
+        ts: 30,
+        toolVersion: '0.1.0',
+        originSessionId: 'local_origin-1',
+        target: NEW_ACCOUNT,
+        copySessionId: 'local_copy-1',
+      },
+      {
+        kind: 'returned',
+        v: 1,
+        ts: 40,
+        toolVersion: '0.1.0',
+        originSessionId: 'local_origin-1',
+        target: NEW_ACCOUNT,
+        copySessionId: 'local_copy-2',
+      },
     ]);
 
-    expect(listActive(state)).toHaveLength(1);
-    expect(listActive(state)[0]!.copySessionId).toBe('local_copy-2');
+    expect(listActive(state)).toHaveLength(0);
+    expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(false);
   });
 
   it('treats the same session in a different target account as a separate fostering', () => {
     const other = { accountUuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', organizationUuid: 'x' };
     const state = project([
       { ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' },
-      { ...fostered, v: 1, ts: 20, toolVersion: '0.1.0', target: other },
+      // A real second copy always mints its own id (`mintSessionId`, global —
+      // never scoped to a target account), which is what lets `active` be keyed
+      // on the copy id alone. Reusing `local_copy-1` here would collide on that
+      // key the way two real copies never do.
+      {
+        ...fostered,
+        v: 1,
+        ts: 20,
+        toolVersion: '0.1.0',
+        target: other,
+        copySessionId: 'local_copy-2',
+      },
     ]);
 
     expect(listActive(state)).toHaveLength(2);
@@ -653,5 +890,49 @@ describe('handler_armed / handler_restored', () => {
       restoreFailed: true,
     });
     expect(ledger.read().map((e) => e.kind)).toEqual(['handler_armed', 'handler_restored']);
+  });
+});
+
+describe('listImportedFrom', () => {
+  // Regression for the blocker found reviewing `foster cloud pull`: both
+  // importers fold `conversation_imported` into the same `state.imported`
+  // map keyed on `rolloutId` alone, so a bare `import-codex --undo` (no
+  // `--session` filter) must not sweep up a `foster cloud pull`-written
+  // conversation just because it lives in the same map.
+  it('keeps a codex-sourced entry out of the cloud list, and vice versa', () => {
+    const ledger = makeLedger();
+    ledger.append({
+      kind: 'conversation_imported',
+      // No `source` — a Codex import predating the `source` field, or one
+      // written by the default importer, which never sets it.
+      rolloutId: 'codex-rollout-1',
+      sourceRolloutPath: '/home/user/.codex/sessions/rollout-1.jsonl',
+      contentHash: 'a'.repeat(64),
+      target: NEW_ACCOUNT,
+      cardPath: '/store/new/local_codex-card-1.json',
+      transcriptPath: '/home/user/.claude/projects/demo/codex-1.jsonl',
+      sessionId: 'local_codex-1',
+      title: 'A Codex thread',
+    });
+    ledger.append({
+      kind: 'conversation_imported',
+      source: 'cloud',
+      rolloutId: 'cse_cloud-session-1',
+      sourceRolloutPath: 'cloud session cse_cloud-session-1',
+      contentHash: 'b'.repeat(64),
+      target: NEW_ACCOUNT,
+      cardPath: '/store/new/local_cloud-card-1.json',
+      transcriptPath: '/home/user/.claude/projects/demo/cloud-1.jsonl',
+      sessionId: 'local_cloud-1',
+      title: 'A cloud session',
+    });
+
+    const state = project(ledger.read());
+
+    const codexOnly = listImportedFrom(state, 'codex');
+    expect(codexOnly.map((i) => i.rolloutId)).toEqual(['codex-rollout-1']);
+
+    const cloudOnly = listImportedFrom(state, 'cloud');
+    expect(cloudOnly.map((i) => i.rolloutId)).toEqual(['cse_cloud-session-1']);
   });
 });

@@ -699,6 +699,47 @@ describe('#41: the fullest file wins', () => {
     expect(again.map((outcome) => outcome.status)).toEqual(['skipped']);
   });
 
+  /**
+   * Ledger-fold fix: `active` used to be keyed on the fostering key, so the
+   * second `fostered` event above overwrote the first in the fold — the older
+   * copy stayed on disk but dropped out of `listActive` forever, and `return`
+   * could never reach it. Measured against the real ledger: 275 `fostered`
+   * events overwrote a still-active key this way. Now both copies stay
+   * tracked, and both come back when the fostering is undone.
+   */
+  it('both copies of a second-file fostering stay active, and both are returned', () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-return-'));
+    transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);
+    transcript(configDir, 'C--work-project', [SHARED, REPO_ONLY, REPO_ONLY_B]);
+    const projectsDirs = [path.join(configDir, 'projects')];
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: ORIGIN_ID,
+        cliSessionId: CLI_ID,
+        cwd: TREE,
+        originCwd: REPO,
+        worktreePath: TREE,
+        worktreeName: 'w',
+      }),
+    );
+
+    const outcomes = fosterSessions(scanAccount(store, OLD_ACCOUNT), { ...opts(), projectsDirs });
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(['fostered', 'fostered']);
+
+    const active = listActive(project(ledger.read()));
+    expect(active).toHaveLength(2);
+    expect(new Set(active.map((f) => f.copySessionId))).toEqual(
+      new Set(outcomes.map((outcome) => outcome.copySessionId)),
+    );
+
+    const returned = returnFosterings(active, { store, ledger, guard: noGuard });
+    expect(returned.every((outcome) => outcome.status === 'returned')).toBe(true);
+    for (const outcome of outcomes) expect(existsSync(outcome.copyPath!)).toBe(false);
+    expect(listActive(project(ledger.read()))).toHaveLength(0);
+  });
+
   it('plans the second file in a dry run too', () => {
     const configDir = mkdtempSync(path.join(tmpdir(), 'foster-fullest-both-dry-'));
     transcript(configDir, 'C--work-project--claude-worktrees-w', [SHARED, TREE_ONLY_A]);

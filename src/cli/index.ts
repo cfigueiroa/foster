@@ -1,9 +1,11 @@
 // The shebang is added by the bundler (see tsup.config.ts), not here.
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { Command, Option } from 'commander';
 import pc from 'picocolors';
 import { DEFAULT_PREFIX } from '../domain/fostering.js';
+import { forLedgerSighting } from '../domain/identity.js';
 import {
   candidateStoreRoots,
   comparablePath,
@@ -15,8 +17,9 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
-import { lineage } from '../engine/lineage.js';
+import { lineage, type Lineage } from '../engine/lineage.js';
 import { registerAppPref } from './appPrefCommand.js';
+import { commandPath } from './commandPath.js';
 import { complainAboutLink } from '../engine/linkShape.js';
 import { sidebarOf } from '../engine/sidebar.js';
 import {
@@ -102,7 +105,7 @@ import {
   listActive,
   listDated,
   listRepointed,
-  listImported,
+  listImportedFrom,
   listRetitled,
   listWorktreeReleased,
   project,
@@ -110,7 +113,7 @@ import {
   whereCopiesAre,
 } from '../ledger/project.js';
 import type { LedgerEvent, RepointedCard } from '../ledger/types.js';
-import { readConfig } from '../store/config.js';
+import { closingWindowQuits, readConfig } from '../store/config.js';
 import {
   readNativeSwitcherAvailability,
   type NativeSwitcherAvailability,
@@ -120,6 +123,7 @@ import { listClients, type ClaudeClient } from '../store/clients.js';
 import { inUseConfigDir, looksLikeClient, registeredClientDirs } from '../store/configDirs.js';
 import { isDirectory, safeReaddir } from '../util/fs.js';
 import { processTableProvenance, type ProcessTableProvenance } from '../util/processes.js';
+import { armAbortOnSignals } from '../util/signals.js';
 import { readAccessToken } from '../store/credential.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
 import { backupPinState, readPinState, writePinState } from '../store/pinstate.js';
@@ -134,12 +138,22 @@ import {
 import { findRestorable } from '../store/restore.js';
 import { scanAccount, scanStore, summarise } from '../store/scanner.js';
 import {
+  cacheDisabled,
+  cacheStats,
+  clearCache,
+  defaultCacheDir,
+  openFosterCache,
+  type FosterCache,
+} from '../store/cache/index.js';
+import {
   defaultRescueDeps,
   findStranded,
   openResumeTabs,
   resumeCommandFor,
 } from '../engine/rescue.js';
 import { defaultReviveDeps, findStopped } from '../engine/revive.js';
+import { diskReport, type DiskReport } from '../engine/diskUsage.js';
+import { computeStats, defaultStatsDeps, type StatsReport } from '../engine/stats.js';
 import { findUnstarted } from '../engine/unstarted.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
@@ -162,6 +176,7 @@ import {
   DETACH_DELAY_MAX,
   DETACH_DELAY_MIN,
   detachNeedsRestart,
+  detachNeedsTerminate,
   detachNeedsYes,
   launchDetached,
   liveWritersEnding,
@@ -170,13 +185,15 @@ import {
   otherLiveWriters,
   parseDetachDelay,
   planDetached,
+  restartCommandFromArgv,
   selfHostedCheck,
   sweepDetachArgv,
   tailLines,
   type DetachedPlan,
   type DetachLaunchResult,
+  type SweepRestartCarry,
 } from '../engine/detach.js';
-import { readProcesses } from '../util/processes.js';
+import { cachedProcesses, readProcesses } from '../util/processes.js';
 import {
   codexSessionsDir,
   findRollouts,
@@ -196,11 +213,29 @@ import {
   type ImportOutcome,
 } from '../engine/codexImportWrite.js';
 import {
+  fetchCloudSession,
+  fetchTeleportEvents,
+  isCloudApiError,
+  listCloudSessions,
+  type CloudSessionSummary,
+} from '../engine/cloudApi.js';
+import { pullCloudSession, type CloudPullOutcome } from '../engine/cloudImportWrite.js';
+import { readCloudAuth, type CloudAuthRefusal } from '../store/cloudAuth.js';
+import { clientNameOf } from '../engine/launch.js';
+import {
   firstPrompt,
   indexTranscripts,
+  readTranscriptFacts,
   transcriptRoots,
   viewTranscript,
 } from '../store/transcripts.js';
+import { grepTranscripts } from '../engine/grep.js';
+import { resolveConversation } from '../engine/resolveConversation.js';
+import {
+  readConversationRecords,
+  renderConversation,
+  type ExportFormat,
+} from '../engine/exportConversation.js';
 import { checkForUpdate } from '../update.js';
 import { VERSION } from '../version.js';
 import { applyFilter, parseSince, selectByIds, type SessionFilter } from '../domain/filter.js';
@@ -215,9 +250,12 @@ import {
 } from '../ops/foster.js';
 import { partitionByStore, selectReturnTargets } from '../ops/active.js';
 import {
+  deferredSweepGap,
   RESTART_COMMAND,
   restartPlan,
   runSweep,
+  sweepFailedCount,
+  sweepMarked,
   type BranchesPhase,
   type FileCardsPhase,
   type SweepReport,
@@ -238,9 +276,15 @@ import {
   type ApplyLayoutResult,
   type LayoutPlan,
 } from '../engine/layout.js';
-import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
-import { planMarksBack } from '../engine/marksBack.js';
 import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
+import { planVerify, type VerifyReport } from '../engine/verify.js';
+import {
+  buildWhereReport,
+  resolveWhereQuery,
+  type WhereEntry,
+  type WhereReport,
+} from '../engine/where.js';
+import { provePlan, type ProveReport } from '../ops/prove.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
   applyViewCopy,
@@ -282,6 +326,7 @@ import {
   layoutPlanLines,
   layoutResultLines,
   outcomeLine,
+  proveLines,
   purgeLine,
   renderAccount,
   renderRenewals,
@@ -300,6 +345,7 @@ import {
 interface GlobalOptions {
   store?: string;
   ledger?: string;
+  cache?: boolean;
 }
 
 const program = new Command();
@@ -312,6 +358,10 @@ program
   .version(VERSION)
   .option('--store <path>', 'path to the Claude Desktop userData directory')
   .option('--ledger <path>', "path to foster's ledger file")
+  .option(
+    '--no-cache',
+    'skip the persistent scan cache under <FOSTER_HOME>/cache (same as FOSTER_NO_CACHE=1)',
+  )
   // Running the bare command opens the guided menu; the subcommands below stay
   // available for scripting and for anyone who prefers one-shot invocations.
   .action(async function (this: Command) {
@@ -330,6 +380,18 @@ function context(command: Command): { store: StoreLayout; ledger: Ledger } {
   // nowhere else.
   const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
   return { store: resolveStoreArg(opts.store, () => ledger.read()), ledger };
+}
+
+/**
+ * Open the persistent scan cache for a command that reads one, or nothing when
+ * `--no-cache` (or `FOSTER_NO_CACHE`) says to skip it. Commander turns
+ * `--no-cache` into `cache: false`; every other case — flag absent, or
+ * `--cache` explicitly, which commander also derives from the same
+ * declaration — leaves the environment variable the only voice left.
+ */
+function openCacheFor(command: Command): FosterCache | undefined {
+  const opts = command.optsWithGlobals<GlobalOptions>();
+  return openFosterCache(process.env, opts.cache === false);
 }
 
 /**
@@ -358,7 +420,7 @@ const NAMES_ACCOUNTS = new Set([
 // Before the command, never during it: a name that arrives late would land in
 // the middle of the output it was meant to be part of.
 program.hook('preAction', async (_program, command) => {
-  if (!NAMES_ACCOUNTS.has(command.name())) return;
+  if (!NAMES_ACCOUNTS.has(commandPath(command))) return;
   try {
     const { store, ledger } = context(command);
     await identifyHeldAccounts(store, ledger);
@@ -587,7 +649,17 @@ program
 
     const { store } = context(this);
     const config = readConfig(store);
-    const app = inspectApp(store);
+    // `cachedProcesses` rather than the `readProcesses` default: `inspectApp`
+    // here and `runningStores` below each want the process table, and without
+    // this they read it twice — a second PowerShell spawn for an answer the
+    // first one already gave, inside the same few hundred milliseconds.
+    const app = inspectApp(store, undefined, cachedProcesses);
+    // Read-only, same as the text output below: a routed handler is the
+    // fingerprint of an `app login` that has not yet been put back.
+    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
+    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+
+    const cache = cacheStats(defaultCacheDir(process.env));
 
     if (opts.json) {
       print({
@@ -603,6 +675,16 @@ program
         // Read from `fcache`, an undocumented cache the app can reshape at any
         // update — 'unknown' here is the expected steady state, not an error.
         nativeMultiAccountSwitcher: readNativeSwitcherAvailability(store),
+        cache: {
+          dir: cache.dir,
+          disabled: cacheDisabled(process.env, opts.cache === false),
+          files: cache.files,
+          bytes: cache.bytes,
+          newestMtimeMs: cache.newestMtimeMs ?? null,
+        },
+        // The "claude:// links are still armed/routed" warning the text output
+        // prints below, as data: `--json` used to omit this entirely.
+        handler,
       });
       return;
     }
@@ -669,7 +751,8 @@ program
     // resolves the package path; both name the same store, and reporting the other
     // spelling as "another instance" invents a profile that does not exist.
     const known = new Set([...candidateStoreRoots(), store.root].map(comparablePath));
-    const others = runningStores().filter((dir) => !known.has(comparablePath(dir)));
+    // Same table `inspectApp` just read, reused rather than read again.
+    const others = runningStores(cachedProcesses).filter((dir) => !known.has(comparablePath(dir)));
     if (others.length > 0) {
       console.log(pc.bold('Other running instances'));
       for (const dir of others) console.log(`  ${dir}`);
@@ -680,7 +763,6 @@ program
     // store, which account" without a second command — AGENTS.md says to start
     // here for exactly that reason.
     console.log(pc.bold('Profiles'));
-    const ledger = opts.ledger ? new Ledger(opts.ledger) : new Ledger();
     const profiles = knownStores(ledger.read());
     const labels = labelsOf(ledger);
     if (profiles.length === 0) {
@@ -692,8 +774,8 @@ program
     // Read-only: nothing here writes. A routed handler is the fingerprint of an
     // `app login` that has not yet been put back — whether it is still running
     // in another terminal or was interrupted, doctor cannot tell, so it points
-    // at the one command that resolves either case.
-    const handler = inspectHandler(project(ledger.read()), registryHandlerIo);
+    // at the one command that resolves either case. Computed above, alongside
+    // `ledger`, so `--json` can report it too.
     if (handler.key !== undefined) {
       console.log(pc.dim(`  packaged ProgID ${handler.key} (via ${handler.progIdSource})`));
       if (handler.current !== undefined) {
@@ -742,6 +824,20 @@ program
             '  If no sign-in is in flight: foster app login --restore --yes',
         ),
       );
+    }
+
+    console.log(pc.bold('Cache'));
+    if (cacheDisabled(process.env, opts.cache === false)) {
+      console.log(pc.dim('  disabled (--no-cache or FOSTER_NO_CACHE)'));
+    } else if (!cache.files) {
+      console.log(pc.dim(`  empty — ${cache.dir}`));
+    } else {
+      console.log(
+        `  ${formatBytes(cache.bytes)} across ${cache.files} file(s), newest ${
+          cache.newestMtimeMs === undefined ? 'unknown' : formatDate(cache.newestMtimeMs)
+        }`,
+      );
+      console.log(pc.dim(`  ${cache.dir} — foster cache clear to empty it`));
     }
 
     console.log(pc.bold('State'));
@@ -1043,6 +1139,11 @@ program
     '--detach-even-with-live',
     'detach anyway even if another live session would be ended by the restart',
   )
+  .option(
+    '--prove',
+    'after planning, independently check every conversation is fully reachable from this account ' +
+      '(exit 1 on any gap) — see `foster verify` for the layout-groups half of the same question',
+  )
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
@@ -1063,22 +1164,13 @@ program
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      prove?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: !dryRun });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
 
@@ -1086,123 +1178,219 @@ program
     // account and prior title an undo needs, the same way `consolidate --undo`
     // needs none of the fork-detection this command otherwise does.
     if (opts.undoRetitles) {
-      await undoRetitles(store, ledger, opts, dryRun);
+      await undoRetitles(store, ledger, { ...opts, detachDelay }, dryRun);
       return;
     }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
-    const report = runSweep({
-      store,
-      ledger,
-      target,
-      prefix: opts.prefix,
-      staleTemplate: opts.stalePrefix,
-      divergedTemplate: opts.branchPrefix,
-      otherFileTemplate: opts.otherFilePrefix,
-      syncTitles: Boolean(opts.syncTitles),
-      dates: Boolean(opts.dates),
-      dryRun,
-      configDirs: opts.configDir ?? [],
-    });
-
-    // Named here, not in `sweepRestart` itself: a layout is planned but never
-    // applied by the sweep, so the command handed over on a restart has to be
-    // the one that actually finishes the job — `foster layout` restarts the
-    // app too, so there is still only one command to run outside it.
-    //
-    // `totalLayoutPending` reads every count the preview carries — groups
-    // created, cards assigned, order entries added, routines brought, view
-    // keys carried — not just the two an earlier cut checked here, which let
-    // a plan with only a pending order entry or only a view-prefs carry print
-    // the generic restart line instead of pointing at `foster layout`.
-    //
-    // A sweep that marked rows goes through `foster layout` too, even with no
-    // layout pending: its gap is the one that writes back any mark the running
-    // app saves over in the meantime (`engine/marksBack.ts`).
-    const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
-    const restartCommand = layoutPending ? 'foster layout --yes --restart' : RESTART_COMMAND;
-
-    if (opts.json) {
-      if (opts.detach) {
-        const outcome = await runDetach(
-          sweepDetachArgv(layoutPending),
-          detachDelay,
-          Boolean(opts.detachEvenWithLive),
-        );
-        print({
-          ...sweepJson(report),
-          detach:
-            outcome.ok && outcome.plan && outcome.launch
-              ? {
-                  detached: true,
-                  pid: outcome.launch.pid,
-                  via: outcome.launch.via,
-                  log: outcome.plan.logPath,
-                  vbs: outcome.plan.vbsPath,
-                  delaySeconds: outcome.plan.delaySeconds,
-                  argv: outcome.plan.argv,
-                  ...(outcome.ending ? { ending: outcome.ending } : {}),
-                }
-              : { detached: false, error: outcome.reason },
-        });
-        if (!outcome.ok) process.exitCode = 1;
-        return;
-      }
-      // The one output that has to wait: it is a single object, so the restart
-      // has to have happened before any of it can be written.
-      const restart = await sweepRestart(
-        store,
-        Boolean(opts.restart) && !dryRun,
-        restartCommand,
-        deferredPinsGap(store, ledger, target, report),
-      );
-      print({ ...sweepJson(report), restart });
-      return;
+    // `--store`/`--ledger` are what picked this installation out; `--to`/
+    // `--to-org` are the account this sweep actually wrote into, spelled out
+    // rather than left to default (see `SweepRestartCarry`'s own doc comment).
+    // Without these a handed-over or detached `foster layout --yes --restart`
+    // silently ran against the *default* installation and whatever account
+    // happened to be current later — measured 24/09/2026, `foster --store work
+    // sweep --yes --restart --detach` restarting the wrong install entirely.
+    const restartCarry: SweepRestartCarry = {
+      store: this.optsWithGlobals<GlobalOptions>().store,
+      ledger: this.optsWithGlobals<GlobalOptions>().ledger,
+      to: target.accountUuid,
+      toOrg: target.organizationUuid,
+    };
+    // Opened once for the whole command and saved in `finally`: every path
+    // below this — dry run, --json, --detach, an error thrown mid-restart —
+    // must still bank whatever this run's scans learned, or the next run pays
+    // the cold cost again for nothing.
+    const cache = openCacheFor(this);
+    try {
+      await runSweepCommand(store, ledger, target, opts, dryRun, detachDelay, cache, restartCarry);
+    } finally {
+      cache?.save();
     }
+  });
 
-    const labels = labelsOf(ledger);
-    console.log(
-      pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
-    );
+async function runSweepCommand(
+  store: StoreLayout,
+  ledger: Ledger,
+  target: AccountRef,
+  opts: {
+    prefix: string;
+    stalePrefix: string;
+    branchPrefix: string;
+    otherFilePrefix: string;
+    syncTitles?: boolean;
+    dates?: boolean;
+    restart?: boolean;
+    detach?: boolean;
+    detachEvenWithLive?: boolean;
+    prove?: boolean;
+    json?: boolean;
+    configDir?: string[];
+  },
+  dryRun: boolean,
+  detachDelay: number,
+  cache: FosterCache | undefined,
+  restartCarry: SweepRestartCarry,
+): Promise<void> {
+  // Filled by `runSweep` itself, the moment its own `Lineage` and whole-store
+  // scan exist — before any pass has written a thing. Only asked for when
+  // `--prove` is, so an ordinary sweep pays nothing for it.
+  let scanned: { kin: Lineage; scanned: readonly DiscoveredSession[] } | undefined;
 
-    printPhase('Fostering, archived included', report.fostered.outcomes);
-    printBranches(report.branches);
-    printFileCards(report.files);
-    printPhase('Restoring what the app deleted', report.restored.outcomes);
-    printWorktreeClaims(report.worktreeClaims, dryRun);
-    if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+  const report = runSweep({
+    store,
+    ledger,
+    target,
+    prefix: opts.prefix,
+    staleTemplate: opts.stalePrefix,
+    divergedTemplate: opts.branchPrefix,
+    otherFileTemplate: opts.otherFilePrefix,
+    syncTitles: Boolean(opts.syncTitles),
+    dates: Boolean(opts.dates),
+    dryRun,
+    configDirs: opts.configDir ?? [],
+    cache,
+    ...(opts.prove
+      ? {
+          onScan: (context: { kin: Lineage; scanned: readonly DiscoveredSession[] }) => {
+            scanned = context;
+          },
+        }
+      : {}),
+  });
 
-    console.log('');
-    for (const line of sweepSummary(report)) console.log(line);
+  // A dry run writes nothing, so a `failed` count in its report describes a
+  // planning problem, not a write that did not land — not the exit-code
+  // signal `--yes` gets.
+  if (!dryRun && sweepFailedCount(report) > 0) process.exitCode = 1;
 
-    if (dryRun) {
-      console.log(pc.dim('\nRe-run with --yes to write.'));
-      return;
-    }
+  // On a dry run nothing was written, so the scan `runSweep` itself took —
+  // handed back through `onScan`, before its own passes ran — already
+  // describes the store exactly as this measures it; reusing it is what
+  // turns `--prove`'s own `Lineage` build and whole-store scan (the two
+  // `runSweepCommand` used to pay for a second time) into nothing at all.
+  //
+  // On a real run the cards themselves may have changed underneath that
+  // scan — a `--yes` run writes new copies — so those are read fresh, after
+  // the write, the same as before. The transcripts a `Lineage` is built from
+  // are never among what a sweep writes, though, so `kin` is reused either
+  // way: it is the expensive half to rebuild (a full transcript walk) and
+  // the one nothing here invalidates.
+  //
+  // A gap reported here is exactly the work `runSweep`'s own plan exists to
+  // close. See `ops/prove.ts` for why it is not built from the sweep's own
+  // outcomes instead.
+  const proveReport = opts.prove
+    ? provePlan(
+        dryRun ? scanned!.scanned : scanStore(store, copySessionIds(ledger.read()), { slim: true }),
+        target,
+        scanned!.kin,
+      )
+    : undefined;
 
-    // Last, and only now. Restarting waits up to half a minute for the app to
-    // close and a minute more for it to take the store again, and doing that
-    // before the report meant a sweep that had already written a few hundred
-    // files sat silent for the whole of it — with nothing on screen naming them
-    // if the wait was mistaken for a hang and interrupted.
+  // Named here, not in `sweepRestart` itself: a layout is planned but never
+  // applied by the sweep, so the command handed over on a restart has to be
+  // the one that actually finishes the job — `foster layout` restarts the
+  // app too, so there is still only one command to run outside it.
+  //
+  // `totalLayoutPending` reads every count the preview carries — groups
+  // created, cards assigned, order entries added, routines brought, view
+  // keys carried — not just the two an earlier cut checked here, which let
+  // a plan with only a pending order entry or only a view-prefs carry print
+  // the generic restart line instead of pointing at `foster layout`.
+  //
+  // A sweep that marked rows goes through `foster layout` too, even with no
+  // layout pending: its gap is the one that writes back any mark the running
+  // app saves over in the meantime (`engine/marksBack.ts`).
+  const layoutPending = totalLayoutPending(report.layout) > 0 || sweepMarked(report);
+  const restartCommand = `foster ${sweepDetachArgv(layoutPending, restartCarry).join(' ')}`;
+
+  if (opts.json) {
     if (opts.detach) {
       const outcome = await runDetach(
-        sweepDetachArgv(layoutPending),
+        store,
+        sweepDetachArgv(layoutPending, restartCarry),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
-      printDetachResult(outcome, false, detachNotNeededNote(store));
+      print({
+        ...sweepJson(report),
+        ...(proveReport ? { prove: proveReport } : {}),
+        detach:
+          outcome.ok && outcome.plan && outcome.launch
+            ? {
+                detached: true,
+                pid: outcome.launch.pid,
+                via: outcome.launch.via,
+                log: outcome.plan.logPath,
+                vbs: outcome.plan.vbsPath,
+                delaySeconds: outcome.plan.delaySeconds,
+                argv: outcome.plan.argv,
+                ...(outcome.ending ? { ending: outcome.ending } : {}),
+              }
+            : { detached: false, error: outcome.reason },
+      });
+      if (!outcome.ok || (proveReport && !proveReport.complete)) process.exitCode = 1;
       return;
     }
-    reportSweepRestart(
-      await sweepRestart(
-        store,
-        Boolean(opts.restart),
-        restartCommand,
-        deferredPinsGap(store, ledger, target, report),
-      ),
+    // The one output that has to wait: it is a single object, so the restart
+    // has to have happened before any of it can be written.
+    const restart = await sweepRestart(
+      store,
+      Boolean(opts.restart) && !dryRun,
+      restartCommand,
+      deferredSweepGap(store, ledger, target, report),
     );
-  });
+    print({ ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}), restart });
+    if (proveReport && !proveReport.complete) process.exitCode = 1;
+    return;
+  }
+
+  const labels = labelsOf(ledger);
+  console.log(
+    pc.bold(`Sweeping into ${labels.get(target.accountUuid) ?? shortId(target.accountUuid)}`),
+  );
+
+  printPhase('Fostering, archived included', report.fostered.outcomes);
+  printBranches(report.branches);
+  printFileCards(report.files);
+  printPhase('Restoring what the app deleted', report.restored.outcomes);
+  printWorktreeClaims(report.worktreeClaims, dryRun);
+  if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+
+  console.log('');
+  for (const line of sweepSummary(report)) console.log(line);
+
+  if (proveReport) printProve(proveReport);
+
+  if (dryRun) {
+    console.log(pc.dim('\nRe-run with --yes to write.'));
+    return;
+  }
+
+  // Last, and only now. Restarting waits up to half a minute for the app to
+  // close and a minute more for it to take the store again, and doing that
+  // before the report meant a sweep that had already written a few hundred
+  // files sat silent for the whole of it — with nothing on screen naming them
+  // if the wait was mistaken for a hang and interrupted.
+  if (opts.detach) {
+    const outcome = await runDetach(
+      store,
+      sweepDetachArgv(layoutPending, restartCarry),
+      detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
+  reportSweepRestart(
+    await sweepRestart(
+      store,
+      Boolean(opts.restart),
+      restartCommand,
+      deferredSweepGap(store, ledger, target, report),
+    ),
+  );
+}
 
 /**
  * Put the marked cards of one account back to the title and archived flag the
@@ -1223,7 +1411,15 @@ program
 async function undoRetitles(
   store: StoreLayout,
   ledger: Ledger,
-  opts: { to?: string; toOrg?: string; restart?: boolean; json?: boolean },
+  opts: {
+    to?: string;
+    toOrg?: string;
+    restart?: boolean;
+    detach?: boolean;
+    detachDelay: number;
+    detachEvenWithLive?: boolean;
+    json?: boolean;
+  },
   dryRun: boolean,
 ): Promise<void> {
   const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -1237,8 +1433,26 @@ async function undoRetitles(
 
   // The same run either way: `--json` describes what this call did, rather than
   // printing the ledger and returning before the write it was asked for.
+  //
+  // `--detach` used to be validated at the top of `sweep`'s own action and then
+  // simply never looked at again here — `foster sweep --undo-retitles --detach`
+  // wrote the undo and then fell into `finish()`, which cannot detach at all.
+  // `checkDetachPrereqs` already refused `--detach` without `--yes`, so by the
+  // time this is reached with `opts.detach` set, `dryRun` is false.
   if (opts.json) {
-    print({ target, dryRun, marked: cards.length, outcomes });
+    if (opts.detach) {
+      const outcome = await runDetach(
+        store,
+        process.argv.slice(2),
+        opts.detachDelay,
+        Boolean(opts.detachEvenWithLive),
+      );
+      print({ target, dryRun, marked: cards.length, outcomes, detach: detachJson(outcome) });
+      if (!outcome.ok) process.exitCode = 1;
+      return;
+    }
+    const restart = await restartAround(store, Boolean(opts.restart) && !dryRun, RESTART_COMMAND);
+    print({ target, dryRun, marked: cards.length, outcomes, restart });
     return;
   }
 
@@ -1264,6 +1478,17 @@ async function undoRetitles(
 
   const back = outcomes.filter((outcome) => outcome.status === 'retitled').length;
   console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
+
+  if (opts.detach) {
+    const outcome = await runDetach(
+      store,
+      process.argv.slice(2),
+      opts.detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
   await finish(store, Boolean(opts.restart));
 }
 
@@ -1357,6 +1582,17 @@ function printTitleSync(phase: TitleSyncPhase, dryRun: boolean): void {
 
 function titleSyncLine(from: string, to: string): string {
   return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
+}
+
+/**
+ * `--prove`'s report: sets `process.exitCode` itself, the way a command that
+ * finishes past its own `return` cannot otherwise leave a failure behind.
+ * The lines themselves are `render.ts`'s `proveLines` — a pure function so
+ * the text is testable, the way every other sweep-facing render is.
+ */
+function printProve(prove: ProveReport): void {
+  for (const line of proveLines(prove)) console.log(line);
+  if (!prove.complete) process.exitCode = 1;
 }
 
 function sweepJson(report: SweepReport): Record<string, unknown> {
@@ -1475,57 +1711,19 @@ async function sweepRestart(
   return restartAround(store, requested, command, duringGap);
 }
 
-/**
- * Whether this sweep put a mark on any row — which the running app may yet save
- * back over, so the restart that finishes it goes through a gap that writes
- * them again: `deferredPinsGap` in-process, `foster layout` when detached.
- */
-function sweepMarked(report: SweepReport): boolean {
-  return [...report.branches.retitled, ...report.files.retitled].some(
-    (outcome) => outcome.status === 'retitled',
-  );
-}
-
-/**
- * The one write a sweep does make in its own restart gap: the pin moves its pin
- * pass had to defer because the app was open (`engine/pinMoves.ts`). A sweep that
- * restarts the app itself has the closed-app window those need right there, and
- * handing the user `foster layout --yes --restart` instead would cost a second
- * full restart for a single record. Groups and routines stay `foster layout`'s,
- * as ever. `undefined` when nothing was deferred, so an ordinary restart is
- * unchanged.
- */
-function deferredPinsGap(
-  store: StoreLayout,
-  ledger: Ledger,
-  target: AccountRef,
-  report: SweepReport,
-): (() => void) | undefined {
-  // The marks the app saved back over while the sweep ran are only knowable
-  // now, once it has closed — so a sweep that wrote any mark opens the gap for
-  // them even when no pin was deferred (`engine/marksBack.ts`).
-  if (!report.pinFixes.deferred && !sweepMarked(report)) return undefined;
-  return () => {
-    // A failure leaves the move pending for the next `foster layout`, the same
-    // as `applyLayout` treats it — never a reason the restart itself failed.
-    try {
-      applyPinMoves(store, ledger, planPinMoves(store, ledger.read(), target));
-    } catch {
-      // still pending
-    }
-    // One card at a time and never throwing: `retitleCards` records a failure
-    // rather than raising it, and the next `foster layout` looks again.
-    retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
-  };
-}
+// `sweepMarked` and `deferredPinsGap` (now `deferredSweepGap`) moved to
+// `ops/sweep.ts` so the TUI's own sweep flow (`src/cli/flows.ts`) can share
+// them instead of recomputing a narrower version of the same thing — see the
+// doc comments there.
 
 /**
  * `--detach`'s whole implementation, shared by every command that offers it:
- * check for a live writer the restart would end (besides the session foster
- * runs in, which is expected to die with the app), write the `.vbs`, launch it
- * outside the app's process tree, and hand back what to print. Never throws —
- * a launch failure is a refusal like any other, so the caller always has one
- * shape to report.
+ * refuse a restart the tray would swallow before anything is written, check
+ * for a live writer the restart would end (besides the session foster runs in,
+ * which is expected to die with the app), write the `.vbs`, launch it outside
+ * the app's process tree, and hand back what to print. Never throws — a launch
+ * failure is a refusal like any other, so the caller always has one shape to
+ * report.
  */
 interface DetachOutcome {
   ok: boolean;
@@ -1537,10 +1735,21 @@ interface DetachOutcome {
 }
 
 async function runDetach(
+  store: StoreLayout,
   argv: string[],
   delaySeconds: number,
   evenWithLive: boolean,
 ): Promise<DetachOutcome> {
+  // Checked first, and against nothing more than the argv and the store's own
+  // tray setting: a detached restart with no way to actually end the app is a
+  // wasted wait and a log nobody reads (`detachNeedsTerminate`'s own doc
+  // comment has the measurement).
+  const terminateRefusal = detachNeedsTerminate({
+    closingWindowQuits: closingWindowQuits(store),
+    argv,
+  });
+  if (terminateRefusal) return { ok: false, reason: terminateRefusal };
+
   const roots = sessionRegistryRoots(process.env);
   const sessions = liveSessions(roots);
   const rows = readProcesses();
@@ -1568,24 +1777,44 @@ async function runDetach(
   }
 }
 
+/**
+ * The `--json` shape of a `DetachOutcome`, on its own so a command that folds
+ * the detach result into a larger object (`sweep --json`, `layout --json`)
+ * builds the same shape `printDetachResult` prints standalone, rather than
+ * three copies of the same six fields drifting apart.
+ */
+function detachJson(outcome: DetachOutcome):
+  | {
+      detached: true;
+      pid: number;
+      via: DetachLaunchResult['via'];
+      log: string;
+      vbs: string;
+      delaySeconds: number;
+      argv: string[];
+      ending?: string;
+    }
+  | { detached: false; error: string | undefined } {
+  if (outcome.ok && outcome.plan && outcome.launch) {
+    return {
+      detached: true,
+      pid: outcome.launch.pid,
+      via: outcome.launch.via,
+      log: outcome.plan.logPath,
+      vbs: outcome.plan.vbsPath,
+      delaySeconds: outcome.plan.delaySeconds,
+      argv: outcome.plan.argv,
+      ...(outcome.ending ? { ending: outcome.ending } : {}),
+    };
+  }
+  return { detached: false, error: outcome.reason };
+}
+
 /** `--detach`'s own report, text or `--json` — every command that offers it prints the same shape. */
 function printDetachResult(outcome: DetachOutcome, json: boolean, note?: string): void {
   if (json) {
-    if (outcome.ok && outcome.plan && outcome.launch) {
-      print({
-        detached: true,
-        pid: outcome.launch.pid,
-        via: outcome.launch.via,
-        log: outcome.plan.logPath,
-        vbs: outcome.plan.vbsPath,
-        delaySeconds: outcome.plan.delaySeconds,
-        argv: outcome.plan.argv,
-        ...(outcome.ending ? { ending: outcome.ending } : {}),
-      });
-      return;
-    }
-    print({ detached: false, error: outcome.reason });
-    process.exitCode = 1;
+    print(detachJson(outcome));
+    if (!outcome.ok) process.exitCode = 1;
     return;
   }
 
@@ -1613,6 +1842,69 @@ function detachNotNeededNote(store: StoreLayout): string | undefined {
     ? 'Not inside a hosted session right now, so --detach was not needed — a plain restart would ' +
         'have done the same thing. Running it anyway.'
     : undefined;
+}
+
+/**
+ * `--detach`'s two prerequisites, checked the same way by every write command
+ * that offers it (`sweep`, `layout`, `view set`, `view copy`) — `app restart`
+ * needs neither, since it already means "restart" and never means "dry run".
+ *
+ * Takes the already-computed `dryRun` (`opts.dryRun || !opts.yes`), never the
+ * raw `opts.yes` on its own: `sweep`, `layout`, `view set` and `view copy` all
+ * compute `dryRun` before calling this, and three of the four used to pass
+ * `opts` wholesale instead, reading `opts.yes` directly. `--dry-run` and
+ * `--yes` are declared as conflicting options, so the two only ever actually
+ * diverged if that Commander wiring were ever loosened — but a check that is
+ * only correct by leaning on a constraint declared somewhere else, rather
+ * than on the value the caller already worked out, is the kind of thing that
+ * silently breaks under refactoring. Passing `dryRun` itself removes the
+ * possibility outright.
+ */
+function checkDetachPrereqs(opts: { detach?: boolean; restart?: boolean; dryRun: boolean }): void {
+  if (!opts.detach) return;
+  const restartRefusal = detachNeedsRestart({
+    detach: true,
+    restart: Boolean(opts.restart),
+    isRestartItself: false,
+  });
+  if (restartRefusal) throw new Error(restartRefusal);
+  const yesRefusal = detachNeedsYes({ detach: true, yes: !opts.dryRun });
+  if (yesRefusal) throw new Error(yesRefusal);
+}
+
+/**
+ * The three `--detach*` options, identical on every command that offers them —
+ * `--restart`/`--terminate` stay each command's own, since their help text
+ * (and, for `app restart`, their very name) differs by what the command
+ * already does.
+ */
+function addDetachOptions(cmd: Command): Command {
+  return cmd
+    .option(
+      '--detach',
+      'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
+    )
+    .option(
+      '--detach-delay <seconds>',
+      `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
+    )
+    .option(
+      '--detach-even-with-live',
+      'detach anyway even if another live session would be ended by the restart',
+    );
+}
+
+/**
+ * Refuses a write that needs the app closed, found it running, and was not
+ * asked to restart it — the same check and the same words `layout`, `view
+ * set` and `view copy` each wrote out by hand.
+ */
+function refuseIfAppRunning(store: StoreLayout): void {
+  if (inspectApp(store).running) {
+    throw new Error(
+      'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
+    );
+  }
 }
 
 function reportSweepRestart(restart: SweepRestart): void {
@@ -1895,6 +2187,7 @@ sourceOptions(
   console.log(
     pc.bold(`\n${counts.fostered} fostered, ${counts.skipped} skipped, ${counts.failed} failed.`),
   );
+  if (counts.failed > 0) process.exitCode = 1;
   if (writers.length > 0) console.log(pc.yellow(`\n${liveBranchNote(writers)}`));
   if (forkNote) console.log(forkNote);
   if (counts.fostered > 0 && twoLiveSidebars(sourceStore, store)) {
@@ -1994,6 +2287,7 @@ program
     }
 
     console.log(pc.bold(`\n${counts.fostered} restored, ${counts.failed} failed.`));
+    if (counts.failed > 0) process.exitCode = 1;
     await finish(store, Boolean(opts.restart));
   });
 
@@ -2064,6 +2358,7 @@ program
     }
 
     console.log(pc.bold(`\n${counts.returned} returned, ${counts.failed} failed.`));
+    if (counts.failed > 0) process.exitCode = 1;
     if (continued.length > 0)
       console.log(
         pc.dim(`
@@ -2136,20 +2431,29 @@ program
     const acting = entries.filter((entry) => entry.status === 'consolidate');
     const diverged = entries.filter((entry) => entry.status === 'diverged');
     const appMade = entries.filter((entry) => entry.status === 'app-made');
+    const jsonEntries = (): Record<string, unknown>[] =>
+      entries.filter((entry) => entry.status !== 'settled').map(consolidationJson);
 
-    if (opts.json) {
-      print(entries.filter((entry) => entry.status !== 'settled').map(consolidationJson));
+    // Same order as `unclaim`/`dates`/`sweep --undo-retitles`: on a dry run
+    // nothing has been written, so the plan is all `--json` has to show. With
+    // `--yes` the write happens first (below) and `--json` reports what was
+    // actually done, rather than degrading to a dry-run preview a scripted
+    // caller would mistake for the real thing.
+    if (opts.json && dryRun) {
+      print(jsonEntries());
       return;
     }
 
-    if (acting.length === 0 && diverged.length === 0 && appMade.length === 0) {
-      console.log('Nothing is forked here — every conversation has one card per account.');
-      return;
-    }
+    if (!opts.json) {
+      if (acting.length === 0 && diverged.length === 0 && appMade.length === 0) {
+        console.log('Nothing is forked here — every conversation has one card per account.');
+        return;
+      }
 
-    for (const entry of acting) console.log(consolidationLines(entry).join('\n'));
-    for (const entry of diverged) console.log(divergedLines(entry).join('\n'));
-    for (const entry of appMade) console.log(appMadeLines(entry).join('\n'));
+      for (const entry of acting) console.log(consolidationLines(entry).join('\n'));
+      for (const entry of diverged) console.log(divergedLines(entry).join('\n'));
+      for (const entry of appMade) console.log(appMadeLines(entry).join('\n'));
+    }
 
     const rows = acting.length;
     const moves = acting.filter((entry) => entry.repoint).length;
@@ -2196,11 +2500,27 @@ program
       { store, ledger },
     );
 
+    const counts = summariseOutcomes(removed);
+    const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
+    if (failed > 0) process.exitCode = 1;
+
+    // Same shape as `sweep`/`layout`/`view set`: the write above already
+    // happened, so `--restart` here is only ever quit-then-start, never a
+    // write-in-the-gap — `restartAround` with no `duringGap` is exactly
+    // `sweepRestart`'s own call. Run and reported under `--json` too, so
+    // `--restart --json` together no longer drops the restart silently the
+    // way returning before `finish` (text-only, and never awaited on this
+    // branch) used to.
+    if (opts.json) {
+      const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+      print({ entries: jsonEntries(), moved, removed, restart });
+      if (opts.restart && !restart.done) process.exitCode = 1;
+      return;
+    }
+
     for (const outcome of moved) console.log(repointLine(outcome));
     for (const outcome of removed) console.log(outcomeLine(outcome));
 
-    const counts = summariseOutcomes(removed);
-    const failed = moved.filter((outcome) => outcome.status === 'failed').length + counts.failed;
     console.log(
       pc.bold(
         `\n${moved.filter((o) => o.status === 'repointed').length} moved, ` +
@@ -2250,17 +2570,39 @@ async function undoConsolidation(
     cards = hits;
   }
 
-  if (opts.json) {
+  // Same order as `unclaim`/`dates`/`sweep --undo-retitles`: the write (if
+  // any) happens before `--json` is checked, so `--undo --yes --json` reports
+  // what was actually put back rather than the bare card list a dry run would
+  // show.
+  if (opts.json && dryRun) {
     print(cards);
     return;
   }
 
   if (cards.length === 0) {
+    if (opts.json) {
+      print([]);
+      return;
+    }
     console.log('No cards are repointed — there is nothing to put back.');
     return;
   }
 
+  // `dryRun` can still be true here (the text-mode preview) — only the
+  // `opts.json && dryRun` combination returned above, before this call.
   const outcomes = repointCards(undoRequests(cards), { store, ledger, dryRun });
+
+  // Same fix as the main consolidate path above: the write already happened
+  // (this branch is only reached once `opts.json && dryRun` has returned
+  // above), so `--restart` is run and folded into the JSON here too, instead
+  // of being silently dropped by returning before `finish` below ever runs.
+  if (opts.json) {
+    const restart = await restartAround(store, Boolean(opts.restart), RESTART_COMMAND);
+    print({ outcomes, restart });
+    if (opts.restart && !restart.done) process.exitCode = 1;
+    return;
+  }
+
   for (const outcome of outcomes) console.log(repointLine(outcome));
 
   if (dryRun) {
@@ -2438,7 +2780,21 @@ function reportDuplicates(report: DuplicateReport): void {
   }
 }
 
-/** Shared tail of the two writing commands: restart now, or say why it matters. */
+/**
+ * Shared tail of every write-then-optionally-restart command that has no
+ * `--detach` of its own — `foster`, `restore`, `return`, `consolidate`,
+ * `import-codex`, and `sweep --undo-retitles` — restart now, through the same
+ * `restartAround` every `--detach`-capable command already shares, or say why
+ * it matters.
+ *
+ * Used to call `restartDesktop` directly, which throws `DesktopControlError`
+ * from inside a session Claude Desktop itself hosts. Every one of those
+ * commands had already written by the time `finish()` ran, so the thrown
+ * error reached `main()`'s generic handler and printed "Nothing was changed."
+ * over writes that had, in fact, happened. `restartAround` never throws: it
+ * reports what was written and hands over the command to finish the restart
+ * from outside the app instead.
+ */
 async function finish(store: StoreLayout, restart: boolean): Promise<void> {
   if (!restart) {
     console.log(
@@ -2446,9 +2802,14 @@ async function finish(store: StoreLayout, restart: boolean): Promise<void> {
     );
     return;
   }
-  // Named outright rather than as a flag to add here: --terminate belongs to
-  // "foster app restart", and the writing commands have no such option.
-  await restartDesktop(store, false, 'Run "foster app restart --terminate"');
+  const outcome = await restartAround(store, true, RESTART_COMMAND);
+  if (outcome.done) {
+    console.log(pc.bold('Claude Desktop is up, with the sidebar rebuilt.'));
+    return;
+  }
+  console.log(pc.yellow(outcome.reason ?? 'The restart did not finish.'));
+  console.log(`  ${outcome.command}`);
+  process.exitCode = 1;
 }
 
 const UNCLAIM_PREVIEW_LIMIT = 12;
@@ -2702,7 +3063,7 @@ function undoDatesCommand(ledger: Ledger, opts: { json?: boolean }, dryRun: bool
   console.log(pc.bold(`\n${back} put back, ${outcomes.length - back} not.`));
 }
 
-program
+const layoutCmd = program
   .command('layout')
   .helpGroup('After the sweep:')
   .summary('bring sidebar groups and routines into this account')
@@ -2728,19 +3089,8 @@ program
   .option(
     '--restart',
     'quit Claude Desktop, write, then start it again — the write happens in the gap',
-  )
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  );
+addDetachOptions(layoutCmd)
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
@@ -2761,16 +3111,7 @@ program
       dryRun?: boolean;
     }>();
     const dryRun = opts.dryRun || !opts.yes;
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -2808,9 +3149,12 @@ program
       return;
     }
 
-    // Named here rather than in `restartAround`: the command that finishes the
-    // job restarts the app too, so there is still only one line to hand over.
-    const restartCommand = 'foster layout --yes --restart';
+    // Built from the actual argv, not a template: a bare `'foster layout --yes
+    // --restart'` dropped whatever `--store`/`--ledger`/`--to`/`--to-org` (or
+    // `--no-*`) this run actually carried, so the line handed over on a
+    // self-hosted refusal silently landed somewhere else, or applied
+    // everything instead of the subset this run asked for.
+    const restartCommand = restartCommandFromArgv(process.argv.slice(2));
 
     if (opts.detach) {
       // The write itself happens in the detached process, which re-runs this
@@ -2819,31 +3163,21 @@ program
       // and launches that; `--restart` re-plans fresh once the app is
       // actually closed, same as the in-process path below, because that is
       // the only plan that is ever real.
-      for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+      //
+      // Text only: `--json` prints the same plan inside the object below, and
+      // printing these lines first as well would hand a scripted caller a
+      // stream that is half plain text and half JSON.
+      if (!opts.json) {
+        for (const line of layoutPlanLines(plan, { groupScopesSkipped })) console.log(line);
+      }
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
       if (opts.json) {
-        print({
-          target,
-          dryRun: false,
-          plan,
-          detach:
-            outcome.ok && outcome.plan && outcome.launch
-              ? {
-                  detached: true,
-                  pid: outcome.launch.pid,
-                  via: outcome.launch.via,
-                  log: outcome.plan.logPath,
-                  vbs: outcome.plan.vbsPath,
-                  delaySeconds: outcome.plan.delaySeconds,
-                  argv: outcome.plan.argv,
-                  ...(outcome.ending ? { ending: outcome.ending } : {}),
-                }
-              : { detached: false, error: outcome.reason },
-        });
+        print({ target, dryRun: false, plan, detach: detachJson(outcome) });
         if (!outcome.ok) process.exitCode = 1;
         return;
       }
@@ -2855,12 +3189,7 @@ program
       // Checked here rather than at the top, the same as `foster pin`: reading
       // and a dry run keep working while the app is up, and it is only the
       // write that cannot share the files with it.
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
 
       // Caught here, not left to the top-level handler: that only ever had the
       // bare error message to show, with no plan around it and no distinction
@@ -3071,7 +3400,7 @@ const view = program
     }
   });
 
-view
+const viewSetCmd = view
   .command('set')
   .summary('change one or more of the seven filters')
   .option('--status <value>', `${STATUS_WORDS.join('|')}`)
@@ -3083,23 +3412,22 @@ view
   .option('--activity-days <value>', '0|1|3|7|30')
   .option('--to <accountUuid>', 'write into this account instead')
   .option('--to-org <organizationUuid>', 'write into this organization')
-  .option('--restart', 'quit Claude Desktop, write, then start it again')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  .option('--restart', 'quit Claude Desktop, write, then start it again');
+addDetachOptions(viewSetCmd)
+  .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
     const { store } = context(this);
-    const opts = this.opts<{
+    // `optsWithGlobals`, not `opts`: the parent `view` command declares `--to`
+    // and `--json` of its own (for the bare `foster view`), and Commander
+    // resolves a flag against the first command in the chain that declares it
+    // — here, the parent, silently, whichever side of `set` on the command
+    // line it lands. `this.opts()` alone came back with neither `to` nor (once
+    // `--json` was added here) `json` at all; `optsWithGlobals` merges every
+    // ancestor's own opts in, so the flag reaches this action no matter which
+    // level actually parsed it.
+    const opts = this.optsWithGlobals<{
       status?: string;
       groupBy?: string;
       sort?: string;
@@ -3113,18 +3441,12 @@ view
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      json?: boolean;
       yes?: boolean;
+      dryRun?: boolean;
     }>();
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    const dryRun = opts.dryRun || !opts.yes;
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const target = resolveDestination(store, listAccountDirs(store), opts);
@@ -3132,41 +3454,76 @@ view
     const plan = planViewSet(store, target, request);
 
     if (plan.changes.length === 0) {
+      if (opts.json) {
+        print({ target, dryRun, plan });
+        return;
+      }
       console.log('Nothing to change.');
       return;
     }
 
-    printViewChanges(plan.changes, plan.impliedStatusActive);
-
-    if (!opts.yes) {
+    if (dryRun) {
+      if (opts.json) {
+        print({ target, dryRun: true, plan });
+        return;
+      }
+      printViewChanges(plan.changes, plan.impliedStatusActive);
       console.log(pc.dim('\nRe-run with --yes to write.'));
       return;
     }
 
-    const restartCommand = 'foster view set --yes --restart';
+    // Built from the actual argv, not a template: a bare `'foster view set
+    // --yes --restart'` dropped every filter flag this run actually carried,
+    // so the command handed over on a self-hosted refusal said "Nothing to
+    // change." — measured 24/09/2026.
+    const restartCommand = restartCommandFromArgv(process.argv.slice(2));
 
     if (opts.detach) {
       // Same split as `foster layout`: this process only shows the plan and
       // launches the detached one, which re-runs the identical invocation
       // (minus --detach*) from outside the app and does the write itself,
       // re-planned fresh once the app is actually closed.
+      if (!opts.json) printViewChanges(plan.changes, plan.impliedStatusActive);
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
+      if (opts.json) {
+        print({
+          target,
+          dryRun: false,
+          plan,
+          detach:
+            outcome.ok && outcome.plan && outcome.launch
+              ? {
+                  detached: true,
+                  pid: outcome.launch.pid,
+                  via: outcome.launch.via,
+                  log: outcome.plan.logPath,
+                  vbs: outcome.plan.vbsPath,
+                  delaySeconds: outcome.plan.delaySeconds,
+                  argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
+                }
+              : { detached: false, error: outcome.reason },
+        });
+        if (!outcome.ok) process.exitCode = 1;
+        return;
+      }
       printDetachResult(outcome, false, detachNotNeededNote(store));
       return;
     }
 
     if (!opts.restart) {
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
       applyViewSet(plan, { store });
+      if (opts.json) {
+        print({ target, dryRun: false, plan });
+        return;
+      }
+      printViewChanges(plan.changes, plan.impliedStatusActive);
       console.log(pc.bold('\nWritten.'));
       console.log(
         pc.dim('Invisible until the app re-reads its files: restart Claude Desktop, or --restart.'),
@@ -3182,6 +3539,14 @@ view
       freshPlan = planViewSet(store, target, request);
       if (freshPlan.changes.length > 0) applyViewSet(freshPlan, { store });
     });
+
+    if (opts.json) {
+      print({ target, dryRun: false, plan, freshPlan, restart });
+      if (!restart.done) process.exitCode = 1;
+      return;
+    }
+
+    printViewChanges(plan.changes, plan.impliedStatusActive);
     if (restart.done) {
       if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
         console.log(
@@ -3197,29 +3562,23 @@ view
     }
   });
 
-view
+const viewCopyCmd = view
   .command('copy')
   .summary("copy another account's per-account filters (env, empty groups, PR status)")
   .requiredOption('--from <accountUuid>', 'the account to copy from')
   .option('--to <accountUuid>', 'write into this account instead')
   .option('--to-org <organizationUuid>', 'write into this organization')
-  .option('--restart', 'quit Claude Desktop, write, then start it again')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
+  .option('--restart', 'quit Claude Desktop, write, then start it again');
+addDetachOptions(viewCopyCmd)
+  .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
+  .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
   .action(async function (this: Command) {
     const { store } = context(this);
-    const opts = this.opts<{
+    // `optsWithGlobals`, not `opts` — same reason as `view set` above: the
+    // parent `view` command's own `--to` and `--json` otherwise claim the
+    // flag before it ever reaches this action.
+    const opts = this.optsWithGlobals<{
       from: string;
       to?: string;
       toOrg?: string;
@@ -3227,18 +3586,12 @@ view
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      json?: boolean;
       yes?: boolean;
+      dryRun?: boolean;
     }>();
-    if (opts.detach) {
-      const restartRefusal = detachNeedsRestart({
-        detach: true,
-        restart: Boolean(opts.restart),
-        isRestartItself: false,
-      });
-      if (restartRefusal) throw new Error(restartRefusal);
-      const yesRefusal = detachNeedsYes({ detach: true, yes: Boolean(opts.yes) });
-      if (yesRefusal) throw new Error(yesRefusal);
-    }
+    const dryRun = opts.dryRun || !opts.yes;
+    checkDetachPrereqs({ detach: opts.detach, restart: opts.restart, dryRun });
     const detachDelay = parseDetachDelay(opts.detachDelay);
     if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
     const accounts = listAccountDirs(store);
@@ -3251,34 +3604,67 @@ view
 
     const plan: ViewCopyPlan = planViewCopy(store, from, to);
     if (plan.changes.length === 0) {
+      if (opts.json) {
+        print({ from, to, dryRun, plan });
+        return;
+      }
       console.log('Nothing to copy: already the same.');
       return;
     }
-    printViewChanges(plan.changes, false);
 
-    if (!opts.yes) {
+    if (dryRun) {
+      if (opts.json) {
+        print({ from, to, dryRun: true, plan });
+        return;
+      }
+      printViewChanges(plan.changes, false);
       console.log(pc.dim('\nRe-run with --yes to write.'));
       return;
     }
 
     const restartCommand = viewCopyRestartCommand(from, to);
     if (opts.detach) {
+      if (!opts.json) printViewChanges(plan.changes, false);
       const outcome = await runDetach(
+        store,
         process.argv.slice(2),
         detachDelay,
         Boolean(opts.detachEvenWithLive),
       );
+      if (opts.json) {
+        print({
+          from,
+          to,
+          dryRun: false,
+          plan,
+          detach:
+            outcome.ok && outcome.plan && outcome.launch
+              ? {
+                  detached: true,
+                  pid: outcome.launch.pid,
+                  via: outcome.launch.via,
+                  log: outcome.plan.logPath,
+                  vbs: outcome.plan.vbsPath,
+                  delaySeconds: outcome.plan.delaySeconds,
+                  argv: outcome.plan.argv,
+                  ...(outcome.ending ? { ending: outcome.ending } : {}),
+                }
+              : { detached: false, error: outcome.reason },
+        });
+        if (!outcome.ok) process.exitCode = 1;
+        return;
+      }
       printDetachResult(outcome, false, detachNotNeededNote(store));
       return;
     }
     if (!opts.restart) {
-      const app = inspectApp(store);
-      if (app.running) {
-        throw new Error(
-          'Claude Desktop rewrites its own config while it runs; close it or add --restart.',
-        );
-      }
+      refuseIfAppRunning(store);
       applyViewCopy(plan, { store });
+      if (opts.json) {
+        print({ from, to, dryRun: false, plan });
+        return;
+      }
+      printViewChanges(plan.changes, false);
       console.log(pc.bold('\nWritten.'));
       return;
     }
@@ -3290,6 +3676,14 @@ view
       freshPlan = planViewCopy(store, from, to);
       if (freshPlan.changes.length > 0) applyViewCopy(freshPlan, { store });
     });
+
+    if (opts.json) {
+      print({ from, to, dryRun: false, plan, freshPlan, restart });
+      if (!restart.done) process.exitCode = 1;
+      return;
+    }
+
+    printViewChanges(plan.changes, false);
     if (restart.done) {
       if (freshPlan && JSON.stringify(freshPlan.changes) !== JSON.stringify(plan.changes)) {
         console.log(pc.yellow('\nThe plan changed once the app closed — this is what was copied:'));
@@ -3636,14 +4030,15 @@ program
     // Written down so the next run still knows it after the app has forgotten —
     // but only when it adds something. A reading command that appended on every
     // invocation would fill an append-only log with identical lines.
-    if (cached && worthRecording(cached, known)) {
+    const toRecord = cached ? forLedgerSighting(cached) : undefined;
+    if (toRecord && worthRecording(toRecord, known)) {
       ledger.append({
         kind: 'account_identity_seen',
         accountUuid,
-        ...(cached.email ? { email: cached.email } : {}),
-        ...(cached.name ? { name: cached.name } : {}),
-        ...(cached.plan ? { plan: cached.plan } : {}),
-        ...(cached.profile ? { profile: cached.profile } : {}),
+        ...(toRecord.email ? { email: toRecord.email } : {}),
+        ...(toRecord.name ? { name: toRecord.name } : {}),
+        ...(toRecord.plan ? { plan: toRecord.plan } : {}),
+        ...(toRecord.profile ? { profile: toRecord.profile } : {}),
       });
     }
 
@@ -3780,11 +4175,17 @@ program
         (uuid) => uuid,
       );
       if (match.kind === 'none') {
-        console.log(`No account here starts with ${accountArg}.`);
+        const message = `No account here starts with ${accountArg}.`;
+        if (opts.json) print({ error: 'no-match', accountUuid: accountArg, message });
+        else console.log(message);
+        process.exitCode = 1;
         return;
       }
       if (match.kind === 'ambiguous') {
-        console.log(`${accountArg} matches more than one account; use more of the id.`);
+        const message = `${accountArg} matches more than one account; use more of the id.`;
+        if (opts.json) print({ error: 'ambiguous', accountUuid: accountArg, message });
+        else console.log(message);
+        process.exitCode = 1;
         return;
       }
       targets = [match.id];
@@ -3794,7 +4195,10 @@ program
         .filter((row) => !row.identity && row.accountUuid !== signedIn)
         .map((row) => row.accountUuid);
     } else {
-      console.log('Name an account, or pass --all. `foster accounts` lists them.');
+      const message = 'Name an account, or pass --all. `foster accounts` lists them.';
+      if (opts.json) print({ error: 'no-target', message });
+      else console.log(message);
+      process.exitCode = 1;
       return;
     }
 
@@ -3849,7 +4253,7 @@ function identifyReason(
 /** Writes down the current account's profile when it says something the ledger does not. */
 function recordCurrentIdentity(rows: AccountOverview[], ledger: Ledger): void {
   const fresh = freshIdentityOf(rows);
-  const identity = fresh?.identity;
+  const identity = fresh?.identity ? forLedgerSighting(fresh.identity) : undefined;
   if (!fresh || !identity) return;
   if (!worthRecording(identity, project(ledger.read()).identities.get(fresh.accountUuid))) return;
 
@@ -4259,6 +4663,33 @@ program
     console.log(outcome.ok ? outcome.message : pc.red(outcome.message));
   });
 
+const cacheCommand = program
+  .command('cache')
+  .helpGroup('After the sweep:')
+  .description('the persistent scan cache under <FOSTER_HOME>/cache');
+
+cacheCommand
+  .command('clear')
+  .summary('delete the persistent scan cache')
+  .description(
+    'Remove every file under the persistent cache foster keeps to skip re-reading\n' +
+      'cards and transcripts that have not changed since the last run.\n\n' +
+      'Nothing here is a record of anything — the next scan simply reads from disk\n' +
+      'again and rebuilds it, the same as an entry `--no-cache` or a version mismatch\n' +
+      'already ignores.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const opts = this.opts<{ json?: boolean }>();
+    const dir = defaultCacheDir(process.env);
+    const removed = clearCache(dir);
+    if (opts.json) {
+      print({ dir, removed });
+      return;
+    }
+    console.log(`Removed ${removed} file${removed === 1 ? '' : 's'} from ${dir}.`);
+  });
+
 const client = program
   .command('client')
   .helpGroup('Credentials and clients:')
@@ -4488,6 +4919,10 @@ client
 
     const outcome = openTerminalTab(plan);
     if (opts.json) {
+      // Same condition text mode uses below: `not-windows` is not a failure —
+      // it is the expected answer on a machine `client open` cannot drive —
+      // so only `failed` sets the exit code a scripted caller would check.
+      if (outcome.outcome === 'failed') process.exitCode = 1;
       return print({
         ok: outcome.outcome === 'opened',
         outcome: outcome.outcome,
@@ -4993,6 +5428,201 @@ program
   });
 
 program
+  .command('grep')
+  .helpGroup('Live sessions:')
+  .summary('search every transcript this machine holds, by what was actually said')
+  .description(
+    "A regex over every client's transcripts — every conversation any account on\n" +
+      'this machine ever ran, archived and deleted included, because a transcript\n' +
+      "outlives the card that opened it. Each hit is matched against a message's\n" +
+      'decoded text, never the raw JSONL, so it cannot fire on a `\\n` inside a JSON\n' +
+      'escape or a uuid quoted inside a tool result. `--role` narrows to only what a\n' +
+      'person typed or only what the assistant answered; with neither, both count and\n' +
+      "the app's own bookkeeping records never do.\n\n" +
+      'Every hit is grouped by conversation and shown with the card(s) — title,\n' +
+      'account, archived — that open it; a conversation with no card left is shown\n' +
+      'with none, which is what a deleted conversation nothing points at looks like.',
+  )
+  .argument('<regex>', 'a JavaScript-flavoured regex, case-sensitive; a plain phrase works too')
+  .option('--account <accountUuid>', 'only conversations with a card in this account')
+  .option('--since <age>', 'skip a transcript whose file is older than this, e.g. 7d, 24h')
+  .option(
+    '--cwd <fragment>',
+    "case-insensitive substring of the conversation's own working directory",
+  )
+  .option('--role <role>', 'only "user" or only "assistant" records')
+  .option('--limit <n>', 'stop once this many conversations have matched')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command, regexArg: string) {
+    const { store } = context(this);
+    const opts = this.opts<{
+      account?: string;
+      since?: string;
+      cwd?: string;
+      role?: string;
+      limit?: string;
+      json?: boolean;
+    }>();
+
+    if (opts.role !== undefined && opts.role !== 'user' && opts.role !== 'assistant') {
+      throw new Error(`--role must be "user" or "assistant", not "${opts.role}".`);
+    }
+
+    let pattern: RegExp;
+    try {
+      pattern = new RegExp(regexArg);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`"${regexArg}" is not a valid regex: ${message}`);
+    }
+
+    let since: number | undefined;
+    if (opts.since !== undefined) {
+      since = parseSince(opts.since);
+      if (since === undefined) {
+        throw new Error(`Could not read --since "${opts.since}". Try 24h, 7d or 2w.`);
+      }
+    }
+
+    let accountUuid: string | undefined;
+    if (opts.account !== undefined) {
+      accountUuid = matchAccountPrefix(listAccountDirs(store), opts.account, '--account')[0]!
+        .accountUuid;
+    }
+
+    let limit: number | undefined;
+    if (opts.limit !== undefined) {
+      limit = Number(opts.limit);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error(`--limit must be a positive integer, not "${opts.limit}".`);
+      }
+    }
+
+    const startedAt = Date.now();
+    const results = grepTranscripts(store, pattern, {
+      ...(accountUuid !== undefined ? { accountUuid } : {}),
+      ...(since !== undefined ? { since } : {}),
+      ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts.role === 'user' || opts.role === 'assistant' ? { role: opts.role } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    if (opts.json) {
+      print({
+        pattern: regexArg,
+        elapsedMs,
+        conversations: results.map((conversation) => ({
+          cliSessionId: conversation.cliSessionId,
+          cwd: conversation.cwd ?? null,
+          hits: conversation.hits,
+          cards: conversation.cards.map((card) => ({
+            accountUuid: card.account.accountUuid,
+            organizationUuid: card.account.organizationUuid,
+            sessionId: card.sessionId,
+            title: card.title ?? null,
+            isArchived: card.isArchived,
+          })),
+        })),
+      });
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log(`No matches for ${regexArg}.`);
+      console.log(pc.dim(`Searched in ${elapsedMs}ms.`));
+      return;
+    }
+
+    for (const conversation of results) {
+      const title = conversation.cards[0]?.title ?? pc.dim('(no card left — deleted or copy-only)');
+      console.log(`${pc.bold(title)}  ${pc.dim(shortId(conversation.cliSessionId))}`);
+      if (conversation.cwd) console.log(pc.dim(`  ${conversation.cwd}`));
+      for (const card of conversation.cards) {
+        console.log(
+          pc.dim(
+            `  card in ${card.account.accountUuid.slice(0, 8)}${card.isArchived ? ' (archived)' : ''}`,
+          ),
+        );
+      }
+      for (const hit of conversation.hits) {
+        console.log(`    ${hit.role.padEnd(9)} ${formatDate(hit.at)}  ${hit.snippet}`);
+      }
+      console.log('');
+    }
+    console.log(pc.bold(`${results.length} conversation(s) matched.`));
+    console.log(pc.dim(`Searched in ${elapsedMs}ms.`));
+  });
+
+program
+  .command('export')
+  .helpGroup('Live sessions:')
+  .summary('render one conversation to Markdown, HTML or JSONL')
+  .description(
+    'Render one conversation, unioning every file it occupies (see AGENTS.md, "One\n' +
+      'conversation can be two files") in timeline order and deduplicated by record\n' +
+      'id. `md` shows user/assistant turns as headings with tool calls collapsed to\n' +
+      'one line each; `html` is the same, self-contained; `jsonl` is every record\n' +
+      'the conversation holds, deduplicated and ordered, exactly as a transcript\n' +
+      'itself is written.\n\n' +
+      'The conversation is resolved the way `--store` resolves a name: a conversation\n' +
+      'id, exact or an unambiguous prefix — tried even against one with no card left,\n' +
+      'since a deleted conversation naming its own id is the ordinary case here —\n' +
+      "then a card's own id, then a case-insensitive fragment of a title. More than\n" +
+      'one candidate at any step is refused rather than guessed at.',
+  )
+  .argument('<id>', 'a conversation id, a card id, or a fragment of its title')
+  .option('--format <format>', 'md, html or jsonl', 'md')
+  .option('--out <file>', 'write here instead of stdout')
+  .action(function (this: Command, id: string) {
+    const { store } = context(this);
+    const opts = this.opts<{ format: string; out?: string }>();
+    if (opts.format !== 'md' && opts.format !== 'html' && opts.format !== 'jsonl') {
+      throw new Error(`--format must be md, html or jsonl, not "${opts.format}".`);
+    }
+    const format = opts.format as ExportFormat;
+
+    const resolved = resolveConversation(id, store, listAccountDirs(store));
+    if (resolved.files.length === 0) {
+      throw new Error(
+        `${resolved.cliSessionId} has no transcript on disk — only a conversation that ` +
+          'ran on this machine can be exported.',
+      );
+    }
+
+    const card = resolved.cards.find((session) => session.data.title !== undefined);
+    const facts =
+      card === undefined
+        ? readTranscriptFacts(resolved.files[0]!, resolved.cliSessionId)
+        : undefined;
+    const records = readConversationRecords(resolved.files);
+    const rendered = renderConversation(
+      records,
+      {
+        cliSessionId: resolved.cliSessionId,
+        ...(card?.data.title !== undefined
+          ? { title: card.data.title }
+          : facts?.title !== undefined
+            ? { title: facts.title }
+            : {}),
+        ...(card?.data.cwd !== undefined
+          ? { cwd: card.data.cwd }
+          : facts?.cwd !== undefined
+            ? { cwd: facts.cwd }
+            : {}),
+      },
+      format,
+    );
+
+    if (opts.out) {
+      writeFileSync(opts.out, rendered, 'utf8');
+      console.error(pc.dim(`Wrote ${records.length} record(s) to ${opts.out}.`));
+      return;
+    }
+    console.log(rendered);
+  });
+
+program
   .command('transcript')
   .helpGroup('Live sessions:')
   .summary("read a conversation's transcript")
@@ -5046,14 +5676,14 @@ program
   .argument('<cliSessionId>', 'the conversation id')
   .argument('<prompt...>', 'what to say to it')
   .option('--timeout <seconds>', 'give up after this long', '300')
-  .action(function (this: Command, cliSessionId: string, prompt: string[]) {
+  .action(async function (this: Command, cliSessionId: string, prompt: string[]) {
     const opts = this.opts<{ timeout: string }>();
     const timeout = Number(opts.timeout);
     if (!Number.isFinite(timeout) || timeout <= 0) {
       throw new Error(`--timeout must be a positive number of seconds, not "${opts.timeout}".`);
     }
 
-    const result = resumeConversation(cliSessionId, prompt.join(' '), {
+    const result = await resumeConversation(cliSessionId, prompt.join(' '), {
       timeoutMs: timeout * 1000,
     });
     if ('refused' in result) {
@@ -5535,6 +6165,533 @@ program
     );
   });
 
+program
+  .command('disk')
+  .helpGroup('Reports:')
+  .summary('where the bytes are: cards and transcripts, per account and per project')
+  .description(
+    'Read-only measurement of everything on disk, across every account this store\n' +
+      'has: card and transcript bytes broken down by account and by working\n' +
+      "directory, how much of a card's own JSON is fields nothing in foster reads\n" +
+      '(BULKY_CARD_FIELDS — measured on a real store: 93% remoteMcpServersConfig),\n' +
+      'transcripts no card in any account still points at, transcript files that are\n' +
+      "byte-for-byte copies of each other, and session cards already over the app's\n" +
+      'own 10 MB load limit and so will not appear in it.\n\n' +
+      'Nothing here deletes anything, and nothing here decides a file is safe to\n' +
+      "remove — that judgement is `foster purge`'s, and it requires a tombstone this\n" +
+      'does not. Reading every card and every transcript on a large store takes a\n' +
+      'while; it stays read-only throughout, the same guarantee every other report in\n' +
+      'this tool gives.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const sessions = scanStore(store, copySessionIds(ledger.read()));
+    const report = diskReport(store, sessions);
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    for (const line of diskReportLines(report, labelsOf(ledger))) console.log(line);
+  });
+
+program
+  .command('stats')
+  .helpGroup('Reports:')
+  .summary('token usage, sessions and usage-limit stops, read from the transcripts')
+  .description(
+    "Read every transcript this store can see for its assistant records' own\n" +
+      '`usage` fields (input, output and cache tokens, and the model that generated\n' +
+      "them), plus every place a conversation ended on the app's own usage-limit\n" +
+      'record — the same detection `foster revive` uses, over the whole transcript\n' +
+      'rather than only its last answer. Aggregated per account, per model and per\n' +
+      'week: a per-model weekly limit can lock an account before its general week\n' +
+      'does (measured on a real account: 53% on the week, 100% on one model), and the\n' +
+      'account-wide number alone never shows that.\n\n' +
+      'An account here means the account a *native* card of the conversation belongs\n' +
+      'to — a fostered copy only proves the conversation reached that sidebar, not\n' +
+      'that its tokens were spent under it. A conversation no card anywhere still\n' +
+      'claims natively counts as unattributed rather than guessed at. Nothing here\n' +
+      'calls the usage API — `foster usage` does that, for the account signed in\n' +
+      'now, live.',
+  )
+  .option('--since <age>', 'how far back to read', '30d')
+  .addOption(
+    new Option('--by <dimension>', 'how to group the totals')
+      .choices(['account', 'model', 'week'])
+      .default('account'),
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ since: string; by: 'account' | 'model' | 'week'; json?: boolean }>();
+    const since = parseSince(opts.since);
+    if (since === undefined) {
+      throw new Error(`Could not read --since "${opts.since}". Try 30d, 12h or 4w.`);
+    }
+
+    const report = computeStats({ since, by: opts.by }, defaultStatsDeps(store, ledger));
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    for (const line of statsReportLines(report, labelsOf(ledger))) console.log(line);
+  });
+
+function accountLabel(uuid: string, labels: Map<string, string>): string {
+  return labels.get(uuid) ?? shortId(uuid);
+}
+
+function percent(part: number, whole: number): string {
+  return whole > 0 ? `${Math.round((part / whole) * 100)}%` : '0%';
+}
+
+function diskReportLines(report: DiskReport, labels: Map<string, string>): string[] {
+  const lines: string[] = [];
+  const { totals } = report;
+
+  lines.push(
+    `Cards:        ${formatBytes(totals.cardBytes)} across ${report.accounts.length} account(s), ` +
+      `${totals.cardCount} file(s)`,
+  );
+  lines.push(
+    pc.dim(
+      `  bulky (BULKY_CARD_FIELDS): ${formatBytes(totals.bulkyCardBytes)} ` +
+        `(${percent(totals.bulkyCardBytes, totals.cardBytes)})` +
+        (report.bulkyFields.length > 0
+          ? ' — ' +
+            report.bulkyFields
+              .filter((field) => field.bytes > 0)
+              .map((field) => `${field.field} ${formatBytes(field.bytes)}`)
+              .join(', ')
+          : ''),
+    ),
+  );
+  lines.push(
+    `Transcripts:  ${formatBytes(totals.transcriptBytes)} across ${totals.transcriptCount} file(s)`,
+  );
+
+  if (report.accounts.length > 0) {
+    lines.push('', pc.bold('By account:'));
+    for (const usage of report.accounts) {
+      lines.push(
+        `  ${accountLabel(usage.account.accountUuid, labels).padEnd(24)} ` +
+          `${formatBytes(usage.cardBytes)} cards (${percent(usage.bulkyCardBytes, usage.cardBytes)} bulky) · ` +
+          `${usage.cardCount} card(s) · ${formatBytes(usage.transcriptBytes)} transcript(s) reached ` +
+          `(${usage.transcriptCount} conversation(s))`,
+      );
+    }
+  }
+
+  const topProjects = report.projects.slice(0, 10);
+  if (topProjects.length > 0) {
+    lines.push('', pc.bold('By project (top 10 by combined bytes):'));
+    for (const project of topProjects) {
+      lines.push(
+        `  ${project.project.padEnd(40)} ${formatBytes(project.cardBytes)} card(s) · ` +
+          `${formatBytes(project.transcriptBytes)} transcript(s)`,
+      );
+    }
+  }
+
+  if (report.orphanTranscripts.length > 0) {
+    const bytes = report.orphanTranscripts.reduce((sum, row) => sum + row.bytes, 0);
+    lines.push(
+      '',
+      `${report.orphanTranscripts.length} transcript(s) (${formatBytes(bytes)}) have no card in any ` +
+        'account — never tombstoned, so `foster purge` will not offer them; remove by hand if sure.',
+    );
+  }
+
+  if (report.duplicateTranscripts.length > 0) {
+    const reclaimable = report.duplicateTranscripts.reduce(
+      (sum, group) => sum + group.bytes * (group.files.length - 1),
+      0,
+    );
+    lines.push(
+      '',
+      `${report.duplicateTranscripts.length} group(s) of byte-identical transcripts ` +
+        `(${formatBytes(reclaimable)} could be reclaimed by keeping one copy of each):`,
+    );
+    for (const group of report.duplicateTranscripts.slice(0, 10)) {
+      lines.push(`  ${formatBytes(group.bytes)} × ${group.files.length}`);
+      for (const file of group.files) lines.push(pc.dim(`    ${file}`));
+    }
+  }
+
+  if (report.oversizedCards.length > 0) {
+    lines.push(
+      '',
+      `${report.oversizedCards.length} session card(s) are already over the app's 10 MB load ` +
+        'limit and will not appear in it:',
+    );
+    for (const card of report.oversizedCards) {
+      lines.push(
+        `  ${formatBytes(card.bytes)}  ${card.path}  ` +
+          pc.dim(`(${accountLabel(card.account.accountUuid, labels)})`),
+      );
+    }
+  }
+
+  return lines;
+}
+
+function statsReportLines(report: StatsReport, labels: Map<string, string>): string[] {
+  const lines: string[] = [];
+  const days = Math.max(1, Math.round((Date.now() - report.since) / 86_400_000));
+  lines.push(pc.bold(`Usage over the last ~${days} day(s), by ${report.by}:`));
+
+  if (report.buckets.length === 0) {
+    lines.push(pc.dim('  nothing found in the transcripts this store can see.'));
+    return lines;
+  }
+
+  for (const bucket of report.buckets) {
+    const name =
+      report.by === 'account'
+        ? bucket.key.account
+          ? accountLabel(bucket.key.account, labels)
+          : '(unattributed)'
+        : report.by === 'model'
+          ? (bucket.key.model ?? 'unknown')
+          : (bucket.key.week ?? '?');
+    const tokens =
+      `in ${bucket.inputTokens.toLocaleString()} · out ${bucket.outputTokens.toLocaleString()} · ` +
+      `cache-create ${bucket.cacheCreationTokens.toLocaleString()} · ` +
+      `cache-read ${bucket.cacheReadTokens.toLocaleString()}`;
+    const stops =
+      bucket.limitStops > 0 ? pc.yellow(`  ${bucket.limitStops} usage-limit stop(s)`) : '';
+    lines.push(`  ${name.padEnd(28)} ${bucket.sessions} session(s)  ${tokens}${stops}`);
+  }
+
+  const t = report.totals;
+  lines.push(
+    '',
+    pc.bold(
+      `Total: ${t.sessions} session(s) · in ${t.inputTokens.toLocaleString()} · ` +
+        `out ${t.outputTokens.toLocaleString()} · cache-create ${t.cacheCreationTokens.toLocaleString()} · ` +
+        `cache-read ${t.cacheReadTokens.toLocaleString()}` +
+        (t.limitStops > 0 ? ` · ${t.limitStops} usage-limit stop(s)` : ''),
+    ),
+  );
+
+  return lines;
+}
+
+program
+  .command('where')
+  .helpGroup('After the sweep:')
+  .summary('every account and store holding a card for one conversation, and which to continue in')
+  .description(
+    'Replaces the three-measurement recipe run by hand when a conversation "didn\'t\n' +
+      'come in the sweep": which accounts show a card for it, how many files it\n' +
+      'occupies and which each card opens, and which row is actually worth opening.\n\n' +
+      '`query` matches a session id or `cliSessionId` (bare, `local_`-prefixed, or any\n' +
+      'unique prefix), or a title fragment. Every installation `foster` already knows\n' +
+      'about is searched — the installed app, anything running, every store the\n' +
+      'ledger has been fostered into before, and every registered profile — not just\n' +
+      'the one `--store` would resolve to.\n\n' +
+      'A fragment matching more than one conversation lists the candidates and exits\n' +
+      '1 rather than guessing. Two ids that share a root — a fork, or the same id\n' +
+      'opened from two working directories — are one conversation here, ranked by the\n' +
+      "exact election `foster sweep`'s own fileCards pass runs (not a re-implementation\n" +
+      'of it): the last answer, then records held that no sibling file holds, then the\n' +
+      'last message of any kind, then sheer size. When that election still ties —\n' +
+      'several rows open the very same file — the row in the account `--store` resolves\n' +
+      'to (the signed-in account) wins, visible before archived, ahead of every other\n' +
+      "account's row; only then the id. The row that measure elects is marked as the\n" +
+      'one to continue in.',
+  )
+  .argument('<query>', 'a session id, a cliSessionId prefix, or a title fragment')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command, query: string) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const events = ledger.read();
+    const state = project(events);
+    const copies = copySessionIds(events);
+    // The account `--store` resolves to (the default when it is not given) is
+    // the one the tiebreak below treats as "the signed-in account" — never
+    // guessed from which row happens to sort first across every account the
+    // search found. Undefined when the store has no cached identity yet, in
+    // which case the tiebreak falls back to the id order it always used.
+    const target = signedInAccount(store);
+
+    const stores: { store: StoreLayout; name?: string }[] = [];
+    const seenRoots = new Set<string>();
+    for (const known of knownStores(events)) {
+      if (!known.exists) continue;
+      const layout = layoutFor(known.root);
+      const key = comparablePath(layout.root);
+      if (seenRoots.has(key)) continue;
+      seenRoots.add(key);
+      stores.push({ store: layout, ...(known.name ? { name: known.name } : {}) });
+    }
+
+    const entries: WhereEntry[] = [];
+    for (const { store: storeLayout, name } of stores) {
+      for (const account of listAccountDirs(storeLayout)) {
+        for (const found of scanAccount(storeLayout, account, copies, { slim: true })) {
+          entries.push({
+            store: storeLayout,
+            ...(name ? { storeName: name } : {}),
+            account,
+            session: found,
+          });
+        }
+      }
+    }
+
+    const kin = lineage(process.env);
+    const resolved = resolveWhereQuery(entries, query, kin);
+
+    if (resolved.kind === 'none') {
+      if (opts.json) {
+        print({ query, matches: [] });
+      } else {
+        console.log(`No conversation matches "${query}" in any store foster knows about.`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    if (resolved.kind === 'ambiguous') {
+      const titleOf = (ids: string[]): string[] => [
+        ...new Set(
+          entries
+            .filter((entry) => ids.includes(entry.session.data.cliSessionId ?? ''))
+            .map((entry) => entry.session.data.title ?? '(untitled)'),
+        ),
+      ];
+      if (opts.json) {
+        print({
+          query,
+          ambiguous: resolved.groups.map((group) => ({
+            ...group,
+            titles: titleOf(group.cliSessionIds),
+          })),
+        });
+      } else {
+        console.log(
+          pc.bold(`"${query}" matches ${resolved.groups.length} different conversations:`) +
+            '\n' +
+            pc.dim('Run again with a longer id or a more specific title fragment.\n'),
+        );
+        for (const group of resolved.groups) {
+          console.log(`  ${shortId(group.root)}  ${titleOf(group.cliSessionIds).join(' / ')}`);
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    const report = buildWhereReport(resolved.id, entries, kin, state, target);
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    printWhere(report);
+  });
+
+function printWhere(report: WhereReport): void {
+  // `report.rows` is in card-discovery order, not sorted by the election
+  // measure — the clean/canonical title is `working.title`, the row this
+  // report elects to continue in (shown again below under "Continue in:").
+  // Falling back to the first-discovered row only when nothing was elected.
+  console.log(
+    pc.bold(`${report.working?.title ?? report.rows[0]?.title ?? '(untitled)'}`) +
+      pc.dim(`  (${shortId(report.cliSessionId)})`),
+  );
+  if (report.family.length > 1) {
+    console.log(pc.dim(`  a fork: ${report.family.length} conversation(s) share this root`));
+  }
+  console.log(
+    pc.dim(
+      `  ${report.files.length} file(s), ${report.totalRecords} record(s) total across the family`,
+    ),
+  );
+  console.log('');
+
+  // `only` is `weighScans`' per-*file* measure: when two rows open the exact
+  // same file — the ordinary case for two cards of one un-forked conversation
+  // — every record in it is "only" held by that one file, which would print
+  // as if each row alone accounted for the whole thing. Said instead as what
+  // it is: a duplicate, not a second file, the same distinction
+  // `fileCards.ts` draws before it ever marks a row.
+  const fileCounts = new Map<string, number>();
+  for (const row of report.rows) {
+    if (row.file) fileCounts.set(row.file, (fileCounts.get(row.file) ?? 0) + 1);
+  }
+
+  for (const row of report.rows) {
+    const mark = row.working ? pc.green('* ') : '  ';
+    console.log(`${mark}${pc.bold(row.account.accountUuid)} ${pc.dim(row.store)}`);
+    console.log(`    session ${row.sessionId}${row.isCopy ? pc.dim('  (foster copy)') : ''}`);
+    console.log(`    "${row.title}"${row.archived ? pc.dim('  [archived]') : ''}`);
+    if (row.cwd) console.log(pc.dim(`    cwd: ${row.cwd}`));
+    if (row.file) {
+      const sameFileElsewhere = (fileCounts.get(row.file) ?? 0) > 1;
+      const reach =
+        row.reaches === undefined
+          ? ''
+          : `  reaches ${row.reaches} of ${report.totalRecords}` +
+            (sameFileElsewhere
+              ? '  (same file as another row below)'
+              : row.only
+                ? `, ${row.only} only here`
+                : '');
+      console.log(pc.dim(`    file: ${row.file}${reach}`));
+    } else {
+      console.log(
+        pc.yellow('    file: could not be told (no cwd, or more than one file matches it)'),
+      );
+    }
+    if (row.fosteredFrom) {
+      console.log(
+        pc.dim(
+          `    a foster copy of ${shortId(row.fosteredFrom.originSessionId)} ` +
+            `in ${row.fosteredFrom.origin.accountUuid}, fostered ${formatDate(row.fosteredFrom.fosteredAt)}`,
+        ),
+      );
+    }
+    if (row.copiesMadeFromHere > 0) {
+      console.log(pc.dim(`    ${row.copiesMadeFromHere} copy/copies made from this card`));
+    }
+    if (row.mark) {
+      console.log(pc.dim(`    marked by foster: "${row.mark.from}" -> "${row.mark.to}"`));
+    }
+    console.log('');
+  }
+
+  if (report.working) {
+    console.log(
+      pc.bold(`Continue in: ${report.working.account.accountUuid} — "${report.working.title}"`),
+    );
+  } else {
+    console.log(pc.yellow('No row could be measured — none of these cards has a readable file.'));
+  }
+}
+
+program
+  .command('verify')
+  .helpGroup('After the sweep:')
+  .summary('after a restart, check nothing foster wrote was undone')
+  .description(
+    'Read back every write the ledger says foster made to this account — card\n' +
+      'titles and archived flags, pins, sidebar groups and routines — and say which\n' +
+      'of them the app has since reverted. Meant to run after `foster layout --yes\n' +
+      '--restart` (or `sweep --restart`) has quit and restarted the app: both write\n' +
+      "in the gap while it is closed, and the app's own startup can save some of it\n" +
+      'straight back over — measured twice on a real store, once for marks and once\n' +
+      'for sidebar groups (see AGENTS.md).\n\n' +
+      'Titles, archived flags and pins are checked exactly: the ledger alone proves\n' +
+      'whether a card is back under a title it wore before foster touched it, or a\n' +
+      'pin move never landed. Groups and routines cannot be checked as exactly — the\n' +
+      'ledger keeps only counts of what a layout run applied, not which card went\n' +
+      'into which group — so this only flags the shape actually measured once: an\n' +
+      'account foster has applied groups or routines to before, now showing none,\n' +
+      'while a fresh plan still wants to bring some. Anything short of that is\n' +
+      'reported as pending, not asserted as undone. Read-only; writes nothing.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const account = requireCurrentAccount(store, listAccountDirs(store));
+    const report = planVerify(store, account, ledger.read());
+
+    if (opts.json) {
+      print(report);
+      if (report.undone) process.exitCode = 1;
+      return;
+    }
+
+    printVerify(report);
+    if (report.undone) process.exitCode = 1;
+  });
+
+function printVerify(report: VerifyReport): void {
+  console.log(pc.bold(`Verifying ${report.target.accountUuid}`));
+
+  if (report.marks.pending.length === 0) {
+    console.log(pc.dim('  titles/archived flags: every mark foster wrote still stands.'));
+  } else {
+    console.log(
+      pc.red(`  titles/archived flags: ${report.marks.pending.length} reverted by the app:`),
+    );
+    for (const mark of report.marks.pending) {
+      console.log(pc.dim(`      ${mark.path}  -> "${mark.title}"`));
+    }
+  }
+
+  if (report.pins.unreadable) {
+    console.log(pc.yellow(`  pins: could not be read — ${report.pins.unreadable}`));
+  } else if (report.pins.pending.length === 0) {
+    console.log(pc.dim('  pins: nothing pending.'));
+  } else {
+    console.log(
+      pc.red(`  pins: ${report.pins.pending.length} not reflecting the row to continue in:`),
+    );
+    for (const move of report.pins.pending) {
+      console.log(pc.dim(`      ${move.staleTitle} -> ${move.cleanTitle}`));
+    }
+  }
+
+  if (report.groups.reset) {
+    console.log(
+      pc.red(
+        `  groups: this account had groups applied before and now has none, ` +
+          `while a fresh plan wants to bring ${report.groups.pendingNewGroups} group(s) ` +
+          `and ${report.groups.pendingAssignments} assignment(s) — likely reverted by the app.`,
+      ),
+    );
+  } else if (report.groups.pendingNewGroups + report.groups.pendingAssignments > 0) {
+    console.log(
+      pc.dim(
+        `  groups: ${report.groups.nowGroups} group(s), ${report.groups.nowAssignments} assignment(s) now; ` +
+          `a fresh \`foster layout\` would still bring ${report.groups.pendingNewGroups} group(s) and ` +
+          `${report.groups.pendingAssignments} assignment(s) — not necessarily undone, see \`foster verify --help\`.`,
+      ),
+    );
+  } else {
+    console.log(pc.dim(`  groups: ${report.groups.nowGroups} group(s) now, nothing pending.`));
+  }
+
+  if (report.routines.reset) {
+    console.log(
+      pc.red(
+        `  routines: this account had routines applied before and now has none, ` +
+          `while a fresh plan wants to bring ${report.routines.pendingBring} — likely reverted by the app.`,
+      ),
+    );
+  } else if (report.routines.pendingBring > 0) {
+    console.log(
+      pc.dim(
+        `  routines: ${report.routines.nowCount} now; a fresh \`foster layout\` would still bring ` +
+          `${report.routines.pendingBring} — not necessarily undone.`,
+      ),
+    );
+  } else {
+    console.log(pc.dim(`  routines: ${report.routines.nowCount} now, nothing pending.`));
+  }
+
+  console.log('');
+  console.log(
+    report.undone
+      ? pc.red(
+          'Something foster wrote was undone. Run `foster layout --yes --restart` to write it again.',
+        )
+      : pc.bold('Nothing foster wrote here has been undone.'),
+  );
+}
+
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {
   return bytes === undefined ? '' : formatBytes(bytes);
@@ -5915,9 +7072,13 @@ program
     const state = project(ledger.read());
     const dryRun = !opts.yes;
 
-    // --undo: remove what an import wrote.
+    // --undo: remove what an import wrote. Scoped to this importer's own
+    // conversations — `foster cloud pull` writes into the same `state.imported`
+    // map (see `ImportedConversation.source`), and a bare `import-codex --undo`
+    // must never sweep up cloud-pulled ones just because it ran with no
+    // `--session` filter.
     if (opts.undo) {
-      let imports = listImported(state);
+      let imports = listImportedFrom(state, 'codex');
       if (opts.session?.length) {
         const { matched, unmatched } = matchCodexIds(imports, (i) => i.rolloutId, opts.session);
         if (unmatched.length > 0) {
@@ -5983,6 +7144,315 @@ program
 
     reportImport(outcomes, dryRun);
     if (!dryRun) await finish(store, Boolean(opts.restart));
+  });
+
+/** "run claude in <dir> to refresh" — never a refresh foster performs itself. See `cloudAuth.ts`. */
+function cloudAuthRefusalMessage(reason: CloudAuthRefusal, configDir: string): string {
+  switch (reason) {
+    case 'signed-out':
+      return 'not signed in';
+    case 'expired':
+      return `access token expired — run claude in ${configDir} to refresh`;
+    case 'no-organization':
+      return `no cached organization on file — run claude in ${configDir} at least once`;
+  }
+}
+
+/**
+ * Resolve `--client <name>` (or, absent, the client in use) against
+ * `listClients()` the same way `client open` resolves its own argument by
+ * name — but only by name, not by path or registered root: `cloud` reads a
+ * credential to call an external API with, and a default that quietly grew to
+ * cover registered fleet roots would widen what one `--client` flag can reach
+ * without anyone asking for that (the same reasoning `listClients`'
+ * `registeredDirs` argument documents).
+ */
+function resolveCloudClient(name: string | undefined, home: string): ClaudeClient {
+  const clients = listClients(process.env);
+  if (name === undefined) {
+    const inUse = clients.find((c) => c.inUse);
+    if (!inUse) throw new Error('No client is in use — pass --client <name>.');
+    return inUse;
+  }
+  const found = clients.find((c) => clientNameOf(c.configDir, home) === name);
+  if (found) return found;
+  const known = clients.map((c) => clientNameOf(c.configDir, home));
+  throw new Error(
+    known.length > 0
+      ? `No client named "${name}". Known clients: ${known.join(', ')}.`
+      : `No client named "${name}", and no clients are known yet — see \`foster clients\`.`,
+  );
+}
+
+/**
+ * `foster cloud` — list and pull Claude Code cloud sessions into the Desktop
+ * sidebar.
+ *
+ * The two endpoints this command family calls (`v1/code/sessions` and
+ * `v1/code/sessions/{id}/teleport-events`) are private and undocumented —
+ * read out of the installed CLI's own bundle rather than a published spec —
+ * and can change without notice. See `src/engine/cloudApi.ts`'s module
+ * comment for exactly what was measured and against what build.
+ */
+const cloud = program
+  .command('cloud')
+  .helpGroup('Cloud sessions:')
+  .description(
+    'list and pull Claude Code cloud sessions (code.claude.com) into the Desktop sidebar',
+  );
+
+cloud
+  .command('list')
+  .summary('list cloud sessions for one or every signed-in CLI account')
+  .description(
+    'Calls the cloud-sessions API for every CLI config directory that is signed in\n' +
+      "— or just --client <name> — and shows each session's title, status,\n" +
+      'repository and last activity.\n\n' +
+      'Reads only, and never refreshes a token: an account whose access token has\n' +
+      'expired is reported as such, not renewed — refreshing rotates the refresh\n' +
+      "token in .credentials.json, which every other client sharing that account's\n" +
+      'login would be affected by. Run `claude` in that config directory yourself to\n' +
+      'refresh it.\n\n' +
+      'API keys are rejected outright by the API itself: cloud sessions need a\n' +
+      'claude.ai sign-in.\n\n' +
+      "--client matches by name only, against `foster clients`' own list — never a\n" +
+      '`foster client register`ed root: this reads a credential to call an external\n' +
+      'API with, and a registered fleet root reaching that by default is not\n' +
+      'something naming it here should quietly grant.',
+  )
+  .option(
+    '--client <name>',
+    'only this client (as `foster clients` names it) — registered fleet roots are out of scope, see above',
+  )
+  .option('--all', 'every signed-in client — the default; only useful to say so explicitly')
+  .option('--json', 'machine-readable output')
+  .action(async function (this: Command) {
+    const opts = this.opts<{ client?: string; all?: boolean; json?: boolean }>();
+    const home = homedir();
+    const clients = listClients(process.env);
+    const targets = opts.client ? [resolveCloudClient(opts.client, home)] : clients;
+
+    interface Row {
+      client: string;
+      configDir: string;
+      ok: boolean;
+      reason?: string;
+      sessions?: CloudSessionSummary[];
+    }
+    const rows: Row[] = [];
+    for (const client of targets) {
+      if (!client.signedIn) continue; // never authenticated for anything cloud-related
+      const name = clientNameOf(client.configDir, home);
+      const auth = readCloudAuth(client.configDir, client.isDefault, home);
+      if (!auth.ok) {
+        rows.push({
+          client: name,
+          configDir: client.configDir,
+          ok: false,
+          reason: cloudAuthRefusalMessage(auth.reason, client.configDir),
+        });
+        continue;
+      }
+      const sessions = await listCloudSessions(auth.auth);
+      if (isCloudApiError(sessions)) {
+        rows.push({
+          client: name,
+          configDir: client.configDir,
+          ok: false,
+          reason: sessions.message,
+        });
+        continue;
+      }
+      rows.push({ client: name, configDir: client.configDir, ok: true, sessions });
+    }
+
+    if (opts.json) {
+      print({ rows });
+      return;
+    }
+
+    if (rows.length === 0) {
+      console.log('No signed-in CLI client to ask.');
+      return;
+    }
+    let total = 0;
+    for (const row of rows) {
+      console.log(pc.bold(`${row.client}`) + pc.dim(`  (${row.configDir})`));
+      if (!row.ok) {
+        console.log(pc.yellow(`  ${row.reason}`));
+        continue;
+      }
+      if (row.sessions!.length === 0) {
+        console.log(pc.dim('  no cloud sessions'));
+        continue;
+      }
+      for (const s of row.sessions!) {
+        total += 1;
+        const repo = s.repo.repo ?? s.repo.url;
+        console.log(`  ${s.title}`);
+        console.log(
+          pc.dim(
+            `    ${s.id}  ·  ${s.status}` +
+              (repo ? `  ·  ${repo}${s.repo.branch ? ` @ ${s.repo.branch}` : ''}` : '') +
+              (s.lastEventAt ? `  ·  last active ${s.lastEventAt}` : ''),
+          ),
+        );
+      }
+    }
+    console.log(pc.bold(`\n${total} cloud session(s).`));
+    console.log(pc.dim('foster cloud pull <id> --into <cwd> brings one in (dry run first).'));
+  });
+
+cloud
+  .command('pull')
+  .summary('bring one cloud session in as a Claude Desktop conversation')
+  .description(
+    "Fetches one cloud session's history and writes it as a local Claude\n" +
+      'transcript plus a sidebar card — the same widening `import-codex` makes for\n' +
+      'a Codex CLI thread: neither session ran as a local Desktop conversation\n' +
+      'before this, so it fabricates both files. The transcript gets a freshly\n' +
+      "minted session id (a cloud session's own id is not shaped like the uuid a\n" +
+      'local one is) and the same "continued from another machine" notice the\n' +
+      "CLI's own --teleport adds.\n\n" +
+      'Dry run by default: nothing is written until --yes. --undo removes what a\n' +
+      'pull wrote.\n\n' +
+      'No git operations happen here — the repository and branch the session last\n' +
+      'ran against are printed as a hint; make sure --into already has them\n' +
+      'checked out.',
+  )
+  .argument('<id>', 'the cloud session id (cse_… / session_…), or a unique prefix')
+  .option('--into <cwd>', 'the working directory the resumed conversation opens in')
+  .option(
+    '--client <name>',
+    'the CLI client to fetch with, and to write the transcript under — defaults to the client in ' +
+      'use; matches by name only, never a registered fleet root (see `cloud list --help`)',
+  )
+  .option('--to <accountUuid>', 'pull into this account instead of the one signed in')
+  .option('--to-org <organizationUuid>', 'pull into this organization')
+  .option('--yes', 'actually write; without it nothing is written')
+  .option('--undo', 'remove a conversation a previous pull wrote')
+  .option('--restart', 'restart Claude Desktop afterwards')
+  .action(async function (this: Command, id: string) {
+    const opts = this.opts<{
+      into?: string;
+      client?: string;
+      to?: string;
+      toOrg?: string;
+      yes?: boolean;
+      undo?: boolean;
+      restart?: boolean;
+    }>();
+    const { store, ledger } = context(this);
+    const state = project(ledger.read());
+    const dryRun = !opts.yes;
+
+    if (opts.undo) {
+      const { matched, unmatched } = matchCodexIds(
+        listImportedFrom(state, 'cloud'),
+        (i) => i.rolloutId,
+        [id],
+      );
+      if (unmatched.length > 0) {
+        throw new Error(`No pulled cloud session matches ${unmatched.join(', ')}.`);
+      }
+      const outcomes = undoCodexImports(matched, { ledger, dryRun });
+      for (const o of outcomes) {
+        const label = o.title ?? o.rolloutId;
+        if (o.status === 'failed') console.log(pc.red(`  failed: ${label} — ${o.reason}`));
+        else console.log(`  ${dryRun ? 'would remove' : 'removed'}: ${label}`);
+      }
+      console.log(
+        pc.bold(
+          `\n${dryRun ? 'Dry run: ' : ''}${outcomes.filter((o) => dryRun || o.status === 'undone').length} removed.`,
+        ),
+      );
+      if (dryRun) console.log(pc.dim('Re-run with --yes to remove.'));
+      return;
+    }
+
+    if (!opts.into) {
+      throw new Error('--into <cwd> is required: where should the resumed conversation open?');
+    }
+    const cwd = path.resolve(opts.into);
+    const home = homedir();
+    const client = resolveCloudClient(opts.client, home);
+
+    const auth = readCloudAuth(client.configDir, client.isDefault, home);
+    if (!auth.ok) throw new Error(cloudAuthRefusalMessage(auth.reason, client.configDir));
+
+    // Resolved against a fresh list rather than a bare GET-by-id: it lets `id`
+    // be a unique prefix, the same courtesy `matchCodexIds` gives every other
+    // id argument in this CLI, and it is one call the size of this account's
+    // whole session list rather than a guess at whether the id is already exact.
+    const sessions = await listCloudSessions(auth.auth);
+    if (isCloudApiError(sessions)) {
+      throw new Error(`Could not list cloud sessions on ${client.configDir}: ${sessions.message}`);
+    }
+    const { matched, unmatched } = matchCodexIds(sessions, (s) => s.id, [id]);
+    if (unmatched.length > 0) {
+      throw new Error(
+        `No cloud session matches "${id}" on ${clientNameOf(client.configDir, home)}.\n` +
+          `Run \`foster cloud list --client ${clientNameOf(client.configDir, home)}\` to see what is available.`,
+      );
+    }
+    if (matched.length > 1) {
+      throw new Error(
+        `"${id}" matches more than one cloud session on this client — use the full id.`,
+      );
+    }
+    const resolvedId = matched[0]!.id;
+
+    const detail = await fetchCloudSession(auth.auth, resolvedId);
+    if (isCloudApiError(detail)) {
+      throw new Error(`Could not fetch session ${resolvedId}: ${detail.message}`);
+    }
+    const events = await fetchTeleportEvents(auth.auth, resolvedId);
+    if (isCloudApiError(events)) {
+      throw new Error(`Could not fetch session ${resolvedId}'s history: ${events.message}`);
+    }
+
+    const target = resolveDestination(store, listAccountDirs(store), opts);
+    const outcome: CloudPullOutcome = pullCloudSession(resolvedId, detail, events, {
+      store,
+      ledger,
+      state,
+      target,
+      cwd,
+      dryRun,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: client.configDir },
+    });
+
+    if (outcome.status === 'failed') {
+      console.log(pc.red(`failed: ${outcome.title ?? outcome.cloudSessionId} — ${outcome.reason}`));
+      process.exitCode = 1;
+      return;
+    }
+    if (outcome.status === 'skipped') {
+      console.log(`${outcome.title ?? outcome.cloudSessionId}: ${outcome.reason}`);
+      return;
+    }
+
+    console.log(
+      `${dryRun ? 'Would pull' : 'Pulled'}: ${outcome.title} ` +
+        pc.dim(
+          `(${outcome.records ?? 0} record(s), ${outcome.sidechainsDropped ?? 0} sidechain(s) dropped)`,
+        ),
+    );
+    const repo = outcome.repo?.repo ?? outcome.repo?.url;
+    if (repo) {
+      console.log(
+        pc.dim(
+          `  ran against ${repo}${outcome.repo?.branch ? ` @ ${outcome.repo.branch}` : ''} — make ` +
+            `sure ${cwd} matches before you continue it`,
+        ),
+      );
+    }
+    if (dryRun) {
+      console.log(pc.dim('Re-run with --yes to write.'));
+    } else {
+      console.log(pc.dim('The copy becomes visible after Claude Desktop restarts.'));
+      await finish(store, Boolean(opts.restart));
+    }
   });
 
 program
@@ -6371,9 +7841,13 @@ app
       }
     }
 
+    // A second Ctrl+C, or closing the window outright, must still reach the
+    // restore in `runLogin`'s own `finally` rather than killing the process
+    // out from under it — see `armAbortOnSignals` for why a bare
+    // `process.once('SIGINT', ...)` (what this used to be) does not, on
+    // either count.
     const controller = new AbortController();
-    const onSigint = () => controller.abort();
-    process.once('SIGINT', onSigint);
+    const disarm = armAbortOnSignals(controller);
     let result;
     try {
       result = await runLogin(plan, {
@@ -6414,7 +7888,7 @@ app
         signal: controller.signal,
       });
     } finally {
-      process.removeListener('SIGINT', onSigint);
+      disarm();
     }
 
     console.log(result.message);
@@ -6428,43 +7902,33 @@ app
     }
   });
 
-app
-  .command('restart')
-  .description('close Claude Desktop and start it again, rebuilding the sidebar')
-  .option('--terminate', 'end the process — required while the app keeps a tray icon')
-  .option(
-    '--detach',
-    'restart from outside the app instead — the one way to finish this from a session Claude Desktop itself hosts',
-  )
-  .option(
-    '--detach-delay <seconds>',
-    `how long the detached restart waits before it fires (${DETACH_DELAY_MIN}-${DETACH_DELAY_MAX}, default ${DETACH_DELAY_DEFAULT})`,
-  )
-  .option(
-    '--detach-even-with-live',
-    'detach anyway even if another live session would be ended by the restart',
-  )
-  .action(async function (this: Command) {
-    const { store } = context(this);
-    const opts = this.opts<{
-      terminate?: boolean;
-      detach?: boolean;
-      detachDelay?: string;
-      detachEvenWithLive?: boolean;
-    }>();
-    if (opts.detach) {
-      const detachDelay = parseDetachDelay(opts.detachDelay);
-      if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
-      const outcome = await runDetach(
-        process.argv.slice(2),
-        detachDelay,
-        Boolean(opts.detachEvenWithLive),
-      );
-      printDetachResult(outcome, false, detachNotNeededNote(store));
-      return;
-    }
-    await restartDesktop(store, Boolean(opts.terminate));
-  });
+addDetachOptions(
+  app
+    .command('restart')
+    .description('close Claude Desktop and start it again, rebuilding the sidebar')
+    .option('--terminate', 'end the process — required while the app keeps a tray icon'),
+).action(async function (this: Command) {
+  const { store } = context(this);
+  const opts = this.opts<{
+    terminate?: boolean;
+    detach?: boolean;
+    detachDelay?: string;
+    detachEvenWithLive?: boolean;
+  }>();
+  if (opts.detach) {
+    const detachDelay = parseDetachDelay(opts.detachDelay);
+    if (typeof detachDelay !== 'number') throw new Error(detachDelay.error);
+    const outcome = await runDetach(
+      store,
+      process.argv.slice(2),
+      detachDelay,
+      Boolean(opts.detachEvenWithLive),
+    );
+    printDetachResult(outcome, false, detachNotNeededNote(store));
+    return;
+  }
+  await restartDesktop(store, Boolean(opts.terminate));
+});
 
 /**
  * The way out of a refusal, in the words of the command the user actually typed.

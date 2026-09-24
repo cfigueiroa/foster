@@ -1,9 +1,9 @@
 import path from 'node:path';
 import { sameAccount } from '../domain/paths.js';
-import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
-import { scanAccount } from '../store/scanner.js';
+import { scanAccount, type ScanCache } from '../store/scanner.js';
 import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
 import { firstLine } from '../util/fs.js';
 
@@ -81,12 +81,16 @@ export function pendingPinMoves(events: readonly LedgerEvent[], target: AccountR
  * The row the pin was meant for is checked again here, not trusted from the
  * deferral: between the sweep that deferred it and this run, a `foster return`
  * can have removed that copy, or a later sweep can have marked and archived it.
+ * When it has, `redirectToVisible` looks once for another row of the same
+ * conversation before giving up — see there for why a deferral used to be
+ * unwritable for good.
  */
 export function planPinMoves(
   store: StoreLayout,
   events: readonly LedgerEvent[],
   target: AccountRef,
   read: (store: StoreLayout) => PinState | undefined = readPinState,
+  cache?: ScanCache,
 ): PinMovesPlan {
   const pending = pendingPinMoves(events, target);
   if (pending.length === 0) return { moves: [], settled: [] };
@@ -99,18 +103,73 @@ export function planPinMoves(
     return { moves: [], settled: [], unreadable: message };
   }
 
+  // `redirectToVisible` below also reads `cliSessionId`, `lastActivityAt` and
+  // `title` off these cards, none of them a bulky field — `slim` (and the
+  // run's own cache, when there is one) costs nothing here either.
+  const cards = scanAccount(store, target, undefined, { slim: true, cache });
   const shown = new Set(
-    scanAccount(store, target)
-      .filter((card) => !card.data.isArchived)
-      .map((card) => card.data.sessionId),
+    cards.filter((card) => !card.data.isArchived).map((card) => card.data.sessionId),
   );
+  const byId = new Map(cards.map((card) => [card.data.sessionId, card]));
+
+  const resolved = pending.map((move) => redirectToVisible(move, shown, byId));
+
   // Nothing pinned at all: every stale row has already lost its pin.
   const ids = new Set(pins?.ids ?? []);
   const writable = (move: PinMove): boolean =>
     ids.has(move.staleSessionId) && shown.has(move.cleanSessionId);
   return {
-    moves: pending.filter(writable),
-    settled: pending.filter((move) => !writable(move)),
+    moves: resolved.filter(writable),
+    settled: resolved.filter((move) => !writable(move)),
+  };
+}
+
+/**
+ * When the row a deferral named is no longer visible — a later pass archived
+ * it, or (before this was fixed) `branchCards.ts` had named the wrong one of a
+ * tip's two rows in the first place — look once for a sibling instead of
+ * settling the move as unwritable for good.
+ *
+ * A sibling is another card in the same account that opens the same
+ * conversation (`cliSessionId`, case folded, the same key `groupByConversation`
+ * uses) and is not itself archived. More than one qualifies at most rarely —
+ * a tip's two files, or a fork's two rows before the app catches up — so the
+ * most recently active is preferred, and the id breaks a tie, the same order
+ * `byContinuation` (`fileCards.ts`) falls back to.
+ *
+ * Leaves the move alone, unresolved, when the named row is already visible or
+ * when no sibling can be found — `planPinMoves` then settles it exactly as it
+ * always did.
+ */
+function redirectToVisible(
+  move: PinMove,
+  shown: ReadonlySet<string>,
+  byId: ReadonlyMap<string, DiscoveredSession>,
+): PinMove {
+  if (shown.has(move.cleanSessionId)) return move;
+  const stale = byId.get(move.staleSessionId);
+  const conversation = stale?.data.cliSessionId?.toLowerCase();
+  if (!conversation) return move;
+
+  let best: DiscoveredSession | undefined;
+  for (const card of byId.values()) {
+    if (card.data.sessionId === move.staleSessionId) continue;
+    if (card.data.isArchived) continue;
+    if (card.data.cliSessionId?.toLowerCase() !== conversation) continue;
+    if (
+      !best ||
+      (card.data.lastActivityAt ?? 0) > (best.data.lastActivityAt ?? 0) ||
+      ((card.data.lastActivityAt ?? 0) === (best.data.lastActivityAt ?? 0) &&
+        card.data.sessionId.localeCompare(best.data.sessionId) < 0)
+    ) {
+      best = card;
+    }
+  }
+  if (!best) return move;
+  return {
+    ...move,
+    cleanSessionId: best.data.sessionId,
+    cleanTitle: best.data.title ?? move.cleanTitle,
   };
 }
 

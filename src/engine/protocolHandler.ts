@@ -16,6 +16,7 @@ import {
   type PackageIdentity,
 } from '../util/processes.js';
 import { readConfig } from '../store/config.js';
+import { encodePsCommand, psSingleQuote } from '../util/powershell.js';
 import { lockfileHeld as lockfileHeldDefault } from './lockfile.js';
 import { project, type LedgerState } from '../ledger/project.js';
 import type { LedgerEvent, LedgerEventInput } from '../ledger/types.js';
@@ -232,26 +233,83 @@ const ASSOC_QUERY_SCRIPT =
   'if ($rc -eq 0) { Write-Output $sb.ToString() } ' +
   '} } catch { }';
 
-/** The real implementation, entirely through `reg.exe` and, for `protocolProgId`, PowerShell. */
+/**
+ * `HKCU\Software\Classes\...` (the only spelling this module ever builds a
+ * key with) to the PowerShell registry-provider path `HKCU:\Software\Classes\...`
+ * that `Get-ItemPropertyValue -LiteralPath` expects.
+ */
+export function toPsRegistryPath(key: string): string {
+  return key.replace(
+    /^(HKCU|HKLM|HKCR|HKU|HKCC)\\/i,
+    (_, hive: string) => `${hive.toUpperCase()}:\\`,
+  );
+}
+
+/**
+ * Reads one registry value through PowerShell's own registry provider and
+ * hands it back base64-of-UTF-8 on stdout, prefixed `OK:` — or the bare word
+ * `MISS` when the key or the value does not exist.
+ *
+ * `reg.exe query`, what this used to shell out to, writes its console output
+ * in the OS's OEM code page — locale-dependent, and not UTF-8 — so decoding
+ * it as `utf8` (what this read used to do, right up to `execFileSync`'s own
+ * `encoding: 'utf8'` option) silently mangles any non-ASCII byte. `Parameters`
+ * carries `--user-data-dir=<profile spelling> "%1"`, and a profile directory
+ * is exactly the kind of value a person names with an accent or another
+ * non-ASCII character in it: the read-back in `runLogin` (below) would then
+ * never match what was just written, even though the write itself landed
+ * correctly (`reg.exe add` takes its value through `execFileSync`'s argv,
+ * which Windows always delivers as UTF-16 regardless of code page). Base64
+ * has no code page of its own to get wrong, which is why this reads through
+ * `-EncodedCommand` and a base64 payload rather than trying to learn and
+ * match whatever OEM code page happens to be active.
+ */
+export function registryReadScript(key: string, name: string): string {
+  const psPath = psSingleQuote(toPsRegistryPath(key));
+  const psName = psSingleQuote(name);
+  return (
+    "$ErrorActionPreference = 'Stop'; try { " +
+    `$v = Get-ItemPropertyValue -LiteralPath ${psPath} -Name ${psName} -ErrorAction Stop; ` +
+    '$bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$v); ' +
+    "Write-Output ('OK:' + [Convert]::ToBase64String($bytes)) " +
+    "} catch { Write-Output 'MISS' }"
+  );
+}
+
+/**
+ * The other half of `registryReadScript`: what `readValue` does with its
+ * stdout. Pulled out on its own so the UTF-8-safe decode can be tested
+ * directly, on strings built in Node, without spawning `powershell.exe` or
+ * running on Windows at all.
+ */
+export function parseRegistryReadOutput(out: string): HandlerReadResult {
+  const trimmed = out.trim();
+  if (!trimmed.startsWith('OK:')) return {};
+  return { value: Buffer.from(trimmed.slice('OK:'.length), 'base64').toString('utf8') };
+}
+
+/** The real implementation, entirely through `reg.exe` and, for `protocolProgId` and value reads, PowerShell. */
 export const registryHandlerIo: HandlerIo = {
   readValue(key: string, name: string): HandlerReadResult {
     if (process.platform !== 'win32') return {};
     try {
-      const out = execFileSync(regExePath(), ['query', key, '/v', name], {
-        windowsHide: true,
-        stdio: 'pipe',
-        encoding: 'utf8',
-        maxBuffer: REG_MAX_BUFFER,
-      });
-      // The value's own name can be localised in other places in this codebase,
-      // but never here: `/v <name>` asks for it by the fixed, English names the
-      // package itself writes (`AppUserModelID`, `Parameters`), so the type
-      // marker is only needed to find where the value starts on the line.
-      const marker = out.indexOf('REG_SZ');
-      return { value: marker === -1 ? undefined : out.slice(marker + 'REG_SZ'.length).trim() };
+      const exe = systemExePath('WindowsPowerShell\\v1.0\\powershell.exe');
+      const out = execFileSync(
+        exe,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-EncodedCommand',
+          encodePsCommand(registryReadScript(key, name)),
+        ],
+        { windowsHide: true, stdio: 'pipe', encoding: 'utf8', timeout: 20_000 },
+      );
+      return parseRegistryReadOutput(out);
     } catch (err) {
-      // A spawn failure (reg.exe not found, denied, etc.) sets `code`; reg
-      // running and exiting non-zero — key or value not found — does not.
+      // A spawn failure (powershell.exe not found, denied, etc.) sets `code`;
+      // the script's own catch block printing `MISS` — key or value not
+      // found — does not, and is handled by the `!out.startsWith('OK:')`
+      // branch above instead.
       const spawnFailure = err as NodeJS.ErrnoException & { stderr?: string };
       if (spawnFailure.code !== undefined) {
         return { error: spawnFailure.stderr?.trim() || spawnFailure.message };
@@ -527,6 +585,12 @@ export interface PlanLoginOptions {
    * asking about a "running" profile inject this rather than faking the file.
    */
   lockfileHeld?: (store: StoreLayout) => boolean;
+  /**
+   * Injectable: the installed package's install location, which
+   * `desktopExecutable` asks PowerShell for (`Get-AppxPackage`). Tests pass a
+   * stub — on a CI runner that query alone took longer than a test's timeout.
+   */
+  packageInstallLocation?: (familyName: string, env: NodeJS.ProcessEnv) => string | undefined;
 }
 
 /** The name registered for `root`, when there is one — the reverse of `LedgerState.profiles`. */
@@ -676,6 +740,7 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     progid,
     identity: identityReader,
     lockfileHeld: lockfileHeldReader = lockfileHeldDefault,
+    packageInstallLocation,
   } = opts;
 
   const state = project(events);
@@ -684,7 +749,7 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
   const running = lockfileHeldReader(store);
   const signedInBefore = config.hasTokenCache === true;
   const spelling = spellingFor(store.root, list);
-  const exe = desktopExecutable(() => undefined, list, env);
+  const exe = desktopExecutable(() => undefined, list, env, packageInstallLocation);
 
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -866,6 +931,18 @@ function messageFor(outcome: LoginOutcome, accountAfter: string | undefined): st
  * writes still leaves the next one (or `app login --restore`) a record of
  * what to put back. Nothing here is undone silently — the restore step and
  * its outcome are appended regardless of how the wait ended.
+ *
+ * That includes the case that used to fall through it: arming and verifying
+ * the write, and the whole wait that follows, all sit inside one
+ * `try`/`finally` now. Before this, a `readBack.value !== armed` mismatch —
+ * exactly what the OEM/UTF-8 decode bug `readValue` no longer has fixed —
+ * threw immediately and returned, having already written `armed` to a
+ * machine-wide registry value with no restore attempted at all: the throw
+ * happened *after* `io.writeValue`, and everything that would have put
+ * `previous` back lived below it, unreached. `readState` throwing, or the
+ * `sleep` this awaits rejecting, had the same effect for the same reason.
+ * The `finally` below runs on every one of those paths, not only the ones
+ * that reach the loop's own `break`.
  */
 export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<LoginResult> {
   if (plan.blockers.length > 0) {
@@ -906,63 +983,78 @@ export async function runLogin(plan: LoginPlan, opts: RunLoginOptions): Promise<
   });
 
   io.writeValue(key, 'Parameters', armed);
-  const readBack = io.readValue(key, 'Parameters');
-  if (readBack.value !== armed) {
-    const detail = readBack.error !== undefined ? `: ${readBack.error}` : '';
-    throw new Error(`could not arm the handler: read back "${readBack.value ?? ''}"${detail}`);
-  }
 
-  onArmed?.();
-
-  const startedAt = now();
-  const deadline = timeoutMs !== undefined ? startedAt + timeoutMs : undefined;
-  let nextHeartbeat = onHeartbeat !== undefined ? startedAt + heartbeatMs : undefined;
   let outcome: LoginOutcome = 'timeout';
   let accountAfter: string | undefined;
-
-  for (;;) {
-    if (signal?.aborted) {
-      outcome = 'aborted';
-      break;
-    }
-
-    const state = readState();
-    const success =
-      (!plan.signedInBefore && state.hasTokenCache) ||
-      (state.accountUuid !== undefined && state.accountUuid !== plan.accountBefore);
-    if (success) {
-      outcome = 'signed-in';
-      accountAfter = state.accountUuid;
-      break;
-    }
-
-    if (io.readValue(key, 'Parameters').value !== armed) {
-      outcome = 'handler-rewritten';
-      break;
-    }
-
-    if (deadline !== undefined && now() >= deadline) {
-      outcome = 'timeout';
-      break;
-    }
-
-    if (nextHeartbeat !== undefined && now() >= nextHeartbeat) {
-      onHeartbeat!(now() - startedAt);
-      nextHeartbeat += heartbeatMs;
-    }
-
-    await sleep(pollMs);
-  }
-
   let restored = false;
-  if (outcome !== 'handler-rewritten') {
-    if (io.readValue(key, 'Parameters').value === armed) {
-      io.writeValue(key, 'Parameters', previous);
-      restored = io.readValue(key, 'Parameters').value === previous;
-    }
-  }
 
-  append({ kind: 'handler_restored', root: plan.root, restored });
+  try {
+    const readBack = io.readValue(key, 'Parameters');
+    if (readBack.value !== armed) {
+      const detail = readBack.error !== undefined ? `: ${readBack.error}` : '';
+      throw new Error(`could not arm the handler: read back "${readBack.value ?? ''}"${detail}`);
+    }
+
+    onArmed?.();
+
+    const startedAt = now();
+    const deadline = timeoutMs !== undefined ? startedAt + timeoutMs : undefined;
+    let nextHeartbeat = onHeartbeat !== undefined ? startedAt + heartbeatMs : undefined;
+
+    for (;;) {
+      if (signal?.aborted) {
+        outcome = 'aborted';
+        break;
+      }
+
+      const state = readState();
+      const success =
+        (!plan.signedInBefore && state.hasTokenCache) ||
+        (state.accountUuid !== undefined && state.accountUuid !== plan.accountBefore);
+      if (success) {
+        outcome = 'signed-in';
+        accountAfter = state.accountUuid;
+        break;
+      }
+
+      if (io.readValue(key, 'Parameters').value !== armed) {
+        outcome = 'handler-rewritten';
+        break;
+      }
+
+      if (deadline !== undefined && now() >= deadline) {
+        outcome = 'timeout';
+        break;
+      }
+
+      if (nextHeartbeat !== undefined && now() >= nextHeartbeat) {
+        onHeartbeat!(now() - startedAt);
+        nextHeartbeat += heartbeatMs;
+      }
+
+      await sleep(pollMs);
+    }
+  } finally {
+    // `handler-rewritten` means the loop's own poll already found something
+    // *other than* `armed` sitting in the key — someone or something else
+    // changed it out from under this run, and writing `previous` over that
+    // would stomp on a change that was never this run's to touch. Every
+    // other way out of the `try` above (including the throw right at its
+    // top, and any exception the polling loop itself never named) is this
+    // run's own to undo, so `previous` goes back unconditionally rather than
+    // gated on a fresh read confirming `armed` is still there — the same
+    // gate that, before this fix, let a merely-mis-decoded read-back skip
+    // the restore it should have run.
+    if (outcome !== 'handler-rewritten') {
+      try {
+        io.writeValue(key, 'Parameters', previous);
+        restored = io.readValue(key, 'Parameters').value === previous;
+      } catch {
+        restored = false;
+      }
+    }
+    append({ kind: 'handler_restored', root: plan.root, restored });
+  }
 
   return {
     outcome,

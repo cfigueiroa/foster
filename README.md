@@ -125,6 +125,17 @@ unmentioned reads as having brought everything. One of the three has a way out �
 [scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
 under a flat "never".
 
+`--prove` audits the sweep instead of trusting it: for every conversation the store holds a card
+for, it reads every file the id occupies end to end and compares that union against what the
+account this run targets can actually reach, independently of the sweep's own bookkeeping — see
+[proving a sweep](#proving-a-sweep). It exits 1 the moment any record is unreachable, excluding the
+documented never-fosterable classes above, which it reports separately.
+
+```bash
+foster sweep --prove            # plan, then check — writes nothing
+foster sweep --yes --prove      # write, then check what actually landed
+```
+
 A fourth pass releases the worktree claim a copy already on disk inherited from its original,
 before fostering learned not to hand one out — see
 [Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
@@ -376,6 +387,65 @@ no mirror history. `rescue` reads that card as the app's own proof of reachabili
 the conversation off the list — the husk alone would put it right back on every run once its
 host went idle and exited.
 
+## Reports: where the bytes are, and where the tokens went
+
+Two read-only commands, across every account this store has — neither writes anything, and
+neither decides what is safe to remove:
+
+```bash
+foster disk            # cards and transcripts: bytes per account, per project, and what is bulky
+foster disk --json     # the same report, machine-readable
+
+foster stats                        # token usage over the last 30 days, by account
+foster stats --by model             # the same window, grouped by model instead
+foster stats --by week --since 90d  # a longer window, grouped by week
+foster stats --json                 # the same report, machine-readable
+```
+
+`foster disk` measures every session card and every transcript this store can see: bytes per
+account and per working directory, how much of a card's own JSON is `BULKY_CARD_FIELDS`
+(measured on a real store: 97%, nearly all of it `remoteMcpServersConfig`), transcripts no
+card in any account still points at (broader than `purge`'s orphans — this counts one without
+requiring a tombstone), transcript files that are byte-for-byte copies of each other (only
+files that already share a size are hashed, and the hash itself streams a file rather than
+reading it whole), and session cards already over the app's own 10 MB load limit. Measured on
+a real store: five pairs of byte-identical transcripts, each pair a repository and a worktree
+cut from it that never diverged after the branch was cut — exactly the "one conversation, two
+files" shape `sweep` already knows about, seen here from the disk-usage side instead.
+
+`foster stats` reads every transcript's assistant records for their own `usage` field (input,
+output and cache tokens, and the model that produced them) and every place a conversation
+ended on the app's own usage-limit record — `foster revive`'s own detection
+(`isApiErrorMessage: true`, `error: "rate_limit"`), over the whole transcript rather than only
+its last answer. The motivation is a per-model weekly limit locking an account before its
+general week does — measured on a real account: 53% used on the week, 100% used on one model
+— which an account-wide number alone never shows. An account here is the account a _native_
+card of the conversation belongs to; a fostered copy only proves the conversation reached that
+sidebar, not that its tokens were spent under it, and a conversation no card anywhere claims
+natively counts as unattributed rather than guessed at. Reading a transcript a live session is
+still appending to returns a snapshot, same as any other reader here — a re-run once the
+session is idle sees the rest.
+
+## Cloud sessions: `foster cloud list` / `foster cloud pull`
+
+```bash
+foster cloud list                         # every cloud session (code.claude.com) this account can see
+foster cloud pull <id> --into <cwd>       # dry run: what pulling this session would write
+foster cloud pull <id> --into <cwd> --yes # fabricate a local transcript + sidebar card from it
+foster cloud pull <id> --undo --yes       # undo a pull, the same way import-codex --undo does
+```
+
+Reads the CLI's own credential — `.credentials.json`'s access token plus `.claude.json`'s cached
+organization uuid, never the Desktop app's — and never refreshes it: an expired token is reported,
+with the directory to re-run `claude` in to refresh it, rather than foster rotating it itself. A
+pull fabricates a transcript and a sidebar card the same way `import-codex` does — files first,
+ledger only once they land, undoable the same way — because a cloud session already carries
+Claude-shaped records (teleported off whatever machine it last ran on), not something to convert
+from scratch. A re-pull of a session whose history grew reuses the id it minted the first time, so
+it overwrites in place instead of leaving an orphaned pair behind. Nothing here is a published API:
+see AGENTS.md's own "Cloud sessions" section for the endpoints, the credential, and what a pull
+does and does not do.
+
 ## When one conversation becomes two
 
 A conversation that already has a writer cannot be continued from a second card. Asked to open one,
@@ -480,6 +550,64 @@ somewhere in the store, because that is where the list of conversations comes fr
 points at is a conversation with no row at all, which is `foster restore`'s question rather than this
 one's.
 
+### Finding one conversation: `foster where`
+
+Before `foster where` this was a recipe run by hand, three separate measurements in whatever order
+occurred to whoever was doing it: grep every account's cards for the id or a piece of the title, look
+in the transcript directory to see how many files the conversation occupies, and weigh those files
+against each other to guess which row was still worth opening.
+
+```bash
+foster where <query>          # a session id, a cliSessionId prefix, or a title fragment
+foster where <query> --json
+```
+
+It searches every installation `foster` already knows about — the installed app, anything running,
+every store the ledger has been fostered into before, every registered profile — not only the one
+`--store` would resolve to, and lists every account and store holding a card for the match: which
+file each one opens, how many records that file holds against the conversation's own total, and what
+the ledger knows about it (a fostering, a mark). A query matching more than one _conversation_ lists
+the candidates and exits 1 rather than guessing; two matches sharing a root are not two conversations
+— a fork, or the same id opened from two working directories, both covered below — so ambiguity is
+judged on the root, never on the count of matching cards.
+
+Which row to continue in is answered by the exact election `foster sweep`'s own fileCards pass runs
+(`byContinuation`, imported rather than reimplemented, so the two can never disagree) — the last
+answer, then records a row's file holds that no sibling's file holds, then the last message of any
+kind, then sheer size — asked once across the whole family (every id sharing the conversation's root,
+every file any of them occupies) rather than choosing a fork-election path or a file-election path up
+front. `byContinuation` decides between files, not between two rows that open the same one; when the
+election is still tied because several rows across different accounts open the very same file, the
+row in the account `--store` resolves to (the signed-in account) wins — its own visible row first, its
+own archived row next, ahead of any other account's row either way — and only then the row id. Read-only
+throughout.
+
+### Proving a sweep
+
+`foster sweep --prove` is the audit that used to live only in a skill's own hand-run recipe, after
+three incidents where a sweep that reported "nothing is left" had not, in fact, brought everything —
+once losing 2116 records nobody noticed until the file was compared by hand.
+
+It is deliberately not built from the sweep's own bookkeeping (`Outcome.beyond`, `Sidebar.unreached`,
+the passes' own plans): two of those three incidents were bugs _in_ that bookkeeping, so checking
+with the same arithmetic would have missed the same bugs the same way. Instead, for every
+conversation the store holds a card for, it reads the id's own transcript files end to end — the same
+set-difference primitive `foster sweep`'s branch and second-file passes are built on, asked fresh,
+with no sweep state in between — and compares that union against what the account this run targets
+can actually reach through its own cards. Anything short of the whole union is a gap, named with its
+title and how many records short it is; `foster sweep --prove` exits 1 the moment any conversation
+has one, excluding the same never-fosterable classes an ordinary sweep already counts and reports
+separately (see [the whole sweep](#the-whole-sweep)).
+
+A fork is out of scope on purpose: whether every branch of one got a row is the branch pass's own
+question, already in the sweep's report. This measures the other thing that pass does not — one id
+split across two working directories, and whether the target's cards for it, together, reach every
+record either file holds.
+
+On a dry run this measures the account **before** the plan above runs, which is exactly the work
+that plan exists to close; on `--yes` it measures what was actually written. Read-only either way —
+nothing about `--prove` itself writes.
+
 ## Why a restart is needed
 
 Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
@@ -507,6 +635,22 @@ if restarting would end any session besides its own. `--detach-even-with-live` o
 `foster detached [--last] [--json]` lists what `--detach` has launched from this machine —
 pending, running or done, with the log's own tail — which is how a session that ended before the
 restart landed finds out whether it actually did.
+
+With the tray **on** — the default — `--detach` alone cannot finish: the detached re-run asks
+Claude Desktop to close the ordinary way, which the tray only hides, and the run ends having
+written nothing. `foster` refuses up front rather than spending the wait: on `app restart` add
+`--terminate` as well (it rides straight through to the detached re-run); the other commands
+have no `--terminate` of their own, so close Claude Desktop yourself first, or run
+`foster app restart --detach --terminate` instead. Checked directly against this machine's own
+default installation 24/09/2026: `menuBarEnabled` is unset there, meaning the app default (tray
+**on**) — so the bug was live on the very machine this codebase is developed on, and the fix was
+never validated by "try it and see" here alone.
+
+`--detach` carries `--store`/`--ledger` (and, for `sweep`, the account it just wrote into) into
+the command it detaches to — `foster --store work sweep --yes --restart --detach` used to hand
+the detached process a bare `foster layout --yes --restart` with no `--store` at all, which
+restarted the _default_ installation while `work` was the one actually swept. Measured
+24/09/2026, fixed the same day.
 
 Closing it is less polite than it should be, and `foster` says so rather than pretending otherwise.
 Claude Desktop's window-close handler quits the app **only when its tray icon is turned off**; with
@@ -594,6 +738,13 @@ tables too, decompresses them, and takes whichever copy of the record carries th
 number. The same number is what a write has to climb above: a record appended to the log but numbered
 below the table's is read as the older of the two, and the change quietly does nothing.
 
+A sorted table that fails to read — a compression this does not implement, a corrupt block — is
+skipped for a read that only lists, the same as LevelDB's own half-written tables from a killed
+compaction. Writing is different: if the table that failed happened to hold the newest copy of the
+record, the value found elsewhere is older than it looks, and a write built from it would erase
+whatever that table actually held. `foster pin --yes` refuses outright rather than write from a
+read like that, naming the table; re-run once it reads cleanly.
+
 One thing `foster` deliberately will not do: write a pin list into an installation that has **never
 pinned anything**. The record carries Blink's serialisation envelope, and with no record there is
 nothing to copy it from — inventing one is guessing at a serialiser version. Pin any session in the
@@ -657,6 +808,38 @@ undo. `--restart` is the one command that does the whole thing itself: quit, wri
 write happens in the gap, which is the only moment either file is safe to touch. `foster sweep`
 plans a layout alongside its own passes (never writing it) and says so in its summary when anything is
 waiting.
+
+### Checking a restart did not undo anything: `foster verify`
+
+Two different runs have now written something in the closed-app gap and watched the app save part of
+it straight back over once it came up: marks (24/09/2026, ten of forty-nine "other file" marks gone
+three minutes later, no foster event in between) and sidebar groups (23/09/2026, the paragraph
+above). `foster verify` is the one command that reads back, after the fact, whether any of what
+foster wrote to this account has since been undone:
+
+```bash
+foster verify            # read-only; writes nothing
+foster verify --json
+```
+
+Titles, archived flags and pins are checked exactly, because the ledger alone proves reversion for
+them: a card is back under a title it wore _before_ foster ever touched it (`planMarksBack`), or a pin
+move a sweep deferred still has not landed (`planPinMoves`) — the same two functions `foster layout`
+itself calls to close the gap, read back here rather than re-derived.
+
+Groups and routines cannot be checked as exactly, and `foster verify` says so rather than pretending
+otherwise: the ledger keeps only counts of what one `layout_applied` run brought, never which card
+went into which group, so "is this one assignment still there" has no ledger-only answer once the
+process that made it has exited — that is what `layoutVerify.ts`'s own check does, inside the same
+run that wrote it, and it cannot be repeated cold. What `foster verify` flags instead is the one
+shape actually measured on a real store: an account that has had groups or routines applied to it
+before, now showing **none**, while a fresh plan still wants to bring some. A non-empty scope with
+more merely pending is reported as such and left out of the exit code — it cannot be told apart from
+another account simply having gained a group since the last run, and asserting undone on a guess is
+worse than saying "pending".
+
+Exits 1 the moment anything above was found undone. Run it after `foster layout --yes --restart` (or
+`sweep --restart`) — the `/fosteia` skill's own last step now does.
 
 ## The sidebar's filter menu: two stores
 
@@ -1106,12 +1289,17 @@ foster clients --fragment # print a Windows Terminal fragment (JSON), one profil
 # Bringing conversations in
 foster sweep     # the whole job: every account, archived and deleted included
 foster sweep --sync-titles # also re-title copies whose original has been renamed since
+foster sweep --prove # after planning, independently check every conversation is fully reachable
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 
 # After the sweep
+foster where <query> # every account/store holding a card for one conversation, and which to
+                 #   continue in (a session id, a cliSessionId prefix, or a title fragment)
+foster verify    # after a restart, check nothing foster wrote (marks, pins, groups, routines)
+                 #   was undone
 foster return    # remove fostered copies, restoring the previous state
 foster consolidate # one row per piece of work, on the branch that carried on
 foster unclaim   # release the worktree claim a copy inherited from its original
@@ -1146,6 +1334,16 @@ foster rescue    # conversations stranded by a crash, and the resumes that bring
 foster unstarted # background-task requests whose session died before answering once
 foster transcript  # read a conversation's transcript, by cliSessionId
 foster resume    # send one prompt to an existing conversation, headlessly
+foster grep      # search every transcript on this machine by what was actually said
+foster export    # render one conversation to Markdown, HTML or JSONL
+
+# Reports
+foster disk      # bytes per account and per project, for cards and transcripts
+foster stats     # token usage, sessions and usage-limit stops, from the transcripts
+
+# Cloud sessions
+foster cloud list             # every cloud session (code.claude.com) this account can see
+foster cloud pull <id> --into <cwd> --yes  # fabricate a local transcript + sidebar card from one
 
 # The app
 foster app       # status | quit | start | restart — drive Claude Desktop itself
@@ -1850,8 +2048,36 @@ npm run build
 ```
 
 Tests run against **synthetic** store fixtures created in a temporary directory. They never read or
-write a real Claude Desktop installation. CI additionally runs a privacy guard that fails the build
-if realistic account identifiers or personal filesystem paths appear in tracked files.
+write a real Claude Desktop installation. `npm run check` (and CI's `privacy-guard` job, which runs
+the same `scripts/privacy.mjs` rather than a second copy of its patterns) fails the build if
+realistic account identifiers or personal filesystem paths appear anywhere `git add -A` would pick
+up — tracked, staged, or merely untracked-but-not-`.gitignore`d (issue #134: a plain `git grep` sees
+only tracked files, so a fixture written but not yet `git add`-ed used to pass locally and only fail
+once CI saw it tracked, after the push).
+
+CI (`.github/workflows/ci.yml`) runs the checks above on Node 22 and 24, on Ubuntu and Windows — not
+20, which vitest 5 (picked up to clear three high-severity dependency advisories) refuses to start
+under at all; `package.json`'s own `"engines": ">=20"` is unaffected, since that floor describes the
+built CLI, which carries no vitest dependency, not the dev toolchain. The `check` job runs `npm run
+coverage`, not a plain `npm test`, since the coverage floor below is only ever collected and enforced
+under `--coverage`; `npm run check` (`package.json`) calls the same script, so a local run fails the
+same way CI would. Three more CI jobs: a build + bundle smoke test (single self-contained file,
+starts quietly, `--version` matches) that used to run only on a tag in `release.yml` and now runs on
+every PR and push too, from the same `scripts/smoke-bundle.sh` both workflows call — on Node 20 as
+well as 24, since this job never touches vitest and Node 20 is the floor the shipped bundle actually
+promises; `npm audit --omit=dev --audit-level=high`, scoped to the two runtime dependencies
+(`commander`, `picocolors`) since the dev toolchain's own advisories never reach anything foster
+installs or executes; and the coverage floor itself.
+
+`npm run coverage` measures `src/**/*.ts` including `src/cli/**` (excluding it made the number
+optimistic — 88% became 66.6% once the CLI entrypoints were counted), and `vitest.config.ts` sets a
+coverage floor with margin below the real level — measured coverage here is genuinely
+environment-dependent, not just noisy: several code paths branch on what actually exists under the
+home directory and on OS, and GitHub Actions' `ubuntu-latest` reads a few tenths of a point lower
+across the board than a developer's own Windows machine or `windows-latest`. The floor sits under
+the real low point of that range (`ubuntu-latest`), not under whichever environment was measured
+most recently: a genuine drop still fails CI, an improvement is free to raise it, and the floor is
+never lowered just to make a drop pass.
 
 ### Releasing
 

@@ -1,5 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import { Command } from 'commander';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_PREFS,
   parsePrefValue,
@@ -8,8 +10,41 @@ import {
   writeAppPref,
 } from '../src/store/appPrefs.js';
 import type { StoreLayout } from '../src/domain/types.js';
-import { plannedChanges, resolve } from '../src/cli/appPrefCommand.js';
+import { plannedChanges, registerAppPref, resolve } from '../src/cli/appPrefCommand.js';
+import type * as Desktop from '../src/engine/desktop.js';
+import type * as Safety from '../src/engine/safety.js';
 import { makeStore } from './helpers/store.js';
+
+/**
+ * Doubles for the "--restart" end-to-end tests below. Nothing in this file may
+ * close or launch the real Claude Desktop — `quitDesktop`/`startDesktop` are
+ * stubbed the same way `tests/interactive.test.ts` stubs them, and
+ * `inspectDesktopFor` (what `restartPlan` reads) is driven per test rather than
+ * left to read the real process table.
+ */
+const desktop = vi.hoisted(() => ({
+  quitDesktop: vi.fn(),
+  startDesktop: vi.fn(),
+  inspectDesktopFor: vi.fn(),
+  hostedByDesktop: vi.fn(() => false),
+}));
+
+vi.mock('../src/engine/desktop.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof Desktop>();
+  return {
+    ...actual,
+    quitDesktop: desktop.quitDesktop,
+    startDesktop: desktop.startDesktop,
+    inspectDesktopFor: desktop.inspectDesktopFor,
+    hostedByDesktop: desktop.hostedByDesktop,
+  };
+});
+
+const safety = vi.hoisted(() => ({ running: false }));
+vi.mock('../src/engine/safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof Safety>();
+  return { ...actual, inspectApp: () => ({ running: safety.running, evidence: [] }) };
+});
 
 /**
  * The app's own settings, read and written where the app keeps them.
@@ -175,6 +210,73 @@ describe('writeAppPref', () => {
     expect(writeAppPref(store, 'allowAllBrowserActions', true).write.guard).toBe(true);
     expect(writeAppPref(store, 'menuBarEnabled', false).write.guard).toBe(false);
   });
+
+  it('refuses on a lossy number literal elsewhere in the file, same guard groupScopes/viewPrefs carry', () => {
+    // Previously missing here (this file used its own hand-rolled write
+    // instead of the shared rewriteDesktopConfig): a `JSON.parse`/`stringify`
+    // round trip would have silently rewritten this trailing `.0`, invisible
+    // to the "did a neighbour move" check because both trees it compares are
+    // already-lossy parses.
+    const store = storeWith({ preferences: {} });
+    writeFileSync(
+      store.desktopConfigFile,
+      '{"preferences":{"menuBarEnabled":true},"scale":1.0}',
+      'utf8',
+    );
+
+    expect(() => writeAppPref(store, 'menuBarEnabled', false)).toThrow(/1\.0/);
+    expect(readFileSync(store.desktopConfigFile, 'utf8')).toBe(
+      '{"preferences":{"menuBarEnabled":true},"scale":1.0}',
+    );
+  });
+
+  it('backs up outside the app store, under ~/.foster/backups — never next to the file it copies', () => {
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    const home = path.join(store.root, '.foster-home');
+
+    const { backup } = writeAppPref(store, 'menuBarEnabled', false, {
+      env: { ...process.env, FOSTER_HOME: home },
+    });
+
+    expect(path.dirname(backup)).not.toBe(path.dirname(store.desktopConfigFile));
+    expect(backup).toMatch(/backups/);
+  });
+
+  it('two writes landing in the same backup-directory second each keep their own backup', () => {
+    // The old scheme named the backup `<file>.bak-<minute-resolution stamp>`,
+    // next to the file itself: a second writeAppPref within the same minute
+    // silently overwrote the first "backup" with the file the first write had
+    // already changed, losing the true original.
+    const store = storeWith({ preferences: { ccBranchPrefix: 'first' } });
+    const home = path.join(store.root, '.foster-home');
+    const env = { ...process.env, FOSTER_HOME: home };
+    const now = () => new Date('2026-09-24T10:00:00.000Z');
+
+    const first = writeAppPref(store, 'ccBranchPrefix', 'second', { env, now });
+    const second = writeAppPref(store, 'ccBranchPrefix', 'third', { env, now });
+
+    expect(first.backup).not.toBe(second.backup);
+    // first.backup is the byte-for-byte original (compact, as `storeWith`
+    // wrote it); second.backup is a copy of what the first write left behind
+    // (pretty-printed by writeFileAtomic) — either way, each write's backup
+    // holds the value from just before *that* write, not the other's.
+    expect(readFileSync(first.backup, 'utf8')).toContain('"ccBranchPrefix":"first"');
+    expect(readFileSync(second.backup, 'utf8')).toContain('"ccBranchPrefix": "second"');
+  });
+
+  it('takes an env option without also needing a now, defaulting the clock itself', () => {
+    // BackupOptions carries both `env` and `now`; a caller that only redirects
+    // FOSTER_HOME (this test, so it never touches the real one) still gets a
+    // working backup without picking a clock.
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    const home = path.join(store.root, '.foster-home');
+
+    const { backup } = writeAppPref(store, 'menuBarEnabled', false, {
+      env: { ...process.env, FOSTER_HOME: home },
+    });
+
+    expect(readdirSync(path.dirname(backup))).toContain(path.basename(backup));
+  });
 });
 
 describe('what a command line asks to change', () => {
@@ -247,5 +349,117 @@ describe('resolving a change before the app is touched', () => {
       to: 6,
       parsed: 6,
     });
+  });
+});
+
+/**
+ * `--restart`, driven through the actual CLI action, not just the pure
+ * helpers above. Three bugs lived here until this went through
+ * `restartAround` (`src/ops/restart.ts`) the same way `layout`/`view` do:
+ * a write that threw after `quitDesktop` succeeded left `startDesktop` never
+ * called at all; the tray refusal told the user to "Re-run with --terminate",
+ * a flag this command has never had; and `startDesktop`'s own result was
+ * thrown away, so it printed "is up" whether or not it actually was.
+ */
+describe('the --restart write, through the real CLI action', () => {
+  beforeEach(() => {
+    desktop.quitDesktop.mockReset().mockResolvedValue({ outcome: 'quit' });
+    desktop.startDesktop.mockReset().mockResolvedValue(true);
+    desktop.inspectDesktopFor
+      .mockReset()
+      .mockReturnValue({ running: true, codeSessions: 0, selfHosted: false });
+    desktop.hostedByDesktop.mockReset().mockReturnValue(false);
+    safety.running = true;
+  });
+
+  function appFor(store: StoreLayout): Command {
+    const app = new Command();
+    app.exitOverride();
+    registerAppPref(app, () => ({ store }));
+    return app;
+  }
+
+  async function run(store: StoreLayout, args: string[]): Promise<string> {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, 'log').mockImplementation((line: unknown) => {
+      lines.push(String(line));
+    });
+    try {
+      await appFor(store).parseAsync(args, { from: 'user' });
+    } finally {
+      spy.mockRestore();
+    }
+    return lines.join('\n');
+  }
+
+  it('quits, writes, starts the app back up, and reports the write', async () => {
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    expect(desktop.startDesktop).toHaveBeenCalledOnce();
+    expect((settingsOf(store).preferences as Record<string, unknown>).menuBarEnabled).toBe(false);
+    expect(output).toContain('Claude Desktop is up.');
+  });
+
+  it('still starts the app back up when the write throws, instead of leaving it closed silently', async () => {
+    // A bare store with no claude_desktop_config.json at all: writeAppPref's
+    // own readFileSync throws ENOENT the first time it is called, inside
+    // restartAround's duringGap — a real throw, not a mocked one.
+    const store = makeStore();
+    process.exitCode = undefined;
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    // The bug: `startDesktop` used to never run at all here.
+    expect(desktop.startDesktop).toHaveBeenCalledOnce();
+    expect(output).not.toContain('Claude Desktop is up.');
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
+  });
+
+  it('reports closed: true when the (only) write throws inside the gap, because the app really was closed', async () => {
+    // Same ENOENT-throwing store as above, but --json and a single change —
+    // so `written` stays empty (the throw happens before anything is pushed
+    // onto it). The old bug used `written.length > 0` as a proxy for "the app
+    // was closed", which is wrong here: `quitDesktop` above resolved 'quit'
+    // before `writeAppPref` ever ran, so the app was closed regardless of
+    // whether the write itself landed.
+    const store = makeStore();
+    process.exitCode = undefined;
+
+    const output = await run(store, [
+      'pref',
+      'menuBarEnabled',
+      'false',
+      '--restart',
+      '--yes',
+      '--json',
+    ]);
+
+    expect(desktop.quitDesktop).toHaveBeenCalledOnce();
+    const parsed = JSON.parse(output) as { written: unknown[]; closed: boolean };
+    expect(parsed.written).toHaveLength(0);
+    expect(parsed.closed).toBe(true);
+    process.exitCode = undefined;
+  });
+
+  it('names "foster app quit --terminate" when the tray is in the way, never the wrong "--terminate" flag', async () => {
+    desktop.quitDesktop.mockResolvedValue({ outcome: 'needs-terminate', mainPid: 4242 });
+    const store = storeWith({ preferences: { menuBarEnabled: true } });
+    process.exitCode = undefined;
+
+    const output = await run(store, ['pref', 'menuBarEnabled', 'false', '--restart', '--yes']);
+
+    // The old bug: this command has no --terminate option of its own, so
+    // "Re-run with --terminate" sent the user to an unknown option.
+    expect(output).not.toContain('Re-run with --terminate');
+    expect(output).toContain('foster app quit --terminate');
+    expect(desktop.startDesktop).not.toHaveBeenCalled();
+    expect((settingsOf(store).preferences as Record<string, unknown>).menuBarEnabled).toBe(true);
+    expect(process.exitCode).toBe(1);
+    process.exitCode = undefined;
   });
 });

@@ -321,13 +321,15 @@ describe('read_transcript', () => {
 describe('resume_headless', () => {
   const CID = '00000000-0000-4000-8000-0000000000ce';
 
-  it('sits behind the --yes switch like every other write', () => {
+  it('sits behind the --yes switch like every other write', async () => {
     const ctx = makeContext({ allowWrites: false });
-    const result = resumeHeadless(ctx, { cliSessionId: CID, prompt: 'hi' }) as { refused: string };
+    const result = (await resumeHeadless(ctx, { cliSessionId: CID, prompt: 'hi' })) as {
+      refused: string;
+    };
     expect(result.refused).toBe(WRITES_DISABLED);
   });
 
-  it('refuses a conversation a live process is holding open', () => {
+  it('refuses a conversation a live process is holding open', async () => {
     const configDir = mkdtempSync(path.join(tmpdir(), 'foster-agent-live-'));
     mkdirSync(path.join(configDir, 'sessions'), { recursive: true });
     writeFileSync(
@@ -343,11 +345,13 @@ describe('resume_headless', () => {
       },
     });
 
-    const result = resumeHeadless(ctx, { cliSessionId: CID, prompt: 'hi' }) as { refused: string };
+    const result = (await resumeHeadless(ctx, { cliSessionId: CID, prompt: 'hi' })) as {
+      refused: string;
+    };
     expect(result.refused).toContain(`pid ${process.pid}`);
   });
 
-  it('runs the resume when nothing is holding the conversation', () => {
+  it('runs the resume when nothing is holding the conversation', async () => {
     const seen: string[] = [];
     const ctx = makeContext({
       allowWrites: true,
@@ -360,16 +364,31 @@ describe('resume_headless', () => {
       },
     });
 
-    const result = resumeHeadless(ctx, { cliSessionId: CID, prompt: 'carry on' }) as {
+    const result = (await resumeHeadless(ctx, { cliSessionId: CID, prompt: 'carry on' })) as {
       output: string;
     };
     expect(result.output).toBe('answer');
     expect(seen).toEqual([CID, 'carry on']);
   });
 
-  it('refuses an id that does not look like a conversation', () => {
+  it('accepts a resumeRunner that answers asynchronously, like the real CLI spawn', async () => {
+    const ctx = makeContext({
+      allowWrites: true,
+      env: {
+        CLAUDE_CONFIG_DIR: mkdtempSync(path.join(tmpdir(), 'foster-agent-idle-')),
+      } as NodeJS.ProcessEnv,
+      resumeRunner: async (_id, prompt) => `echo: ${prompt}`,
+    });
+
+    const result = (await resumeHeadless(ctx, { cliSessionId: CID, prompt: 'carry on' })) as {
+      output: string;
+    };
+    expect(result.output).toBe('echo: carry on');
+  });
+
+  it('refuses an id that does not look like a conversation', async () => {
     const ctx = makeContext({ allowWrites: true });
-    expect(() => resumeHeadless(ctx, { cliSessionId: 'not; an id', prompt: 'hi' })).toThrow(
+    await expect(resumeHeadless(ctx, { cliSessionId: 'not; an id', prompt: 'hi' })).rejects.toThrow(
       /does not look like/,
     );
   });

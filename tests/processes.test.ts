@@ -14,6 +14,11 @@ import {
   type ReaderMemory,
 } from '../src/util/processes.js';
 
+// The console-encoding fix (below) is one line prepended to every PowerShell
+// script this module runs; asserting it is there is cheaper and more durable
+// than asserting the whole script text.
+const FORCE_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8;';
+
 describe('parseWmicList', () => {
   // The real sample this module was written against, decoded from latin1 and
   // still carrying the doubled CR wmic prints, a leading blank line, and keys
@@ -234,6 +239,21 @@ describe('readProcessesWith', () => {
     expect(memory.skipPowerShell).toBeUndefined();
   });
 
+  it('forces UTF-8 output before the query, so a non-ASCII path is not decoded as the OEM code page', () => {
+    // Measured 24/09/2026: PowerShell writes redirected stdout in the console's
+    // OEM code page unless told otherwise, and this module always decodes as
+    // 'utf8' — without the prefix, "ô" (a real surname in a profile path) comes
+    // back as U+FFFD, and everything comparing --user-data-dir against it fails.
+    let sawArgs: string[] = [];
+    const run: CommandRunner = (_exe, args) => {
+      sawArgs = args;
+      return { ok: true, stdout: PS_CSV };
+    };
+    readProcessesWith(run, {}, ENV);
+    const script = sawArgs.at(-1) ?? '';
+    expect(script.startsWith(FORCE_UTF8)).toBe(true);
+  });
+
   it('falls back to wmic on a PowerShell timeout, and remembers not to retry it', () => {
     const calls: string[] = [];
     const memory: ReaderMemory = {};
@@ -334,7 +354,10 @@ describe('readProcessesWith', () => {
 // a check the issue that added the CommandRunner seam left untouched — only the
 // spawn itself gained one. On the POSIX CI runner that check answers before the
 // injected runner is ever called, so these cases only exercise the outcome
-// mapping they are written to prove on the Windows leg of the matrix.
+// mapping they are written to prove on the Windows leg of the matrix. Every
+// call passes its own fresh `memory: ReaderMemory = {}` (never the module's
+// shared default) so one test's PowerShell failure cannot leak into the next —
+// the sharing itself is proven separately, below each describe block.
 describe('processPackageIdentity', () => {
   const ENV = { SystemRoot: 'C:\\W' };
 
@@ -343,35 +366,71 @@ describe('processPackageIdentity', () => {
   }
 
   it.skipIf(process.platform !== 'win32')('reads "packaged" from a runner that reports it', () => {
-    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'packaged\n' }))).toBe(
+    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'packaged\n' }), {})).toBe(
       'packaged',
     );
   });
 
   it.skipIf(process.platform !== 'win32')('reads "none" from a runner that reports it', () => {
-    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'none' }))).toBe('none');
+    expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'none' }), {})).toBe('none');
   });
 
   it.skipIf(process.platform !== 'win32')(
     'treats any other stdout as unknown rather than guessing',
     () => {
-      expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'garbage' }))).toBe(
+      expect(processPackageIdentity(123, ENV, runner({ ok: true, stdout: 'garbage' }), {})).toBe(
         'unknown',
       );
     },
   );
 
   it.skipIf(process.platform !== 'win32')('maps a timed-out runner to unknown', () => {
-    expect(processPackageIdentity(123, ENV, runner({ ok: false, reason: 'timeout' }))).toBe(
+    expect(processPackageIdentity(123, ENV, runner({ ok: false, reason: 'timeout' }), {})).toBe(
       'unknown',
     );
   });
 
   it.skipIf(process.platform !== 'win32')('maps a failed runner to unknown', () => {
     expect(
-      processPackageIdentity(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' })),
+      processPackageIdentity(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' }), {}),
     ).toBe('unknown');
   });
+
+  it.skipIf(process.platform !== 'win32')(
+    'forces UTF-8 output ahead of the P/Invoke script, same as the process-table query',
+    () => {
+      let sawArgs: string[] = [];
+      const run: CommandRunner = (_exe, args) => {
+        sawArgs = args;
+        return { ok: true, stdout: 'none' };
+      };
+      processPackageIdentity(123, ENV, run, {});
+      expect((sawArgs.at(-1) ?? '').startsWith(FORCE_UTF8)).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'does not run at all once shared memory already says PowerShell is stuck',
+    () => {
+      let calls = 0;
+      const run: CommandRunner = () => {
+        calls++;
+        return { ok: true, stdout: 'packaged' };
+      };
+      const memory: ReaderMemory = { skipPowerShell: 'PowerShell timed out after 20 s' };
+      expect(processPackageIdentity(123, ENV, run, memory)).toBe('unknown');
+      expect(calls).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'marks the shared memory itself on a timeout, for mainWindowVisible to see',
+    () => {
+      const memory: ReaderMemory = {};
+      processPackageIdentity(123, ENV, runner({ ok: false, reason: 'timeout' }), memory);
+      expect(memory.skipPowerShell).toBe('PowerShell timed out after 20 s');
+    },
+  );
 });
 
 describe('mainWindowVisible', () => {
@@ -382,29 +441,69 @@ describe('mainWindowVisible', () => {
   }
 
   it.skipIf(process.platform !== 'win32')('reads "visible" from a runner that reports it', () => {
-    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'visible\n' }))).toBe(true);
+    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'visible\n' }), {})).toBe(true);
   });
 
   it.skipIf(process.platform !== 'win32')('reads "hidden" from a runner that reports it', () => {
-    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'hidden' }))).toBe(false);
+    expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'hidden' }), {})).toBe(false);
   });
 
   it.skipIf(process.platform !== 'win32')(
     'treats any other stdout as undefined rather than guessing',
     () => {
-      expect(mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'garbage' }))).toBeUndefined();
+      expect(
+        mainWindowVisible(123, ENV, runner({ ok: true, stdout: 'garbage' }), {}),
+      ).toBeUndefined();
     },
   );
 
   it.skipIf(process.platform !== 'win32')('maps a timed-out runner to undefined', () => {
-    expect(mainWindowVisible(123, ENV, runner({ ok: false, reason: 'timeout' }))).toBeUndefined();
+    expect(
+      mainWindowVisible(123, ENV, runner({ ok: false, reason: 'timeout' }), {}),
+    ).toBeUndefined();
   });
 
   it.skipIf(process.platform !== 'win32')('maps a failed runner to undefined', () => {
     expect(
-      mainWindowVisible(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' })),
+      mainWindowVisible(123, ENV, runner({ ok: false, reason: 'failed', detail: 'boom' }), {}),
     ).toBeUndefined();
   });
+
+  it.skipIf(process.platform !== 'win32')(
+    'forces UTF-8 output ahead of the Get-Process script too',
+    () => {
+      let sawArgs: string[] = [];
+      const run: CommandRunner = (_exe, args) => {
+        sawArgs = args;
+        return { ok: true, stdout: 'visible' };
+      };
+      mainWindowVisible(123, ENV, run, {});
+      expect((sawArgs.at(-1) ?? '').startsWith(FORCE_UTF8)).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'shares reader memory with processPackageIdentity: one PowerShell timeout skips both',
+    () => {
+      const memory: ReaderMemory = {};
+      let calls = 0;
+      const failingRun: CommandRunner = () => {
+        calls++;
+        return { ok: false, reason: 'timeout' };
+      };
+      expect(mainWindowVisible(123, ENV, failingRun, memory)).toBeUndefined();
+      expect(calls).toBe(1);
+
+      // A second call, through the memory processPackageIdentity would also be
+      // given by default, never spawns PowerShell again.
+      const okRun: CommandRunner = () => {
+        calls++;
+        return { ok: true, stdout: 'none' };
+      };
+      expect(processPackageIdentity(123, ENV, okRun, memory)).toBe('unknown');
+      expect(calls).toBe(1);
+    },
+  );
 });
 
 describe('processTableProvenance', () => {
