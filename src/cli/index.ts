@@ -4343,7 +4343,7 @@ program
 
 const cacheCommand = program
   .command('cache')
-  .helpGroup('Start here:')
+  .helpGroup('After the sweep:')
   .description('the persistent scan cache under <FOSTER_HOME>/cache');
 
 cacheCommand

@@ -70,11 +70,21 @@ const MENTIONED_ID = /"uuid":"([0-9a-fA-F-]{36})"/g;
  * hash of the `TAIL_BYTES` immediately before its stored offset — read fresh
  * from the file now, not assumed — and only a match trusts that appending is
  * all that happened; a mismatch means the file was rewritten in place, and the
- * whole thing is read again. The resumed read starts `TAIL_BYTES` before the
- * old offset rather than exactly at it, so a line that was still being
- * written when the entry was last saved is read whole rather than
- * half-counted; every id lands in a `Set`, so reading a stretch of
- * already-known bytes twice costs work, not correctness.
+ * whole thing is read again. `scanConversation`'s resumed read does not start
+ * `TAIL_BYTES` before the old offset and trust that to be a line boundary —
+ * `lineStartAtOrBefore` walks backward from the old offset to the nearest
+ * real newline instead, however far back that is. A record still being
+ * written when the entry was last saved is routinely longer than
+ * `TAIL_BYTES` (a big tool result, a long assistant turn), and starting a
+ * fixed `TAIL_BYTES` back can then land *inside* that record rather than
+ * before it; `linesInRange` used to drop whatever came before the first
+ * newline in the resumed range unconditionally, on the assumption that a
+ * fragment there was already-counted leftovers — for a record longer than
+ * `TAIL_BYTES` that assumption is false, and the drop silently discarded the
+ * whole completed record, uuid included. Resuming from a genuine line
+ * boundary instead means there is never a leading fragment to drop; every id
+ * lands in a `Set`, so reading a stretch of already-known bytes twice costs
+ * work, not correctness.
  *
  * Ids are stored as 16 raw bytes rather than the 36-character string a
  * transcript spells one as (`uuidToBytes`/`bytesToUuid`). A string that does
@@ -166,7 +176,7 @@ export class TranscriptCache {
       stat.size > existing.size &&
       tailStillMatches(file, existing.offset, existing.tailHash)
     ) {
-      const from = Math.max(0, existing.offset - TAIL_BYTES);
+      const from = lineStartAtOrBefore(file, existing.offset);
       const grown = scanOwnRange(file, from, stat.size);
       if (grown) {
         const lastMessageAt = later(existing.lastMessageAt, grown.lastMessageAt);
@@ -389,15 +399,62 @@ function tailStillMatches(file: string, offset: number, tailHash: Buffer): boole
   return hashTail(file, offset).equals(tailHash);
 }
 
+const BACKSCAN_CHUNK = 64 * 1024;
+
+/**
+ * The start of the line that contains (or immediately follows) `offset` —
+ * the position right after the nearest `\n` at or before `offset`, or `0`
+ * when none is found scanning all the way back to the start of the file.
+ *
+ * Unlike a fixed `TAIL_BYTES` lookback, this always lands on a genuine line
+ * boundary, however far back that is — the one property `scanOwnRange`'s
+ * resumed read needs to never have to guess whether the bytes before its
+ * start position belong to an already-counted line. A record longer than
+ * `TAIL_BYTES` costs more than one backward chunk read here; a normal
+ * transcript, with a newline every few hundred bytes, costs at most one.
+ */
+function lineStartAtOrBefore(file: string, offset: number): number {
+  if (offset <= 0) return 0;
+  let fd: number;
+  try {
+    fd = openSync(file, 'r');
+  } catch {
+    return 0;
+  }
+  try {
+    let end = offset;
+    const buffer = Buffer.alloc(BACKSCAN_CHUNK);
+    while (end > 0) {
+      const chunkSize = Math.min(BACKSCAN_CHUNK, end);
+      const start = end - chunkSize;
+      const read = readSync(fd, buffer, 0, chunkSize, start);
+      const slice = buffer.subarray(0, read);
+      const newlineAt = slice.lastIndexOf(0x0a);
+      if (newlineAt !== -1) return start + newlineAt + 1;
+      end = start;
+    }
+    return 0;
+  } catch {
+    return 0;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const CHUNK_BYTES = 1024 * 1024;
 
 /**
  * A file's lines between two byte offsets, oldest first.
  *
- * When `from` is not 0 the first line the raw split produces is a fragment —
- * whatever followed the last complete newline before `from` — and is dropped
- * rather than yielded, the same rule `transcripts.ts`'s own tail readers use.
- * A trailing line with no newline at `to` is yielded anyway, exactly as
+ * `from` must already be a genuine line boundary — `0`, or a position a
+ * caller found with `lineStartAtOrBefore` — never an arbitrary byte offset
+ * that might land inside a line. With that guarantee there is never a
+ * leading fragment to drop: earlier versions of this function assumed the
+ * text before the first newline in the range was always already-counted
+ * leftovers and discarded it unconditionally, which silently dropped a
+ * whole record — uuid included — whenever `from` landed inside a record
+ * still being written when it was last cached (see the class doc). A
+ * trailing line with no newline at `to` is yielded anyway, exactly as
  * `scanConversation`'s own reader does with the true end of file; a record
  * this cuts off mid-write fails to parse and is skipped by the caller, not
  * miscounted.
@@ -413,7 +470,6 @@ function* linesInRange(file: string, from: number, to: number): Generator<string
   try {
     let position = from;
     let pending = '';
-    let droppedFirst = from === 0;
     const buffer = Buffer.alloc(CHUNK_BYTES);
 
     while (position < to) {
@@ -425,16 +481,10 @@ function* linesInRange(file: string, from: number, to: number): Generator<string
       const text = pending + buffer.subarray(0, read).toString('latin1');
       const lines = text.split('\n');
       pending = lines.pop() ?? '';
-      for (const line of lines) {
-        if (!droppedFirst) {
-          droppedFirst = true;
-          continue;
-        }
-        yield line;
-      }
+      for (const line of lines) yield line;
     }
 
-    if (pending !== '' && droppedFirst) yield pending;
+    if (pending !== '') yield pending;
   } catch {
     // A file that vanished or turned unreadable mid-read yields what it gave.
   } finally {

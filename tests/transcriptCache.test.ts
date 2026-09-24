@@ -182,6 +182,39 @@ describe('TranscriptCache.scanConversation', () => {
     expect(toSorted(cached.uuids)).toEqual(toSorted([OWN_A, OWN_B]));
   });
 
+  it('a record still being written, longer than the tail window, is not lost once it completes', () => {
+    // Reproduces the growth-resume bug: a record whose serialized length
+    // exceeds TAIL_BYTES (4096) is only partly on disk when the entry is
+    // cached — genuinely incomplete JSON, not just missing its trailing
+    // newline — so it is correctly uncounted at that point. The write then
+    // completes and the file grows past it. A resume that starts a fixed
+    // TAIL_BYTES before the old offset lands inside this record rather than
+    // before it, and dropping "the fragment before the first newline" as
+    // already-counted then discards the whole finished record.
+    const base = dir();
+    const file = path.join(base, 'a.jsonl');
+    const fullSecond = line(OWN_B, { big: 'x'.repeat(6900) });
+    // Cut well short of the closing quote/brace: unambiguously invalid JSON,
+    // the shape an in-progress write actually takes on disk.
+    const truncatedSecond = fullSecond.slice(0, fullSecond.length - 500);
+    expect(truncatedSecond.length).toBeGreaterThan(4096);
+
+    writeFileSync(file, `${line(OWN_A)}\n${truncatedSecond}`, 'utf8');
+    const cache = new TranscriptCache(path.join(base, 'cache.bin'));
+
+    const beforeCompletion = cache.scanConversation(file);
+    expect(beforeCompletion.uuids.has(OWN_B)).toBe(false);
+
+    // The write completes: same prefix, the rest of the record appended, now
+    // with its trailing newline.
+    writeFileSync(file, `${line(OWN_A)}\n${fullSecond}\n`, 'utf8');
+
+    const cached = cache.scanConversation(file);
+    const live = scanConversation(file);
+    expect(toSorted(cached.uuids)).toEqual(toSorted(live.uuids));
+    expect(toSorted(cached.uuids)).toEqual(toSorted([OWN_A, OWN_B]));
+  });
+
   it('an unreadable file answers empty, the same as the live function', () => {
     const base = dir();
     const cache = new TranscriptCache(path.join(base, 'cache.bin'));
