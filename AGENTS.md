@@ -645,6 +645,83 @@ the target has none — the same "target already has one, leave it" rule groups 
 machine-wide half needs no copying, since one Local Storage record already covers every account on
 the installation.
 
+## The ledger is read once per instance, not once per call
+
+Measured 24/09/2026, a real ledger: 23 MB, 30,445 events, reading and parsing it costs
+160-290 ms depending on the machine, and `Ledger.read()` is called on the order of a dozen times
+per sweep round (`ops/sweep.ts`), up to three rounds, plus once per copy in the branch pass
+(`applyBranchCards` → `fosterSessions` → `project(ledger.read())`, `engine/executor.ts:175`,
+`engine/branchCards.ts`). `Ledger` (`ledger/log.ts`) now caches its own parse, keyed on
+`(size, mtimeMs)` from `statSync` rather than trusted blindly — a ledger changed from outside this
+instance (a second `foster` process, a hand edit) still forces a reread. `append()` keeps the cache
+in step by pushing the new event onto the same array and re-stating for the new key, instead of
+dropping it, so a run that both reads and writes the ledger many times (a sweep round) reparses at
+most once. `read()` hands back the live cached array, never a defensive copy — checked across
+`src/`, nothing mutates what it returns, only iterates it.
+
+`project()` (`ledger/project.ts`) memoizes its own fold over the same array, by identity and
+length (a `WeakMap`, so it does not keep an abandoned events array alive) — the same
+"append pushes, does not replace" behaviour is what lets a `Ledger` instance's later `read()` still
+hit this cache. Two existing callers mutate the `LedgerState` they get back mid-run to reconcile it
+against what they are about to write — `fosterSessions` deletes a reconciled fostering from
+`state.active` (`executor.ts:274`), `identifyHeldAccounts` adds a newly-seen identity to
+`state.identities` (`cli/index.ts`, via `identify.ts:167`) — which used to be harmless because every
+call got its own fresh Maps. Memoizing without defending against that would leak one call's
+mutation into the next call's state whenever the two share a cache entry, which is exactly the
+shape a dry-run batch with no ledger writes in between produces (several `fosterSessions` calls,
+each `project(ledger.read())`, same array). So `project()` itself always returns a fresh shallow
+copy of the memoized fold — new `Map`s, same entries — cheap next to the fold it is avoiding: on
+the real ledger above, the fold itself costs 70-130 ms and a clone of its `Map`s a few ms.
+Measured with a micro-benchmark standing in for the branch pass's per-copy call (50x
+`project(ledger.read())` in a row, no writes between): 9.8 s uncached, 0.5 s cached, on the same
+ledger.
+
+`appendFileSync` does not check that the file it is growing already ends in a newline. A line left
+torn on disk — the detached restart's `taskkill /F`, a power loss mid-write — glues to whatever is
+appended next: the merged line is neither valid JSON nor separated from its neighbour, so
+`parseLedgerEvent` drops it whole and _both_ events are lost, not just the one that was already
+damaged. `Ledger` now checks the last byte of the file once, on its first `append()` per instance
+(an `openSync`/seek/`readSync`, not a full read of a 23 MB file), and prefixes a newline first if it
+is missing — nothing but this instance's own appends can retorn the file once that is fixed, so
+later appends skip the check.
+
+`doctor` used to read the process table twice — once through `inspectApp`, once through
+`runningStores` a few lines later, each defaulting to `readProcesses` rather than the 5-second
+`cachedProcesses` (`util/processes.ts`) — a second PowerShell spawn for an answer the first one
+already gave. Both calls in `cli/index.ts` now pass `cachedProcesses` explicitly. `identifyHeldAccounts`
+in the startup `preAction` hook (`NAMES_ACCOUNTS`, `cli/index.ts`) was already gated to the commands
+that print an account by name — not every command — from #52, well before this; what it still pays
+on those commands is one PowerShell spawn to unseal the Desktop's DPAPI-sealed token
+(`store/credential.ts:183`), which has no process-table equivalent to cache.
+
+The bundle's banner (`tsup.config.ts`) now also calls `module.enableCompileCache?.()` — a namespace
+import and optional call rather than `import { enableCompileCache }`, because the named form is a
+static binding and fails the whole module at load on a Node old enough not to export it, where the
+optional call on a namespace object simply no-ops. This persists V8's compiled bytecode for the
+bundle across runs, which is where a CLI invoked as a new short-lived process each time actually
+spends the saving — not measured in isolation here, folded into the `doctor` timings below.
+
+`tests/setup.ts` now points `HOME`/`USERPROFILE` at a fresh `mkdtemp` directory before any test
+file's own imports run. `configDirCandidates`, `inUseConfigDir` and the rest of
+`store/configDirs.ts` default their `home` parameter to `os.homedir()`, which — unset — is this
+machine's real profile: measured on this store, 13 GB under `~/.claude*` that a unit test has no
+business scanning, and `os.homedir()` on win32 reads `USERPROFILE` first. Every default-`home` call
+is a lazily-evaluated parameter, not cached at import time, so setting both env vars once at the top
+of the setup file is enough. Measured 24/09/2026: the suite went from 39 s to 7-16 s (machine load
+dependent) for the same ~1,631 green tests (1,641 with the tests this milestone adds), and
+`tests/interactive.test.ts` alone from over a second to under one. Nothing in the suite depended on
+the real home — a full `npm run check` with an empty temp `HOME`/`USERPROFILE` passes exactly as it
+did before.
+
+Real-data timings (`FOSTER_HOME` pointed at a scratch copy of `~/.foster`, never the real one; the
+Desktop store read only): `doctor` 8.2-8.4 s before this milestone, 6.4-7.6 s after (removing the
+doubled process-table read; the rest is PowerShell's own cold-start cost on this machine, unrelated
+to any of this). A `sweep` dry run on a store with nothing left to bring (no fostering or branch-pass
+copies to write, so the per-copy `project(ledger.read())` saving above does not get exercised) went
+from 68.7 s to 62.6 s — the eight-or-so `read()`/`project()` calls per round are a much smaller share
+of a real sweep's time than the branch pass's per-copy calls are, which the micro-benchmark above
+measures in isolation.
+
 ## Before pushing
 
 ```bash

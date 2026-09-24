@@ -70,10 +70,57 @@ export interface LedgerState {
 }
 
 /**
+ * The last fold this process computed for a given events array, so a second
+ * `project()` call over the same `Ledger.read()` result does not redo it.
+ *
+ * Keyed by the array's own identity (a `WeakMap`, so a projected-away events
+ * array is not held alive by this cache) and its length, matching how
+ * `Ledger.append()` keeps its cached array — same identity, longer — rather
+ * than handing out a new one. A length change is the cheap, sufficient proxy
+ * for "the content changed" here: nothing under `src/` mutates an events array
+ * in place (`ledger/log.ts` only ever pushes), so identity plus length is as
+ * good a fingerprint as hashing the contents, for a fraction of the cost.
+ */
+const foldCache = new WeakMap<LedgerEvent[], { length: number; state: LedgerState }>();
+
+/**
  * Current state is a pure fold over the event log — there is no mutable record to
- * drift out of sync with the file.
+ * drift out of sync with the file. `project()` itself is the cached, public
+ * entry point: it returns a fresh shallow copy of a memoized fold, never the
+ * fold's own Maps. `fosterSessions` (`engine/executor.ts`) and
+ * `identifyHeldAccounts` (`cli/index.ts`) both delete/set entries on the state
+ * they get back mid-run, to reconcile it against what they are about to write —
+ * sound when every call got its own brand-new Maps, which is what this
+ * preserves even though the expensive fold underneath now runs once per
+ * distinct array rather than once per call.
  */
 export function project(events: LedgerEvent[]): LedgerState {
+  const cached = foldCache.get(events);
+  if (cached && cached.length === events.length) return cloneState(cached.state);
+
+  const state = foldEvents(events);
+  foldCache.set(events, { length: events.length, state });
+  return cloneState(state);
+}
+
+/** Shallow copy: same entries, Maps (and the one nested object) a caller owns. */
+function cloneState(state: LedgerState): LedgerState {
+  return {
+    active: new Map(state.active),
+    labels: new Map(state.labels),
+    identities: new Map(state.identities),
+    repointed: new Map(state.repointed),
+    retitled: new Map(state.retitled),
+    dated: new Map(state.dated),
+    worktreeReleased: new Map(state.worktreeReleased),
+    imported: new Map(state.imported),
+    profiles: new Map(state.profiles),
+    clientRoots: new Map(state.clientRoots),
+    ...(state.handlerArmed ? { handlerArmed: { ...state.handlerArmed } } : {}),
+  };
+}
+
+function foldEvents(events: LedgerEvent[]): LedgerState {
   const active = new Map<string, ActiveFostering>();
   const labels = new Map<string, string>();
   const identities = new Map<string, KnownIdentity>();

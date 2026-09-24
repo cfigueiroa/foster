@@ -1,11 +1,11 @@
-import { appendFileSync, mkdtempSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { comparablePath } from '../src/domain/paths.js';
 import { Ledger } from '../src/ledger/log.js';
 import { isFostered, listActive, project, selectByTarget } from '../src/ledger/project.js';
-import type { ActiveFostering } from '../src/ledger/types.js';
+import type { ActiveFostering, LedgerEvent } from '../src/ledger/types.js';
 import type { AccountRef } from '../src/domain/types.js';
 import { NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
 
@@ -78,6 +78,101 @@ describe('Ledger', () => {
     expect(events).toHaveLength(2);
     expect(events.map((event) => event.kind)).toEqual(['fostered', 'fostered']);
   });
+
+  describe('caching', () => {
+    it('rereads on the first call and reuses the cache while the file is unchanged', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+
+      const first = ledger.read();
+      // Same array reference, not merely an equal one — the identity is what
+      // lets project() (ledger/project.ts) memoize its own fold over it.
+      expect(ledger.read()).toBe(first);
+    });
+
+    it('rereads once the file changes underneath it', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const first = ledger.read();
+
+      // Written directly, bypassing this instance's own append — the way a
+      // second `foster` process, or a hand edit, would change the file.
+      appendFileSync(
+        ledger.path,
+        `${JSON.stringify({
+          ...fostered,
+          v: 1,
+          ts: 2,
+          toolVersion: '0.1.0',
+          originSessionId: 'local_origin-2',
+          copySessionId: 'local_copy-2',
+        })}\n`,
+        'utf8',
+      );
+
+      const second = ledger.read();
+      expect(second).not.toBe(first);
+      expect(second).toHaveLength(2);
+    });
+
+    it('grows the cached array in place on append, instead of dropping it', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const first = ledger.read();
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const second = ledger.read();
+      expect(second).toBe(first);
+      expect(second).toHaveLength(2);
+    });
+
+    it('fixes a missing trailing newline before its first append, so a torn line does not glue to the next event', () => {
+      const ledger = makeLedger();
+      // A ledger left without a trailing newline — the shape a killed process or
+      // power loss leaves, whether or not the last line's JSON is itself intact.
+      // Written directly: this is damage from outside this instance, not
+      // something its own append ever produces on its own.
+      writeFileSync(
+        ledger.path,
+        JSON.stringify({ ...fostered, v: 1, ts: 1, toolVersion: '0.1.0' }),
+        'utf8',
+      );
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const events = ledger.read();
+      expect(events).toHaveLength(2);
+      expect(
+        events.map((event) => (event as { originSessionId?: string }).originSessionId),
+      ).toEqual(['local_origin-1', 'local_origin-2']);
+    });
+
+    it('does not touch a file that already ends in a newline', () => {
+      const ledger = makeLedger();
+      ledger.append(fostered);
+      const before = ledger.read();
+      expect(before).toHaveLength(1);
+
+      ledger.append({
+        ...fostered,
+        originSessionId: 'local_origin-2',
+        copySessionId: 'local_copy-2',
+      });
+
+      const after = ledger.read();
+      expect(after).toHaveLength(2);
+      expect(after[0]).toMatchObject({ originSessionId: 'local_origin-1' });
+    });
+  });
 });
 
 describe('projection', () => {
@@ -86,6 +181,47 @@ describe('projection', () => {
 
     expect(listActive(state)).toHaveLength(1);
     expect(isFostered(state, 'local_origin-1', NEW_ACCOUNT)).toBe(true);
+  });
+
+  /**
+   * `project()` memoizes its fold over a given events array (identity + length)
+   * so a sweep's many `project(ledger.read())` calls over an unchanged ledger
+   * redo the fold once. `fosterSessions` (engine/executor.ts) and
+   * `identifyHeldAccounts` (cli/index.ts) both mutate the state they get back —
+   * deleting a reconciled fostering, adding a newly-seen identity — to keep a
+   * single run's own view current as it goes. Memoizing without defending
+   * against that would leak one call's mutation into the next call's state
+   * whenever the two share a cache entry (no ledger write in between), which is
+   * exactly the dry-run-batch shape those two callers run in.
+   */
+  it('does not leak a mutation of the returned state into a later call over the same events', () => {
+    const events: LedgerEvent[] = [{ ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' }];
+
+    const first = project(events);
+    expect(listActive(first)).toHaveLength(1);
+    first.active.clear();
+    expect(listActive(first)).toHaveLength(0);
+
+    // A second call over the identical array — the shape `Ledger.read()`
+    // produces when nothing has appended in between — must not see the clear
+    // above: each caller gets its own Maps to do with as it pleases.
+    const second = project(events);
+    expect(listActive(second)).toHaveLength(1);
+  });
+
+  it('still reflects a growing array after the cached fold is invalidated by length', () => {
+    const events: LedgerEvent[] = [{ ...fostered, v: 1, ts: 10, toolVersion: '0.1.0' }];
+    expect(listActive(project(events))).toHaveLength(1);
+
+    events.push({
+      ...fostered,
+      v: 1,
+      ts: 20,
+      toolVersion: '0.1.0',
+      originSessionId: 'local_origin-2',
+      copySessionId: 'local_copy-2',
+    });
+    expect(listActive(project(events))).toHaveLength(2);
   });
 
   it('removes it again on return', () => {
