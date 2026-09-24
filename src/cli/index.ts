@@ -5707,8 +5707,12 @@ program
   });
 
 function printWhere(report: WhereReport): void {
+  // `report.rows` is in card-discovery order, not sorted by the election
+  // measure — the clean/canonical title is `working.title`, the row this
+  // report elects to continue in (shown again below under "Continue in:").
+  // Falling back to the first-discovered row only when nothing was elected.
   console.log(
-    pc.bold(`${report.rows[0]?.title ?? '(untitled)'}`) +
+    pc.bold(`${report.working?.title ?? report.rows[0]?.title ?? '(untitled)'}`) +
       pc.dim(`  (${shortId(report.cliSessionId)})`),
   );
   if (report.family.length > 1) {

@@ -85,7 +85,14 @@ export function provePlan(
   const gaps: ProveGap[] = [];
   const neverFosterable: ProveNeverFosterable[] = [];
 
-  for (const [id, cards] of byId) {
+  for (const [, cards] of byId) {
+    // `Lineage`'s transcript index is keyed by the exact filename on disk
+    // (`indexAllTranscripts`), an exact-match lookup with no case folding —
+    // unlike the grouping key above. An original-case id, taken from an
+    // actual card the same way `fileCards.ts`'s `groupByConversation` does,
+    // is what `scanOf`/`reachOf` need; the lowercased key would silently
+    // fail to find the transcript for any id that is not already all-lower.
+    const id = cards[0]!.data.cliSessionId!;
     const scan = kin.scanOf(id);
     if (scan === undefined || scan.uuids.size === 0) continue;
     const total = scan.uuids.size;

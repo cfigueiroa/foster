@@ -130,6 +130,51 @@ describe('provePlan', () => {
     ]);
   });
 
+  it('reports a gap for a conversation whose cliSessionId is not already lowercase', () => {
+    // Regression for the grouping key (`id.toLowerCase()`) being passed to
+    // `kin.scanOf`/`reachOf` instead of an original-case id taken from a card
+    // — see `provePlan`'s comment. `Lineage`'s transcript index is an
+    // exact-match lookup keyed by the filename on disk, so a lowercased id
+    // that isn't already all-lower fails to find the transcript, and the old
+    // code's `scan === undefined` guard silently dropped the conversation
+    // from the audit instead of counting it as a gap.
+    const MIXED = CONVERSATION.toUpperCase();
+    const store = makeStore();
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-prove-mixedcase-'));
+
+    transcript(configDir, 'C--work-project', MIXED, [
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec('00000000-0000-4000-8000-0000000000e1', 'assistant', '2026-09-01T20:01:00.000Z'),
+    ]);
+
+    // Only another account holds a card for it; the target holds none at all
+    // — an unambiguous, total gap.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({
+        sessionId: '00000000-0000-4000-8000-0000000000d3',
+        cliSessionId: MIXED,
+        cwd: 'C:\\work\\project',
+        title: 'Work',
+      }),
+    );
+
+    const kin = lineageAt([path.join(configDir, 'projects')]);
+    const cards = listAccountDirs(store).flatMap((account) => scanAccount(store, account));
+    const report = provePlan(cards, NEW_ACCOUNT, kin);
+
+    expect(report.complete).toBe(false);
+    expect(report.gaps).toEqual([
+      expect.objectContaining({
+        cliSessionId: MIXED,
+        totalRecords: 2,
+        reachedByTarget: 0,
+        missing: 2,
+      }),
+    ]);
+  });
+
   it('counts a conversation whose only other card is a scheduled task as never-fosterable, not a gap', () => {
     const store = makeStore();
     const configDir = mkdtempSync(path.join(tmpdir(), 'foster-prove-never-'));
