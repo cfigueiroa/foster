@@ -1,6 +1,8 @@
 import { UNTITLED } from '../domain/fostering.js';
 import { looksMarked, staleMatcher, stampWithin, stripMarks } from '../domain/stale.js';
 import type { DiscoveredSession } from '../domain/types.js';
+import type { LedgerState } from '../ledger/project.js';
+import type { LedgerEvent } from '../ledger/types.js';
 import type { RetitleRequest } from './retitle.js';
 
 /**
@@ -46,6 +48,54 @@ export interface MarkContext {
   archivedByFoster: Set<string>;
   /** True to file the row in the archived view; false to lift foster's own filing. */
   file: boolean;
+}
+
+/**
+ * Copies foster itself filed away, by session id — the only ones a card
+ * turning out to be the row to continue in may be lifted back out of the
+ * archived view for. A flag the user set by hand is the user's, whatever this
+ * pass now thinks of the row.
+ *
+ * `branchCards.ts` and `fileCards.ts` computed this identically side by side;
+ * shared here so the two cannot drift.
+ */
+export function archivedByFosterIds(state: LedgerState): Set<string> {
+  const ids = new Set<string>();
+  for (const fostering of state.active.values()) {
+    if (fostering.archivedByFoster) ids.add(fostering.copySessionId);
+  }
+  for (const card of state.retitled.values()) {
+    if (card.toArchived) ids.add(card.sessionId);
+  }
+  return ids;
+}
+
+/**
+ * The last `as` the ledger recorded for each session id — last entry wins,
+ * because the marking passes undo each other's marks by design: a row marked
+ * stale that turns out to be the branch that carried on is written back as
+ * `tip`, and after that it is nobody's but that pass's again.
+ *
+ * A copy `branchCards.ts` brings in already wearing a mark is folded in as
+ * `stale` too — it was born on the losing side of a fork just as much as a
+ * card rewritten in place, and `fileCards.ts`'s own reading of "which rows
+ * has the branch pass already spoken for" needs to see it the same way.
+ *
+ * `branchCards.ts` and `fileCards.ts` each built this fold themselves, one
+ * reading `card_retitled` alone and the other adding `fostered`; the same map
+ * answers both, and each caller keeps only the `as` values that are its own
+ * to answer for.
+ */
+export function lastMarkedAs(events: readonly LedgerEvent[]): Map<string, string> {
+  const last = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind === 'fostered' && event.template !== undefined) {
+      last.set(event.copySessionId, 'stale');
+    } else if (event.kind === 'card_retitled') {
+      last.set(event.sessionId, event.as);
+    }
+  }
+  return last;
 }
 
 export function markFor(card: DiscoveredSession, context: MarkContext): MarkDecision {

@@ -7,7 +7,7 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { fileOpenedFrom, type ConversationScan } from '../store/transcripts.js';
 import { weighScans, type ScanWeight } from './branches.js';
 import type { Lineage } from './lineage.js';
-import { markFor, UNKNOWN_MARK_DETAIL } from './marks.js';
+import { archivedByFosterIds, lastMarkedAs, markFor, UNKNOWN_MARK_DETAIL } from './marks.js';
 import { retitleCards, type RetitleOutcome, type RetitleRequest } from './retitle.js';
 
 /**
@@ -103,13 +103,7 @@ export function planFileCards(input: FilePlanInput): FilePlan[] {
 
   // Cards foster itself filed away. Only those are lifted back out when the row
   // turns out to be the one to continue in: a flag the user set is the user's.
-  const archivedByFoster = new Set<string>();
-  for (const fostering of state.active.values()) {
-    if (fostering.archivedByFoster) archivedByFoster.add(fostering.copySessionId);
-  }
-  for (const card of state.retitled.values()) {
-    if (card.toArchived) archivedByFoster.add(card.sessionId);
-  }
+  const archivedByFoster = archivedByFosterIds(state);
 
   const branchDecided = branchMarkedIds(events);
   const plans: FilePlan[] = [];
@@ -271,9 +265,13 @@ export function applyFileCards(
  * The last *answer*, never the last record: opening a row appends a user record
  * with today's timestamp and no answer after it, so a row that was merely
  * clicked would otherwise outrank the one that was worked in — the same trap
- * `branches.ts` documents for mtime. Ties fall back to what a row holds that no
- * other file of the conversation holds, then to sheer size, then to the id, so
- * the answer never depends on which card the scan listed first.
+ * `branches.ts` documents for mtime. Ties fall back to `only` — what a row
+ * holds that no other file of the conversation holds — before `lastMessageAt`,
+ * on purpose: a mere click changes `lastMessageAt` (that is the whole reason
+ * `lastAssistantAt` is asked first), so a tied election that fell back to it
+ * would flip the moment somebody opened the row this pass had just filed away.
+ * `only` does not move on a click. After that, sheer size, then the id, so the
+ * answer never depends on which card the scan listed first.
  */
 function byContinuation(
   a: ScanWeight,
@@ -283,35 +281,21 @@ function byContinuation(
 ): number {
   const answered = (b.lastAssistantAt ?? 0) - (a.lastAssistantAt ?? 0);
   if (answered !== 0) return answered;
+  if (a.only !== b.only) return b.only - a.only;
   const said = (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0);
   if (said !== 0) return said;
-  if (a.only !== b.only) return b.only - a.only;
   if (a.total !== b.total) return b.total - a.total;
   return cardA.data.sessionId.localeCompare(cardB.data.sessionId);
 }
 
 /**
- * Cards whose title the branch pass is responsible for, by the last thing the
- * ledger says was written to them.
- *
- * The last entry wins because the passes undo each other's marks by design: a
- * row marked stale that turns out to be the branch that carried on is written
- * back as `tip`, and after that it is nobody's but this pass's again.
+ * Cards whose title the branch pass is responsible for. `lastMarkedAs`
+ * (`marks.ts`) does the fold this pass and `branchCards.ts` used to each do
+ * their own way; this keeps only the `as` values that are the branch pass's.
  */
 function branchMarkedIds(events: readonly LedgerEvent[]): Set<string> {
-  const last = new Map<string, string>();
-  for (const event of events) {
-    // A copy the branch pass brought in already wearing a mark is just as much
-    // its decision as a card it rewrote in place — it was born on the losing
-    // side of a fork, and nothing here should say otherwise.
-    if (event.kind === 'fostered' && event.template !== undefined) {
-      last.set(event.copySessionId, 'stale');
-    } else if (event.kind === 'card_retitled') {
-      last.set(event.sessionId, event.as);
-    }
-  }
   const ids = new Set<string>();
-  for (const [id, as] of last) if (as === 'stale' || as === 'diverged') ids.add(id);
+  for (const [id, as] of lastMarkedAs(events)) if (as === 'stale' || as === 'diverged') ids.add(id);
   return ids;
 }
 
