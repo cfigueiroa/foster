@@ -1,6 +1,7 @@
 import { createCipheriv, randomBytes } from 'node:crypto';
+import { inspect } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { decryptOsCrypt, pickToken } from '../src/store/credential.js';
+import { decryptOsCrypt, pickToken, redactOAuthToken } from '../src/store/credential.js';
 
 /** Builds a Chromium `v10` blob the way the app stores one, for a round-trip. */
 function sealV10(plaintext: string, key: Buffer): Buffer {
@@ -60,5 +61,35 @@ describe('pickToken', () => {
   it('is undefined when no entry has a token', () => {
     expect(pickToken({ [profileOnly]: { refreshToken: 'r' } })).toBeUndefined();
     expect(pickToken({})).toBeUndefined();
+  });
+
+  it('never prints the bearer token via JSON.stringify or console.log/util.inspect', () => {
+    const token = pickToken({ [profileOnly]: { token: 'super-secret-bearer' } });
+    expect(token).toBeDefined();
+
+    expect(JSON.stringify(token)).toBe('"[credential]"');
+    expect(JSON.stringify({ auth: token })).toBe('{"auth":"[credential]"}');
+    expect(inspect(token)).toBe('[credential]');
+    expect(inspect(token)).not.toContain('super-secret-bearer');
+  });
+});
+
+describe('redactOAuthToken', () => {
+  it('makes a bare token object refuse to serialise, without hiding its own fields', () => {
+    const token = redactOAuthToken({ token: 'bearer-xyz', organizationUuid: 'org-1' });
+
+    expect(token.token).toBe('bearer-xyz');
+    expect(token.organizationUuid).toBe('org-1');
+    expect(JSON.stringify(token)).toBe('"[credential]"');
+    expect(inspect(token)).toBe('[credential]');
+    expect(inspect(token)).not.toContain('bearer-xyz');
+  });
+
+  it('is defensive against a caller that never wires it up: a bare object stays a plain OAuthToken', () => {
+    // The interface's toJSON/[inspect.custom] are optional precisely so this
+    // compiles — a fixture like `usage.test.ts`'s AUTH constant is still a
+    // valid OAuthToken without ever calling redactOAuthToken.
+    const bare = { token: 'bearer-xyz' };
+    expect(JSON.stringify(bare)).toBe('{"token":"bearer-xyz"}');
   });
 });

@@ -1,10 +1,13 @@
 import pc from 'picocolors';
-import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { loadAgentSdk } from './sdk.js';
 import { buildServer, SERVER_NAME } from './server.js';
 import type { AgentToolContext } from './tools.js';
+
+/** Read-only built-ins kept in reach either way — the same trio a gated run falls back to. */
+const READ_ONLY_BUILTINS = ['Read', 'Glob', 'Grep'];
 
 /**
  * `foster agent` — one task, one headless Claude run, foster's operations as
@@ -70,6 +73,65 @@ You also have Claude Code's general tools. Two rules about them:
 Report counts and outcomes plainly, and quote session titles rather than raw uuids when both are
 available.`;
 
+/**
+ * The tool-related half of the query options — split out so it can be built,
+ * and inspected, without loading the Agent SDK or spawning a model.
+ *
+ * Two shapes, chosen by the same switch the CLI has: --yes.
+ *
+ * Without it, `tools` stays the full Claude Code preset and `permissionMode`
+ * is `'default'` — headless 'default' auto-denies every tool that would have
+ * asked (Bash, edits, web; there is no terminal to ask in), so a read-only run
+ * is read-only because nothing risky is ever approved, not because it was
+ * never offered. That is today's behaviour, kept exactly: a run that only
+ * ever wanted to read still sees the whole toolset and picks what it needs.
+ *
+ * With it, `permissionMode: 'bypassPermissions'` removes that layer — every
+ * tool call is approved without being asked — so the toolset itself has to be
+ * the gate instead: `tools` is trimmed to the read-only builtins (no Bash, no
+ * Write/Edit, no WebFetch/WebSearch), and `allowedTools` to that plus the
+ * foster MCP tools, which is what --yes is actually for. `canUseTool` is a
+ * second, independent gate on top of the trimmed toolset rather than a
+ * replacement for it — it denies any call whose name did not make the
+ * allowlist, which catches a tool the harness resolves some other way (a
+ * toolAlias, a name this build of the SDK adds later) that `tools` alone
+ * would not have kept out.
+ */
+export function buildToolOptions(
+  fosterTools: string[],
+  allowWrites: boolean,
+): Pick<
+  Options,
+  'tools' | 'allowedTools' | 'permissionMode' | 'allowDangerouslySkipPermissions' | 'canUseTool'
+> {
+  const allowedTools = [...fosterTools, ...READ_ONLY_BUILTINS];
+
+  if (!allowWrites) {
+    return {
+      tools: { type: 'preset', preset: 'claude_code' },
+      allowedTools,
+      permissionMode: 'default',
+    };
+  }
+
+  return {
+    tools: [...READ_ONLY_BUILTINS],
+    allowedTools,
+    permissionMode: 'bypassPermissions',
+    allowDangerouslySkipPermissions: true,
+    canUseTool: denyOutsideAllowlist(allowedTools),
+  };
+}
+
+/** Denies any tool call whose name is not in `allowed` — see `buildToolOptions`. */
+export function denyOutsideAllowlist(allowed: string[]): CanUseTool {
+  const allowedSet = new Set(allowed);
+  return async (toolName, input) =>
+    allowedSet.has(toolName)
+      ? { behavior: 'allow', updatedInput: input }
+      : { behavior: 'deny', message: `${toolName} is not available to foster agent --yes.` };
+}
+
 /** Runs the task and returns the process exit code. */
 export async function runAgent(options: AgentRunOptions): Promise<number> {
   const sdk = await loadAgentSdk();
@@ -83,21 +145,7 @@ export async function runAgent(options: AgentRunOptions): Promise<number> {
 
   const queryOptions: Options = {
     mcpServers: { [SERVER_NAME]: server },
-    // The full Claude Code toolset, deliberately: the session-management server
-    // covers the store, and everything else — shell, files, web — is there for
-    // whatever the task turns out to need. What keeps this honest is the
-    // permission layer below, not a trimmed tool list.
-    tools: { type: 'preset', preset: 'claude_code' },
-    // The foster tools never prompt, and the read-only trio works even in a
-    // gated run — reading is what a dry run is for.
-    allowedTools: [...allowedTools, 'Read', 'Glob', 'Grep'],
-    // One switch decides writing, and it is the same one the CLI has: --yes.
-    // Without it, headless 'default' mode auto-denies every tool that would
-    // have asked (Bash, edits, web) — there is no terminal to ask in — and the
-    // foster tools stay dry runs via their own gate. With it, everything runs.
-    ...(options.allowWrites
-      ? { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }
-      : { permissionMode: 'default' as const }),
+    ...buildToolOptions(allowedTools, options.allowWrites),
     systemPrompt: { type: 'preset', preset: 'claude_code', append: SYSTEM_PROMPT },
     maxTurns: options.maxTurns ?? 50,
     ...(options.model ? { model: options.model } : {}),

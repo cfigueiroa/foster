@@ -41,14 +41,19 @@ export function buildServer(sdk: AgentSdkModule, ctx: AgentToolContext): BuiltSe
     content: [{ type: 'text' as const, text: errorMessage(error) }],
     isError: true,
   });
-  /** Handlers throw plain Errors; the model gets the message, not a stack. */
+  /**
+   * Handlers throw plain Errors; the model gets the message, not a stack.
+   * Always awaited: every handler here is synchronous but `resume_headless`
+   * is not (it spawns the CLI), and `await` on a plain value resolves
+   * immediately, so one wrapper covers both without the sync ones noticing.
+   */
   const wrap =
     <A>(handler: (args: A) => unknown) =>
-    (args: A) => {
+    async (args: A) => {
       try {
-        return Promise.resolve(respond(handler(args)));
+        return respond(await handler(args));
       } catch (error) {
-        return Promise.resolve(refuse(error));
+        return refuse(error);
       }
     };
 

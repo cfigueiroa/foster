@@ -14,7 +14,7 @@ import {
   type LiveCliSession,
   type WriterCheck,
 } from '../store/liveSessions.js';
-import type { OAuthToken } from '../store/credential.js';
+import { redactOAuthToken, type OAuthToken } from '../store/credential.js';
 import { fetchLiveProfile } from './anthropicApi.js';
 import { currentCredential, rememberCredential } from './vault.js';
 
@@ -112,10 +112,10 @@ export function asOAuthToken(credential: CliCredential): OAuthToken | undefined 
   if (!token) return undefined;
 
   const expiresAtMs = credential.oauth?.expiresAt;
-  return {
+  return redactOAuthToken({
     token,
     ...(typeof expiresAtMs === 'number' ? { expiresAt: Math.floor(expiresAtMs / 1000) } : {}),
-  };
+  });
 }
 
 /**

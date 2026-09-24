@@ -40,3 +40,21 @@ export interface AccountProfile {
   cardBrand?: string;
   cardLast4?: string;
 }
+
+/**
+ * `AccountProfile`, minus the card. What the ledger's `account_identity_seen`
+ * event records going forward (agent-safety package, 24/09/2026) — see
+ * AGENTS.md, "The ledger's `account_identity_seen`: what it holds". Identity
+ * matching (which account this is, and label/plan display) never needed the
+ * card brand or its last four digits; an append-only log with no expiry is
+ * not where they belong. Existing ledger lines are not rewritten — the log
+ * stays append-only — so an account sighted before this shipped can still
+ * show a card until a fresh sighting supersedes that field
+ * (`ledger/project.ts` merges `profile` field by field).
+ */
+export function forLedger(profile: AccountProfile): AccountProfile {
+  const copy = { ...profile };
+  delete copy.cardBrand;
+  delete copy.cardLast4;
+  return copy;
+}

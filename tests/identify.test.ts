@@ -12,7 +12,12 @@ import type { StoreLayout } from '../src/domain/types.js';
  * feature is that identifying an account persists it the way a sign-in would.
  * The API is keyed by token so a wrong key is a wrong account, not a failure.
  */
-vi.mock('../src/store/credential.js', () => ({ readAccessToken: vi.fn() }));
+vi.mock('../src/store/credential.js', () => ({
+  readAccessToken: vi.fn(),
+  // switch.ts's asOAuthToken calls this for real; identity here keeps the
+  // synthetic tokens in these tests exactly the objects the test wrote.
+  redactOAuthToken: (token: unknown) => token,
+}));
 vi.mock('../src/store/clients.js', () => ({ listClients: vi.fn(() => []) }));
 vi.mock('../src/store/cliCredential.js', () => ({ readCliCredential: vi.fn() }));
 vi.mock('../src/engine/vault.js', () => ({

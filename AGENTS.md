@@ -37,6 +37,31 @@ only the latest root for it. `ui.json` and `update-check.json` stay the only oth
 under `~/.foster`, and neither is a registry — preference and an update-check cache, not a record
 of writes.
 
+## The ledger's `account_identity_seen`: what it holds
+
+Four top-level fields — `accountUuid`, `email`, `name`, `plan` — plus a nested `profile`
+(`AccountProfile`, `domain/profile.ts`) carrying whatever else the app's response cache or a
+live API answer said: organization, subscription status, the raw rate-limit tier, the renewal
+and plan-ending dates, currency, billing interval. All of it exists to answer one question —
+whose account this is, and what it is worth checking `usage`/`renewals` against — for an
+account you are not signed into right now, which is the only reason anything is written down at
+all (see "The human name behind an account UUID" in `store/identity.ts`).
+
+What it does **not** hold, since the agent-safety package (24/09/2026): the card brand and last
+four digits (`AccountProfile.cardBrand`/`cardLast4`). `forLedger` (`domain/profile.ts`) strips
+both before every write, and every place that writes `account_identity_seen` —
+`cli/flows.ts`'s `labelAccount`, the two sightings in `cli/index.ts` (`whoami`,
+`recordCurrentIdentity`), and `cli/screens.ts`'s `recordFreshIdentity` — goes through
+`forLedgerSighting` (`domain/identity.ts`) rather than calling `forLedger` on the profile alone,
+so the "is this worth writing" check (`worthRecording`, `store/identity.ts`) and the write
+itself agree on the same card-free shape. Comparing a fresh cache read (which still has the
+card) against an already-stripped ledger record would otherwise look like a change on every
+single run — the exact log-spam `worthRecording` exists to prevent. Nothing here needed the
+card: identity matching runs on `accountUuid`, never on billing detail. Existing lines from
+before this shipped are not rewritten — the ledger stays append-only — so an account sighted
+earlier can still show a card in `foster accounts`/`whoami` until a fresh sighting supersedes
+that one field (`ledger/project.ts` merges `profile` field by field, not wholesale).
+
 ## `--store <name>`: resolution order, and what it now reaches
 
 Four sources feed `foster stores` / `foster clients`: the installed app, whatever is running,
@@ -557,6 +582,36 @@ resume prompt. Two facts that save wasted turns (both measured on a live store):
 reach for on "bring everything here": `foster_sessions` leaves archived sessions behind and
 cannot reach deleted conversations at all. **`consolidate`, `purge` and `live` are not among
 them** — `purge` is excluded on purpose and must not be reached through the shell either.
+
+`--yes` used to loosen more than the mutation gate on those ten tools. Before the agent-safety
+package (24/09/2026), a run started with `--yes` still got the full Claude Code built-in
+toolset — Bash included — with `permissionMode: 'bypassPermissions'` the only thing between the
+model and the machine, and the system prompt's own "never run this through the shell" rules
+(`purge`, `switch`, `vault`, …) the only thing standing between a task and one of them run
+directly, plus `read_transcript` feeding arbitrary transcript text into context as a
+prompt-injection surface. `buildToolOptions` (`agent/run.ts`) now makes `--yes` narrower than
+that: `tools` drops from the full preset to `['Read', 'Glob', 'Grep']`, so Bash, Write, Edit,
+WebFetch and WebSearch are never offered to the model at all, and a `canUseTool` denies any call
+whose name is not one of those three or one of the ten foster MCP tools — a second, independent
+gate on top of the trimmed toolset, not a replacement for it, in case something resolves a tool
+name outside `tools` some other way. Without `--yes`, none of this changed: the full preset
+stays, `permissionMode: 'default'` auto-denies whatever would have asked (headless, there is no
+terminal to ask in), and that auto-deny is what keeps a read-only run read-only, same as before.
+
+`resume_headless` (and `foster resume`, which shares the same engine, `engine/resume.ts`) no
+longer risks leaving a second writer on a transcript after a timeout. Measured: the previous
+implementation ran `claude -p --resume` through `execFileSync` with `shell: true` — required on
+Windows, where the CLI resolves through a `.cmd` shim that Node refuses to spawn directly — and
+its own `timeout` option. That timeout's kill signal reached only the process Node started
+directly, `cmd.exe`; `cmd.exe` never forwarded it to the `claude` process it had gone on to
+start, which kept writing to the transcript after the caller believed the run was over — a
+second writer, exactly what this module exists to prevent. `runClaudeResume` now uses an async
+`spawn` and a timer the function owns: on timeout it runs `taskkill /PID <pid> /T /F` against
+the pid `spawn()` itself returned, `/T` walking down to every process that shell went on to
+start, `claude` included, and never touching a pid the call did not spawn itself. The spawned
+process's environment is `scrubbedEnv` (`engine/launchEnv.ts`) now too — it was inherited
+unscrubbed before, so a resume run from inside a hosted session could start `claude` believing
+itself hosted (see "A launched Claude.exe never inherits foster's own `CLAUDE*` env" above).
 
 ## The registry has two views
 

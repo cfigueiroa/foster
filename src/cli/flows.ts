@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import { isCancel, type Ui } from '../tui/ui.js';
 import { DEFAULT_PREFIX, EXAMPLE_PREFIX } from '../domain/fostering.js';
+import { forLedgerSighting } from '../domain/identity.js';
 import { listAccountDirs, samePath } from '../domain/paths.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import {
@@ -127,14 +128,15 @@ export async function labelAccount(
   // unrecorded is exactly the one the ledger cannot offer after the switch,
   // when the cache describes the new account and this screen is asked about
   // the old one.
-  if (cached && worthRecording(cached, remembered)) {
+  const toRecord = cached ? forLedgerSighting(cached) : undefined;
+  if (toRecord && worthRecording(toRecord, remembered)) {
     ledger.append({
       kind: 'account_identity_seen',
       accountUuid: picked,
-      ...(cached.email ? { email: cached.email } : {}),
-      ...(cached.name ? { name: cached.name } : {}),
-      ...(cached.plan ? { plan: cached.plan } : {}),
-      ...(cached.profile ? { profile: cached.profile } : {}),
+      ...(toRecord.email ? { email: toRecord.email } : {}),
+      ...(toRecord.name ? { name: toRecord.name } : {}),
+      ...(toRecord.plan ? { plan: toRecord.plan } : {}),
+      ...(toRecord.profile ? { profile: toRecord.profile } : {}),
     });
   }
 

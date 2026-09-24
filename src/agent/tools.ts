@@ -524,7 +524,10 @@ export interface ResumeHeadlessArgs {
 
 const RESUME_TIMEOUT_DEFAULT = 300;
 
-export function resumeHeadless(ctx: AgentToolContext, args: ResumeHeadlessArgs): unknown {
+export async function resumeHeadless(
+  ctx: AgentToolContext,
+  args: ResumeHeadlessArgs,
+): Promise<unknown> {
   // Resuming appends to the conversation's transcript, so it is a write and sits
   // behind the same switch as the store mutations. The live-writer gate itself
   // lives in the engine, shared with the `foster resume` command.

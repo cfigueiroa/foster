@@ -1,5 +1,6 @@
 import pc from 'picocolors';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
+import { forLedgerSighting } from '../domain/identity.js';
 import { listAccountDirs, samePath, storeRootOfCopy } from '../domain/paths.js';
 import { continuedSince } from '../engine/continued.js';
 import { fetchLiveProfile, fetchLiveUsage } from '../engine/anthropicApi.js';
@@ -101,7 +102,7 @@ export function showAccounts(ui: Ui, store: StoreLayout, ledger: Ledger, target:
  */
 function recordFreshIdentity(rows: AccountOverview[], ledger: Ledger): void {
   const fresh = freshIdentityOf(rows);
-  const identity = fresh?.identity;
+  const identity = fresh?.identity ? forLedgerSighting(fresh.identity) : undefined;
   if (
     fresh &&
     identity &&

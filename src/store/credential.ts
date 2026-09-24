@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createDecipheriv } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { inspect } from 'node:util';
 import type { StoreLayout } from '../domain/types.js';
 
 /**
@@ -46,6 +47,29 @@ export interface OAuthToken {
   subscriptionType?: string;
   /** The raw tier beside the token — "default_claude_max_20x". */
   rateLimitTier?: string;
+  /**
+   * Deliberately unserialisable, the same defence `CliCredential` carries
+   * (`cliCredential.ts`) — see `redactOAuthToken` below. Optional on the
+   * interface so a value built without it (a test fixture, a caller that has
+   * not been updated) still satisfies the type; it is what every real
+   * `OAuthToken` this module hands out actually carries.
+   */
+  toJSON?(): string;
+  [inspect.custom]?(): string;
+}
+
+/**
+ * Attaches the same `JSON.stringify` / `util.inspect` redaction `CliCredential`
+ * carries. An `OAuthToken` was a plain object without it — a live bearer token
+ * that would print itself in full through a stray `console.log`, an unhandled
+ * rejection, or a `--json` path that serialises whatever it is handed. Called
+ * at every place this module builds one; non-enumerable so the redaction
+ * methods themselves do not show up as fields on the object.
+ */
+export function redactOAuthToken<T extends OAuthToken>(data: T): T {
+  Object.defineProperty(data, 'toJSON', { value: () => '[credential]', enumerable: false });
+  Object.defineProperty(data, inspect.custom, { value: () => '[credential]', enumerable: false });
+  return data;
 }
 
 /** A single entry in the token cache, keyed by client, org, audience and scopes. */
@@ -109,13 +133,13 @@ export function pickToken(cache: Record<string, TokenCacheEntry>): OAuthToken | 
 
   const chosen = scored[0]!;
   const organizationUuid = chosen.key.split(':')[1];
-  return {
+  return redactOAuthToken({
     token: chosen.value.token!,
     ...(organizationUuid ? { organizationUuid } : {}),
     ...(typeof chosen.value.expiresAt === 'number' ? { expiresAt: chosen.value.expiresAt } : {}),
     ...(chosen.value.subscriptionType ? { subscriptionType: chosen.value.subscriptionType } : {}),
     ...(chosen.value.rateLimitTier ? { rateLimitTier: chosen.value.rateLimitTier } : {}),
-  };
+  });
 }
 
 /**
