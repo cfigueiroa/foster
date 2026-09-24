@@ -11,7 +11,7 @@ import {
   parseParameters,
   parseRegistryReadOutput,
   parseSubkeyNames,
-  planLogin,
+  planLogin as planLoginWithRealReaders,
   registryReadScript,
   restoreHandler,
   runLogin,
@@ -24,6 +24,10 @@ import { project } from '../src/ledger/project.js';
 import type { LedgerEvent, LedgerEventInput } from '../src/ledger/types.js';
 import type { StoreLayout } from '../src/domain/types.js';
 import type { ProcessRow } from '../src/engine/desktop.js';
+
+/** planLogin without the real `Get-AppxPackage` query, which is slow enough on CI to time a test out. */
+const planLogin: typeof planLoginWithRealReaders = (store, opts) =>
+  planLoginWithRealReaders(store, { packageInstallLocation: () => undefined, ...opts });
 
 // Not a real machine identifier (this repo is public) — the same shape
 // measured on 05/09/2026: a Package Family Name followed by its application.

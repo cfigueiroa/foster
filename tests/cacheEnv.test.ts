@@ -7,7 +7,9 @@ import { openFosterCache } from '../src/store/cache/index.js';
 
 describe('defaultCacheDir', () => {
   it('sits under FOSTER_HOME, next to the ledger, not inside it', () => {
-    expect(defaultCacheDir({ FOSTER_HOME: 'C:\\fake\\home' })).toBe('C:\\fake\\home\\cache');
+    expect(defaultCacheDir({ FOSTER_HOME: 'C:\\fake\\home' })).toBe(
+      path.join('C:\\fake\\home', 'cache'),
+    );
   });
 });
 

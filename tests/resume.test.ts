@@ -191,31 +191,34 @@ describe('resumeConversation — the default runner (spawn mocked, never the rea
     await expect(promise).rejects.toThrow(/not signed in/);
   });
 
-  it('on timeout, kills the whole tree via taskkill on the spawned pid, and never resolves', async () => {
-    vi.useFakeTimers();
-    const child = new FakeChild();
-    spawnMock.mockReturnValue(child);
+  it.skipIf(process.platform !== 'win32')(
+    'on timeout, kills the whole tree via taskkill on the spawned pid, and never resolves',
+    async () => {
+      vi.useFakeTimers();
+      const child = new FakeChild();
+      spawnMock.mockReturnValue(child);
 
-    const promise = resumeConversation(ID, 'hi', {
-      env: { CLAUDE_CONFIG_DIR: mkdtempSync(path.join(tmpdir(), 'foster-resume-idle-')) },
-      timeoutMs: 1_000,
-    });
-    // Let the synchronous setup inside runClaudeResume happen before advancing time.
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(1_000);
+      const promise = resumeConversation(ID, 'hi', {
+        env: { CLAUDE_CONFIG_DIR: mkdtempSync(path.join(tmpdir(), 'foster-resume-idle-')) },
+        timeoutMs: 1_000,
+      });
+      // Let the synchronous setup inside runClaudeResume happen before advancing time.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(execFileSyncMock).toHaveBeenCalledTimes(1);
-    expect(execFileSyncMock).toHaveBeenCalledWith(
-      'taskkill',
-      ['/PID', String(child.pid), '/T', '/F'],
-      expect.objectContaining({ windowsHide: true }),
-    );
+      expect(execFileSyncMock).toHaveBeenCalledTimes(1);
+      expect(execFileSyncMock).toHaveBeenCalledWith(
+        'taskkill',
+        ['/PID', String(child.pid), '/T', '/F'],
+        expect.objectContaining({ windowsHide: true }),
+      );
 
-    // Even a late, post-kill exit from the child must not resolve the run —
-    // the point of the tree kill was that nothing should still be writing.
-    child.emit('close', null, 'SIGTERM');
-    await expect(promise).rejects.toThrow(/did not answer within/);
-  });
+      // Even a late, post-kill exit from the child must not resolve the run —
+      // the point of the tree kill was that nothing should still be writing.
+      child.emit('close', null, 'SIGTERM');
+      await expect(promise).rejects.toThrow(/did not answer within/);
+    },
+  );
 
   it('on a non-Windows platform, kills the spawned pid directly with SIGKILL instead of shelling out to taskkill', async () => {
     // On win32 `spawn` above resolves the `claude` `.cmd` shim through a shell,

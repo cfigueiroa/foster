@@ -585,6 +585,12 @@ export interface PlanLoginOptions {
    * asking about a "running" profile inject this rather than faking the file.
    */
   lockfileHeld?: (store: StoreLayout) => boolean;
+  /**
+   * Injectable: the installed package's install location, which
+   * `desktopExecutable` asks PowerShell for (`Get-AppxPackage`). Tests pass a
+   * stub — on a CI runner that query alone took longer than a test's timeout.
+   */
+  packageInstallLocation?: (familyName: string, env: NodeJS.ProcessEnv) => string | undefined;
 }
 
 /** The name registered for `root`, when there is one — the reverse of `LedgerState.profiles`. */
@@ -734,6 +740,7 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
     progid,
     identity: identityReader,
     lockfileHeld: lockfileHeldReader = lockfileHeldDefault,
+    packageInstallLocation,
   } = opts;
 
   const state = project(events);
@@ -742,7 +749,7 @@ export function planLogin(store: StoreLayout, opts: PlanLoginOptions): LoginPlan
   const running = lockfileHeldReader(store);
   const signedInBefore = config.hasTokenCache === true;
   const spelling = spellingFor(store.root, list);
-  const exe = desktopExecutable(() => undefined, list, env);
+  const exe = desktopExecutable(() => undefined, list, env, packageInstallLocation);
 
   const blockers: string[] = [];
   const warnings: string[] = [];
