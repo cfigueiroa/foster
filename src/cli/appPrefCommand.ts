@@ -1,7 +1,9 @@
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { hostedByDesktop, quitDesktop, startDesktop, trayNote } from '../engine/desktop.js';
+import { hostedByDesktop } from '../engine/desktop.js';
+import { restartCommandFromArgv } from '../engine/detach.js';
 import { inspectApp } from '../engine/safety.js';
+import { restartAround } from '../ops/restart.js';
 import {
   parsePrefValue,
   readAppPrefs,
@@ -130,40 +132,55 @@ export function registerAppPref(
         );
       }
 
-      let closed = false;
-      if (running) {
-        const result = await quitDesktop(store);
-        if (result.outcome === 'needs-terminate' || result.outcome === 'hides-to-tray') {
-          console.log(pc.yellow(trayNote('Re-run with --terminate')));
-          process.exitCode = 1;
-          return;
+      if (!running) {
+        for (const item of planned) {
+          const { write, backup } = writeAppPref(store, item.name, item.parsed, {
+            ...(item.unset ? { unset: true } : {}),
+          });
+          console.log(
+            `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
+              (write.unset ? pc.dim(' (default)') : ''),
+          );
+          console.log(pc.dim(`  backup: ${backup}`));
         }
-        if (result.outcome !== 'quit' && result.outcome !== 'not-running') {
-          throw new Error('Claude Desktop is still running; nothing was written.');
-        }
-        closed = true;
-        console.log('Claude Desktop is closed.');
-      }
-
-      for (const item of planned) {
-        const { write, backup } = writeAppPref(store, item.name, item.parsed, {
-          ...(item.unset ? { unset: true } : {}),
-        });
-        console.log(
-          `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
-            (write.unset ? pc.dim(' (default)') : ''),
-        );
-        console.log(pc.dim(`  backup: ${backup}`));
-      }
-
-      if (closed) {
-        await startDesktop(store);
-        console.log('Claude Desktop is up.');
-      } else {
         console.log(
           pc.dim('The app reads this at start-up; it will see the change when it opens.'),
         );
+        return;
       }
+
+      // `--restart` from here on. Went through `quitDesktop` and `startDesktop`
+      // by hand until this: a `writeAppPref` that threw after the app had
+      // already quit left `startDesktop` never called, and the app closed with
+      // nothing said about it; the tray refusal named "--terminate", a flag
+      // this command has never had (that one belongs to "foster app restart");
+      // and `startDesktop`'s own result was thrown away, so this printed "is
+      // up" whether or not it actually was. `restartAround` is the one place
+      // that already gets all three right, the same as `layout`/`view` do.
+      const restart = await restartAround(
+        store,
+        true,
+        restartCommandFromArgv(process.argv.slice(2)),
+        async () => {
+          for (const item of planned) {
+            const { write, backup } = writeAppPref(store, item.name, item.parsed, {
+              ...(item.unset ? { unset: true } : {}),
+            });
+            console.log(
+              `${pc.bold(write.name)}: ${format(write.from)} -> ${format(write.to)}` +
+                (write.unset ? pc.dim(' (default)') : ''),
+            );
+            console.log(pc.dim(`  backup: ${backup}`));
+          }
+        },
+      );
+      if (restart.done) {
+        console.log('Claude Desktop is up.');
+        return;
+      }
+      console.log(pc.yellow(restart.reason ?? 'The restart did not finish.'));
+      console.log(`  ${restart.command}`);
+      process.exitCode = 1;
     });
 }
 

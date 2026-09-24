@@ -572,6 +572,85 @@ That probe is PowerShell, and PowerShell is not always the tool that answers (se
 section). When it is stuck, ask wmic the same question about one pid instead:
 `wmic process where "ProcessId=<pid>" get ParentProcessId,Name,ExecutablePath /format:list`.
 
+## CLI: one restart path, and the gaps that had each grown their own
+
+Four places used to restart the app on their own terms; three of the four are now `restartAround`
+(`src/ops/restart.ts`) end to end, and the fourth (the TUI's `offerRestart`, `src/cli/desktopUi.ts`)
+stays separate on purpose — it asks the user before closing anything, and the write it is offered
+after has already landed, so it has no `duringGap` to run and nothing `restartAround` would add.
+
+- **`finish()`** (`src/cli/index.ts`) is the shared tail of `foster`, `restore`, `return`,
+  `consolidate`, `import-codex` and `sweep --undo-retitles` — every write command with no
+  `--detach` of its own. It used to call `restartDesktop` → `quitDesktop` directly, which throws
+  `DesktopControlError` from inside a hosted session; that reached `main()`'s generic catch and
+  printed "Nothing was changed." **after** the write had already happened. It now goes through
+  `restartAround`, which never throws — it reports what was written and hands over the command to
+  finish the restart from outside the app.
+- **`sweep --undo-retitles --detach`** used to validate `--detach` (`detachNeedsRestart`/
+  `detachNeedsYes`) and then simply never look at it again — the undo fell straight into
+  `finish()`, which cannot detach. It now runs the same `runDetach` every other command does,
+  re-running its own invocation (`process.argv`, `--detach*` stripped) from outside the app.
+- **`foster app pref --restart`** (`src/cli/appPrefCommand.ts`) had its own hand-rolled
+  quit/write/start: a `writeAppPref` that threw after `quitDesktop` succeeded left `startDesktop`
+  never called at all (the app stayed closed, silently); the tray refusal said "Re-run with
+  --terminate", a flag this command has never had (`--terminate` belongs to `app quit`/`app
+restart`); and `startDesktop`'s own boolean was thrown away, so it printed "is up" whether or
+  not it actually was. Also now `restartAround`, with the command reconstructed from the actual
+  argv (`restartCommandFromArgv`, next section) rather than a name nobody could run.
+
+**`sweepDetachArgv`** (`src/engine/detach.ts`) built `['layout', '--yes', '--restart']` or
+`['app', 'restart']` from nothing — no `--store`, no `--ledger`, no `--to`/`--to-org`. Measured
+24/09/2026: `foster --store work sweep --yes --restart --detach` restarted the **default**
+installation, silently, while the sweep itself had written into `work`. It now takes a `carry`
+(`{store, ledger, to, toOrg}`, read from `this.optsWithGlobals()` and the sweep's own resolved
+target) and forwards it into whichever command it hands off to — `--to`/`--to-org` only for
+`layout`, which is the only one of the two that takes a destination; `--store`/`--ledger` either
+way. The same `carry` also builds the plain-text `restartCommand` sweep hands over on a
+self-hosted refusal, not just what it detaches to.
+
+**`restartCommandFromArgv`** (`src/engine/detach.ts`) replaces three literal template strings —
+`layout`'s `'foster layout --yes --restart'`, `view set`'s `'foster view set --yes --restart'`,
+and `app pref`'s hand-built one — with the actual `process.argv`, `--detach*` stripped and
+`--yes`/`--restart` guaranteed present. The template for `view set` in particular dropped every
+filter flag the run actually carried, so the handed-over command read "Nothing to change." — the
+run had nothing to change **as printed**, having lost `--status`/`--group-by`/etc along the way.
+`view copy`'s own `viewCopyRestartCommand` (`src/cli/render.ts`) stays hand-built, because it
+needs the two accounts it actually _resolved_ (a label or a default, not necessarily what `--to`
+said) rather than an argv echo — it was just missing `--to-org`, which an account holding two
+organizations needs to disambiguate `--to` at all.
+
+**`--detach` with the tray on is a no-op**, and was until this: the detached re-run calls
+`quitDesktop` without `terminate`, which — tray on, `closingWindowQuits` false — returns
+`needs-terminate` rather than closing anything, and nothing after that ever runs. Checked directly
+against this machine's own default installation 24/09/2026: `menuBarEnabled` is **unset** there —
+absent means the app default, tray on — so the bug was live here too, not just somewhere else;
+nothing about this machine's own setup had been shielding it. `runDetach` now checks
+`closingWindowQuits(store)` before writing or launching anything
+(`detachNeedsTerminate`, `src/engine/detach.ts`) and refuses up front: `app restart` is told to
+add `--terminate` (it already rides straight through `stripDetachFlags`, so once it is on the
+command line the detached re-run inherits it — nothing new had to forward it); every other
+command has no `--terminate` of its own, so it is told to close the app by hand first, or to run
+`foster app restart --detach --terminate` instead.
+
+**Measured, not assumed:** a process WMI's `Win32_Process.Create` starts does **not** inherit the
+calling process's own environment — a marker set only via `$env:` in the calling PowerShell shell
+never reached a child launched this way, though the logged-on user's persistent variables did. A
+`FOSTER_HOME` set only for one session (a test harness, a relocated ledger for one shell) was
+silently dropped the moment a restart detached: the re-run read and wrote the **default**
+`~/.foster`, not the one the original invocation meant. `planDetached` now writes `set
+FOSTER_HOME=<value>&` into the launch line whenever the calling process has one, checked against
+the same `cmd.exe`-unsafe-character guard the rest of the argv already gets.
+
+**Four repeats folded into one each**, all in `src/cli/index.ts`: `addDetachOptions(cmd)` adds the
+three `--detach*` options every `--detach`-capable command declared by hand (`--restart`/
+`--terminate` stay each command's own — the help text, and for `app restart` the very name,
+differ by what the command already does); `checkDetachPrereqs(opts)` is the
+`detachNeedsRestart`/`detachNeedsYes` pair every one of them checked the same way;
+`refuseIfAppRunning(store)` is the "close it or add --restart" throw `layout`, `view set` and
+`view copy` each wrote out by hand, word for word; `detachJson(outcome)` is the six-field
+`--json` shape of a `DetachOutcome`, built once instead of copied at the `sweep --json` and
+`layout --json` sites (`printDetachResult`'s own `--json` branch now calls it too).
+
 ## A reported "live writer", and why the pid alone was not one
 
 Foster decides a conversation has a live writer from a registry file under

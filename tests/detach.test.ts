@@ -6,6 +6,7 @@ import {
   DETACH_DELAY_DEFAULT,
   detachedRunStatus,
   detachNeedsRestart,
+  detachNeedsTerminate,
   detachNeedsYes,
   launchDetached,
   launchWithFallback,
@@ -14,6 +15,9 @@ import {
   otherLiveWriters,
   parseDetachDelay,
   planDetached,
+  restartCommandFromArgv,
+  stripDetachFlags,
+  stripLeadingGlobalOptions,
   sweepDetachArgv,
   tailLines,
   VBS_VARIABLE_NAMES,
@@ -113,6 +117,19 @@ describe('planDetached', () => {
     expect(path.basename(plan.logPath)).toBe('2026-09-22T153000-app-restart.log');
   });
 
+  it('names the vbs after the real verb even behind a leading --store/--ledger', () => {
+    // sweepDetachArgv forwards --store/--ledger ahead of the verb (see its own
+    // doc comment); before verbOf skipped them the same way, this produced the
+    // generic '<stamp>-run.vbs' instead of '<stamp>-layout.vbs'.
+    const env = { FOSTER_HOME: tmpHome() };
+    const plan = planDetached(
+      baseOptions(env, {
+        argv: ['--store', 'work', '--ledger', 'C:\\ledger.jsonl', 'layout', '--yes', '--restart'],
+      }),
+    );
+    expect(path.basename(plan.vbsPath)).toBe('2026-09-22T153000-layout.vbs');
+  });
+
   it('breaks a filename collision with a counter', () => {
     const home = tmpHome();
     const env = { FOSTER_HOME: home };
@@ -156,6 +173,181 @@ describe('planDetached', () => {
     const env = { FOSTER_HOME: tmpHome() };
     const plan = planDetached(baseOptions(env, { argv: ['app', 'restart'] }));
     expect(plan.commandLine).toBe(`wscript.exe "${plan.vbsPath}"`);
+  });
+
+  it('sets FOSTER_HOME in the launch line when this process has one', () => {
+    // Measured 24/09/2026: a process WMI's Win32_Process.Create starts does not
+    // inherit the calling process's own environment, only the logged-on user's
+    // persistent one — a FOSTER_HOME set only in this shell would otherwise be
+    // silently dropped the moment the restart detaches.
+    const home = tmpHome();
+    const env = { FOSTER_HOME: home };
+    const plan = planDetached(baseOptions(env, { argv: ['app', 'restart'] }));
+    expect(plan.vbsText).toContain(`set FOSTER_HOME=${home}& ping`);
+  });
+
+  it('does not mention FOSTER_HOME in the launch line when this process has none', () => {
+    const plan = planDetached(baseOptions({}, { argv: ['app', 'restart'] }));
+    expect(plan.vbsText).not.toContain('FOSTER_HOME');
+  });
+
+  it('refuses a FOSTER_HOME that would break out of the cmd.exe line', () => {
+    const env = { FOSTER_HOME: 'C:\\bad"home' };
+    expect(() => planDetached(baseOptions(env, { argv: ['app', 'restart'] }))).toThrow(
+      /FOSTER_HOME/,
+    );
+  });
+});
+
+describe('stripDetachFlags', () => {
+  it('drops --detach, --detach-delay <n>, --detach-delay=<n> and --detach-even-with-live', () => {
+    expect(
+      stripDetachFlags([
+        'layout',
+        '--yes',
+        '--detach',
+        '--detach-delay',
+        '30',
+        '--detach-even-with-live',
+        '--restart',
+      ]),
+    ).toEqual(['layout', '--yes', '--restart']);
+  });
+
+  it('leaves everything else untouched, --terminate included', () => {
+    expect(stripDetachFlags(['app', 'restart', '--terminate'])).toEqual([
+      'app',
+      'restart',
+      '--terminate',
+    ]);
+  });
+});
+
+describe('stripLeadingGlobalOptions', () => {
+  it('strips a leading --store <value>', () => {
+    expect(stripLeadingGlobalOptions(['--store', 'work', 'app', 'restart'])).toEqual([
+      'app',
+      'restart',
+    ]);
+  });
+
+  it('strips a leading --store and --ledger together, in either order', () => {
+    expect(
+      stripLeadingGlobalOptions(['--store', 'work', '--ledger', 'C:\\l.jsonl', 'app', 'restart']),
+    ).toEqual(['app', 'restart']);
+    expect(
+      stripLeadingGlobalOptions(['--ledger', 'C:\\l.jsonl', '--store', 'work', 'app', 'restart']),
+    ).toEqual(['app', 'restart']);
+  });
+
+  it('strips the --store=value / --ledger=value form', () => {
+    expect(stripLeadingGlobalOptions(['--store=work', 'app', 'restart'])).toEqual([
+      'app',
+      'restart',
+    ]);
+  });
+
+  it('leaves argv with no leading global options untouched', () => {
+    expect(stripLeadingGlobalOptions(['app', 'restart', '--detach'])).toEqual([
+      'app',
+      'restart',
+      '--detach',
+    ]);
+  });
+
+  it('only strips a leading run — a later --store is left alone', () => {
+    expect(stripLeadingGlobalOptions(['app', 'restart', '--store', 'work'])).toEqual([
+      'app',
+      'restart',
+      '--store',
+      'work',
+    ]);
+  });
+});
+
+describe('restartCommandFromArgv', () => {
+  it('echoes the actual argv rather than a bare template', () => {
+    expect(
+      restartCommandFromArgv(['view', 'set', '--status', 'active', '--group-by', 'state', '--yes']),
+    ).toBe('foster view set --status active --group-by state --yes --restart');
+  });
+
+  it('strips --detach* and still guarantees --yes and --restart', () => {
+    expect(
+      restartCommandFromArgv(['layout', '--to', 'acct-1', '--yes', '--detach', '--restart']),
+    ).toBe('foster layout --to acct-1 --yes --restart');
+  });
+
+  it('adds --yes and --restart when neither was there', () => {
+    expect(restartCommandFromArgv(['app', 'pref', 'sidebarMode', 'code'])).toBe(
+      'foster app pref sidebarMode code --yes --restart',
+    );
+  });
+});
+
+describe('detachNeedsTerminate', () => {
+  it('says nothing when the tray is off — a plain quit already closes the app', () => {
+    expect(
+      detachNeedsTerminate({ closingWindowQuits: true, argv: ['app', 'restart'] }),
+    ).toBeUndefined();
+  });
+
+  it('says nothing when --terminate already rides the argv', () => {
+    expect(
+      detachNeedsTerminate({
+        closingWindowQuits: false,
+        argv: ['app', 'restart', '--terminate', '--detach'],
+      }),
+    ).toBeUndefined();
+  });
+
+  it('tells "app restart" to add --terminate, with the tray on and none given', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['app', 'restart', '--detach'],
+    });
+    expect(reason).toMatch(/--terminate/);
+    expect(reason).not.toMatch(/close Claude Desktop yourself/);
+  });
+
+  it('points sweep/layout/view at "foster app restart" instead, since they have no --terminate', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['layout', '--yes', '--restart', '--detach'],
+    });
+    expect(reason).toMatch(/foster app restart --detach --terminate/);
+  });
+
+  it('still recognises "app restart" behind a leading --store, and asks for --terminate', () => {
+    // This repo's own documented convention (AGENTS.md, README.md) puts the
+    // global --store/--ledger options before the verb: `foster --store
+    // "D:\Claude-Work" app restart --terminate`. argv[0] is '--store' there,
+    // not 'app' — the positional check used to fall through to the wrong
+    // ("close Claude Desktop yourself") branch and drop --store from the
+    // suggested fix-up command entirely.
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--store', 'work', 'app', 'restart', '--detach'],
+    });
+    expect(reason).toMatch(/--terminate/);
+    expect(reason).not.toMatch(/close Claude Desktop yourself/);
+  });
+
+  it('recognises "app restart" behind a leading --store/--ledger pair, in the --store=value form too', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--ledger', 'C:\\l.jsonl', '--store=work', 'app', 'restart', '--detach'],
+    });
+    expect(reason).toMatch(/--terminate/);
+    expect(reason).not.toMatch(/close Claude Desktop yourself/);
+  });
+
+  it('still says "close Claude Desktop yourself" for a non-app-restart command behind --store', () => {
+    const reason = detachNeedsTerminate({
+      closingWindowQuits: false,
+      argv: ['--store', 'work', 'sweep', '--yes', '--restart', '--detach'],
+    });
+    expect(reason).toMatch(/close Claude Desktop yourself/);
   });
 });
 
@@ -427,6 +619,47 @@ describe('sweepDetachArgv', () => {
 
   it('detaches foster layout --yes --restart when a layout is pending', () => {
     expect(sweepDetachArgv(true)).toEqual(['layout', '--yes', '--restart']);
+  });
+
+  it('carries --store and --ledger into "app restart" too, not just "layout"', () => {
+    // Measured 24/09/2026: `foster --store work sweep --yes --restart --detach`
+    // used to hand the detached process a bare ['app', 'restart'], which
+    // restarted the *default* installation instead of `work`.
+    const carry = { store: 'work', ledger: 'C:\\ledger.jsonl' };
+    expect(sweepDetachArgv(false, carry)).toEqual([
+      '--store',
+      'work',
+      '--ledger',
+      'C:\\ledger.jsonl',
+      'app',
+      'restart',
+    ]);
+  });
+
+  it('carries --store/--ledger and the resolved --to/--to-org into "layout"', () => {
+    const carry = {
+      store: 'work',
+      ledger: 'C:\\ledger.jsonl',
+      to: 'acct-1',
+      toOrg: 'org-1',
+    };
+    expect(sweepDetachArgv(true, carry)).toEqual([
+      '--store',
+      'work',
+      '--ledger',
+      'C:\\ledger.jsonl',
+      'layout',
+      '--yes',
+      '--restart',
+      '--to',
+      'acct-1',
+      '--to-org',
+      'org-1',
+    ]);
+  });
+
+  it('omits --to/--to-org from the "app restart" form, which takes no destination', () => {
+    expect(sweepDetachArgv(false, { to: 'acct-1', toOrg: 'org-1' })).toEqual(['app', 'restart']);
   });
 });
 

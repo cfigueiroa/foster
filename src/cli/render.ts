@@ -63,9 +63,20 @@ export function formatRoutineFireAt(ms: number | undefined, now: Date = new Date
  * placeholder nobody could run — see finding #14/(f). `--to` is spelled out
  * too, not left to default: a restart that runs later, after whatever is
  * signed in has changed, must still land on the same target this run was for.
+ *
+ * `--to-org` used to be missing (#140-ish): an account holding two
+ * organizations makes `--to <uuid>` alone ambiguous (`resolveDestination`
+ * refuses it, naming both), so the handed-over command could not actually be
+ * run as printed. `--from` has no such flag to spell out — `view copy` never
+ * grew a `--from-org` — so an ambiguous `--from` stays a refusal this
+ * function cannot route around; it only ever gets as far as the target it
+ * already resolved.
  */
 export function viewCopyRestartCommand(from: AccountRef, to: AccountRef): string {
-  return `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} --yes --restart`;
+  return (
+    `foster view copy --from ${from.accountUuid} --to ${to.accountUuid} ` +
+    `--to-org ${to.organizationUuid} --yes --restart`
+  );
 }
 
 /**
