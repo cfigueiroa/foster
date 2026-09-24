@@ -152,7 +152,7 @@ export function planFileCards(input: FilePlanInput): FilePlan[] {
     if (readable.length === 0) continue;
 
     const working = [...readable].sort((a, b) =>
-      byContinuation(weightOf(a)!, weightOf(b)!, a, b),
+      byContinuation(weightOf(a)!, weightOf(b)!, a.data.sessionId, b.data.sessionId),
     )[0]!;
     const workingFile = opens.get(working.data.sessionId);
     if (cards.every((card) => opens.get(card.data.sessionId) === workingFile)) continue;
@@ -272,20 +272,21 @@ export function applyFileCards(
  * would flip the moment somebody opened the row this pass had just filed away.
  * `only` does not move on a click. After that, sheer size, then the id, so the
  * answer never depends on which card the scan listed first.
+ *
+ * This is the one election a "which row is the row to continue in" caller
+ * should ever run — `where.ts`'s report imports it rather than keeping its
+ * own copy, precisely so the two never drift into naming different rows for
+ * the same conversation (milestone review, 0.62.0: they once did, `only`
+ * and `lastMessageAt` swapped between the two).
  */
-function byContinuation(
-  a: ScanWeight,
-  b: ScanWeight,
-  cardA: DiscoveredSession,
-  cardB: DiscoveredSession,
-): number {
+export function byContinuation(a: ScanWeight, b: ScanWeight, idA: string, idB: string): number {
   const answered = (b.lastAssistantAt ?? 0) - (a.lastAssistantAt ?? 0);
   if (answered !== 0) return answered;
   if (a.only !== b.only) return b.only - a.only;
   const said = (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0);
   if (said !== 0) return said;
   if (a.total !== b.total) return b.total - a.total;
-  return cardA.data.sessionId.localeCompare(cardB.data.sessionId);
+  return idA.localeCompare(idB);
 }
 
 /**

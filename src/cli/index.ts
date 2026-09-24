@@ -6381,9 +6381,10 @@ program
       'A fragment matching more than one conversation lists the candidates and exits\n' +
       '1 rather than guessing. Two ids that share a root — a fork, or the same id\n' +
       'opened from two working directories — are one conversation here, ranked by the\n' +
-      "measure `foster sweep`'s own fileCards/branch passes use: records held that no\n" +
-      'sibling file holds, then the last answer, then sheer size. The row that measure\n' +
-      'elects is marked as the one to continue in.',
+      "exact election `foster sweep`'s own fileCards pass runs (not a re-implementation\n" +
+      'of it): the last answer, then records held that no sibling file holds, then the\n' +
+      'last message of any kind, then sheer size. The row that measure elects is marked\n' +
+      'as the one to continue in.',
   )
   .argument('<query>', 'a session id, a cliSessionId prefix, or a title fragment')
   .option('--json', 'machine-readable output')

@@ -571,10 +571,12 @@ the candidates and exits 1 rather than guessing; two matches sharing a root are 
 — a fork, or the same id opened from two working directories, both covered below — so ambiguity is
 judged on the root, never on the count of matching cards.
 
-Which row to continue in is answered by the same measure `foster sweep`'s own passes use — records a
-row's file holds that no sibling's file holds, then the last answer, then sheer size — asked once
-across the whole family (every id sharing the conversation's root, every file any of them occupies)
-rather than choosing a fork-election path or a file-election path up front. Read-only throughout.
+Which row to continue in is answered by the exact election `foster sweep`'s own fileCards pass runs
+(`byContinuation`, imported rather than reimplemented, so the two can never disagree) — the last
+answer, then records a row's file holds that no sibling's file holds, then the last message of any
+kind, then sheer size — asked once across the whole family (every id sharing the conversation's root,
+every file any of them occupies) rather than choosing a fork-election path or a file-election path up
+front. Read-only throughout.
 
 ### Proving a sweep
 

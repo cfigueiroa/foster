@@ -177,6 +177,80 @@ describe('buildWhereReport — one conversation, two files', () => {
   });
 });
 
+describe("buildWhereReport — matches the sweep's own election", () => {
+  const CONVERSATION_2 = '00000000-0000-4000-8000-0000000000d9';
+  const ROOT_2 = '00000000-0000-4000-8000-0000000000e9';
+  const SHARED = '00000000-0000-4000-8000-0000000000ea';
+  const REPO_ONLY = '00000000-0000-4000-8000-0000000000eb';
+  const TREE_ONLY_1 = '00000000-0000-4000-8000-0000000000ec';
+  const TREE_ONLY_2 = '00000000-0000-4000-8000-0000000000ed';
+
+  function fixture() {
+    const store = makeStore();
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-where-election-'));
+
+    // The repository's file: the answer both files share, then one record of
+    // its own the next morning — a click, not an answer, but it is the last
+    // *message* on the file.
+    transcript(configDir, 'C--work-project', CONVERSATION_2, [
+      { type: 'custom-title', customTitle: 'Work' },
+      rec(ROOT_2, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(SHARED, 'assistant', '2026-09-01T20:30:00.000Z'),
+      rec(REPO_ONLY, 'user', '2026-09-02T09:00:00.000Z'),
+    ]);
+    // The worktree's file: two records of its own, both before the shared
+    // answer, so its last *answer* ties the repository's.
+    transcript(configDir, 'C--work-project--claude-worktrees-w', CONVERSATION_2, [
+      { type: 'custom-title', customTitle: 'Work' },
+      rec(ROOT_2, 'user', '2026-09-01T20:00:00.000Z'),
+      rec(TREE_ONLY_1, 'user', '2026-09-01T20:10:00.000Z'),
+      rec(TREE_ONLY_2, 'user', '2026-09-01T20:20:00.000Z'),
+      rec(SHARED, 'assistant', '2026-09-01T20:30:00.000Z'),
+    ]);
+
+    const entries = [
+      card(
+        store,
+        NEW_ACCOUNT,
+        session({
+          sessionId: '00000000-0000-4000-8000-0000000000d2',
+          cliSessionId: CONVERSATION_2,
+          cwd: 'C:\\work\\project',
+          title: 'Work',
+        }),
+      ),
+      card(
+        store,
+        OLD_ACCOUNT,
+        session({
+          sessionId: '00000000-0000-4000-8000-0000000000d3',
+          cliSessionId: CONVERSATION_2,
+          cwd: 'C:\\work\\project\\.claude\\worktrees\\w',
+          title: 'Work',
+        }),
+      ),
+    ];
+
+    const kin = lineageAt(projectsDirOf(configDir));
+    return { kin, entries };
+  }
+
+  it('elects the row with more of the conversation to itself, not merely the later message', () => {
+    const { kin, entries } = fixture();
+    const report = buildWhereReport(CONVERSATION_2, entries, kin, project([]));
+
+    // Both files tie on the last *answer* (`SHARED`). The repository's file
+    // has the later *message* (`REPO_ONLY`, a click) but only one record
+    // nobody else holds; the worktree's file holds two. The sweep's own
+    // election (`fileCards.ts`'s `byContinuation`) asks `only` before
+    // `lastMessageAt` for exactly this reason — `where` must name the same
+    // row the sweep would, not the row a click happens to be newest on.
+    const working = report.rows.find((row) => row.working);
+    expect(working?.account).toEqual(OLD_ACCOUNT);
+    expect(report.working?.account).toEqual(OLD_ACCOUNT);
+  });
+});
+
 describe('buildWhereReport — a fork', () => {
   function fixture() {
     const store = makeStore();

@@ -1525,20 +1525,24 @@ keeps. Two matching cards are ambiguous only when they root to two different con
 `resolveWhereQuery` roots every matched id with `Lineage.deepen`/`rootOf` before counting, so a fork
 or a same-id-two-cwds pair (which share a root) resolve to one report rather than a false
 ambiguity. `buildWhereReport` then ranks every card in the whole family (every id sharing the root,
-every file any of them occupies) with one measure — `weighScans` keyed by file, tie-broken the same
-way `fileCards.ts`'s `byContinuation` and `branches.ts`'s `byAdvancement` each are — rather than
-choosing a fork-election path or a file-election path up front, since a query does not know in
-advance which kind of "shown twice" it is asking about. Read-only; the search phase uses
-`scanAccount(..., { slim: true })`, the same perf seam sweep uses (#116/#117).
+every file any of them occupies) with one measure — `weighScans` keyed by file, elected with the
+exact same comparator `fileCards.ts`'s `byContinuation` uses for the sweep (imported, not
+reimplemented, after the milestone review found the two independently-written copies disagreeing on
+whether `only` or the last message broke a tie) — rather than choosing a fork-election path or a
+file-election path up front, since a query does not know in advance which kind of "shown twice" it is
+asking about. Read-only; the search phase uses `scanAccount(..., { slim: true })`, the same perf seam
+sweep uses (#116/#117).
 
 Cross-checked against a real store 24/09/2026: `foster where` on a title fragment reported "1 file,
 255 record(s) total"; an independent `grep`-and-`sort -u` of the transcript's own `uuid` fields
 counted 255 distinct ids out of 374 lines. On a two-file conversation it reported "12335 record(s)
 total"; hand-summing the union of both files' `uuid` sets, independently, gave 12335. The same run
-surfaced a conversation (`83b273f9…`, "INSSIST R5") where **every** card in **every** account on the
-machine — eleven of them — opened the same one file of a two-file conversation; nothing anywhere had
-ever opened the other, larger file. Not a bug in `where` — a real gap `restore`/a fresh card would
-close — but exactly the shape `sweep --prove` (below) is for.
+surfaced a conversation where **every** card in **every** account on the machine — eleven of them —
+opened the same one file of a two-file conversation; nothing anywhere had ever opened the other,
+larger file. Not a bug in `where` — a real gap `restore`/a fresh card would close, since no existing
+card anywhere reaches the larger file for an ordinary sweep to copy — but exactly the shape
+`sweep --prove` (below) is for, and one of the 29 gaps a real run of it surfaced on 24/09/2026 (see
+"Triage of a real `--prove` run" below).
 
 **`foster verify`** (`src/engine/verify.ts`) reads back, in a fresh process, whether the app undid a
 write `foster layout`/`sweep --restart` made in the closed-app gap. Titles/archived flags and pins
@@ -1571,12 +1575,61 @@ row is the branch pass's own question, already in `SweepReport.branches`; this m
 thing — one id split across two working directories — that the branch pass does not.
 
 Measured 24/09/2026 against the real store (scratch ledger, `--yes` never passed): a full dry-run
-`sweep --prove` took 1m54s and surfaced real gaps, `83b273f9…` above included (0 of 12335 reached by
-the currently-signed-in account through its own cards, at the time of the run — the ordinary sweep
-pass above it in the same run is what would close most of them; the second file nobody has ever
-opened is what it cannot). On a dry run this measures the account **before** the plan runs, which is
-the work that plan exists to close, not a simulation of what the plan would leave — said plainly in
-`--prove`'s own `--help` text so a dry-run gap is not mistaken for a `--yes` run's own failure.
+`sweep --prove` took 1m54s and surfaced 29 gaps while the ordinary sweep pass in the same run planned
+0 copies — the shape that looks like a contradiction until each gap is checked independently. On a
+dry run this measures the account **before** the plan runs, which is the work that plan exists to
+close, not a simulation of what the plan would leave — said plainly in `--prove`'s own `--help` text
+so a dry-run gap is not mistaken for a `--yes` run's own failure.
+
+**Triage of that run's 29 gaps**, one card-level fact at a time rather than trusting `provePlan`'s
+own arithmetic (the point of the audit): for every gap id, every card anywhere on the machine that
+names it was read directly, off disk, independently of `provePlan`/`Lineage`. Two shapes:
+
+- The conversation named in this file's own `foster where` section above (the one card in **every**
+  account opens the smaller of two files) turned out not to be the only one of its kind: an
+  independent per-id `foster where` on eight more of the highest-record gaps found the same
+  ceiling every time — the best card anywhere reaches exactly what `--prove` already reported as
+  reached, and no other card, including archived and fork-sibling ones, reaches a single record
+  more. Sweep genuinely cannot close these by copying: there is no fuller card anywhere to copy
+  from. Correctly reported as a gap, not a bug in `provePlan` or in the sweep planner, and not a
+  `NEVER_COMES` class either — a fresh card opened in the right directory, or `restore`, is the
+  only way in, exactly as this file already said for the one case found by hand before this triage.
+- A cluster of about twenty gaps, each with exactly two cards on the whole machine, both outside
+  the target account, sharing one working directory — a scheduled-task card and a plain card that
+  is itself a fostered copy — and both reaching the conversation's own full total (confirmed by an
+  independent `foster where` on three of them). `provePlan` reports these as gaps correctly by its
+  own rule: the copy card carries `already-a-copy`, not a `NEVER_COMES` reason, so it is not "all
+  blocked". The candidate `foster sweep` itself never offers has the same shape one level down —
+  `applyFilter` (`src/domain/filter.ts`) holds a copy back as a source while its conversation still
+  has a card of its own, lifted only when `carriedOn` finds it reaches records the destination
+  cannot (#49) — a rule built for a copy that outran its origin, not for a copy whose _origin_ is
+  a scheduled task the destination will never otherwise see. Whether that is the actual mechanism
+  here was not confirmed against this run — `applyFilter`'s own reach check is asked of the
+  destination's _sidebar_ (`engine/sidebar.ts`'s `unreached`), a different measure than `where`'s,
+  and reproducing it exactly needs the live `runSweep` call this triage did not repeat. Reported
+  precisely rather than fixed on a hypothesis, against a machine this session cannot risk
+  mis-copying automation-spawned session data on.
+
+**The "double listing"** — one title named in both the gap list and the never-fosterable list in the
+same printed report — is not `provePlan` counting one id twice: the grouping key is the id, and the
+loop pushes an id to at most one of the two lists. An independent `foster where` on that exact title
+resolved to two different, unrelated roots — a recurring scheduled task names every run it ever
+fires with the identical title, so two runs of it are two different conversations that happen to
+print the same words. `ProveGap`/`ProveNeverFosterable` already carry the full `cliSessionId`
+(`--json` was never ambiguous); the text report's never-fosterable line does not print it the way the
+gap line prints `shortId(gap.cliSessionId)`, which is the only reason the two looked like the same
+row twice. That one-line print fix is outside this file's own scope (`src/cli/index.ts`) and is left
+for whichever pass owns `printProve`.
+
+**Prove's own 1m54s against the same run's ~35s sweep** is not a cost inside `ops/prove.ts` itself —
+`provePlan`'s loop is a single pass over the cards and ids it is handed. `runSweepCommand`
+(`src/cli/index.ts`) is what hands them to it: a brand new `lineage(...)`, indexing every transcript
+on the machine from zero, and a brand new full `listAccountDirs(store).flatMap(scanAccount(...))`
+account scan — both already paid for, seconds earlier, inside the same command's own `runSweep` call,
+and neither reused. Fixing that means threading the sweep's own `Lineage` and scanned cards out to
+the caller instead of rebuilding both, which is `src/ops/sweep.ts`/`src/cli/index.ts` work outside
+this section's own scope; reported here precisely rather than attempted against files this pass does
+not own.
 
 ## Cloud sessions: `foster cloud list` / `foster cloud pull`
 
