@@ -14,8 +14,30 @@ import type {
 export type { KnownIdentity };
 
 export interface LedgerState {
-  /** Keyed by origin session + target account: one active copy per pair. */
+  /**
+   * Every active copy, keyed by the copy's own session id.
+   *
+   * Not keyed by `fosteringKey`: the executor's #63 path legitimately writes a
+   * *second* copy under one idempotency key when the offered card's own file
+   * reaches records the first copy cannot (a second file of one conversation,
+   * `resolveExisting` in `engine/executor.ts`) — both copies are current and
+   * both have to stay tracked. Keying on the copy id, which is unique and never
+   * reused, is what makes that possible; keying on the fostering key made the
+   * second `fostered` event overwrite the first in this map, which is why
+   * `return`, `unclaim`, `titleSync` and everything else that reads `active`
+   * lost the older copy — it was still on disk, un-tracked. Measured against the
+   * real ledger: 275 `fostered` events overwrote a still-active key this way.
+   * See `activeByKey` for the lookup this replaces.
+   */
   active: Map<string, ActiveFostering>;
+  /**
+   * Reverse index from `fosteringKey` to every copy id currently filed under
+   * it — almost always one, occasionally two (see `active` above). This is
+   * what `isFostered` and the executor's idempotency check read; nothing else
+   * needs it, because everything else already enumerates copies through
+   * `listActive`/`active.values()`.
+   */
+  activeByKey: Map<string, Set<string>>;
   labels: Map<string, string>;
   /** Who each account belongs to, as last seen — see KnownIdentity. */
   identities: Map<string, KnownIdentity>;
@@ -75,6 +97,7 @@ export interface LedgerState {
  */
 export function project(events: LedgerEvent[]): LedgerState {
   const active = new Map<string, ActiveFostering>();
+  const activeByKey = new Map<string, Set<string>>();
   const labels = new Map<string, string>();
   const identities = new Map<string, KnownIdentity>();
   const repointed = new Map<string, RepointedCard>();
@@ -85,9 +108,26 @@ export function project(events: LedgerEvent[]): LedgerState {
   const profiles = new Map<string, string>();
   const clientRoots = new Map<string, 'client' | 'container'>();
   let handlerArmed: LedgerState['handlerArmed'];
-  // Which fostering a copy belongs to, so a repoint can find it. The fold is
-  // keyed on the origin session, and a repoint knows only the card it rewrote.
+  // Which fostering key a copy was filed under, so a repoint or a return can
+  // find it from the card alone. Also what keeps `activeByKey` honest: it is
+  // the only record of which key a given copy's entry has to be removed from.
   const fosteringOfCopy = new Map<string, string>();
+
+  const indexByKey = (key: string, copySessionId: string): void => {
+    let copies = activeByKey.get(key);
+    if (!copies) {
+      copies = new Set();
+      activeByKey.set(key, copies);
+    }
+    copies.add(copySessionId);
+  };
+  const unindexByKey = (key: string | undefined, copySessionId: string): void => {
+    if (key === undefined) return;
+    const copies = activeByKey.get(key);
+    if (!copies) return;
+    copies.delete(copySessionId);
+    if (copies.size === 0) activeByKey.delete(key);
+  };
 
   for (const event of events) {
     switch (event.kind) {
@@ -130,7 +170,7 @@ export function project(events: LedgerEvent[]): LedgerState {
 
       case 'fostered': {
         const key = fosteringKey(event.originSessionId, event.target, event.cliSessionId);
-        active.set(key, {
+        active.set(event.copySessionId, {
           originSessionId: event.originSessionId,
           origin: event.origin,
           target: event.target,
@@ -144,37 +184,46 @@ export function project(events: LedgerEvent[]): LedgerState {
           ...(event.archived ? { archivedByFoster: true } : {}),
         });
         fosteringOfCopy.set(event.copySessionId, key);
+        indexByKey(key, event.copySessionId);
         break;
       }
 
       case 'returned':
-        // Resolved through the copy rather than recomputed. The key carries the
-        // conversation now, and a `returned` written before it did — or after
-        // the fostering followed a branch — cannot rebuild the key it was filed
-        // under. The copy id can: it is what the fostering was indexed by when
-        // it was written, whatever the key looked like.
-        active.delete(
+        // Resolved through the copy, which is the primary key of `active` now —
+        // no need to rebuild the fostering key first. `activeByKey` still needs
+        // one, to know which key's set to drop the copy from; the legacy
+        // fallback covers a `returned` for a copy whose `fostered` event this
+        // fold never saw (a log that starts mid-stream).
+        unindexByKey(
           fosteringOfCopy.get(event.copySessionId) ??
             fosteringKey(event.originSessionId, event.target),
+          event.copySessionId,
         );
+        active.delete(event.copySessionId);
         fosteringOfCopy.delete(event.copySessionId);
         break;
 
-      case 'fostering_followed': {
+      case 'fostering_followed':
         // The copy is the same file in the same account; only the conversation it
         // holds has moved. Keeping the fostering and moving its pointer is the
         // whole point — dropping it is what used to make the next sweep write a
         // second card for work that already had a row.
-        // Resolved through the copy, and filed back under the same key. The key
-        // names the conversation that was copied *from the origin*, which does
-        // not move when the app branches the copy; `cliSessionId` is what tracks
-        // where the copy went, and that is the field to update.
-        const key =
-          fosteringOfCopy.get(event.copySessionId) ??
-          fosteringKey(event.originSessionId, event.target, event.from);
-        const fostering = active.get(key);
-        if (fostering) {
-          active.set(key, { ...fostering, cliSessionId: event.to, followedBranch: true });
+        //
+        // Resolved through the copy, which needs no key lookup any more: `active`
+        // is keyed on the copy id directly, and the idempotency key this copy was
+        // filed under (`activeByKey`) never changes here — it names the
+        // conversation that was copied *from the origin*, which does not move
+        // when the app branches the copy. `cliSessionId` is what tracks where the
+        // copy went, and that is the only field this write updates.
+        {
+          const fostering = active.get(event.copySessionId);
+          if (fostering) {
+            active.set(event.copySessionId, {
+              ...fostering,
+              cliSessionId: event.to,
+              followedBranch: true,
+            });
+          }
         }
 
         // Foster's own claim on this card lapses here. `repointed` is what
@@ -185,18 +234,16 @@ export function project(events: LedgerEvent[]): LedgerState {
         // that card nothing else holds.
         repointed.delete(event.copySessionId);
         break;
-      }
 
       case 'card_repointed': {
         // The conversation a copy holds moves with it. Without this the next
         // command reads the file, finds a pointer that disagrees with the ledger,
         // and calls the copy `repurposed` — dropping the tracking of the very
-        // card foster had just put right.
-        const key = fosteringOfCopy.get(event.sessionId);
-        const fostering = key === undefined ? undefined : active.get(key);
-        if (key !== undefined && fostering) {
-          // Same as above: the key stays, only where the copy points moves.
-          active.set(key, { ...fostering, cliSessionId: event.to });
+        // card foster had just put right. Resolved straight off the copy id —
+        // `active`'s own key now — with no need for `fosteringOfCopy` at all.
+        const fostering = active.get(event.sessionId);
+        if (fostering) {
+          active.set(event.sessionId, { ...fostering, cliSessionId: event.to });
         }
 
         // `from` is where the app had it, which the first repoint is the only one
@@ -393,6 +440,7 @@ export function project(events: LedgerEvent[]): LedgerState {
 
   return {
     active,
+    activeByKey,
     labels,
     identities,
     repointed,
@@ -523,7 +571,8 @@ export function isFostered(
   target: { accountUuid: string; organizationUuid: string },
   cliSessionId?: string,
 ): boolean {
-  if (state.active.has(fosteringKey(originSessionId, target, cliSessionId))) return true;
+  const hasAny = (key: string): boolean => (state.activeByKey.get(key)?.size ?? 0) > 0;
+  if (hasAny(fosteringKey(originSessionId, target, cliSessionId))) return true;
   // The legacy key, for fosterings written before the conversation was recorded.
-  return cliSessionId !== undefined && state.active.has(fosteringKey(originSessionId, target));
+  return cliSessionId !== undefined && hasAny(fosteringKey(originSessionId, target));
 }
