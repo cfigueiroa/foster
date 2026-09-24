@@ -241,6 +241,14 @@ import {
 import { applyPinMoves, planPinMoves } from '../engine/pinMoves.js';
 import { planMarksBack } from '../engine/marksBack.js';
 import { verifyLayoutGroups, type LayoutGroupsCheck } from '../engine/layoutVerify.js';
+import { planVerify, type VerifyReport } from '../engine/verify.js';
+import {
+  buildWhereReport,
+  resolveWhereQuery,
+  type WhereEntry,
+  type WhereReport,
+} from '../engine/where.js';
+import { provePlan, type ProveReport } from '../ops/prove.js';
 import { readGroupScopesReport, scopeKey } from '../store/groupScopes.js';
 import {
   applyViewCopy,
@@ -1043,6 +1051,11 @@ program
     '--detach-even-with-live',
     'detach anyway even if another live session would be ended by the restart',
   )
+  .option(
+    '--prove',
+    'after planning, independently check every conversation is fully reachable from this account ' +
+      '(exit 1 on any gap) — see `foster verify` for the layout-groups half of the same question',
+  )
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
@@ -1063,6 +1076,7 @@ program
       detach?: boolean;
       detachDelay?: string;
       detachEvenWithLive?: boolean;
+      prove?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
@@ -1105,6 +1119,21 @@ program
       configDirs: opts.configDir ?? [],
     });
 
+    // Read fresh, after the sweep's own write — on a real run this is the
+    // store as it now stands; on a dry run nothing was written, so this
+    // measures the account as it stood *before* the plan above, and a gap
+    // reported here is exactly the work that plan exists to close. See
+    // `ops/prove.ts` for why it is not built from the sweep's own outcomes.
+    const proveReport = opts.prove
+      ? provePlan(
+          listAccountDirs(store).flatMap((account) =>
+            scanAccount(store, account, copySessionIds(ledger.read()), { slim: true }),
+          ),
+          target,
+          lineage(process.env, opts.configDir ?? []),
+        )
+      : undefined;
+
     // Named here, not in `sweepRestart` itself: a layout is planned but never
     // applied by the sweep, so the command handed over on a restart has to be
     // the one that actually finishes the job — `foster layout` restarts the
@@ -1131,6 +1160,7 @@ program
         );
         print({
           ...sweepJson(report),
+          ...(proveReport ? { prove: proveReport } : {}),
           detach:
             outcome.ok && outcome.plan && outcome.launch
               ? {
@@ -1145,7 +1175,7 @@ program
                 }
               : { detached: false, error: outcome.reason },
         });
-        if (!outcome.ok) process.exitCode = 1;
+        if (!outcome.ok || (proveReport && !proveReport.complete)) process.exitCode = 1;
         return;
       }
       // The one output that has to wait: it is a single object, so the restart
@@ -1156,7 +1186,8 @@ program
         restartCommand,
         deferredPinsGap(store, ledger, target, report),
       );
-      print({ ...sweepJson(report), restart });
+      print({ ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}), restart });
+      if (proveReport && !proveReport.complete) process.exitCode = 1;
       return;
     }
 
@@ -1174,6 +1205,8 @@ program
 
     console.log('');
     for (const line of sweepSummary(report)) console.log(line);
+
+    if (proveReport) printProve(proveReport);
 
     if (dryRun) {
       console.log(pc.dim('\nRe-run with --yes to write.'));
@@ -1357,6 +1390,37 @@ function printTitleSync(phase: TitleSyncPhase, dryRun: boolean): void {
 
 function titleSyncLine(from: string, to: string): string {
   return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
+}
+
+/**
+ * `--prove`'s report: sets `process.exitCode` itself, the way a command that
+ * finishes past its own `return` cannot otherwise leave a failure behind.
+ */
+function printProve(prove: ProveReport): void {
+  console.log(pc.bold(`\nProof: ${prove.conversations} conversation(s) checked`));
+  if (prove.complete) {
+    console.log(pc.dim('  every one is fully reachable from this account.'));
+  } else {
+    console.log(pc.red(`  ${prove.gaps.length} conversation(s) this account cannot fully reach:`));
+    for (const gap of prove.gaps) {
+      console.log(
+        `    ${pc.red('!')} ${gap.title ?? pc.dim('(untitled)')} ${pc.dim(`(${shortId(gap.cliSessionId)})`)}\n` +
+          `        reaches ${gap.reachedByTarget} of ${gap.totalRecords} — ${gap.missing} record(s) short`,
+      );
+    }
+    process.exitCode = 1;
+  }
+  if (prove.neverFosterable.length > 0) {
+    console.log(
+      pc.dim(
+        `  ${prove.neverFosterable.length} more never had a way in (scheduled task, never opened, ` +
+          'or too large) — not counted above:',
+      ),
+    );
+    for (const item of prove.neverFosterable) {
+      console.log(pc.dim(`      ${item.title ?? '(untitled)'} — ${item.reason}`));
+    }
+  }
 }
 
 function sweepJson(report: SweepReport): Record<string, unknown> {
@@ -5534,6 +5598,301 @@ program
       ),
     );
   });
+
+program
+  .command('where')
+  .helpGroup('After the sweep:')
+  .summary('every account and store holding a card for one conversation, and which to continue in')
+  .description(
+    'Replaces the three-measurement recipe run by hand when a conversation "didn\'t\n' +
+      'come in the sweep": which accounts show a card for it, how many files it\n' +
+      'occupies and which each card opens, and which row is actually worth opening.\n\n' +
+      '`query` matches a session id or `cliSessionId` (bare, `local_`-prefixed, or any\n' +
+      'unique prefix), or a title fragment. Every installation `foster` already knows\n' +
+      'about is searched — the installed app, anything running, every store the\n' +
+      'ledger has been fostered into before, and every registered profile — not just\n' +
+      'the one `--store` would resolve to.\n\n' +
+      'A fragment matching more than one conversation lists the candidates and exits\n' +
+      '1 rather than guessing. Two ids that share a root — a fork, or the same id\n' +
+      'opened from two working directories — are one conversation here, ranked by the\n' +
+      "measure `foster sweep`'s own fileCards/branch passes use: records held that no\n" +
+      'sibling file holds, then the last answer, then sheer size. The row that measure\n' +
+      'elects is marked as the one to continue in.',
+  )
+  .argument('<query>', 'a session id, a cliSessionId prefix, or a title fragment')
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command, query: string) {
+    const { ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const events = ledger.read();
+    const state = project(events);
+    const copies = copySessionIds(events);
+
+    const stores: { store: StoreLayout; name?: string }[] = [];
+    const seenRoots = new Set<string>();
+    for (const known of knownStores(events)) {
+      if (!known.exists) continue;
+      const layout = layoutFor(known.root);
+      const key = comparablePath(layout.root);
+      if (seenRoots.has(key)) continue;
+      seenRoots.add(key);
+      stores.push({ store: layout, ...(known.name ? { name: known.name } : {}) });
+    }
+
+    const entries: WhereEntry[] = [];
+    for (const { store: storeLayout, name } of stores) {
+      for (const account of listAccountDirs(storeLayout)) {
+        for (const found of scanAccount(storeLayout, account, copies, { slim: true })) {
+          entries.push({
+            store: storeLayout,
+            ...(name ? { storeName: name } : {}),
+            account,
+            session: found,
+          });
+        }
+      }
+    }
+
+    const kin = lineage(process.env);
+    const resolved = resolveWhereQuery(entries, query, kin);
+
+    if (resolved.kind === 'none') {
+      if (opts.json) {
+        print({ query, matches: [] });
+      } else {
+        console.log(`No conversation matches "${query}" in any store foster knows about.`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    if (resolved.kind === 'ambiguous') {
+      const titleOf = (ids: string[]): string[] => [
+        ...new Set(
+          entries
+            .filter((entry) => ids.includes(entry.session.data.cliSessionId ?? ''))
+            .map((entry) => entry.session.data.title ?? '(untitled)'),
+        ),
+      ];
+      if (opts.json) {
+        print({
+          query,
+          ambiguous: resolved.groups.map((group) => ({
+            ...group,
+            titles: titleOf(group.cliSessionIds),
+          })),
+        });
+      } else {
+        console.log(
+          pc.bold(`"${query}" matches ${resolved.groups.length} different conversations:`) +
+            '\n' +
+            pc.dim('Run again with a longer id or a more specific title fragment.\n'),
+        );
+        for (const group of resolved.groups) {
+          console.log(`  ${shortId(group.root)}  ${titleOf(group.cliSessionIds).join(' / ')}`);
+        }
+      }
+      process.exitCode = 1;
+      return;
+    }
+
+    const report = buildWhereReport(resolved.id, entries, kin, state);
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    printWhere(report);
+  });
+
+function printWhere(report: WhereReport): void {
+  console.log(
+    pc.bold(`${report.rows[0]?.title ?? '(untitled)'}`) +
+      pc.dim(`  (${shortId(report.cliSessionId)})`),
+  );
+  if (report.family.length > 1) {
+    console.log(pc.dim(`  a fork: ${report.family.length} conversation(s) share this root`));
+  }
+  console.log(
+    pc.dim(
+      `  ${report.files.length} file(s), ${report.totalRecords} record(s) total across the family`,
+    ),
+  );
+  console.log('');
+
+  // `only` is `weighScans`' per-*file* measure: when two rows open the exact
+  // same file — the ordinary case for two cards of one un-forked conversation
+  // — every record in it is "only" held by that one file, which would print
+  // as if each row alone accounted for the whole thing. Said instead as what
+  // it is: a duplicate, not a second file, the same distinction
+  // `fileCards.ts` draws before it ever marks a row.
+  const fileCounts = new Map<string, number>();
+  for (const row of report.rows) {
+    if (row.file) fileCounts.set(row.file, (fileCounts.get(row.file) ?? 0) + 1);
+  }
+
+  for (const row of report.rows) {
+    const mark = row.working ? pc.green('* ') : '  ';
+    console.log(`${mark}${pc.bold(row.account.accountUuid)} ${pc.dim(row.store)}`);
+    console.log(`    session ${row.sessionId}${row.isCopy ? pc.dim('  (foster copy)') : ''}`);
+    console.log(`    "${row.title}"${row.archived ? pc.dim('  [archived]') : ''}`);
+    if (row.cwd) console.log(pc.dim(`    cwd: ${row.cwd}`));
+    if (row.file) {
+      const sameFileElsewhere = (fileCounts.get(row.file) ?? 0) > 1;
+      const reach =
+        row.reaches === undefined
+          ? ''
+          : `  reaches ${row.reaches} of ${report.totalRecords}` +
+            (sameFileElsewhere
+              ? '  (same file as another row below)'
+              : row.only
+                ? `, ${row.only} only here`
+                : '');
+      console.log(pc.dim(`    file: ${row.file}${reach}`));
+    } else {
+      console.log(
+        pc.yellow('    file: could not be told (no cwd, or more than one file matches it)'),
+      );
+    }
+    if (row.fosteredFrom) {
+      console.log(
+        pc.dim(
+          `    a foster copy of ${shortId(row.fosteredFrom.originSessionId)} ` +
+            `in ${row.fosteredFrom.origin.accountUuid}, fostered ${formatDate(row.fosteredFrom.fosteredAt)}`,
+        ),
+      );
+    }
+    if (row.copiesMadeFromHere > 0) {
+      console.log(pc.dim(`    ${row.copiesMadeFromHere} copy/copies made from this card`));
+    }
+    if (row.mark) {
+      console.log(pc.dim(`    marked by foster: "${row.mark.from}" -> "${row.mark.to}"`));
+    }
+    console.log('');
+  }
+
+  if (report.working) {
+    console.log(
+      pc.bold(`Continue in: ${report.working.account.accountUuid} — "${report.working.title}"`),
+    );
+  } else {
+    console.log(pc.yellow('No row could be measured — none of these cards has a readable file.'));
+  }
+}
+
+program
+  .command('verify')
+  .helpGroup('After the sweep:')
+  .summary('after a restart, check nothing foster wrote was undone')
+  .description(
+    'Read back every write the ledger says foster made to this account — card\n' +
+      'titles and archived flags, pins, sidebar groups and routines — and say which\n' +
+      'of them the app has since reverted. Meant to run after `foster layout --yes\n' +
+      '--restart` (or `sweep --restart`) has quit and restarted the app: both write\n' +
+      "in the gap while it is closed, and the app's own startup can save some of it\n" +
+      'straight back over — measured twice on a real store, once for marks and once\n' +
+      'for sidebar groups (see AGENTS.md).\n\n' +
+      'Titles, archived flags and pins are checked exactly: the ledger alone proves\n' +
+      'whether a card is back under a title it wore before foster touched it, or a\n' +
+      'pin move never landed. Groups and routines cannot be checked as exactly — the\n' +
+      'ledger keeps only counts of what a layout run applied, not which card went\n' +
+      'into which group — so this only flags the shape actually measured once: an\n' +
+      'account foster has applied groups or routines to before, now showing none,\n' +
+      'while a fresh plan still wants to bring some. Anything short of that is\n' +
+      'reported as pending, not asserted as undone. Read-only; writes nothing.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const account = requireCurrentAccount(store, listAccountDirs(store));
+    const report = planVerify(store, account, ledger.read());
+
+    if (opts.json) {
+      print(report);
+      if (report.undone) process.exitCode = 1;
+      return;
+    }
+
+    printVerify(report);
+    if (report.undone) process.exitCode = 1;
+  });
+
+function printVerify(report: VerifyReport): void {
+  console.log(pc.bold(`Verifying ${report.target.accountUuid}`));
+
+  if (report.marks.pending.length === 0) {
+    console.log(pc.dim('  titles/archived flags: every mark foster wrote still stands.'));
+  } else {
+    console.log(
+      pc.red(`  titles/archived flags: ${report.marks.pending.length} reverted by the app:`),
+    );
+    for (const mark of report.marks.pending) {
+      console.log(pc.dim(`      ${mark.path}  -> "${mark.title}"`));
+    }
+  }
+
+  if (report.pins.unreadable) {
+    console.log(pc.yellow(`  pins: could not be read — ${report.pins.unreadable}`));
+  } else if (report.pins.pending.length === 0) {
+    console.log(pc.dim('  pins: nothing pending.'));
+  } else {
+    console.log(
+      pc.red(`  pins: ${report.pins.pending.length} not reflecting the row to continue in:`),
+    );
+    for (const move of report.pins.pending) {
+      console.log(pc.dim(`      ${move.staleTitle} -> ${move.cleanTitle}`));
+    }
+  }
+
+  if (report.groups.reset) {
+    console.log(
+      pc.red(
+        `  groups: this account had groups applied before and now has none, ` +
+          `while a fresh plan wants to bring ${report.groups.pendingNewGroups} group(s) ` +
+          `and ${report.groups.pendingAssignments} assignment(s) — likely reverted by the app.`,
+      ),
+    );
+  } else if (report.groups.pendingNewGroups + report.groups.pendingAssignments > 0) {
+    console.log(
+      pc.dim(
+        `  groups: ${report.groups.nowGroups} group(s), ${report.groups.nowAssignments} assignment(s) now; ` +
+          `a fresh \`foster layout\` would still bring ${report.groups.pendingNewGroups} group(s) and ` +
+          `${report.groups.pendingAssignments} assignment(s) — not necessarily undone, see \`foster verify --help\`.`,
+      ),
+    );
+  } else {
+    console.log(pc.dim(`  groups: ${report.groups.nowGroups} group(s) now, nothing pending.`));
+  }
+
+  if (report.routines.reset) {
+    console.log(
+      pc.red(
+        `  routines: this account had routines applied before and now has none, ` +
+          `while a fresh plan wants to bring ${report.routines.pendingBring} — likely reverted by the app.`,
+      ),
+    );
+  } else if (report.routines.pendingBring > 0) {
+    console.log(
+      pc.dim(
+        `  routines: ${report.routines.nowCount} now; a fresh \`foster layout\` would still bring ` +
+          `${report.routines.pendingBring} — not necessarily undone.`,
+      ),
+    );
+  } else {
+    console.log(pc.dim(`  routines: ${report.routines.nowCount} now, nothing pending.`));
+  }
+
+  console.log('');
+  console.log(
+    report.undone
+      ? pc.red(
+          'Something foster wrote was undone. Run `foster layout --yes --restart` to write it again.',
+        )
+      : pc.bold('Nothing foster wrote here has been undone.'),
+  );
+}
 
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {

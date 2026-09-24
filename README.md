@@ -125,6 +125,17 @@ unmentioned reads as having brought everything. One of the three has a way out �
 [scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
 under a flat "never".
 
+`--prove` audits the sweep instead of trusting it: for every conversation the store holds a card
+for, it reads every file the id occupies end to end and compares that union against what the
+account this run targets can actually reach, independently of the sweep's own bookkeeping — see
+[proving a sweep](#proving-a-sweep). It exits 1 the moment any record is unreachable, excluding the
+documented never-fosterable classes above, which it reports separately.
+
+```bash
+foster sweep --prove            # plan, then check — writes nothing
+foster sweep --yes --prove      # write, then check what actually landed
+```
+
 A fourth pass releases the worktree claim a copy already on disk inherited from its original,
 before fostering learned not to hand one out — see
 [Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
@@ -480,6 +491,58 @@ somewhere in the store, because that is where the list of conversations comes fr
 points at is a conversation with no row at all, which is `foster restore`'s question rather than this
 one's.
 
+### Finding one conversation: `foster where`
+
+Before `foster where` this was a recipe run by hand, three separate measurements in whatever order
+occurred to whoever was doing it: grep every account's cards for the id or a piece of the title, look
+in the transcript directory to see how many files the conversation occupies, and weigh those files
+against each other to guess which row was still worth opening.
+
+```bash
+foster where <query>          # a session id, a cliSessionId prefix, or a title fragment
+foster where <query> --json
+```
+
+It searches every installation `foster` already knows about — the installed app, anything running,
+every store the ledger has been fostered into before, every registered profile — not only the one
+`--store` would resolve to, and lists every account and store holding a card for the match: which
+file each one opens, how many records that file holds against the conversation's own total, and what
+the ledger knows about it (a fostering, a mark). A query matching more than one _conversation_ lists
+the candidates and exits 1 rather than guessing; two matches sharing a root are not two conversations
+— a fork, or the same id opened from two working directories, both covered below — so ambiguity is
+judged on the root, never on the count of matching cards.
+
+Which row to continue in is answered by the same measure `foster sweep`'s own passes use — records a
+row's file holds that no sibling's file holds, then the last answer, then sheer size — asked once
+across the whole family (every id sharing the conversation's root, every file any of them occupies)
+rather than choosing a fork-election path or a file-election path up front. Read-only throughout.
+
+### Proving a sweep
+
+`foster sweep --prove` is the audit that used to live only in a skill's own hand-run recipe, after
+three incidents where a sweep that reported "nothing is left" had not, in fact, brought everything —
+once losing 2116 records nobody noticed until the file was compared by hand.
+
+It is deliberately not built from the sweep's own bookkeeping (`Outcome.beyond`, `Sidebar.unreached`,
+the passes' own plans): two of those three incidents were bugs _in_ that bookkeeping, so checking
+with the same arithmetic would have missed the same bugs the same way. Instead, for every
+conversation the store holds a card for, it reads the id's own transcript files end to end — the same
+set-difference primitive `foster sweep`'s branch and second-file passes are built on, asked fresh,
+with no sweep state in between — and compares that union against what the account this run targets
+can actually reach through its own cards. Anything short of the whole union is a gap, named with its
+title and how many records short it is; `foster sweep --prove` exits 1 the moment any conversation
+has one, excluding the same never-fosterable classes an ordinary sweep already counts and reports
+separately (see [the whole sweep](#the-whole-sweep)).
+
+A fork is out of scope on purpose: whether every branch of one got a row is the branch pass's own
+question, already in the sweep's report. This measures the other thing that pass does not — one id
+split across two working directories, and whether the target's cards for it, together, reach every
+record either file holds.
+
+On a dry run this measures the account **before** the plan above runs, which is exactly the work
+that plan exists to close; on `--yes` it measures what was actually written. Read-only either way —
+nothing about `--prove` itself writes.
+
 ## Why a restart is needed
 
 Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
@@ -657,6 +720,38 @@ undo. `--restart` is the one command that does the whole thing itself: quit, wri
 write happens in the gap, which is the only moment either file is safe to touch. `foster sweep`
 plans a layout alongside its own passes (never writing it) and says so in its summary when anything is
 waiting.
+
+### Checking a restart did not undo anything: `foster verify`
+
+Two different runs have now written something in the closed-app gap and watched the app save part of
+it straight back over once it came up: marks (24/09/2026, ten of forty-nine "other file" marks gone
+three minutes later, no foster event in between) and sidebar groups (23/09/2026, the paragraph
+above). `foster verify` is the one command that reads back, after the fact, whether any of what
+foster wrote to this account has since been undone:
+
+```bash
+foster verify            # read-only; writes nothing
+foster verify --json
+```
+
+Titles, archived flags and pins are checked exactly, because the ledger alone proves reversion for
+them: a card is back under a title it wore _before_ foster ever touched it (`planMarksBack`), or a pin
+move a sweep deferred still has not landed (`planPinMoves`) — the same two functions `foster layout`
+itself calls to close the gap, read back here rather than re-derived.
+
+Groups and routines cannot be checked as exactly, and `foster verify` says so rather than pretending
+otherwise: the ledger keeps only counts of what one `layout_applied` run brought, never which card
+went into which group, so "is this one assignment still there" has no ledger-only answer once the
+process that made it has exited — that is what `layoutVerify.ts`'s own check does, inside the same
+run that wrote it, and it cannot be repeated cold. What `foster verify` flags instead is the one
+shape actually measured on a real store: an account that has had groups or routines applied to it
+before, now showing **none**, while a fresh plan still wants to bring some. A non-empty scope with
+more merely pending is reported as such and left out of the exit code — it cannot be told apart from
+another account simply having gained a group since the last run, and asserting undone on a guess is
+worse than saying "pending".
+
+Exits 1 the moment anything above was found undone. Run it after `foster layout --yes --restart` (or
+`sweep --restart`) — the `/fosteia` skill's own last step now does.
 
 ## The sidebar's filter menu: two stores
 
@@ -1106,12 +1201,17 @@ foster clients --fragment # print a Windows Terminal fragment (JSON), one profil
 # Bringing conversations in
 foster sweep     # the whole job: every account, archived and deleted included
 foster sweep --sync-titles # also re-title copies whose original has been renamed since
+foster sweep --prove # after planning, independently check every conversation is fully reachable
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster foster    # create the copies
 foster restore   # bring back sessions deleted in the app
 
 # After the sweep
+foster where <query> # every account/store holding a card for one conversation, and which to
+                 #   continue in (a session id, a cliSessionId prefix, or a title fragment)
+foster verify    # after a restart, check nothing foster wrote (marks, pins, groups, routines)
+                 #   was undone
 foster return    # remove fostered copies, restoring the previous state
 foster consolidate # one row per piece of work, on the branch that carried on
 foster unclaim   # release the worktree claim a copy inherited from its original

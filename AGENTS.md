@@ -645,6 +645,75 @@ the target has none — the same "target already has one, leave it" rule groups 
 machine-wide half needs no copying, since one Local Storage record already covers every account on
 the installation.
 
+## `foster where`, `foster verify`, and `sweep --prove`
+
+Added 24/09/2026, replacing three hand-run recipes: "which account holds this conversation and
+which row do I open" (`.claude/commands/fosteia.md`'s audit steps), "did the restart undo what
+`foster layout` just wrote" (no command existed), and "did a sweep that said 'nothing is left'
+actually bring everything" (the incidents 06/09, 14/09 and 15/09/2026 the memory
+`foster-auditar-completude-do-sweep` names — 2116 records lost once, #114).
+
+**`foster where <query>`** (`src/engine/where.ts`) searches every store `knownStores` names —
+installed app, running, used-before, registered — not just the one `--store` resolves to, and every
+account within each. A query is an id/cliSessionId prefix or a title fragment; `local_` is stripped
+from both sides before comparing, the same convention `selectByKey` (`domain/filter.ts`) already
+keeps. Two matching cards are ambiguous only when they root to two different conversations —
+`resolveWhereQuery` roots every matched id with `Lineage.deepen`/`rootOf` before counting, so a fork
+or a same-id-two-cwds pair (which share a root) resolve to one report rather than a false
+ambiguity. `buildWhereReport` then ranks every card in the whole family (every id sharing the root,
+every file any of them occupies) with one measure — `weighScans` keyed by file, tie-broken the same
+way `fileCards.ts`'s `byContinuation` and `branches.ts`'s `byAdvancement` each are — rather than
+choosing a fork-election path or a file-election path up front, since a query does not know in
+advance which kind of "shown twice" it is asking about. Read-only; the search phase uses
+`scanAccount(..., { slim: true })`, the same perf seam sweep uses (#116/#117).
+
+Cross-checked against a real store 24/09/2026: `foster where` on a title fragment reported "1 file,
+255 record(s) total"; an independent `grep`-and-`sort -u` of the transcript's own `uuid` fields
+counted 255 distinct ids out of 374 lines. On a two-file conversation it reported "12335 record(s)
+total"; hand-summing the union of both files' `uuid` sets, independently, gave 12335. The same run
+surfaced a conversation (`83b273f9…`, "INSSIST R5") where **every** card in **every** account on the
+machine — eleven of them — opened the same one file of a two-file conversation; nothing anywhere had
+ever opened the other, larger file. Not a bug in `where` — a real gap `restore`/a fresh card would
+close — but exactly the shape `sweep --prove` (below) is for.
+
+**`foster verify`** (`src/engine/verify.ts`) reads back, in a fresh process, whether the app undid a
+write `foster layout`/`sweep --restart` made in the closed-app gap. Titles/archived flags and pins
+are checked exactly, by calling `planLayout` and reading its `.marks`/`.pins` back out — the same two
+values `foster layout` itself uses to decide what to write, not a re-derivation. Groups and routines
+cannot be checked as exactly: `layout_applied` carries only counts, never which card went into which
+group (`project()`'s fold explicitly never reads a `layout_applied` event's fields — see
+`LayoutAppliedEvent`'s own comment), so there is no ledger record of "this card, this group" to
+compare a later read against. What `verifyFromPlan` flags instead is the one shape actually measured
+on 23/09/2026: a `layout_applied` event exists for this target with `groupsCreated > 0`, the store's
+current scope (`readGroupScopes`) now has zero groups, **and** a fresh `planLayout` still wants to
+create some. Anything short of that — a non-empty scope with more merely pending — is reported, not
+asserted as undone: it cannot be told apart from another account having simply gained a group since.
+Cross-checked 24/09/2026 against a real store (scratch-copied ledger, live store read-only): `foster
+verify` reported "a fresh `foster layout` would still bring 6 group(s)"; an independent `foster
+layout` dry run against the same store proposed exactly 6 new groups.
+
+**`sweep --prove`** (`src/ops/prove.ts`) is the sweep audit, deliberately not built from the sweep's
+own bookkeeping (`Outcome.beyond`, `Sidebar.unreached`) — two of the three incidents above were bugs
+_in_ that bookkeeping, so checking with the same arithmetic would have missed the same bugs the same
+way. For every `cliSessionId` any card in the store names, it reads `Lineage.scanOf(id)` (every file
+the id occupies, end to end, fresh) and compares that union against what the target account's own
+cards reach (`Lineage.reachOf` per card, unioned). A gap whose only cards outside the target are all
+blocked by a `NEVER_COMES` reason (`ops/sweep.ts`'s own list — scheduled task, spawned task, never
+opened, too large) is reported separately as never-fosterable rather than counted as a gap; a gap
+with no card at all outside the target (every card the missing file's id has is the target's own) is
+reported as a gap on the same basis, not guessed into either bucket — see the module's own comment.
+Scoped to one id at a time, the same way `fileCards.ts` is: whether every branch of a _fork_ got a
+row is the branch pass's own question, already in `SweepReport.branches`; this measures the other
+thing — one id split across two working directories — that the branch pass does not.
+
+Measured 24/09/2026 against the real store (scratch ledger, `--yes` never passed): a full dry-run
+`sweep --prove` took 1m54s and surfaced real gaps, `83b273f9…` above included (0 of 12335 reached by
+the currently-signed-in account through its own cards, at the time of the run — the ordinary sweep
+pass above it in the same run is what would close most of them; the second file nobody has ever
+opened is what it cannot). On a dry run this measures the account **before** the plan runs, which is
+the work that plan exists to close, not a simulation of what the plan would leave — said plainly in
+`--prove`'s own `--help` text so a dry-run gap is not mistaken for a `--yes` run's own failure.
+
 ## Before pushing
 
 ```bash
