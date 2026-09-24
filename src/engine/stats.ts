@@ -327,12 +327,30 @@ export function usageEventsInFile(
 ): { usage: UsageEvent[]; stops: LimitStopEvent[] } {
   const usage: UsageEvent[] = [];
   const stops: LimitStopEvent[] = [];
+  // The app writes a limit-stop record with its own model field set to the
+  // literal placeholder `<synthetic>` — see the doc comment on `lastAnswer` in
+  // `store/transcripts.ts`. The real model is whatever the conversation's last
+  // genuine turn (a usage record, never an error or a sidechain — `eventOfLine`
+  // already filters both out before a line can become `kind: 'usage'`) was
+  // running, so it is tracked here across the whole file, in order, and a stop
+  // is attributed to it instead of to the placeholder. Tracked regardless of
+  // `since`: a stop just inside the window can be preceded by the model that
+  // was running just outside it, and that model is still the right answer.
+  let lastRealModel: string | undefined;
 
   for (const line of streamLines(file)) {
     const found = eventOfLine(line);
-    if (!found || found.at < since) continue;
-    if (found.kind === 'usage') usage.push(found.event);
-    else stops.push(found.event);
+    if (!found) continue;
+
+    if (found.kind === 'usage') {
+      lastRealModel = found.event.model;
+      if (found.at >= since) usage.push(found.event);
+      continue;
+    }
+
+    if (found.at >= since) {
+      stops.push({ ...found.event, model: lastRealModel ?? found.event.model });
+    }
   }
 
   return { usage, stops };
@@ -340,9 +358,11 @@ export function usageEventsInFile(
 
 /**
  * Every account whose transcripts still exist on disk, for the whole-store
- * report. Built from a full scan rather than reading it again inside `stats`:
- * `foster disk` and `foster stats` both need the store scanned once, and the
- * CLI passes the same `DiscoveredSession[]` to both.
+ * report. Takes the scan rather than doing it itself so a caller that already
+ * has one — `defaultStatsDeps` scans once per invocation of `stats`, and
+ * `foster disk` scans once per invocation of its own command — never asks for
+ * a second. The two commands are separate CLI handlers, run in separate
+ * processes, so nothing is actually shared between them today.
  */
 export function ownersOf(sessions: DiscoveredSession[]): Map<string, AccountRef> {
   const owners = new Map<string, { account: AccountRef; isCopy: boolean }>();

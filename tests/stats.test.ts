@@ -318,6 +318,46 @@ describe('usageEventsInFile', () => {
     expect(stops).toEqual([{ at: Date.parse('2026-09-24T10:00:00.000Z'), model: '<synthetic>' }]);
   });
 
+  it('attributes a usage-limit stop to the real model that was running, not the placeholder', () => {
+    const file = write([
+      {
+        type: 'assistant',
+        timestamp: '2026-09-24T09:00:00.000Z',
+        message: {
+          model: 'claude-opus-5',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: 'assistant',
+        timestamp: '2026-09-24T10:00:00.000Z',
+        isApiErrorMessage: true,
+        error: USAGE_LIMIT,
+        message: { model: '<synthetic>' },
+      },
+    ]);
+
+    const { stops } = usageEventsInFile(file, 0);
+
+    expect(stops).toEqual([{ at: Date.parse('2026-09-24T10:00:00.000Z'), model: 'claude-opus-5' }]);
+  });
+
+  it('falls back to the stop record itself when no real model preceded it', () => {
+    const file = write([
+      {
+        type: 'assistant',
+        timestamp: '2026-09-24T10:00:00.000Z',
+        isApiErrorMessage: true,
+        error: USAGE_LIMIT,
+        message: { model: '<synthetic>' },
+      },
+    ]);
+
+    const { stops } = usageEventsInFile(file, 0);
+
+    expect(stops).toEqual([{ at: Date.parse('2026-09-24T10:00:00.000Z'), model: '<synthetic>' }]);
+  });
+
   it('ignores an error that is not a usage limit', () => {
     const file = write([
       {

@@ -143,7 +143,11 @@ export function diskReport(
   env: NodeJS.ProcessEnv = process.env,
 ): DiskReport {
   const accounts = new Map<string, AccountDiskUsage>();
-  const projects = new Map<string, { cardBytes: number; cardCount: number }>();
+  // Keyed lowercase: a cwd's casing can differ from the directory name already
+  // on disk on a case-insensitive filesystem, the same lossiness `fileOpenedFrom`
+  // (`store/transcripts.ts`) already normalizes for. The label kept alongside
+  // is whichever spelling was seen first, purely for display.
+  const projects = new Map<string, { label: string; cardBytes: number; cardCount: number }>();
   const bulkyByField = new Map<string, { bytes: number; cardCount: number }>();
   const oversizedCards: OversizedCard[] = [];
   const referencedIds = new Set<string>();
@@ -195,10 +199,11 @@ export function diskReport(
     accounts.set(key, accountUsage);
 
     const project = projectDirName(found.data.cwd ?? '') || '(no working directory)';
-    const projectUsage = projects.get(project) ?? { cardBytes: 0, cardCount: 0 };
+    const projectKey = project.toLowerCase();
+    const projectUsage = projects.get(projectKey) ?? { label: project, cardBytes: 0, cardCount: 0 };
     projectUsage.cardBytes += bytes;
     projectUsage.cardCount += 1;
-    projects.set(project, projectUsage);
+    projects.set(projectKey, projectUsage);
 
     if (bytes > SESSION_FILE_MAX_BYTES) {
       oversizedCards.push({ path: found.path, account: found.account, bytes });
@@ -215,7 +220,7 @@ export function diskReport(
   const roots = transcriptRoots(env);
   const index = indexAllTranscripts(roots);
 
-  const transcriptProjectUsage = new Map<string, { bytes: number; count: number }>();
+  const transcriptProjectUsage = new Map<string, { label: string; bytes: number; count: number }>();
   const allFiles: { path: string; bytes: number }[] = [];
   const fileBytes = new Map<string, number>();
   let totalTranscriptBytes = 0;
@@ -230,10 +235,15 @@ export function diskReport(
       allFiles.push({ path: file, bytes });
 
       const project = path.basename(path.dirname(file));
-      const usage = transcriptProjectUsage.get(project) ?? { bytes: 0, count: 0 };
+      const projectKey = project.toLowerCase();
+      const usage = transcriptProjectUsage.get(projectKey) ?? {
+        label: project,
+        bytes: 0,
+        count: 0,
+      };
       usage.bytes += bytes;
       usage.count += 1;
-      transcriptProjectUsage.set(project, usage);
+      transcriptProjectUsage.set(projectKey, usage);
     }
   }
 
@@ -244,15 +254,15 @@ export function diskReport(
   const projectList: ProjectDiskUsage[] = [
     ...new Set([...projects.keys(), ...transcriptProjectUsage.keys()]),
   ]
-    .map((project) => {
-      const cards = projects.get(project) ?? { cardBytes: 0, cardCount: 0 };
-      const transcripts = transcriptProjectUsage.get(project) ?? { bytes: 0, count: 0 };
+    .map((projectKey) => {
+      const cards = projects.get(projectKey);
+      const transcripts = transcriptProjectUsage.get(projectKey);
       return {
-        project,
-        cardBytes: cards.cardBytes,
-        cardCount: cards.cardCount,
-        transcriptBytes: transcripts.bytes,
-        transcriptCount: transcripts.count,
+        project: cards?.label ?? transcripts?.label ?? projectKey,
+        cardBytes: cards?.cardBytes ?? 0,
+        cardCount: cards?.cardCount ?? 0,
+        transcriptBytes: transcripts?.bytes ?? 0,
+        transcriptCount: transcripts?.count ?? 0,
       };
     })
     .sort((a, b) => b.cardBytes + b.transcriptBytes - (a.cardBytes + a.transcriptBytes));
