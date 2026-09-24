@@ -178,7 +178,7 @@ import {
   type DetachedPlan,
   type DetachLaunchResult,
 } from '../engine/detach.js';
-import { readProcesses } from '../util/processes.js';
+import { cachedProcesses, readProcesses } from '../util/processes.js';
 import {
   codexSessionsDir,
   findRollouts,
@@ -589,7 +589,11 @@ program
 
     const { store } = context(this);
     const config = readConfig(store);
-    const app = inspectApp(store);
+    // `cachedProcesses` rather than the `readProcesses` default: `inspectApp`
+    // here and `runningStores` below each want the process table, and without
+    // this they read it twice — a second PowerShell spawn for an answer the
+    // first one already gave, inside the same few hundred milliseconds.
+    const app = inspectApp(store, undefined, cachedProcesses);
 
     if (opts.json) {
       print({
@@ -671,7 +675,8 @@ program
     // resolves the package path; both name the same store, and reporting the other
     // spelling as "another instance" invents a profile that does not exist.
     const known = new Set([...candidateStoreRoots(), store.root].map(comparablePath));
-    const others = runningStores().filter((dir) => !known.has(comparablePath(dir)));
+    // Same table `inspectApp` just read, reused rather than read again.
+    const others = runningStores(cachedProcesses).filter((dir) => !known.has(comparablePath(dir)));
     if (others.length > 0) {
       console.log(pc.bold('Other running instances'));
       for (const dir of others) console.log(`  ${dir}`);
