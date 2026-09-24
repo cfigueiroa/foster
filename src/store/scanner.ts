@@ -10,7 +10,9 @@ import type {
   StoreLayout,
 } from '../domain/types.js';
 import { safeReaddir } from '../util/fs.js';
-import { readSessionCard, readSessionFile } from './sessionFile.js';
+import type { SlimCardCache } from './cache/cardCache.js';
+import { readSessionCardCached } from './cache/cardCache.js';
+import { readSessionFile } from './sessionFile.js';
 
 /**
  * Read-only view of the Claude Desktop store.
@@ -48,9 +50,16 @@ const NOTHING_KNOWN: KnownCopies = new Set<string>();
  * store for a long run, which is the sweep, and which puts them back with
  * `withBulkyFields` before any write that copies a whole card. Off by default,
  * so every other reader keeps the card exactly as the file holds it.
+ *
+ * `cache`, consulted only when `slim` is true: a persisted `SlimCardCache`
+ * (`store/cache/`) that answers for a card whose file has not changed size or
+ * mtime since it was last read, instead of reading and parsing it again. With
+ * no cache this is exactly the uncached read, so passing nothing here changes
+ * nothing about what a scan finds.
  */
 export interface ScanOptions {
   slim?: boolean;
+  cache?: SlimCardCache;
 }
 
 export function scanAccount(
@@ -66,7 +75,7 @@ export function scanAccount(
     if (!isSessionFileName(entry)) continue;
 
     const file = path.join(dir, entry);
-    const card = options.slim ? readSessionCard(file) : wholeCard(file);
+    const card = options.slim ? readSessionCardCached(file, options.cache) : wholeCard(file);
     if (!card) continue;
     const { data } = card;
 

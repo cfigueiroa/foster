@@ -34,8 +34,43 @@ that holds one per child — for `clients` and launch (`LedgerState.clientRoots`
 ever carries an account uuid, a token, or a URL: the root outlives whatever account currently
 sits inside it, and registering a name already in use is a rename, not a refusal — the fold keeps
 only the latest root for it. `ui.json` and `update-check.json` stay the only other mutable files
-under `~/.foster`, and neither is a registry — preference and an update-check cache, not a record
-of writes.
+under `~/.foster` that are a registry or a preference; `~/.foster/cache` (relocatable with
+`FOSTER_HOME`, same as the ledger) is a third kind, a pure performance cache with nothing it would
+be a loss to delete — see the section below.
+
+## The persistent scan cache, and why it is safe to lose
+
+`~/.foster/cache` holds two files: `cards.ndjson` (slim `readSessionCard` results,
+`store/cache/cardCache.ts`) and `transcripts.bin` (`scanConversation` and `idsMentionedIn`
+results, `store/cache/transcriptCache.ts`). Both are keyed on a file's absolute path plus its size
+and mtime — the transcript cache additionally resumes from a stored byte offset on growth, after
+verifying the last 4 KB before that offset still reads the same, so an actively-growing JSONL log
+is read once and topped up rather than reread whole every run. Neither file is a registry: nothing
+here is folded by `project()`, nothing is ever read to decide what foster does, only to skip
+re-reading a file whose content is already known. Deleting the directory (`foster cache clear`, or
+by hand) costs the next run its head start and nothing else — the next scan reads from disk and
+rebuilds it, the same as an entry a schema or version mismatch already ignores.
+
+`--no-cache` (or `FOSTER_NO_CACHE=1`) skips it entirely, both reads and writes, and is the answer
+whenever the cache itself is suspect. Measured 24/09/2026 on a real store (25k+ cards, 1000+
+transcripts): a dry-run `/fosteia`-flagged sweep went from 55–79 s uncached to 34–36 s warm —
+smaller than the roughly 3-4× a store this size's read cost alone would suggest, because most of
+the remaining time is the sweep's own in-memory planning (fork detection, the file-card and
+title-sync passes), which the cache does not touch. Cold, warm and `--no-cache` produced
+byte-identical `--json` and text output on that store (`runSweep`'s dry-run always mints a fresh
+random id for the copy it previews, on every call regardless of caching — the one deliberate
+source of variation, and not what this compares).
+
+Residual risk, stated once here rather than at every call site: a card or transcript rewritten
+with the exact same size inside the same mtime tick as its previous write reads as unchanged.
+Nothing keyed on size and mtime alone can tell that apart from no change at all.
+
+A first design combined the transcript cache's two halves into one entry, computing and keeping
+`idsMentionedIn`'s superset for every file `scanConversation` touched instead of only the handful
+`Lineage.deepen` ever asks about. Measured the same day: that ran a real dry-run sweep out of the
+default heap (`Ineffective mark-compacts near heap limit`) on a store the uncached sweep read in
+78 s. The two are independent caches now, growth-resumed separately, so a `scanConversation`-only
+run never pays for or retains data nobody asked for.
 
 ## `--store <name>`: resolution order, and what it now reaches
 

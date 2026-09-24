@@ -56,9 +56,10 @@ import {
 } from '../engine/unclaim.js';
 import type { Ledger } from '../ledger/log.js';
 import { copySessionIds, project } from '../ledger/project.js';
+import type { FosterCache } from '../store/cache/index.js';
 import { readPinState, type PinState } from '../store/pinstate.js';
 import { findRestorable } from '../store/restore.js';
-import { fromAccounts, scanAccount, scanStore } from '../store/scanner.js';
+import { fromAccounts, scanAccount, scanStore, type ScanOptions } from '../store/scanner.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage, firstLine } from '../util/fs.js';
 import { fosterableFrom, liveConversationIds } from './foster.js';
@@ -175,6 +176,14 @@ export interface SweepOptions {
    * synthetic table instead of the real machine deciding whether it passes.
    */
   list?: ProcessLister;
+  /**
+   * The persistent scan cache (`store/cache/`), opened and — once the run is
+   * over — saved by the caller. `runSweep` only ever reads and writes through
+   * it; opening one is `--no-cache`'s business, in `cli/index.ts`. With none
+   * given, every scan and every transcript read here is exactly what it would
+   * have been before this existed.
+   */
+  cache?: FosterCache;
 }
 
 export interface SweepPhase {
@@ -493,6 +502,8 @@ interface SweepRun {
   kin: Lineage;
   /** The sources' cards, classified by the ledger. Never written to, so read once. */
   fromSources: DiscoveredSession[];
+  /** The slim-card half of the persistent cache, when one was opened for this run. */
+  cardCache: FosterCache['cards'] | undefined;
 }
 
 interface Passes {
@@ -522,8 +533,12 @@ export function runSweep(options: SweepOptions): SweepReport {
       !(ref.accountUuid === target.accountUuid && ref.organizationUuid === target.organizationUuid),
   );
 
-  const kin = options.projectsDirs ? lineageAt(options.projectsDirs) : lineage(env, configDirs);
-  const scanned = scanStore(store, copySessionIds(ledger.read()), SLIM);
+  const cardCache = options.cache?.cards;
+  const transcriptCache = options.cache?.transcripts;
+  const kin = options.projectsDirs
+    ? lineageAt(options.projectsDirs, transcriptCache)
+    : lineage(env, configDirs, transcriptCache);
+  const scanned = scanStore(store, copySessionIds(ledger.read()), slimOptions(cardCache));
   const run: SweepRun = {
     store,
     ledger,
@@ -537,6 +552,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     env,
     live,
     kin,
+    cardCache,
     fromSources: fromAccounts(scanned, sources),
   };
 
@@ -671,6 +687,11 @@ function pendingOf(confirmation: SweepConfirmation): number {
 /** The sweep holds every card of the store for its whole run — see `ScanOptions`. */
 const SLIM = { slim: true } as const;
 
+/** `SLIM`, plus the persisted card cache when this run opened one. */
+function slimOptions(cache: FosterCache['cards'] | undefined): ScanOptions {
+  return cache ? { slim: true, cache } : SLIM;
+}
+
 /** One round's writes, in the order a sweep has always made them. */
 export interface Round {
   passes: Passes;
@@ -700,7 +721,12 @@ function runRound(
   // title pass reads titles, and they are the ones those passes just changed.
   // Every other account is read from the scan this run began with — a sweep
   // writes into one directory only, so nothing it did can have moved them.
-  const settled = scanAccount(store, target, copySessionIds(ledger.read()), SLIM);
+  const settled = scanAccount(
+    store,
+    target,
+    copySessionIds(ledger.read()),
+    slimOptions(run.cardCache),
+  );
   const cards = cardsAfter(scanned, target, settled);
 
   // Reading the ledger fresh: the passes above may just have appended
@@ -960,7 +986,7 @@ function confirm(
 ): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(store, target, copySessionIds(events), slimOptions(run.cardCache));
   const cards = cardsAfter(scanned, target, hereCards);
   const again = runPasses(run, hereCards, true);
 
@@ -1019,7 +1045,7 @@ function runFileCards(run: SweepRun, dryRun: boolean): FileCardsResult {
   const { store, ledger, target, kin, live } = run;
   const { staleTemplate, divergedTemplate, otherFileTemplate } = run;
   const events = ledger.read();
-  const hereCards = scanAccount(store, target, copySessionIds(events), SLIM);
+  const hereCards = scanAccount(store, target, copySessionIds(events), slimOptions(run.cardCache));
   const plans = planFileCards({
     hereCards,
     kin,
