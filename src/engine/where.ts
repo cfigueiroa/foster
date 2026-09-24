@@ -171,6 +171,16 @@ function openedFile(files: readonly string[], cwd: string | undefined): string |
   return fileOpenedFrom(files, cwd);
 }
 
+/** Sorts first the account whose rows should win an otherwise-tied election. */
+function accountRank(
+  row: { account: AccountRef; archived: boolean },
+  target: string | undefined,
+): number {
+  const isTarget = target !== undefined && row.account.accountUuid === target;
+  if (isTarget) return row.archived ? 1 : 0;
+  return row.archived ? 3 : 2;
+}
+
 /**
  * Where the work was left, across the whole family — the exact election
  * `fileCards.ts`'s `byContinuation` runs for the sweep, reused here rather
@@ -180,16 +190,49 @@ function openedFile(files: readonly string[], cwd: string | undefined): string |
  * one case the shared comparator does not itself need to handle, since the
  * sweep only ever calls it on rows it has already filtered down to the
  * measurable ones.
+ *
+ * `byContinuation` decides between *files*, never between two rows that
+ * open the very same one — for a single file, every metric it looks at
+ * (`lastAssistantAt`, `only`, `lastMessageAt`, `total`) comes from that
+ * file's one shared `ScanWeight`, so it degenerates to its own last resort,
+ * the row id, which is arbitrary across accounts. Measured on a real store
+ * (24/09/2026, milestone D1): naming the row to continue in that way named
+ * a row in another account — one of them archived — in 2 of 4 checks,
+ * although the signed-in (target) account had a row open on the very same
+ * file. `accountRank` is the tiebreak this needs instead, tried only when
+ * `byContinuation` would otherwise fall through to comparing ids on a tied
+ * file: the target account's own visible row first, then its archived row
+ * — the target's own card, however filed, still beats a jump to another
+ * account — then another account's visible row, then the rest. `target` is
+ * the signed-in account's uuid; left undefined (no signed-in account could
+ * be read), every row ranks the same here and the id is still the last word.
  */
 function byWorkingRow(
-  a: { weight?: ScanWeight; sessionId: string },
-  b: { weight?: ScanWeight; sessionId: string },
+  a: {
+    weight?: ScanWeight;
+    sessionId: string;
+    file?: string;
+    account: AccountRef;
+    archived: boolean;
+  },
+  b: {
+    weight?: ScanWeight;
+    sessionId: string;
+    file?: string;
+    account: AccountRef;
+    archived: boolean;
+  },
+  target: string | undefined,
 ): number {
   if (a.weight === undefined && b.weight === undefined) {
     return a.sessionId.localeCompare(b.sessionId);
   }
   if (a.weight === undefined) return 1;
   if (b.weight === undefined) return -1;
+  if (a.file !== undefined && a.file === b.file) {
+    const rank = accountRank(a, target) - accountRank(b, target);
+    return rank !== 0 ? rank : a.sessionId.localeCompare(b.sessionId);
+  }
   return byContinuation(a.weight, b.weight, a.sessionId, b.sessionId);
 }
 
@@ -210,13 +253,15 @@ export function familyOf(id: string, universe: Iterable<string>, kin: Lineage): 
 /**
  * Build the report for one conversation, given every card this run found for
  * its family — see `familyOf`. `state` is the ledger's own fold, read once by
- * the caller.
+ * the caller. `target`, when known, is the signed-in account's uuid — see
+ * `byWorkingRow`'s own comment for what it changes.
  */
 export function buildWhereReport(
   id: string,
   entries: readonly WhereEntry[],
   kin: Lineage,
   state: LedgerState,
+  target?: string,
 ): WhereReport {
   const family = familyOf(
     id,
@@ -301,8 +346,21 @@ export function buildWhereReport(
 
   const ranked = [...rows].sort((a, b) =>
     byWorkingRow(
-      { weight: a.file ? weights.get(a.file) : undefined, sessionId: a.sessionId },
-      { weight: b.file ? weights.get(b.file) : undefined, sessionId: b.sessionId },
+      {
+        weight: a.file ? weights.get(a.file) : undefined,
+        sessionId: a.sessionId,
+        ...(a.file === undefined ? {} : { file: a.file }),
+        account: a.account,
+        archived: a.archived,
+      },
+      {
+        weight: b.file ? weights.get(b.file) : undefined,
+        sessionId: b.sessionId,
+        ...(b.file === undefined ? {} : { file: b.file }),
+        account: b.account,
+        archived: b.archived,
+      },
+      target,
     ),
   );
   const winner = ranked[0];

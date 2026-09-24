@@ -6399,17 +6399,26 @@ program
       'opened from two working directories — are one conversation here, ranked by the\n' +
       "exact election `foster sweep`'s own fileCards pass runs (not a re-implementation\n" +
       'of it): the last answer, then records held that no sibling file holds, then the\n' +
-      'last message of any kind, then sheer size. The row that measure elects is marked\n' +
-      'as the one to continue in.',
+      'last message of any kind, then sheer size. When that election still ties —\n' +
+      'several rows open the very same file — the row in the account `--store` resolves\n' +
+      'to (the signed-in account) wins, visible before archived, ahead of every other\n' +
+      "account's row; only then the id. The row that measure elects is marked as the\n" +
+      'one to continue in.',
   )
   .argument('<query>', 'a session id, a cliSessionId prefix, or a title fragment')
   .option('--json', 'machine-readable output')
   .action(function (this: Command, query: string) {
-    const { ledger } = context(this);
+    const { store, ledger } = context(this);
     const opts = this.opts<{ json?: boolean }>();
     const events = ledger.read();
     const state = project(events);
     const copies = copySessionIds(events);
+    // The account `--store` resolves to (the default when it is not given) is
+    // the one the tiebreak below treats as "the signed-in account" — never
+    // guessed from which row happens to sort first across every account the
+    // search found. Undefined when the store has no cached identity yet, in
+    // which case the tiebreak falls back to the id order it always used.
+    const target = signedInAccount(store);
 
     const stores: { store: StoreLayout; name?: string }[] = [];
     const seenRoots = new Set<string>();
@@ -6479,7 +6488,7 @@ program
       return;
     }
 
-    const report = buildWhereReport(resolved.id, entries, kin, state);
+    const report = buildWhereReport(resolved.id, entries, kin, state, target);
 
     if (opts.json) {
       print(report);

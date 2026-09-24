@@ -251,6 +251,110 @@ describe("buildWhereReport — matches the sweep's own election", () => {
   });
 });
 
+describe('buildWhereReport — same-file tie across accounts', () => {
+  // A third fake account, distinct from OLD_ACCOUNT/NEW_ACCOUNT, so a test can
+  // tell "the target" from "some other account" without relying on which of
+  // the two helper constants happens to sort first.
+  const OTHER_ACCOUNT: AccountRef = {
+    accountUuid: '22222222-2222-4222-8222-222222222222',
+    organizationUuid: '22222222-2222-4222-8222-222222222223',
+  };
+
+  const CONVERSATION_3 = '00000000-0000-4000-8000-0000000000f9';
+
+  function fixture(rows: { account: AccountRef; sessionId: string; archived?: boolean }[]) {
+    const store = makeStore();
+    const configDir = mkdtempSync(path.join(tmpdir(), 'foster-where-tie-'));
+
+    // One file only: every card below opens it regardless of cwd, since
+    // `openedFile` returns the sole file without needing to disambiguate by
+    // working directory — the shape that makes the election tie in the first
+    // place (`byContinuation` has only one `ScanWeight` to compare).
+    transcript(configDir, 'C--work-project', CONVERSATION_3, [
+      { type: 'custom-title', customTitle: 'Work' },
+      rec(ROOT, 'user', '2026-09-01T20:00:00.000Z'),
+      rec('00000000-0000-4000-8000-0000000000fa', 'assistant', '2026-09-01T20:01:00.000Z'),
+    ]);
+
+    const entries = rows.map(({ account, sessionId, archived }) =>
+      card(
+        store,
+        account,
+        session({
+          sessionId,
+          cliSessionId: CONVERSATION_3,
+          title: 'Work',
+          isArchived: archived ?? false,
+        }),
+      ),
+    );
+
+    const kin = lineageAt(projectsDirOf(configDir));
+    return { kin, entries };
+  }
+
+  // Chosen so plain id order (the pre-fix tiebreak) picks OLD_ACCOUNT's row —
+  // 'a1' sorts before 'b1' — the opposite of what every case below expects
+  // once a target is named, proving the target preference is what moved it.
+  const OLD_ROW_ID = '00000000-0000-4000-8000-0000000000a1';
+  const NEW_ROW_ID = '00000000-0000-4000-8000-0000000000b1';
+
+  it('elects the target account over another account, both visible on the same file', () => {
+    const { kin, entries } = fixture([
+      { account: OLD_ACCOUNT, sessionId: OLD_ROW_ID },
+      { account: NEW_ACCOUNT, sessionId: NEW_ROW_ID },
+    ]);
+    const report = buildWhereReport(
+      CONVERSATION_3,
+      entries,
+      kin,
+      project([]),
+      NEW_ACCOUNT.accountUuid,
+    );
+    expect(report.working?.account).toEqual(NEW_ACCOUNT);
+  });
+
+  it("elects the target account's archived row over another account's visible row", () => {
+    const { kin, entries } = fixture([
+      { account: OLD_ACCOUNT, sessionId: OLD_ROW_ID },
+      { account: NEW_ACCOUNT, sessionId: NEW_ROW_ID, archived: true },
+    ]);
+    const report = buildWhereReport(
+      CONVERSATION_3,
+      entries,
+      kin,
+      project([]),
+      NEW_ACCOUNT.accountUuid,
+    );
+    expect(report.working?.account).toEqual(NEW_ACCOUNT);
+    expect(report.working?.archived).toBe(true);
+  });
+
+  it("elects another account's visible row over a third account's archived row, target absent from the file", () => {
+    const { kin, entries } = fixture([
+      { account: OLD_ACCOUNT, sessionId: OLD_ROW_ID },
+      { account: OTHER_ACCOUNT, sessionId: NEW_ROW_ID, archived: true },
+    ]);
+    const report = buildWhereReport(
+      CONVERSATION_3,
+      entries,
+      kin,
+      project([]),
+      NEW_ACCOUNT.accountUuid, // the target has no row on this file at all
+    );
+    expect(report.working?.account).toEqual(OLD_ACCOUNT);
+  });
+
+  it('falls back to the row id, unchanged, when no target account is known', () => {
+    const { kin, entries } = fixture([
+      { account: OLD_ACCOUNT, sessionId: OLD_ROW_ID },
+      { account: NEW_ACCOUNT, sessionId: NEW_ROW_ID },
+    ]);
+    const report = buildWhereReport(CONVERSATION_3, entries, kin, project([]));
+    expect(report.working?.account).toEqual(OLD_ACCOUNT);
+  });
+});
+
 describe('buildWhereReport — a fork', () => {
   function fixture() {
     const store = makeStore();

@@ -576,7 +576,11 @@ Which row to continue in is answered by the exact election `foster sweep`'s own 
 answer, then records a row's file holds that no sibling's file holds, then the last message of any
 kind, then sheer size — asked once across the whole family (every id sharing the conversation's root,
 every file any of them occupies) rather than choosing a fork-election path or a file-election path up
-front. Read-only throughout.
+front. `byContinuation` decides between files, not between two rows that open the same one; when the
+election is still tied because several rows across different accounts open the very same file, the
+row in the account `--store` resolves to (the signed-in account) wins — its own visible row first, its
+own archived row next, ahead of any other account's row either way — and only then the row id. Read-only
+throughout.
 
 ### Proving a sweep
 
