@@ -105,6 +105,62 @@ describe('grepTranscripts', () => {
     expect(results).toHaveLength(0);
   });
 
+  it('finds a literal term whose match spans a double quote (JSON-escaped on disk)', () => {
+    // The record's raw JSONL line carries `\"connection refused\"`, never the
+    // contiguous bytes `"connection refused"` — the coarse pre-filter must
+    // compare against the escaped form, not the term as it was typed.
+    const store = makeStore();
+    const dirs = transcripts({
+      [CONVERSATION]: [
+        record(
+          'user',
+          'the error said "connection refused" during startup',
+          '2026-09-01T00:00:00.000Z',
+        ),
+      ],
+    });
+
+    const results = grepTranscripts(store, /"connection refused"/, { projectsDirs: dirs });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.hits[0]!.snippet).toContain('connection refused');
+  });
+
+  it('finds a Windows path whose backslashes JSON escaping doubles on disk', () => {
+    // A pattern carrying a `\` is never the literal fast path (`\` is regex
+    // syntax), so this exercises the regex/prefilter side of the same fix —
+    // the raw line holds `C:\\repos\\widget-service\\...`, doubled, never
+    // the single backslashes the pattern (or the decoded message) uses.
+    const store = makeStore();
+    const dirs = transcripts({
+      [CONVERSATION]: [
+        record(
+          'assistant',
+          'run C:\\repos\\widget-service\\bin\\tarefas-invisiveis\\vigia.vbs to fix it',
+          '2026-09-01T00:00:00.000Z',
+        ),
+      ],
+    });
+
+    const pattern = /C:\\repos\\widget-service\\bin\\tarefas-invisiveis\\vigia\.vbs/;
+    const results = grepTranscripts(store, pattern, { projectsDirs: dirs });
+    expect(results).toHaveLength(1);
+  });
+
+  it('finds a literal term containing a control character JSON escapes', () => {
+    const store = makeStore();
+    const dirs = transcripts({
+      [CONVERSATION]: [record('user', 'columns:\tvalue', '2026-09-01T00:00:00.000Z')],
+    });
+
+    // Built from a string with a real tab character, not a regex `\t`
+    // escape, so `.source` carries the raw control character and stays on
+    // the literal fast path (no regex-meta character in it).
+    // eslint-disable-next-line no-control-regex -- the raw tab is the point of this test
+    const pattern = new RegExp('columns:\tvalue');
+    const results = grepTranscripts(store, pattern, { projectsDirs: dirs });
+    expect(results).toHaveLength(1);
+  });
+
   it('decodes non-ASCII text correctly rather than matching mojibake', () => {
     const store = makeStore();
     const dirs = transcripts({

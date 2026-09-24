@@ -114,6 +114,63 @@ function byteViewSource(source: string): string {
   return out;
 }
 
+const SIMPLE_JSON_ESCAPES: Record<string, string> = {
+  '"': '\\"',
+  '\\': '\\\\',
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+};
+
+/**
+ * Whether a character JSON string escaping changes: quote, backslash, or a
+ * C0 control character. Written as a character-code scan rather than a regex
+ * literal — a control-character class in a regex trips `no-control-regex`,
+ * the same reason `engine/launch.ts#hasQuoteOrControlChar` scans by code
+ * instead.
+ */
+function hasJsonEscapedChar(source: string): boolean {
+  for (let i = 0; i < source.length; i++) {
+    const code = source.charCodeAt(i);
+    if (code === 0x22 || code === 0x5c || code <= 0x1f) return true;
+  }
+  return false;
+}
+
+/**
+ * A literal search term, rewritten to the bytes it would actually take on
+ * disk once the CLI's own `JSON.stringify` has escaped it into a transcript
+ * line — never the term as a person typed it.
+ *
+ * `scanTranscriptFile`'s coarse pass used to compare a literal pattern's own
+ * bytes straight against the raw (still-escaped) file bytes, which silently
+ * dropped every conversation whose match spans a character JSON escaping
+ * changes: a quoted phrase (`"connection refused"` is written on disk as
+ * `\"connection refused\"`), a Windows path (every `\` doubled), a literal
+ * newline or tab inside a message. This runs on the *byte-view* source (after
+ * `byteViewSource`), so it only ever sees single-byte ASCII control
+ * characters and the two ASCII punctuation marks JSON escapes — the UTF-8
+ * continuation bytes `byteViewSource` produces for non-ASCII text are always
+ * 0x80 or above and pass through untouched, exactly like `JSON.stringify`
+ * itself leaves them.
+ */
+function jsonEscapeLiteral(source: string): string {
+  if (!hasJsonEscapedChar(source)) return source;
+  let out = '';
+  for (const ch of source) {
+    const simple = SIMPLE_JSON_ESCAPES[ch];
+    if (simple !== undefined) {
+      out += simple;
+      continue;
+    }
+    const code = ch.charCodeAt(0);
+    out += code < 0x20 ? `\\u${code.toString(16).padStart(4, '0')}` : ch;
+  }
+  return out;
+}
+
 interface FileMatch {
   lineNumber: number;
   role: string;
@@ -141,6 +198,21 @@ interface FileMatch {
  * all (measured separately at ~10.6 s). A pattern carrying real regex syntax
  * still needs a string to run `RegExp#test` against, so that path decodes
  * every file regardless — the literal path is what a plain search term gets.
+ *
+ * `literal` is already the *JSON-escaped* form of the search term — see
+ * `jsonEscapeLiteral` — so the coarse check above compares against what the
+ * file actually holds on disk, not against the term as somebody typed it.
+ *
+ * `forceFullScan` covers what the literal path's escaping cannot: a regex
+ * pattern whose *source* contains a quote, a backslash or a control
+ * character has no safe general rewrite (a `\` in a regex source can start
+ * an escape for a literal character, a character class, a backreference or a
+ * Unicode property, and only the first of those maps onto a single disk byte
+ * sequence) — see the blocker this fixes for two real patterns that failed
+ * silently on a real corpus. Rather than risk a second silent miss, such a
+ * pattern skips both coarse checks below and decodes every line of every
+ * file instead, exactly as if nothing had been coarse-filtered — slower for
+ * that one query, never wrong.
  */
 function scanTranscriptFile(
   file: string,
@@ -150,6 +222,7 @@ function scanTranscriptFile(
   prefilter: RegExp,
   matcher: RegExp,
   role: string | undefined,
+  forceFullScan: boolean,
 ): FileMatch[] {
   let bytes: Buffer;
   try {
@@ -162,10 +235,10 @@ function scanTranscriptFile(
 
   let raw: string | undefined;
   if (isLiteral) {
-    if (!bytes.includes(literalBytes)) return [];
+    if (!forceFullScan && !bytes.includes(literalBytes)) return [];
   } else {
     raw = bytes.toString('latin1');
-    if (!prefilter.test(raw)) return [];
+    if (!forceFullScan && !prefilter.test(raw)) return [];
   }
   raw ??= bytes.toString('latin1');
 
@@ -174,7 +247,7 @@ function scanTranscriptFile(
   for (const line of raw.split('\n')) {
     lineNumber++;
     if (line === '') continue;
-    if (isLiteral ? !line.includes(literal) : !prefilter.test(line)) continue;
+    if (!forceFullScan && (isLiteral ? !line.includes(literal) : !prefilter.test(line))) continue;
 
     let record: Record<string, unknown> | undefined;
     try {
@@ -253,10 +326,16 @@ export function grepTranscripts(
   // case-insensitive — `i` changes what "the same bytes" means and the regex
   // path is what honours it.
   const isLiteral = !REGEX_META.test(pattern.source) && !flags.includes('i');
-  const literalSource = isLiteral ? byteViewSource(pattern.source) : '';
+  const literalSource = isLiteral ? jsonEscapeLiteral(byteViewSource(pattern.source)) : '';
   const literalBytes = Buffer.from(literalSource, 'latin1');
   const prefilter = new RegExp(byteViewSource(pattern.source), flags);
   const matcher = new RegExp(pattern.source, flags);
+  // A non-literal pattern whose source mentions a quote, a backslash or a
+  // control character has no safe rewrite onto the escaped bytes a transcript
+  // actually holds on disk (see `scanTranscriptFile`) — the coarse pass is
+  // skipped for it rather than risk it, same as the literal path's escaping
+  // covers the literal pattern case exactly.
+  const forceFullScan = !isLiteral && hasJsonEscapedChar(pattern.source);
 
   const raw: RawGrepMatch[] = [];
 
@@ -283,6 +362,7 @@ export function grepTranscripts(
         prefilter,
         matcher,
         options.role,
+        forceFullScan,
       )) {
         hits.push({
           cliSessionId,
