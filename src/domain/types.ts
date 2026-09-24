@@ -20,24 +20,36 @@ export interface FosterMark {
 }
 
 /**
- * The marker foster writes into a card it minted from a Codex CLI rollout, so
- * the card describes where it came from and a second import of the same rollout
- * is a no-op.
+ * The marker foster writes into a card it minted from an outside conversation —
+ * a Codex CLI rollout, or (since `foster cloud pull`) a Claude Code cloud
+ * session — so the card describes where it came from and a second import of the
+ * same source is a no-op.
  *
  * Mirrors `FosterMark`, and for the same reasons: it survives on the card
  * because the app tolerates unknown keys, and — because the app may drop it on
  * the first save it makes — it is backed by a `conversation_imported` ledger
  * event, exactly as `_foster` is backed by `fostered`. Unlike `FosterMark` it
- * names no Claude account of origin: a Codex rollout has none.
+ * names no Claude account of origin: neither a Codex rollout nor a cloud
+ * session ran as a local Claude Desktop conversation before this.
  */
 export interface FosterImportMark {
-  /** The rollout under ~/.codex/sessions this card was minted from. */
+  /**
+   * Which importer wrote this mark. Absent means `'codex'`: the field was
+   * added alongside `foster cloud pull`, and every mark written before that
+   * came from `import-codex`, the only importer that existed.
+   */
+  source?: 'codex' | 'cloud';
+  /**
+   * The rollout under ~/.codex/sessions this card was minted from (`source:
+   * 'codex'`), or a human-readable description of the cloud session it came
+   * from (`source: 'cloud'`) — a cloud session has no local file to name.
+   */
   sourceRolloutPath: string;
-  /** The Codex thread's own id — also the transcript's `cliSessionId`. */
+  /** The Codex thread's id, or the cloud session's own id (`cse_…`/`session_…`). */
   rolloutId: string;
-  /** A hash of the rollout's bytes, so a changed rollout can be told from an unchanged one. */
+  /** A hash of the source's bytes, so a changed source can be told from an unchanged one. */
   contentHash: string;
-  /** The Codex `cli_version` that wrote the rollout, when it recorded one. */
+  /** The Codex `cli_version` that wrote the rollout, when it recorded one. Codex only. */
   cliVersion?: string;
   importedAt: number;
   toolVersion: string;

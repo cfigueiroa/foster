@@ -645,6 +645,68 @@ the target has none — the same "target already has one, leave it" rule groups 
 machine-wide half needs no copying, since one Local Storage record already covers every account on
 the installation.
 
+## Cloud sessions: `foster cloud list` / `foster cloud pull`
+
+Measured 24/09/2026 against the installed CLI (`@anthropic-ai/claude-code` 2.1.278,
+`bin/claude.exe`, a bundled Node binary) and against seven real cloud sessions on one signed-in
+account. `src/engine/cloudApi.ts`'s own module comment carries the detail; this is the summary.
+
+**The endpoints are private and undocumented.** Nothing here is a published spec — it is a byte
+search for literal strings the minified bundle cannot obfuscate away (`/v1/code/sessions`, header
+names, the functions that build them: `bot`, `iar`, `gL`, `qv` in the 2.1.278 build). They can
+change under a future CLI release with no notice to foster, unlike `engine/anthropicApi.ts`'s two
+endpoints, which are treated as more durable. `list` sends `Authorization`, `Content-Type`,
+`anthropic-version` and `anthropic-client-platform` and nothing else — measured against the real
+list and single-session endpoints, neither sends `x-organization-uuid`. `teleport-events` and its
+`session_ingress` fallback both add it; the fallback's own behaviour (its response shape, whether
+it is ever actually reached) is read out of the bundle alone, since every real session probed here
+answered the primary endpoint directly. `errorFrom`'s `untrusted_device`/`session_stale_relogin`
+codes are assumed to arrive as `error.type` on the response body — named in the bundle's own error
+copy as reasons a device or sign-in is no longer trusted, but never actually seen fire against a
+real account, so a body that does not carry a recognised `type` falls back to a plain status read
+rather than guessing.
+
+**The credential this reads is the CLI's, not the Desktop app's**: `.credentials.json`'s
+`accessToken` plus `.claude.json`'s cached `oauthAccount.organizationUuid` (`store/cloudAuth.ts`,
+the same two files and the same default-client candidate order `store/clients.ts` already uses for
+`readClientIdentity`). **Never refreshed.** An expired token is reported, not renewed — renewing
+rotates the refresh token in a file every `claude` process in that config directory reads at birth
+(`store/cliCredential.ts`'s own warning), and a fleet of clients sharing one account's login is
+exactly the kind of shared, live file foster's other write paths go out of their way not to
+disturb. The refusal names the directory: "run claude in `<dir>` to refresh" is the only fix, and
+it is the user's to run, not foster's. Measured on this machine: of three config directories with a
+credential at all, one (`~/.claude`) had a live token with the `user:sessions:claude_code` scope;
+one (`~/.claude-frota`) had an expired one, which `cloud list` reported per-row rather than failing
+the whole run. Cloud sessions need a `claude.ai` sign-in — an API key is rejected outright by the
+API itself (`gL`'s own guard: "Cloud sessions are only available on the first-party Anthropic API
+provider"), a condition `readCloudAuth` cannot even produce since it only ever hands this module a
+token read from `.credentials.json`.
+
+**`foster cloud pull <id> --into <cwd>`** fabricates a transcript and a sidebar card the same way
+`import-codex` does (`engine/codexImportWrite.ts`): files first, ledger only after they land, guarded
+by `_fosterImport` (now carrying `source: 'cloud'`) and undone the same way (`conversation_imported`
+/ `conversation_import_undone` — `undoCodexImports` is reused as-is for a cloud pull's undo, since
+its body never referenced anything Codex-specific). The one real difference from a Codex import: a
+teleport event's `payload` is already shaped like a Claude transcript record — `uuid`, `parentUuid`,
+`sessionId`, `timestamp`, `type`, `isSidechain`, and per-type fields — because the cloud session
+_is_ a CLI conversation, teleported off whatever machine it last ran on; conversion
+(`engine/cloudTranscript.ts`) is mostly pass-through rather than built from scratch. Three things are
+done to it: sidechains are dropped (`isSidechain: true`), a freshly minted uuid replaces `sessionId`
+everywhere and `cwd` is rewritten to `--into` (a cloud id like `cse_…` is not shaped like the uuid a
+local transcript's filename is expected to be, and the source `cwd` names a path on a container this
+machine does not have), and the CLI's own "continued from another machine" notice is appended —
+copied verbatim out of the bundle's `k$o()`. A **re-pull of a session whose history changed** reuses
+the uuid minted the first time rather than minting a new one, so it overwrites in place instead of
+orphaning the previous pair — the same reasoning `codexImportWrite.ts` gets for free from reusing the
+rollout's own id, made explicit here since a cloud pull's minted id is not otherwise stable across
+runs. No git operation runs here — the repo and branch the session last ran against
+(`config.sources[].url`, `config.outcomes[].git_info`) are printed as a hint, not checked out.
+
+**Payloads are personal data.** Every raw response saved while measuring this (list, one
+single-session detail, one session's full teleport-events) went to a local scratch directory only,
+never committed; the fixtures in `tests/cloud*.test.ts` have every id, path and message text replaced
+with synthetic values. Treat any future manual probe of these endpoints the same way.
+
 ## Before pushing
 
 ```bash

@@ -316,6 +316,7 @@ export function project(events: LedgerEvent[]): LedgerState {
 
       case 'conversation_imported':
         imported.set(event.rolloutId, {
+          ...(event.source !== undefined ? { source: event.source } : {}),
           rolloutId: event.rolloutId,
           sourceRolloutPath: event.sourceRolloutPath,
           contentHash: event.contentHash,
