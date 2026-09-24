@@ -71,7 +71,27 @@ const POWERSHELL_RELATIVE = 'WindowsPowerShell\\v1.0\\powershell.exe';
 const WMIC_RELATIVE = 'wbem\\wmic.exe';
 const TASKLIST_RELATIVE = 'tasklist.exe';
 
+/**
+ * `[Console]::OutputEncoding=[Text.Encoding]::UTF8;` ahead of every PowerShell
+ * query below.
+ *
+ * Measured 24/09/2026: PowerShell writes its redirected stdout in the console's
+ * OEM code page, not UTF-8, regardless of what this module decodes it as
+ * (`'utf8'`, throughout this file) — a profile path containing "ô" (a surname)
+ * came back with the byte foster reads as U+FFFD, the replacement character.
+ * `resolveStoreArg`, `isDesktopProcess` and everything downstream compare that
+ * corrupted string against the real `--user-data-dir`, so the profile's own
+ * instance was never found: `inspectDesktopFor` reported it not running,
+ * `app restart` started a second instance beside the live one, and `app quit`
+ * had nothing it recognised to quit. Setting `Console.OutputEncoding` inside
+ * the script — even though stdout is a redirected pipe, never a real console —
+ * is what PowerShell's own formatter reads to encode text before it leaves the
+ * process, pipe or not; this is the standard fix for exactly this failure.
+ */
+export const FORCE_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8; ';
+
 const POWERSHELL_QUERY =
+  FORCE_UTF8 +
   'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,' +
   'CommandLine,' +
   "@{n='Started';e={if($_.CreationDate){$_.CreationDate.ToUniversalTime().ToString('o')}}} | " +
@@ -539,6 +559,7 @@ export type PackageIdentity = 'packaged' | 'none' | 'unknown';
 const APPMODEL_ERROR_NO_PACKAGE = 15700;
 
 const PACKAGE_IDENTITY_SCRIPT = (pid: number): string =>
+  FORCE_UTF8 +
   "$ErrorActionPreference='Stop'; try {" +
   "Add-Type -Namespace FosterNative -Name Pkg -MemberDefinition '" +
   '[DllImport("kernel32.dll")] public static extern System.IntPtr OpenProcess(uint a, bool b, uint pid);' +
@@ -556,19 +577,35 @@ const PACKAGE_IDENTITY_SCRIPT = (pid: number): string =>
   '[FosterNative.Pkg]::CloseHandle($h) | Out-Null ' +
   '} catch { Write-Output unknown }';
 
+/**
+ * `memory` defaults to the same `ReaderMemory` `readProcesses()` writes to
+ * (below), not one private to this function. Measured 24/09/2026: with a
+ * PowerShell that hangs at start-up, `startDesktop`'s window-raise poll calls
+ * this (and `mainWindowVisible`) up to six times in three seconds, and before
+ * this shared the memory, every one of those paid the full 20 s hang on its
+ * own — neither function had ever consulted `skipPowerShell`, so a process
+ * table read (`readProcesses`) that had already given up on PowerShell this
+ * run taught these two nothing. A test that wants its own isolated memory
+ * passes one explicitly, same as `readProcessesWith`.
+ */
 export function processPackageIdentity(
   pid: number,
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = execFileSyncRunner,
+  memory: ReaderMemory = readerMemory,
 ): PackageIdentity {
   if (process.platform !== 'win32') return 'unknown';
+  if (memory.skipPowerShell !== undefined) return 'unknown';
   const exe = systemExePath(POWERSHELL_RELATIVE, env);
   const outcome = run(
     exe,
     ['-NoProfile', '-NonInteractive', '-Command', PACKAGE_IDENTITY_SCRIPT(pid)],
     { timeoutMs: TIMEOUT_MS, encoding: 'utf8' },
   );
-  if (!outcome.ok) return 'unknown';
+  if (!outcome.ok) {
+    memory.skipPowerShell = readerFailureReason('PowerShell', outcome, exe);
+    return 'unknown';
+  }
   const out = outcome.stdout.trim();
   return out === 'packaged' || out === 'none' ? out : 'unknown';
 }
@@ -588,15 +625,22 @@ export function processPackageIdentity(
  *
  * `undefined` means this could not be established (no working PowerShell, the
  * pid already gone) — never a guess, exactly like `processPackageIdentity`.
+ *
+ * `memory` shares the default with `processPackageIdentity` — see that
+ * function's own doc comment for why sharing it matters here specifically:
+ * `startDesktop` polls this in a loop.
  */
 export function mainWindowVisible(
   pid: number,
   env: NodeJS.ProcessEnv = process.env,
   run: CommandRunner = execFileSyncRunner,
+  memory: ReaderMemory = readerMemory,
 ): boolean | undefined {
   if (process.platform !== 'win32') return undefined;
+  if (memory.skipPowerShell !== undefined) return undefined;
   const exe = systemExePath(POWERSHELL_RELATIVE, env);
   const script =
+    FORCE_UTF8 +
     "$ErrorActionPreference='Stop'; try { " +
     `$p = Get-Process -Id ${pid} -ErrorAction Stop; ` +
     'if ($p.MainWindowHandle -ne 0) { Write-Output visible } else { Write-Output hidden } ' +
@@ -605,7 +649,10 @@ export function mainWindowVisible(
     timeoutMs: TIMEOUT_MS,
     encoding: 'utf8',
   });
-  if (!outcome.ok) return undefined;
+  if (!outcome.ok) {
+    memory.skipPowerShell = readerFailureReason('PowerShell', outcome, exe);
+    return undefined;
+  }
   const out = outcome.stdout.trim();
   if (out === 'visible') return true;
   if (out === 'hidden') return false;
