@@ -17,7 +17,7 @@ import {
   storeRootOfCopy,
 } from '../domain/paths.js';
 import { currentAccount, requireCurrentAccount, resolveAccountPrefix } from '../engine/account.js';
-import { lineage } from '../engine/lineage.js';
+import { lineage, type Lineage } from '../engine/lineage.js';
 import { registerAppPref } from './appPrefCommand.js';
 import { commandPath } from './commandPath.js';
 import { complainAboutLink } from '../engine/linkShape.js';
@@ -326,6 +326,7 @@ import {
   layoutPlanLines,
   layoutResultLines,
   outcomeLine,
+  proveLines,
   purgeLine,
   renderAccount,
   renderRenewals,
@@ -1230,6 +1231,11 @@ async function runSweepCommand(
   cache: FosterCache | undefined,
   restartCarry: SweepRestartCarry,
 ): Promise<void> {
+  // Filled by `runSweep` itself, the moment its own `Lineage` and whole-store
+  // scan exist — before any pass has written a thing. Only asked for when
+  // `--prove` is, so an ordinary sweep pays nothing for it.
+  let scanned: { kin: Lineage; scanned: readonly DiscoveredSession[] } | undefined;
+
   const report = runSweep({
     store,
     ledger,
@@ -1243,6 +1249,13 @@ async function runSweepCommand(
     dryRun,
     configDirs: opts.configDir ?? [],
     cache,
+    ...(opts.prove
+      ? {
+          onScan: (context: { kin: Lineage; scanned: readonly DiscoveredSession[] }) => {
+            scanned = context;
+          },
+        }
+      : {}),
   });
 
   // A dry run writes nothing, so a `failed` count in its report describes a
@@ -1250,18 +1263,27 @@ async function runSweepCommand(
   // signal `--yes` gets.
   if (!dryRun && sweepFailedCount(report) > 0) process.exitCode = 1;
 
-  // Read fresh, after the sweep's own write — on a real run this is the
-  // store as it now stands; on a dry run nothing was written, so this
-  // measures the account as it stood *before* the plan above, and a gap
-  // reported here is exactly the work that plan exists to close. See
-  // `ops/prove.ts` for why it is not built from the sweep's own outcomes.
+  // On a dry run nothing was written, so the scan `runSweep` itself took —
+  // handed back through `onScan`, before its own passes ran — already
+  // describes the store exactly as this measures it; reusing it is what
+  // turns `--prove`'s own `Lineage` build and whole-store scan (the two
+  // `runSweepCommand` used to pay for a second time) into nothing at all.
+  //
+  // On a real run the cards themselves may have changed underneath that
+  // scan — a `--yes` run writes new copies — so those are read fresh, after
+  // the write, the same as before. The transcripts a `Lineage` is built from
+  // are never among what a sweep writes, though, so `kin` is reused either
+  // way: it is the expensive half to rebuild (a full transcript walk) and
+  // the one nothing here invalidates.
+  //
+  // A gap reported here is exactly the work `runSweep`'s own plan exists to
+  // close. See `ops/prove.ts` for why it is not built from the sweep's own
+  // outcomes instead.
   const proveReport = opts.prove
     ? provePlan(
-        listAccountDirs(store).flatMap((account) =>
-          scanAccount(store, account, copySessionIds(ledger.read()), { slim: true }),
-        ),
+        dryRun ? scanned!.scanned : scanStore(store, copySessionIds(ledger.read()), { slim: true }),
         target,
-        lineage(process.env, opts.configDir ?? []),
+        scanned!.kin,
       )
     : undefined;
 
@@ -1565,32 +1587,12 @@ function titleSyncLine(from: string, to: string): string {
 /**
  * `--prove`'s report: sets `process.exitCode` itself, the way a command that
  * finishes past its own `return` cannot otherwise leave a failure behind.
+ * The lines themselves are `render.ts`'s `proveLines` — a pure function so
+ * the text is testable, the way every other sweep-facing render is.
  */
 function printProve(prove: ProveReport): void {
-  console.log(pc.bold(`\nProof: ${prove.conversations} conversation(s) checked`));
-  if (prove.complete) {
-    console.log(pc.dim('  every one is fully reachable from this account.'));
-  } else {
-    console.log(pc.red(`  ${prove.gaps.length} conversation(s) this account cannot fully reach:`));
-    for (const gap of prove.gaps) {
-      console.log(
-        `    ${pc.red('!')} ${gap.title ?? pc.dim('(untitled)')} ${pc.dim(`(${shortId(gap.cliSessionId)})`)}\n` +
-          `        reaches ${gap.reachedByTarget} of ${gap.totalRecords} — ${gap.missing} record(s) short`,
-      );
-    }
-    process.exitCode = 1;
-  }
-  if (prove.neverFosterable.length > 0) {
-    console.log(
-      pc.dim(
-        `  ${prove.neverFosterable.length} more never had a way in (scheduled task, never opened, ` +
-          'or too large) — not counted above:',
-      ),
-    );
-    for (const item of prove.neverFosterable) {
-      console.log(pc.dim(`      ${item.title ?? '(untitled)'} — ${item.reason}`));
-    }
-  }
+  for (const line of proveLines(prove)) console.log(line);
+  if (!prove.complete) process.exitCode = 1;
 }
 
 function sweepJson(report: SweepReport): Record<string, unknown> {

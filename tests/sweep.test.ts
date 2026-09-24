@@ -201,6 +201,40 @@ describe('runSweep', () => {
     expect(copies().map((data) => data.cliSessionId)).toContain(DELETED_CLI);
   });
 
+  it('hands `onScan` the run’s own Lineage and whole-store scan before any pass writes', () => {
+    // `foster sweep --prove` used to open a second `Lineage` (a full
+    // transcript walk) and a second whole-store scan just to call
+    // `provePlan`, on top of the ones `runSweep` had already built for its
+    // own passes — doubling a sweep's own time. `onScan` is the seam that
+    // lets a caller reuse them instead; this pins down that it fires with
+    // the pre-write scan, exactly once, before the fostering pass runs.
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: ORDINARY, title: 'In Recents' }));
+
+    let calls = 0;
+    let seen:
+      { kin: unknown; scanned: readonly { account: { accountUuid: string } }[] } | undefined;
+    const report = sweep(false, {
+      onScan: (context) => {
+        calls += 1;
+        seen = context;
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(seen).toBeDefined();
+    expect(seen!.kin).toBeDefined();
+    // The moment `onScan` fired, nothing had been written to the target yet —
+    // its own scan is the one this run took before the fostering pass ran,
+    // not a fresh one taken after.
+    expect(
+      seen!.scanned.filter((card) => card.account.accountUuid === NEW_ACCOUNT.accountUuid),
+    ).toEqual([]);
+    // The run itself still fostered the session, same as ever — `onScan`
+    // only reports what things looked like at the start.
+    expect(report.fostered.counts.fostered).toBe(1);
+    expect(copies()).toHaveLength(1);
+  });
+
   it('confirms it is finished, so nobody has to re-run it to find out', () => {
     writeSession(store, OLD_ACCOUNT, session({ sessionId: ORDINARY, title: 'In Recents' }));
     writeSession(
