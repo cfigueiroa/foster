@@ -140,6 +140,8 @@ import {
   resumeCommandFor,
 } from '../engine/rescue.js';
 import { defaultReviveDeps, findStopped } from '../engine/revive.js';
+import { diskReport, type DiskReport } from '../engine/diskUsage.js';
+import { computeStats, defaultStatsDeps, type StatsReport } from '../engine/stats.js';
 import { findUnstarted } from '../engine/unstarted.js';
 import { runAgent } from '../agent/run.js';
 import { AgentSdkNotInstalledError, installAgentSdk } from '../agent/sdk.js';
@@ -5534,6 +5536,220 @@ program
       ),
     );
   });
+
+program
+  .command('disk')
+  .helpGroup('Reports:')
+  .summary('where the bytes are: cards and transcripts, per account and per project')
+  .description(
+    'Read-only measurement of everything on disk, across every account this store has:\n' +
+      'card and transcript bytes broken down by account and by working directory, how much\n' +
+      "of a card's own JSON is fields nothing in foster reads (BULKY_CARD_FIELDS — measured\n" +
+      'on a real store: 93% remoteMcpServersConfig), transcripts no card in any account\n' +
+      'still points at, transcript files that are byte-for-byte copies of each other, and\n' +
+      "session cards already over the app's own 10 MB load limit and so will not appear in it.\n\n" +
+      'Nothing here deletes anything, and nothing here decides a file is safe to remove —\n' +
+      "that judgement is `foster purge`'s, and it requires a tombstone this does not.\n" +
+      'Reading every card and every transcript on a large store takes a while; it stays\n' +
+      'read-only throughout, the same guarantee every other report in this tool gives.',
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ json?: boolean }>();
+    const sessions = scanStore(store, copySessionIds(ledger.read()));
+    const report = diskReport(store, sessions);
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    for (const line of diskReportLines(report, labelsOf(ledger))) console.log(line);
+  });
+
+program
+  .command('stats')
+  .helpGroup('Reports:')
+  .summary('token usage, sessions and usage-limit stops, read from the transcripts')
+  .description(
+    "Read every transcript this store can see for its assistant records' own `usage`\n" +
+      'fields (input, output and cache tokens, and the model that generated them), plus\n' +
+      "every place a conversation ended on the app's own usage-limit record — the same\n" +
+      'detection `foster revive` uses, over the whole transcript rather than only its last\n' +
+      'answer. Aggregated per account, per model and per week: a per-model weekly limit\n' +
+      'can lock an account before its general week does (measured on a real account: 53%\n' +
+      'on the week, 100% on one model), and the account-wide number alone never shows that.\n\n' +
+      'An account here means the account a *native* card of the conversation belongs to —\n' +
+      'a fostered copy only proves the conversation reached that sidebar, not that its\n' +
+      'tokens were spent under it. A conversation no card anywhere still claims natively\n' +
+      'counts as unattributed rather than guessed at. Nothing here calls the usage API —\n' +
+      '`foster usage` does that, for the account signed in now, live.',
+  )
+  .option('--since <age>', 'how far back to read', '30d')
+  .addOption(
+    new Option('--by <dimension>', 'how to group the totals')
+      .choices(['account', 'model', 'week'])
+      .default('account'),
+  )
+  .option('--json', 'machine-readable output')
+  .action(function (this: Command) {
+    const { store, ledger } = context(this);
+    const opts = this.opts<{ since: string; by: 'account' | 'model' | 'week'; json?: boolean }>();
+    const since = parseSince(opts.since);
+    if (since === undefined) {
+      throw new Error(`Could not read --since "${opts.since}". Try 30d, 12h or 4w.`);
+    }
+
+    const report = computeStats({ since, by: opts.by }, defaultStatsDeps(store, ledger));
+
+    if (opts.json) {
+      print(report);
+      return;
+    }
+
+    for (const line of statsReportLines(report, labelsOf(ledger))) console.log(line);
+  });
+
+function accountLabel(uuid: string, labels: Map<string, string>): string {
+  return labels.get(uuid) ?? shortId(uuid);
+}
+
+function percent(part: number, whole: number): string {
+  return whole > 0 ? `${Math.round((part / whole) * 100)}%` : '0%';
+}
+
+function diskReportLines(report: DiskReport, labels: Map<string, string>): string[] {
+  const lines: string[] = [];
+  const { totals } = report;
+
+  lines.push(
+    `Cards:        ${formatBytes(totals.cardBytes)} across ${report.accounts.length} account(s), ` +
+      `${totals.cardCount} file(s)`,
+  );
+  lines.push(
+    pc.dim(
+      `  bulky (BULKY_CARD_FIELDS): ${formatBytes(totals.bulkyCardBytes)} ` +
+        `(${percent(totals.bulkyCardBytes, totals.cardBytes)})` +
+        (report.bulkyFields.length > 0
+          ? ' — ' +
+            report.bulkyFields
+              .filter((field) => field.bytes > 0)
+              .map((field) => `${field.field} ${formatBytes(field.bytes)}`)
+              .join(', ')
+          : ''),
+    ),
+  );
+  lines.push(
+    `Transcripts:  ${formatBytes(totals.transcriptBytes)} across ${totals.transcriptCount} file(s)`,
+  );
+
+  if (report.accounts.length > 0) {
+    lines.push('', pc.bold('By account:'));
+    for (const usage of report.accounts) {
+      lines.push(
+        `  ${accountLabel(usage.account.accountUuid, labels).padEnd(24)} ` +
+          `${formatBytes(usage.cardBytes)} cards (${percent(usage.bulkyCardBytes, usage.cardBytes)} bulky) · ` +
+          `${usage.cardCount} card(s) · ${formatBytes(usage.transcriptBytes)} transcript(s) reached ` +
+          `(${usage.transcriptCount} conversation(s))`,
+      );
+    }
+  }
+
+  const topProjects = report.projects.slice(0, 10);
+  if (topProjects.length > 0) {
+    lines.push('', pc.bold('By project (top 10 by combined bytes):'));
+    for (const project of topProjects) {
+      lines.push(
+        `  ${project.project.padEnd(40)} ${formatBytes(project.cardBytes)} card(s) · ` +
+          `${formatBytes(project.transcriptBytes)} transcript(s)`,
+      );
+    }
+  }
+
+  if (report.orphanTranscripts.length > 0) {
+    const bytes = report.orphanTranscripts.reduce((sum, row) => sum + row.bytes, 0);
+    lines.push(
+      '',
+      `${report.orphanTranscripts.length} transcript(s) (${formatBytes(bytes)}) have no card in any ` +
+        'account — never tombstoned, so `foster purge` will not offer them; remove by hand if sure.',
+    );
+  }
+
+  if (report.duplicateTranscripts.length > 0) {
+    const reclaimable = report.duplicateTranscripts.reduce(
+      (sum, group) => sum + group.bytes * (group.files.length - 1),
+      0,
+    );
+    lines.push(
+      '',
+      `${report.duplicateTranscripts.length} group(s) of byte-identical transcripts ` +
+        `(${formatBytes(reclaimable)} could be reclaimed by keeping one copy of each):`,
+    );
+    for (const group of report.duplicateTranscripts.slice(0, 10)) {
+      lines.push(`  ${formatBytes(group.bytes)} × ${group.files.length}`);
+      for (const file of group.files) lines.push(pc.dim(`    ${file}`));
+    }
+  }
+
+  if (report.oversizedCards.length > 0) {
+    lines.push(
+      '',
+      `${report.oversizedCards.length} session card(s) are already over the app's 10 MB load ` +
+        'limit and will not appear in it:',
+    );
+    for (const card of report.oversizedCards) {
+      lines.push(
+        `  ${formatBytes(card.bytes)}  ${card.path}  ` +
+          pc.dim(`(${accountLabel(card.account.accountUuid, labels)})`),
+      );
+    }
+  }
+
+  return lines;
+}
+
+function statsReportLines(report: StatsReport, labels: Map<string, string>): string[] {
+  const lines: string[] = [];
+  const days = Math.max(1, Math.round((Date.now() - report.since) / 86_400_000));
+  lines.push(pc.bold(`Usage over the last ~${days} day(s), by ${report.by}:`));
+
+  if (report.buckets.length === 0) {
+    lines.push(pc.dim('  nothing found in the transcripts this store can see.'));
+    return lines;
+  }
+
+  for (const bucket of report.buckets) {
+    const name =
+      report.by === 'account'
+        ? bucket.key.account
+          ? accountLabel(bucket.key.account, labels)
+          : '(unattributed)'
+        : report.by === 'model'
+          ? (bucket.key.model ?? 'unknown')
+          : (bucket.key.week ?? '?');
+    const tokens =
+      `in ${bucket.inputTokens.toLocaleString()} · out ${bucket.outputTokens.toLocaleString()} · ` +
+      `cache-create ${bucket.cacheCreationTokens.toLocaleString()} · ` +
+      `cache-read ${bucket.cacheReadTokens.toLocaleString()}`;
+    const stops =
+      bucket.limitStops > 0 ? pc.yellow(`  ${bucket.limitStops} usage-limit stop(s)`) : '';
+    lines.push(`  ${name.padEnd(28)} ${bucket.sessions} session(s)  ${tokens}${stops}`);
+  }
+
+  const t = report.totals;
+  lines.push(
+    '',
+    pc.bold(
+      `Total: ${t.sessions} session(s) · in ${t.inputTokens.toLocaleString()} · ` +
+        `out ${t.outputTokens.toLocaleString()} · cache-create ${t.cacheCreationTokens.toLocaleString()} · ` +
+        `cache-read ${t.cacheReadTokens.toLocaleString()}` +
+        (t.limitStops > 0 ? ` · ${t.limitStops} usage-limit stop(s)` : ''),
+    ),
+  );
+
+  return lines;
+}
 
 /** A size the rescue listing can afford: exact bytes read as noise there. */
 function formatSize(bytes: number | undefined): string {
