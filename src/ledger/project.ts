@@ -129,6 +129,7 @@ export function project(events: LedgerEvent[]): LedgerState {
 function cloneState(state: LedgerState): LedgerState {
   return {
     active: new Map(state.active),
+    activeByKey: new Map(Array.from(state.activeByKey, ([key, copies]) => [key, new Set(copies)])),
     labels: new Map(state.labels),
     identities: new Map(state.identities),
     repointed: new Map(state.repointed),
