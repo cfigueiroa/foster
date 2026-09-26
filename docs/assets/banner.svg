@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-labelledby="t d">
+  <title id="t">foster</title>
+  <desc id="d">Sessions from several Claude Desktop accounts flowing into the one account signed in now.</desc>
+  <style>
+    .bg { fill: #f6f8fa; stroke: #d0d7de; }
+    .card { fill: #ffffff; stroke: #d0d7de; }
+    .row { fill: #d0d7de; }
+    .row-hot { fill: #d97757; }
+    .ink { fill: #1f2328; }
+    .muted { fill: #59636e; }
+    .flow { stroke: #d97757; fill: none; }
+    .dot { fill: #d97757; }
+    .badge { fill: #fbeee8; stroke: #d97757; }
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; stroke: #30363d; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .row { fill: #30363d; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .badge { fill: #2d1c16; }
+    }
+  </style>
+
+  <rect class="bg" x="1" y="1" width="1198" height="318" rx="18" stroke-width="2"/>
+
+  <!-- Left: three accounts, each with its own sessions -->
+  <g stroke-width="2">
+    <rect class="card" x="48" y="48" width="170" height="66" rx="10"/>
+    <text class="muted" x="64" y="72" font-size="14" font-weight="600">account A</text>
+    <rect class="row" x="64" y="84" width="120" height="8" rx="4"/>
+    <rect class="row" x="64" y="98" width="86" height="8" rx="4"/>
+
+    <rect class="card" x="48" y="127" width="170" height="66" rx="10"/>
+    <text class="muted" x="64" y="151" font-size="14" font-weight="600">account B</text>
+    <rect class="row" x="64" y="163" width="104" height="8" rx="4"/>
+    <rect class="row" x="64" y="177" width="132" height="8" rx="4"/>
+
+    <rect class="card" x="48" y="206" width="170" height="66" rx="10"/>
+    <text class="muted" x="64" y="230" font-size="14" font-weight="600">account C</text>
+    <rect class="row" x="64" y="242" width="94" height="8" rx="4"/>
+    <rect class="row" x="64" y="256" width="118" height="8" rx="4"/>
+  </g>
+
+  <!-- Flows converging on the account in use -->
+  <g class="flow" stroke-width="3" stroke-linecap="round">
+    <path d="M222 81 C 300 81, 300 160, 372 160"/>
+    <path d="M222 160 L 372 160"/>
+    <path d="M222 239 C 300 239, 300 160, 372 160"/>
+  </g>
+  <circle class="dot" cx="378" cy="160" r="7"/>
+
+  <!-- Middle: the account signed in now, holding everything -->
+  <g stroke-width="2">
+    <rect class="card" x="392" y="40" width="236" height="240" rx="12"/>
+    <text class="ink" x="412" y="70" font-size="15" font-weight="700">signed in now</text>
+    <rect class="row-hot" x="412" y="88" width="190" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="110" width="150" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="132" width="176" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="154" width="128" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="176" width="164" height="10" rx="5"/>
+    <rect class="row-hot" x="412" y="198" width="140" height="10" rx="5"/>
+    <rect class="badge" x="412" y="226" width="196" height="34" rx="8"/>
+    <text class="ink" x="426" y="248" font-size="13" font-weight="600">Nothing is left to sweep</text>
+  </g>
+
+  <!-- Right: name and tagline -->
+  <text class="ink" x="680" y="150" font-size="72" font-weight="800" letter-spacing="-1">foster</text>
+  <text class="muted" x="684" y="192" font-size="20">Every Claude Desktop Code session,</text>
+  <text class="muted" x="684" y="220" font-size="20">in the account you are signed into now.</text>
+  <text class="muted" x="684" y="262" font-size="14">sweep &#183; layout &#183; where &#183; verify &#183; revive</text>
+</svg>

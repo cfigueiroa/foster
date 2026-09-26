@@ -1,2123 +1,525 @@
-# foster
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="foster — every Claude Desktop Code session, in the account you are signed into now" width="100%"/>
+</p>
 
-Bring your **Claude Code sessions from a previous local account** back into the sidebar of the
-account you are signed into now — **without moving or modifying the originals**.
+<h1 align="center">foster</h1>
 
-If you switched Claude Desktop accounts and your old sessions vanished from the sidebar, they are
-almost certainly still on your disk. `foster` finds them and exposes them under your current account,
-reversibly.
+<p align="center">
+  <strong>Switch Claude Desktop accounts without losing a single Code session.</strong><br/>
+  One sweep brings every conversation — archived, deleted and forked — into the account signed in now.<br/>
+  One layout brings its pins, sidebar groups, routines and settings along.
+</p>
 
-> **Status:** early. Windows-only for now (that is where Claude Desktop ships as an MSIX package).
-> Read [Safety model](#safety-model) before running anything that writes.
+<p align="center">
+  <a href="https://github.com/cfigueiroa/foster/actions/workflows/ci.yml"><img src="https://github.com/cfigueiroa/foster/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"/></a>
+  <a href="https://github.com/cfigueiroa/foster/releases/latest"><img src="https://img.shields.io/github/v/release/cfigueiroa/foster?label=release" alt="Latest release"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/cfigueiroa/foster" alt="License: MIT"/></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D20-339933?logo=nodedotjs&logoColor=white" alt="Node >= 20"/>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white" alt="Platform: Windows"/>
+</p>
 
-## Why the sessions disappear
+<p align="center">
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-what-foster-does">Features</a> ·
+  <a href="#-commands">Commands</a> ·
+  <a href="#-safety-model">Safety</a> ·
+  <a href="docs/guide/README.md">Full guide</a>
+</p>
 
-Claude Desktop stores each Code session as a small JSON file, in a directory tree keyed by account
-and organization:
+> **Status:** early, and Windows-first — that is where Claude Desktop ships as an MSIX package.
+> Every command that writes is a dry run until you pass `--yes`. Read the
+> [safety model](docs/guide/safety-model.md) before running anything that writes.
 
-```
-<userData>/claude-code-sessions/<accountUuid>/<organizationUuid>/local_<sessionId>.json
-```
+---
 
-There is **no account field inside the session file**. The only thing binding a session to an account
-is _the folder it sits in_, and which folder that is comes from the account you are signed into.
-(The `lastKnownAccountUuid` in the app's config is a cached copy of that answer, not the source of
-it — which is why no local edit can switch accounts.)
+## 😩 The problem
 
-So when you sign in with a different account, the app reads a different folder — and everything you
-did under the old account becomes invisible, while remaining perfectly intact on disk.
+Claude Desktop files each Code session under the folder of the **account** you were signed into.
+There is no account field inside the session — only the folder. So when one account runs out of
+quota and you sign into another, the sidebar goes empty: every conversation you had is still on your
+disk, intact, and invisible. The transcripts themselves are account-agnostic; only a pointer has to
+move. [How it works →](docs/guide/how-it-works.md)
 
-The conversation transcript is not in that JSON at all. It lives outside the account tree, under
-`~/.claude/projects/<encoded-cwd>/<cliSessionId>.jsonl`, and is **account-agnostic**. That is why a
-session can be re-attributed locally: only a pointer has to move, not the content.
+## ✨ What foster does
 
-## What `foster` does
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <h3>🧹 One sweep, everything</h3>
+      <code>foster sweep</code> copies every session from every other account — <b>archived included</b>
+      — and brings back conversations the app deleted that nothing points at. It re-scans until it can
+      say <i>“Nothing is left to sweep”</i>.
+    </td>
+    <td width="33%" valign="top">
+      <h3>🌿 One row per branch</h3>
+      A conversation continued in two accounts is a fork. Each branch gets its own row; the tip keeps
+      the clean title, a branch that stopped is marked and filed away, a branch that went on stays.
+    </td>
+    <td width="33%" valign="top">
+      <h3>📄 Two files, one conversation</h3>
+      Continuing from a repository and from its worktree leaves two transcripts under one id. foster
+      measures what each row can reach and elects the one to continue in.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>🏷️ Titles and archive stay in step</h3>
+      <code>--sync-titles</code> carries a rename across; a name a person chose beats one the app
+      generated. 🆕 <i>0.63:</i> the archived flag follows the account used last.
+    </td>
+    <td valign="top">
+      <h3>📌 Layout parity</h3>
+      <code>foster layout</code> brings sidebar groups, routines and the filter menu.
+      🆕 <i>0.63:</i> pins, group moves and account-keyed app settings too.
+    </td>
+    <td valign="top">
+      <h3>☁️ Cloud sessions, locally</h3>
+      <code>foster cloud pull</code> turns a code.claude.com session into a local transcript and a
+      sidebar card. 🆕 <i>0.63:</i> <code>sweep --cloud</code> brings every other account's.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>🔁 Pick up where it stopped</h3>
+      <code>foster revive</code> lists sessions a usage limit stopped; <code>/retoma</code> tells each
+      to carry on. 🆕 <i>0.63:</i> also turns a restart cut off mid-way.
+    </td>
+    <td valign="top">
+      <h3>🔎 Audits you can trust</h3>
+      <code>where</code> names the row to open, <code>verify</code> checks a restart undid nothing,
+      <code>sweep --prove</code> re-reads every file independently of the sweep's own bookkeeping.
+    </td>
+    <td valign="top">
+      <h3>📊 Reports</h3>
+      <code>grep</code> every transcript by what was said, <code>export</code> one to Markdown/HTML,
+      <code>disk</code> for bytes per account, <code>stats</code> for tokens and limit stops.
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <h3>🔄 Restart from inside the app</h3>
+      The app reads its sessions once, at start. <code>--detach</code> restarts it from a process
+      outside its tree, so even a session the app hosts can finish the job.
+    </td>
+    <td valign="top">
+      <h3>🛡️ Reversible by design</h3>
+      Originals are never touched; copies get a fresh id. Every write lands in an append-only ledger,
+      and <code>foster return</code> removes what foster added.
+    </td>
+    <td valign="top">
+      <h3>👥 Accounts and clients</h3>
+      Who is signed in where, which plan, live 5-hour and weekly limits, renewals — and CLI clients
+      opened as any account in their own terminal tab.
+    </td>
+  </tr>
+</table>
 
-For each session you select, it writes a **copy** of the session JSON into your current account's
-folder, with:
+> 🆕 marks what is new in **0.63.0** (PRs
+> [#159](https://github.com/cfigueiroa/foster/pull/159)–[#163](https://github.com/cfigueiroa/foster/pull/163)).
 
-- a **fresh `sessionId`**, so the copy is a distinct object the server has never seen (deleting it
-  can never reach the original);
-- the **same `cliSessionId`**, so it opens the real transcript;
-- `error` / `errorAt` **stripped**, so a stale failure from the old account does not show up as a
-  warning badge on the restored session;
-- an optional **title prefix** (`--prefix`), off by default — see below for why a copy is no
-  longer marked in its own title;
-- a `_foster` key recording where it came from.
+## 🔀 The account switch, end to end
 
-That last one is a hint, not a record. The app rebuilds a session from a fixed list of fields when
-it saves one, so the first time it writes a copy back — a rename, a focus, any activity at all —
-`_foster` is dropped and the copy becomes indistinguishable on disk from a session the app made
-itself. Measured on a live store: of 364 copies, 21 had lost it, and they were exactly the 21 that
-had been opened. What is authoritative is foster's own ledger, which the app cannot reach; the
-marker earns its place by covering the one case the ledger cannot, a crash between writing the copy
-and recording it.
-
-The original file is never touched. `foster return` deletes the copy and the session is simply gone
-from the current account again.
-
-### Why a copy is not marked in its own title
-
-Copies used to be titled `↪ <original>`. The prefix still exists as `--prefix`, but it is off by
-default, for two reasons that only showed up at scale.
-
-It stopped separating anything. On a swept store, 704 of the 764 rows in the account in use were
-copies — the marker was on 92% of the sidebar, and the 60 native rows, the ones worth picking out,
-were the unmarked ones. A mark that nearly everything carries is not a mark.
-
-And it was never reliable, for the same reason `_foster` is not: the title belongs to the app. A
-copy the app renames loses the prefix, and a session the app forks from a copy inherits one while
-being no copy at all. On that same store the titles disagreed with the ledger in five places, in
-both directions, with nobody having edited anything by hand.
-
-Nothing ever decided anything by it — `return` selects from the ledger, and `--title` filters on
-`originalTitle`, which never carried a prefix. So the marker was a display choice competing with a
-display that cannot be wrong: foster's own list, which draws its arrow from the ledger.
-
-## The whole sweep
-
-The request behind most runs never varies — _bring everything here_ — and answering it used to
-mean three commands in the right order plus one flag that was easy to miss. `foster sweep` is that
-sequence as a command:
-
-```bash
-foster sweep          # what it would do, writing nothing
-foster sweep --yes    # do it
-```
-
-It copies every fosterable session from the other accounts, **archived ones included**, gives every
-branch of a forked conversation a row of its own, brings back conversations the app deleted that
-nothing still points at, and then re-scans to say whether any pass has anything left. That last part
-is the reason it exists as a command rather than as advice: measured on one real store, the same
-sweep offered 15 sessions without `--archived` and 141 with it, so anyone who did not know the flag
-finished with a tenth of the work done and no way to tell.
-
-Archived copies **stay archived**. They arrive in the app's archived view rather than reappearing in
-Recents — bringing the conversation across is the point, not undoing the decision to tuck it away.
-
-A forked conversation — one piece of work continued in more than one account, each continuation on
-a transcript of its own — gets **one row per branch**, and the rows say which one to open. The
-branch that carried on keeps its title untouched. Every other branch is retitled
-`(stale, stopped DD/MM HH:MM) …`, stamped with the moment of its last answer, and filed in the
-archived view — the row already in the account included, whoever made it. Nothing is chosen and
-nothing is hidden: the stale rows still open, they just no longer look like the row to continue in.
-The one branch that gets no row of its own is one holding nothing of its own — every record of it
-already in the branch that carried on — because a row for it would open nothing the clean row does
-not.
-`--stale-prefix` changes the words a fresh mark is written with, and `--branch-prefix` does the same
-for a branch that went on rather than stopped; `{when}` is where the moment goes in either. Measured
-on the store that prompted this: the row the user had pinned held 328 records while the branches in
-two other accounts held 3157 and 2564, and every previous sweep had reported that nothing was left to
-do.
-
-Recognising a mark an _earlier_ run wrote never depends on being told those same words again. The
-ledger already says what a row was actually marked with, so a bare `foster sweep` — the English
-defaults — still recognises a row the `/fosteia` skill marked in Portuguese last week, and leaves it
-exactly as it is rather than stacking a second mark in front of the first: `--stale-prefix` and
-`--branch-prefix` only ever choose the words a _new_ mark is written with (#35). Measured on a real
-store: 10 rows would have been rewritten that way by one bare `foster sweep --yes` on 05/09/2026. A row
-wearing a mark no known template can explain — a hand edit, or a foster too old to have recorded one —
-is left alone and named in the sweep's summary, rather than guessed at.
-
-It also counts what a sweep does not bring: scheduled tasks, sessions never opened, and files over
-the 10 MB the app refuses to load. Those are a real gap in the sidebar, and a run that leaves them
-unmentioned reads as having brought everything. One of the three has a way out — see
-[scheduled tasks](#a-scheduled-tasks-conversation) — and the count says so rather than filing it
-under a flat "never".
-
-`--prove` audits the sweep instead of trusting it: for every conversation the store holds a card
-for, it reads every file the id occupies end to end and compares that union against what the
-account this run targets can actually reach, independently of the sweep's own bookkeeping — see
-[proving a sweep](#proving-a-sweep). It exits 1 the moment any record is unreachable, excluding the
-documented never-fosterable classes above, which it reports separately.
-
-```bash
-foster sweep --prove            # plan, then check — writes nothing
-foster sweep --yes --prove      # write, then check what actually landed
+```mermaid
+flowchart LR
+    A["Account A<br/>hits its usage limit"] --> B["Sign Claude Desktop<br/>into account B"]
+    B --> C["Sidebar is empty:<br/>sessions still on disk"]
+    C --> D["foster sweep --yes"]
+    D --> E["foster layout --yes<br/>--restart --detach"]
+    E --> F["Account B shows every<br/>conversation, pin, group<br/>and routine A had"]
+    F --> G["/retoma: stopped sessions<br/>carry on with fresh quota"]
 ```
 
-A fourth pass releases the worktree claim a copy already on disk inherited from its original,
-before fostering learned not to hand one out — see
-[Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
-whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
+## ⚡ Quick start
 
-The archived flag follows the account last used on each conversation, on by default
-(`--no-archive-sync` turns it off): a row is archived or unarchived to match whichever other account
-was most recently active on it — never a row changed here by hand since foster last wrote it, never
-one used here more recently than anywhere else, and never on a tie between two sources that
-disagree. `--cloud` adds a source no local pass can see: every cloud session (code.claude.com) any
-other signed-in CLI credential on this machine can reach, pulled into a local row in the checkout
-whose git remote matches the session's repository. Those continue locally, not in the cloud.
-
-A fifth pass, `--sync-titles`, brings a copy's title back into step with the original's. A copy
-carries the name of the instant it was made, and every later sweep sees it as already fostered and
-walks past — so a conversation renamed where it came from keeps the old name in every other account
-for ever, and the sidebar reads as if the work were missing when only its name is.
-
-Whose name wins is decided from the ledger, never from reading the strings: a copy still wearing the
-last title foster itself wrote is rewritten. That is `card_retitled.to` when the branch pass has
-marked the card since, and the fostering's `originalTitle` otherwise. On the store this was measured
-against, 875 of 911 copies still matched, 9 wore a mark, and the one that had been renamed by hand
-was exactly the row that must not be trampled.
-
-That test alone was too narrow. Open a copy in this account and the app generates a title for it,
-which matches no baseline — so a conversation renamed where it came from stayed out of step for
-ever, and the run reported it as "renamed here" when nobody had renamed anything. The card records
-who named it: `titleSource` is `auto` when the app generated the name, `user` when somebody renamed
-the row in the sidebar, `tool` when `set_session_title` wrote it, and absent on copies older than
-the field. So a second rule follows the first — **a name a person chose beats a name the app
-generated**, whichever side each is on, and a name chosen on both sides is a conflict the run prints
-with both names rather than settling. Authorship is the only question that can be answered here:
-nothing records _when_ a title changed (there is no `titleUpdatedAt`, and `lastActivityAt` moves when
-a conversation is merely opened), so "the newer rename wins" is not available at all.
-
-Marks survive it and never travel. The mark a branch wears is not part of its name, so it is put
-back in front of the new title; a mark the _original_ happens to wear is dropped, or the two would
-stack. Both are derived by subtracting the title from the record that carries it, which is what
-keeps this clear of the [prefix problem](#when-one-conversation-becomes-two) — a run does not have to
-be told the words a mark was written with to recognise one. When a card has been marked twice and the
-mark can no longer be told from the title beneath it, the copy is left alone rather than rewritten
-with a guess. It is off by default because the first run on a store fostered into for weeks rewrites
-in bulk, and only shows at the next restart.
-
-Two things it deliberately does not do. It never [purges](#deleting-for-real), which destroys
-transcripts and is part of no sweep. And it never [consolidates](#when-one-conversation-becomes-two):
-with a row per branch nothing is hidden, so collapsing a fork to one row is a tidy-up for whoever
-wants one, not a decision the sweep has to leave open.
-
-One scan, one lineage, one walk of the transcript tree per run. The passes used to build their own,
-and a `--yes` run read every card in the store five times over and walked the transcript tree six —
-on a store of eleven accounts, half a minute of the run was spent reading what it had just read.
-
-`--restart` restarts Claude Desktop at the end, which is what makes the copies visible. A Claude
-Code session started from the app's sidebar is a child process of the app, so restarting from
-inside one would kill the caller part-way through; the sweep asks first and ends with the command
-to run from a terminal outside the app instead of failing after writing everything.
-
-## Copies that still claim a worktree
-
-A card names the worktree it holds in `worktreePath` / `worktreeName`, but the lease itself lives
-in the app's own store of worktrees, keyed by the session id that took it out. A copy used to
-carry the claim without the lease — a fresh id naming a directory it cannot hold — so when the app
-reached the second card on that branch it refused with `fatal: 'claude/<branch>' is already used
-by worktree at '<path>'` and dropped the session into the main repository, uncommitted work and
-all. Fostering has not made that mistake since 0.38.0: a fresh copy drops the claim and opens in
-the repository the worktree was cut from instead.
-
-What that fix could not reach is what was already on disk. `foster unclaim` is the repair:
-
-```bash
-foster unclaim          # what it would release, writing nothing
-foster unclaim --yes    # release it
-```
-
-Only **copies** are ever touched — the candidates are the active fosterings foster's own ledger
-already tracks, never a card discovered by scanning the store, so a native card carrying the same
-stale claim is left exactly as it is. The write removes the three claim fields and moves `cwd` to
-the repository the worktree was cut from, the same relocation `buildFosterCopy` makes for a copy
-being minted fresh, and carries every other key on the card through untouched.
-
-The release is recorded, so it can be put back: `foster unclaim --undo --yes` restores the claim
-and the directory, refusing a card that has since moved on — repointed, retitled into a different
-`cwd`, or handed a fresh worktree by the app — rather than overwriting it.
-
-Releasing a claim takes no write guard, unlike a repoint — it is allowed with Claude Desktop open,
-the same as [a retitle](#when-one-conversation-becomes-two). The app reads the session directory once,
-at startup, and only ever rewrites a card it is holding in memory, whole, the next time something
-about it changes. A release that write overwrites is not lost: `planUnclaim` re-derives the claim
-from whatever is on disk, so a card the app hands the fields back to is simply one the next plan
-finds again, and the next `foster unclaim` — or the next sweep — releases it a second time. The
-change becomes visible at the app's next restart either way, exactly like a retitle.
-
-`foster sweep` runs this as its fourth pass, on the destination store, after the other three have
-written — so "bring everything here" also stops a freshly arrived copy from fighting its original
-over a branch. Two follow-ups from the original issue (#26) stay open: the `branch` a stale, archived
-row still claims, and the cosmetic `keptDirtyWorktree` a copy cannot really have.
-
-## Undoing a deletion
-
-Deleting a session in the app removes the pointer and **keeps the conversation**. The transcript
-stays under `~/.claude/projects`, and the app records the deletion by writing a `deleted_<id>` marker
-next to the sessions — one per identifier the session carried, each holding only the time.
-
-Those markers exist to stop the app's own recovery scan from offering back something you threw away
-on purpose. They stop the _scan_ only: a `claude://resume` link imports a tombstoned conversation
-without complaint, and nothing stops a session file that points at one from being written and
-loaded. So for an accidental deletion, writing a fresh pointer is the route left, and it is the one
-`foster restore` takes:
-
-```bash
-foster restore          # what could come back, writing nothing
-foster restore --yes    # bring them back
-```
-
-Title, working directory and dates are read out of the transcript itself, so the restored session
-arrives named and dated rather than blank — and it sorts into its real place in Recents instead of
-jumping to the top with today's date. Recovering the working directory does more than label it: the
-session opens with its repository and branch bound again, reading the diff and offering to open a
-pull request. It comes back resumable, not merely readable.
-
-What cannot come back is what was never in the conversation: the model it ran, its permission mode,
-and any MCP configuration. The marker is left exactly where it is — it is the app's record, not
-`foster`'s to erase — and the restored session is an ordinary copy, so `foster return` undoes it
-like any other.
-
-A conversation that some session still points at is not offered: it is not lost, and restoring it
-would only produce a duplicate.
-
-## Deleting for real
-
-`restore` is also the uncomfortable proof of something: deleting a session in the app does not
-delete the conversation. Everything that was said is still in a file, and a tool that can list those
-files and put them back in your sidebar is a tool that just demonstrated they were never gone.
-Sometimes gone is what you actually wanted.
-
-```bash
-foster purge                        # what could be destroyed, writing nothing
-foster purge --yes --confirm 19     # destroy it
-```
-
-This deletes the transcripts themselves — every copy of them — and nothing else in foster can bring
-them back. There is no backup, deliberately: a command whose purpose is to make something
-unrecoverable cannot quietly keep a copy and still be that command.
-
-Two gates stand in front of it, and they are not the usual ones.
-
-**It only ever considers conversations the app has already deleted.** The candidates are exactly
-what `restore` would offer: a deletion marker exists, the transcript is still on disk, and no
-session file anywhere points at it. That last check is asked of **every installation foster knows
-about**, not just the one in use — a card in a profile you are not signed into is still a card, and
-the session it opens is one restart away. `--this-store-only` narrows it, and is a worse question to
-ask. A conversation a live `claude` process is holding open is skipped as well, and said so out
-loud.
-
-**`--yes` is not enough on its own.** Every other writing command in foster is undone by the command
-next to it, so one flag is a fair price; here the same flag would put "destroy every conversation I
-ever threw away" one word away from "copy them into my sidebar". So `purge` also wants
-`--confirm <count>` — the number the dry run printed. A count is the one confirmation that can fail
-for a reason other than intent: it cannot be pasted from documentation or typed from memory, and if
-the set moved between reading and running — something else deleted in the app in the meantime, a
-filter that matches more than it did — the number no longer agrees and nothing happens.
-
-Narrow it with `--title` or `--session <id...>`, and `--json` lists the candidates with their sizes
-without destroying anything.
-
-What it leaves behind is the app's own deletion marker, for the same reason `restore` does: that
-record belongs to the app. And the ledger gets one line saying a conversation was destroyed here —
-an id, a file count, a byte count, and nothing else. Not the title, not the working directory, not a
-word of the text. A ledger that kept those would be the backup this command promises not to keep.
-
-`foster agent` cannot do this. It is not one of the agent's tools, and the agent is told not to
-reach for it through the shell either: an irreversible delete is not a thing to hand to a model
-working from a one-line description of what you wanted.
-
-Conversations are looked for in every Claude config directory that has them, not just the one this
-process happens to be running under. Running a second Claude Code account means pointing the CLI at
-its own `CLAUDE_CONFIG_DIR`, and each of those keeps a separate `projects/` tree — searching only one
-would produce a shorter list that looks complete. Siblings of `~/.claude` are picked up when they
-actually contain transcripts, and `--config-dir <path...>` adds any that live elsewhere.
-`foster clients` is the map of those directories, and of who is signed into each.
-
-## After a sweep: sessions a usage limit stopped
-
-A sweep moves every conversation into the account signed in now, and the ones that were working
-when their old account ran out arrive exactly where they stopped — ending on the app's own
-"You've hit your limit" line, waiting for a turn nobody is going to give them. The card cannot
-tell you which ones they are: fostering drops the card's error so a copy does not show a stale
-warning. The transcript can. A conversation cut off by a limit ends on a record the app writes
-in the model's place, `isApiErrorMessage: true` with `error: "rate_limit"`, and `foster revive`
-lists the sessions whose conversation ends that way:
-
-```bash
-foster revive                 # stopped on a limit, or cut off mid-turn, in the last 24 hours
-foster revive --since 3d      # a longer window; sessions you archived need --archived
-foster revive --json          # the work list the /retoma skill reads
-```
-
-It reads the file each card actually opens, keeps one row per conversation and one per git
-branch of a repository — the most recent stop, since two agents on one branch would commit over
-each other — and names what it left out: a session a live `claude` is writing, a second row
-of work already on the list, or a row whose folder is gone (the app refuses a message to it).
-A session a restart cut off mid-turn — its transcript ends on a tool result or a prompt nothing
-answered — is listed too, as `why: "cut-off"` beside `why: "limit"`.
-
-Nothing here sends the message that revives them. Only Claude Desktop can deliver a turn to a
-session and keep its card attached; a headless `claude --resume` runs the turn and leaves the
-row showing the stop. The `/retoma` skill in this repository is the other half: run inside the
-app, it reads `foster revive --json` and tells each session that the quota is back and to carry
-on, highest return first.
-
-## After a crash: cards that cannot reach the computer
-
-A session card with a remote-control mirror is a live link — the app shows the conversation
-through the process hosting it. When that process dies without closing (a crash, a reboot),
-the server keeps the mirror and the card can only say it cannot reach your computer. Nothing
-client-side reattaches the old mirror: the device key, bridge URL and authentication all
-survive a crash unchanged, and the card stays unreachable anyway, because the link is
-per-session, not per-device.
-
-What works is resuming the conversation — the transcript on disk is complete, and the first
-turn of a resume mints a fresh mirror. `foster rescue` finds the conversations in that state:
-cards that had a mirror, were active inside the window, and have no live writer now. Each row
-names the directory the resume must run in, read from the transcript's own tail rather than
-from the card — a session that moved between worktrees is filed under the directory it moved
-to, and the card still names the one it started in. A directory that has since been removed
-(worktrees usually are, once their session is archived) is said out loud instead of failing
-inside a closing terminal tab.
-
-```bash
-foster rescue                 # the list, with a resume command per conversation
-foster rescue --since 7d      # a longer window; sessions you archived need --archived
-foster rescue --open          # one Windows Terminal tab per conversation, resume running
-```
-
-Each tab stops at the CLI's own resume prompt, so nothing is consumed until a human picks
-summary or full there; `/desktop` inside a resumed session hands it back to the app. The old
-unreachable card never reconnects — archive it. The empty mirror cards named after the device
-("no messages yet") are the same husk seen from the other side: they hold nothing and are
-archived, not rescued.
-
-Two things that look like shortcuts, measured against a live store:
-
-- **Headless resume does not reconnect the card.** `foster resume` (and `claude -p --resume`
-  generally) appends a real turn to the transcript, but print mode never attaches to the app,
-  so the card stays unreachable and the tokens are spent anyway. Use it to _talk_ to a
-  conversation, not to rescue one.
-- **The app can rescue its own cards, one paid turn each.** A Claude session running inside
-  Claude Desktop has session tools this CLI does not: asking it to deliver a message to a
-  stranded card makes the app itself host the conversation, which re-links the card with no
-  terminal tab and no human at a resume prompt. `foster rescue --json` gives such a session
-  the work list. Two conditions, both measured: the app refuses a card whose directory no
-  longer exists (recreate the worktree first — `git worktree add --detach <path>`), and
-  delivery runs a full turn in the target conversation, so say in the message that nothing
-  should be resumed or acted on.
-
-A rescued conversation leaves a second card behind: the app's fresh hosting card, which has
-no mirror history. `rescue` reads that card as the app's own proof of reachability and keeps
-the conversation off the list — the husk alone would put it right back on every run once its
-host went idle and exited.
-
-## Reports: where the bytes are, and where the tokens went
-
-Two read-only commands, across every account this store has — neither writes anything, and
-neither decides what is safe to remove:
-
-```bash
-foster disk            # cards and transcripts: bytes per account, per project, and what is bulky
-foster disk --json     # the same report, machine-readable
-
-foster stats                        # token usage over the last 30 days, by account
-foster stats --by model             # the same window, grouped by model instead
-foster stats --by week --since 90d  # a longer window, grouped by week
-foster stats --json                 # the same report, machine-readable
-```
-
-`foster disk` measures every session card and every transcript this store can see: bytes per
-account and per working directory, how much of a card's own JSON is `BULKY_CARD_FIELDS`
-(measured on a real store: 97%, nearly all of it `remoteMcpServersConfig`), transcripts no
-card in any account still points at (broader than `purge`'s orphans — this counts one without
-requiring a tombstone), transcript files that are byte-for-byte copies of each other (only
-files that already share a size are hashed, and the hash itself streams a file rather than
-reading it whole), and session cards already over the app's own 10 MB load limit. Measured on
-a real store: five pairs of byte-identical transcripts, each pair a repository and a worktree
-cut from it that never diverged after the branch was cut — exactly the "one conversation, two
-files" shape `sweep` already knows about, seen here from the disk-usage side instead.
-
-`foster stats` reads every transcript's assistant records for their own `usage` field (input,
-output and cache tokens, and the model that produced them) and every place a conversation
-ended on the app's own usage-limit record — `foster revive`'s own detection
-(`isApiErrorMessage: true`, `error: "rate_limit"`), over the whole transcript rather than only
-its last answer. The motivation is a per-model weekly limit locking an account before its
-general week does — measured on a real account: 53% used on the week, 100% used on one model
-— which an account-wide number alone never shows. An account here is the account a _native_
-card of the conversation belongs to; a fostered copy only proves the conversation reached that
-sidebar, not that its tokens were spent under it, and a conversation no card anywhere claims
-natively counts as unattributed rather than guessed at. Reading a transcript a live session is
-still appending to returns a snapshot, same as any other reader here — a re-run once the
-session is idle sees the rest.
-
-## Cloud sessions: `foster cloud list` / `foster cloud pull`
-
-```bash
-foster cloud list                         # every cloud session (code.claude.com) this account can see
-foster cloud pull <id> --into <cwd>       # dry run: what pulling this session would write
-foster cloud pull <id> --into <cwd> --yes # fabricate a local transcript + sidebar card from it
-foster cloud pull <id> --undo --yes       # undo a pull, the same way import-codex --undo does
-```
-
-Reads the CLI's own credential — `.credentials.json`'s access token plus `.claude.json`'s cached
-organization uuid, never the Desktop app's — and never refreshes it: an expired token is reported,
-with the directory to re-run `claude` in to refresh it, rather than foster rotating it itself. A
-pull fabricates a transcript and a sidebar card the same way `import-codex` does — files first,
-ledger only once they land, undoable the same way — because a cloud session already carries
-Claude-shaped records (teleported off whatever machine it last ran on), not something to convert
-from scratch. A re-pull of a session whose history grew reuses the id it minted the first time, so
-it overwrites in place instead of leaving an orphaned pair behind. Nothing here is a published API:
-see AGENTS.md's own "Cloud sessions" section for the endpoints, the credential, and what a pull
-does and does not do.
-
-## When one conversation becomes two
-
-A conversation that already has a writer cannot be continued from a second card. Asked to open one,
-the app forks instead: it copies the history into a new transcript with a new `cliSessionId` and
-points that card at the fork. From then on there are two conversations where there was one, the two
-halves usually live in different accounts, and fostering between those accounts puts both in the same
-sidebar — one piece of work, several rows, nothing to tell them apart but a date.
-
-`foster sweep` answers this without choosing: one row per branch, the branch that carried on under
-its own title and every other branch retitled stale and filed in the archived view — see
-[the whole sweep](#the-whole-sweep). The retitle is the one write the sweep makes to a card it did
-not create, and it changes only the title and the archived flag; the ledger records both before
-and after, native or not, and a stale row that later carries on gets its title back and, if it was
-foster that filed it away, its place in Recents.
-
-`foster consolidate` is the tidy-up for anyone who wants one row per account instead, on the half
-that carried on:
-
-```bash
-foster consolidate                  # what it would do, writing nothing
-foster consolidate --yes            # do it, with Claude Desktop closed
-foster consolidate --undo --yes     # put every moved card back
-```
-
-It moves the card rather than adding one. A copy of the other half would be a second row, which is
-the problem; the row you already have simply starts opening the conversation that kept going. The
-card keeps its identity, its title and its pins, and only two fields change: the pointer, and the
-date, so it stops sorting in Recents by the day it was interrupted.
-
-### Which half carried on
-
-The measure is **records a branch holds that no sibling holds**. The two obvious alternatives are
-both wrong, and were measured to be wrong on a real store rather than reasoned about:
-
-- **The file's modification time.** The app rewrites its own bookkeeping — `custom-title`, `mode`,
-  `last-prompt` — into a transcript every time its card is opened, so a conversation nobody has added
-  a word to gets a fresh timestamp. One fork here had its stale half stamped a day _after_ the half
-  that had been running all morning, purely because the stale row had just been clicked. Anything
-  ranked by mtime can be flipped by looking at the wrong answer.
-- **The common prefix.** A branch is a copy of the history, so walking both files in step until they
-  differ looks exact. It is not — the app does not write the copy in the original's order. On one
-  fork the ordered prefix ran 169 records while the two files had 1255 in common.
-
-`foster return --branches` used to pick its survivor by mtime and now uses the same measure, which
-means it can no longer keep the row you happened to open and drop the one holding the work.
-
-### What one row costs, and when it is not worth paying
-
-Choosing a half hides what the others hold alone — from the sidebar, and only from the sidebar. The
-transcripts stay on disk and `foster transcript <cliSessionId>` still reads them. Every line of the
-dry run says both numbers, because "keeps 2802 records, hides 105" is the whole decision and printing
-only the first half would be an advertisement.
-
-When both halves are substantial that trade is not one to make quietly, so it is not made. Two tests
-decide it, and a fork has to pass both:
-
-- `--max-lost` (200 records by default) — how much the losing halves may hold between them;
-- `--max-lost-share` (33% by default) — how much they may be worth _beside the half that stays_.
-
-The second is there because the first measures the wrong thing on its own. What makes a merge safe
-is not that the losing half is small but that it is insignificant next to the one that survives, and
-those two come apart at the ends: hiding 200 records of a 210-record conversation passes a
-`--max-lost` of 200 and is 95% of the work, while hiding 250 of 30,000 is a rounding error and fails
-it. Both gaps turn out to be wide. Across a store of 591 conversations the forks worth collapsing
-left between 3 and 158 records behind — 0.3%, 8% and 15% of what stayed — while the one that was
-genuinely two pieces of work, 2352 records on one side and 3609 on the other with 770 in common,
-left 2352: 54%.
-
-A fork that fails either test is reported with its numbers and left exactly as it is, naming the
-test that stopped it so the flag offered is the one that would lift it. Merging the two transcripts
-would be the only way to keep everything, and rewriting the record of a conversation is not
-something this tool does.
-
-### The one write to a card foster did not make
-
-Everywhere else, foster removes only what foster wrote. A repoint is the exception, and it carries
-the guarantees that exception has to earn.
-
-It refuses to rewrite a card a running app is holding, because that card will be written back from
-memory, pointer and all, and the move would not survive. That question is asked of each card rather
-than of the installation, the same way `return` asks it: a card the app wrote is held for as long as
-the app runs, and so is a copy that already existed when it started, but a copy foster wrote
-afterwards was never read — the app is past its one read of the directory, which is why it takes a
-restart to appear and why nothing can retitle or refocus it in the meantime.
-
-The practical shape of that: **consolidate before the restart, not after**. A sweep and the tidy-up
-that follows it can run back to back on one closed-then-reopened app, where doing it the other way
-round hands every fresh copy to the app first and then finds them all held. What cannot be helped is
-a card the app itself made; those wait, and are reported as waiting rather than taking the rest of
-the batch down with them.
-
-The ledger records where the card was, the date it wore and where to find it, so `--undo` needs no
-scan and works for an account nobody is signed into. A card moved twice still goes back to where the
-app had it, not to where it stopped along the way.
-
-What it will not touch is a second card the _app_ made for the same work. Those are reported and left
-alone, for the reason `return` leaves them alone: deleting somebody else's file on the strength of a
-heuristic is exactly the kind of help nobody asked for.
-
-One shape is out of reach by construction. A fork is visible here only while both halves have a card
-somewhere in the store, because that is where the list of conversations comes from. A branch nothing
-points at is a conversation with no row at all, which is `foster restore`'s question rather than this
-one's.
-
-### Finding one conversation: `foster where`
-
-Before `foster where` this was a recipe run by hand, three separate measurements in whatever order
-occurred to whoever was doing it: grep every account's cards for the id or a piece of the title, look
-in the transcript directory to see how many files the conversation occupies, and weigh those files
-against each other to guess which row was still worth opening.
-
-```bash
-foster where <query>          # a session id, a cliSessionId prefix, or a title fragment
-foster where <query> --json
-```
-
-It searches every installation `foster` already knows about — the installed app, anything running,
-every store the ledger has been fostered into before, every registered profile — not only the one
-`--store` would resolve to, and lists every account and store holding a card for the match: which
-file each one opens, how many records that file holds against the conversation's own total, and what
-the ledger knows about it (a fostering, a mark). A query matching more than one _conversation_ lists
-the candidates and exits 1 rather than guessing; two matches sharing a root are not two conversations
-— a fork, or the same id opened from two working directories, both covered below — so ambiguity is
-judged on the root, never on the count of matching cards.
-
-Which row to continue in is answered by the exact election `foster sweep`'s own fileCards pass runs
-(`byContinuation`, imported rather than reimplemented, so the two can never disagree) — the last
-answer, then records a row's file holds that no sibling's file holds, then the last message of any
-kind, then sheer size — asked once across the whole family (every id sharing the conversation's root,
-every file any of them occupies) rather than choosing a fork-election path or a file-election path up
-front. `byContinuation` decides between files, not between two rows that open the same one; when the
-election is still tied because several rows across different accounts open the very same file, the
-row in the account `--store` resolves to (the signed-in account) wins — its own visible row first, its
-own archived row next, ahead of any other account's row either way — and only then the row id. Read-only
-throughout.
-
-### Proving a sweep
-
-`foster sweep --prove` is the audit that used to live only in a skill's own hand-run recipe, after
-three incidents where a sweep that reported "nothing is left" had not, in fact, brought everything —
-once losing 2116 records nobody noticed until the file was compared by hand.
-
-It is deliberately not built from the sweep's own bookkeeping (`Outcome.beyond`, `Sidebar.unreached`,
-the passes' own plans): two of those three incidents were bugs _in_ that bookkeeping, so checking
-with the same arithmetic would have missed the same bugs the same way. Instead, for every
-conversation the store holds a card for, it reads the id's own transcript files end to end — the same
-set-difference primitive `foster sweep`'s branch and second-file passes are built on, asked fresh,
-with no sweep state in between — and compares that union against what the account this run targets
-can actually reach through its own cards. Anything short of the whole union is a gap, named with its
-title and how many records short it is; `foster sweep --prove` exits 1 the moment any conversation
-has one, excluding the same never-fosterable classes an ordinary sweep already counts and reports
-separately (see [the whole sweep](#the-whole-sweep)).
-
-A fork is out of scope on purpose: whether every branch of one got a row is the branch pass's own
-question, already in the sweep's report. This measures the other thing that pass does not — one id
-split across two working directories, and whether the target's cards for it, together, reach every
-record either file holds.
-
-On a dry run this measures the account **before** the plan above runs, which is exactly the work
-that plan exists to close; on `--yes` it measures what was actually written. Read-only either way —
-nothing about `--prove` itself writes.
-
-## Why a restart is needed
-
-Claude Desktop reads its session directory **once**, while it initialises, and keeps what it found in
-memory. Nothing watches the directory afterwards, so a file that appears later is invisible until the
-app initialises again. Reloading the window (F5) does not help: the list it redraws comes from the
-app, not from disk.
-
-`foster` will do the restart for you — from the menu, or with `--restart`. It will not close an app
-it is running inside, because that would kill the session that asked.
-
-### Restarting from inside a hosted session: `--detach`
-
-Add `--detach` to `app restart`, `layout --yes --restart`, `view set/copy --yes --restart` or
-`sweep --restart` and the restart happens anyway, from outside the app: a small `.vbs` launched
-through WMI, in a process tree the app quitting cannot take down, waits a few seconds and then
-re-runs the same command from there. The write itself still happens in that second, detached run
-— this call only launches it and returns immediately, so the session that asked ends a few
-seconds later along with the app it restarted.
-
-Every session the app hosts ends when it quits, this one included — there is no way to warn one
-first and no undo — so `--detach` reads the live-session registry first and refuses, naming them,
-if restarting would end any session besides its own. `--detach-even-with-live` overrides that.
-`--detach-delay <seconds>` sets how long it waits before firing (default 20, 5–300).
-
-`foster detached [--last] [--json]` lists what `--detach` has launched from this machine —
-pending, running or done, with the log's own tail — which is how a session that ended before the
-restart landed finds out whether it actually did.
-
-With the tray **on** — the default — `--detach` alone cannot finish: the detached re-run asks
-Claude Desktop to close the ordinary way, which the tray only hides, and the run ends having
-written nothing. `foster` refuses up front rather than spending the wait: on `app restart` add
-`--terminate` as well (it rides straight through to the detached re-run); the other commands
-have no `--terminate` of their own, so close Claude Desktop yourself first, or run
-`foster app restart --detach --terminate` instead. Checked directly against this machine's own
-default installation 24/09/2026: `menuBarEnabled` is unset there, meaning the app default (tray
-**on**) — so the bug was live on the very machine this codebase is developed on, and the fix was
-never validated by "try it and see" here alone.
-
-`--detach` carries `--store`/`--ledger` (and, for `sweep`, the account it just wrote into) into
-the command it detaches to — `foster --store work sweep --yes --restart --detach` used to hand
-the detached process a bare `foster layout --yes --restart` with no `--store` at all, which
-restarted the _default_ installation while `work` was the one actually swept. Measured
-24/09/2026, fixed the same day.
-
-Closing it is less polite than it should be, and `foster` says so rather than pretending otherwise.
-Claude Desktop's window-close handler quits the app **only when its tray icon is turned off**; with
-the tray on — the default — it cancels the close and hides the window. So asking politely would make
-your window vanish and leave the process running. `foster` does not send that request at all: it
-tells you the situation and asks for an explicit yes to end the process. Session files survive
-either way (they are written through a temporary and renamed), but ending the process skips the
-app's own shutdown, so a title or timestamp changed in the last few seconds may not be saved and
-Cowork sandboxes are not stopped cleanly. Quitting from the tray icon yourself avoids all of that.
-
-If your account has **more than one organization**, switching organization and switching back also
-makes the app re-read the directory, with no restart. It ends any session that is running, so it is
-not free either.
-
-With only one organization there is still a way, because the re-read is not guarded by a
-"sessions are already loaded" flag: when the account and organization it resolves are the same ones
-it already has, the app takes a branch that loads the directory again anyway. Signing out and back
-in reaches it. Nothing external can force it — the organization change is noticed through an
-in-process cookie event, so writing that cookie from outside emits nothing, and a same-value change
-is discarded by two separate guards. It is a second door, not a cheaper one: the sign-in is more
-disruptive than the restart it saves.
-
-### The app's own import, and why `foster` does not use it
-
-Claude Desktop registers a deep link, `claude://resume?session=<cliSessionId>`, which imports a CLI
-transcript into the current account **live** — no restart, appears immediately. It looks like the
-perfect answer. Running it once on a real conversation is what settles it:
-
-- **It deletes part of the conversation.** The import rewrites the `.jsonl` in place to strip
-  reasoning. Measured on a 58,678-byte transcript: 22 records became 19, three assistant records
-  containing only reasoning were removed, and 9,677 bytes went with them. Nothing else changed — no
-  message or answer was touched — but the file is the one the original session also points at, and
-  those records are not coming back. This is the reason `foster` will not call it.
-- **The title does not survive.** It carries the working directory and nothing else, so the session
-  arrives with no title at all — which the app displays as "General coding session", the same label
-  every other untitled session gets. The transcript holds the real title the whole time; the import
-  simply does not read it.
-- **The dates are reset** to the moment of the import, and the model and permission mode are gone.
-- **It takes over your window.** The app navigates to the imported session and focuses the composer,
-  so whatever you were reading is replaced.
-
-`foster restore` reads the same transcript and writes a pointer at it instead: the real title, the
-real dates, a fresh identity, and the transcript's modification time left exactly where it was.
-
-The deep link is still worth knowing about — it is the only thing that puts a session on screen
-without a restart. It is not a way to move three hundred, and it is not free.
-
-Relatedly: the app has a built-in recovery scan that offers importable transcripts, and it will
-never offer these ones. Before scanning it collects every `cliSessionId` referenced by every account
-and organization on disk and treats those as already known — so a session that still exists under
-your old account is excluded by the very fact that it still exists.
-
-## Pinned sessions
-
-A pinned session is not a session with a flag set. The session file has no field for it and the
-app's config never mentions it: pinning is state of the **window**, kept in Chromium's IndexedDB
-under one key, holding one JSON array of session ids.
-
-That makes it the one thing a copy cannot inherit. `foster` mints a fresh `sessionId` for every copy
-— which is exactly what keeps deleting the copy from ever reaching the original — and the pin is
-keyed on the id. So a pinned session, fostered, arrives unpinned, and the entry left behind still
-points at the original. `foster pin` is the way to put it back:
-
-```bash
-foster pin                                    # what is pinned, with titles
-foster pin --session 14f73ab6 --yes           # pin it
-foster pin --remove --session 14f73ab6 --yes  # unpin it
-```
-
-Reading is always safe. Writing needs **Claude Desktop closed** — not for the usual reason, but
-because LevelDB keeps recent writes in memory and flushes them on its own schedule, so a change made
-underneath a running app would simply be overwritten. The database is copied into `~/.foster/backups`
-before anything is written, and the write itself only ever **appends**: LevelDB replays its log in
-order, so a record added at the end supersedes the earlier one without a single existing byte being
-rewritten. The worst an interrupted write can leave is a torn record at the end of the file, which is
-the one kind of damage that format is designed to discard.
-
-Reading has to look in **both halves** of the database, and this is the part that is easy to get
-wrong. LevelDB writes to a log and, once that log grows, folds it into a sorted table and forgets it.
-A reader that only knows about logs therefore answers "nothing has ever been pinned" for any
-installation that has been running long enough to compact — which is every installation that has been
-running for a while. It was the first thing to break here against a real profile, with ten sessions
-visibly pinned in the sidebar and the log holding no trace of them. So `foster` reads the sorted
-tables too, decompresses them, and takes whichever copy of the record carries the higher sequence
-number. The same number is what a write has to climb above: a record appended to the log but numbered
-below the table's is read as the older of the two, and the change quietly does nothing.
-
-A sorted table that fails to read — a compression this does not implement, a corrupt block — is
-skipped for a read that only lists, the same as LevelDB's own half-written tables from a killed
-compaction. Writing is different: if the table that failed happened to hold the newest copy of the
-record, the value found elsewhere is older than it looks, and a write built from it would erase
-whatever that table actually held. `foster pin --yes` refuses outright rather than write from a
-read like that, naming the table; re-run once it reads cleanly.
-
-One thing `foster` deliberately will not do: write a pin list into an installation that has **never
-pinned anything**. The record carries Blink's serialisation envelope, and with no record there is
-nothing to copy it from — inventing one is guessing at a serialiser version. Pin any session in the
-sidebar by hand, once, and the rest follows.
-
-There is no LevelDB dependency, and it would not have helped: the database declares the comparator
-`idb_cmp1`, and a stock binding refuses to open a database whose comparator it does not recognise.
-The pieces actually needed are implemented directly — the log record format, the sorted-table format,
-Snappy decompression, and IndexedDB's key encoding, which stores its strings as UTF-16 big-endian
-while every other multi-byte field in the file is little-endian.
-
-## Sidebar groups and routines: `foster layout`
-
-Two more things a copy cannot inherit, for the same reason pinning cannot: neither is a field on the
-session file. A sidebar **group** lives in `claude_desktop_config.json`, in a scope keyed by account
-and organization; a **routine** (a scheduled task) lives in its own `scheduled-tasks.json`, one file
-per account. `foster layout` brings both from every other account into the one signed in now:
-
-```bash
-foster layout                    # what would be brought, writing nothing
-foster layout --yes              # write it — refuses if the app is running
-foster layout --yes --restart    # quit Claude Desktop, write, start it again
-```
-
-A group is matched **by name**: an existing target group of that name is reused, a new one is minted
-only when none matches. A routine is matched by its own **id**. Either way, bringing the same thing
-twice is a no-op, not a duplicate — and a target the user has already filed or already has, however it
-got there, is left exactly as it is. That is the same "the user's own choice wins" rule the sweep
-keeps for a copy's title. The one exception is a row foster itself filed earlier: when the source
-has since moved it to another group, it moves too. New groups arrive in the most recently active
-source's own order.
-
-The same run brings the rest of what makes two accounts look alike: the **pins** the most recently
-active other account shows on each conversation (and removes only a pin foster itself added), the
-sidebar's group-by and sort as that account last showed them, and per-account app settings the
-target has no entry for yet. Everything is under the same rule — a value changed here by hand is
-never overwritten — and `foster verify` reads all of it back after the restart.
-
-A routine that is a one-shot (`fireAt`, no `cronExpression`) and already overdue is not brought at
-all: the app runs an overdue task the moment it next launches, and a stale one firing unasked in an
-account that never scheduled it is worse than one left behind. The copy also drops `lastRunAt`,
-`lastScheduledFor` and `notifySessionId` — another account's history, a count that could make the app
-believe a run was missed here, and a session id that names nothing in this account.
-
-A group is not just that one config scope, either — the same scope sits in Local Storage too, once
-under its own key and again folded into the filter menu's own `dframe-store` record below. `foster
-layout` writes all three together whenever a Local Storage database exists at all, and skips the Local
-Storage pair (writing only the config copy) on a store the sidebar's filter menu has never touched yet.
-
-None of the three is what the app trusts at startup, as it turned out. The sidebar is claude.ai's own
-code, and `dframe-store` is synced with the account's settings on the server: when the app starts, the
-server's list of groups for the signed-in account replaces the local one, and a row stays filed only
-under a group the server already knows. A group foster minted is not one of those — measured
-23/09/2026, every group one `foster layout --yes --restart` wrote was gone three seconds after the app
-came back. The page keeps a marker of its own for "this device has an edit the server has not seen",
-and when that marker names the signed-in account, startup uploads the local groups instead of
-replacing them; `foster layout` now sets it, in the same write as the groups. Watched through a real
-restart the same day, a group foster minted that way came back with its row and stayed through three
-more restarts. The page is claude.ai's code and can change without notice, though, so `--restart`
-still checks: it waits
-for the app to rewrite its config, reads every row back, and when any were dropped it says how many
-and from which groups, and exits non-zero, instead of reporting the layout applied. The way that
-held on 23/09 still works when it does: file them from inside the app, with its own group tools.
-
-Both files are the app's own, and it rewrites them from memory the same way it does the pin database
-and its other preferences — so, like `foster pin`, a write needs the app **closed**, and `foster
-layout --yes` refuses outright while it is running rather than writing something the next flush would
-undo. `--restart` is the one command that does the whole thing itself: quit, write, start again — the
-write happens in the gap, which is the only moment either file is safe to touch. `foster sweep`
-plans a layout alongside its own passes (never writing it) and says so in its summary when anything is
-waiting.
-
-### Checking a restart did not undo anything: `foster verify`
-
-Two different runs have now written something in the closed-app gap and watched the app save part of
-it straight back over once it came up: marks (24/09/2026, ten of forty-nine "other file" marks gone
-three minutes later, no foster event in between) and sidebar groups (23/09/2026, the paragraph
-above). `foster verify` is the one command that reads back, after the fact, whether any of what
-foster wrote to this account has since been undone:
-
-```bash
-foster verify            # read-only; writes nothing
-foster verify --json
-```
-
-Titles, archived flags and pins are checked exactly, because the ledger alone proves reversion for
-them: a card is back under a title it wore _before_ foster ever touched it (`planMarksBack`), or a pin
-move a sweep deferred still has not landed (`planPinMoves`) — the same two functions `foster layout`
-itself calls to close the gap, read back here rather than re-derived.
-
-Groups and routines cannot be checked as exactly, and `foster verify` says so rather than pretending
-otherwise: the ledger keeps only counts of what one `layout_applied` run brought, never which card
-went into which group, so "is this one assignment still there" has no ledger-only answer once the
-process that made it has exited — that is what `layoutVerify.ts`'s own check does, inside the same
-run that wrote it, and it cannot be repeated cold. What `foster verify` flags instead is the one
-shape actually measured on a real store: an account that has had groups or routines applied to it
-before, now showing **none**, while a fresh plan still wants to bring some. A non-empty scope with
-more merely pending is reported as such and left out of the exit code — it cannot be told apart from
-another account simply having gained a group since the last run, and asserting undone on a guess is
-worse than saying "pending".
-
-Exits 1 the moment anything above was found undone. Run it after `foster layout --yes --restart` (or
-`sweep --restart`) — the `/fosteia` skill's own last step now does.
-
-## The sidebar's filter menu: two stores
-
-The Code sidebar's filter menu — status, group by, sort, environment, empty groups, PR status,
-activity window — is seven settings split across two stores, and the split is not the one you would
-guess from the menu itself. Re-measured 22/09/2026 via the app's own `set_view` tool: an earlier
-reading of this section put status and the activity window in the wrong column — both are per
-account, not machine-wide or shared — and `dframe-store`'s own `recentsStatusFilter` is a different
-list the app keeps for something else, never this menu's status filter.
-
-| Setting                                    | Where                       | Key                                                    |
-| ------------------------------------------ | --------------------------- | ------------------------------------------------------ |
-| Group by (Data/Pasta/Estado/Custom/Nenhum) | machine-wide, Local Storage | `groupByByMode.code`                                   |
-| Sort by (Recência/Nome/Recém-criados)      | machine-wide, Local Storage | `sortByByMode.code`                                    |
-| Status (Ativo/Arquivado/Todos)             | per account                 | `code-sessions-status-filter.<accountUuid>`            |
-| Activity window (only with group-by state) | per account                 | `code-sessions-state-activity-days.<accountUuid>`      |
-| Environment                                | per account                 | `code-sessions-selected-environments-v2.<accountUuid>` |
-| Show empty groups                          | per account                 | `code-sessions-show-empty-projects.<accountUuid>`      |
-| Show PR status                             | per account                 | `code-sessions-show-pr-status.<accountUuid>`           |
-
-The first two live in Chromium's Local Storage for the app's own origin — a second LevelDB database
-next to the one `foster pin` reads, encoded more simply (no Blink envelope, no separate "exists"
-record). The other five are ordinary keys under `preferences.epitaxyPrefs` in
-`claude_desktop_config.json`, every one of them carrying the account uuid as a suffix because the
-filter they hold belongs to one account's own view of the sidebar. Four more keys without the
-account suffix or the `-v2` are left over from an older build; the app no longer reads them, so
-`foster view` only ever reports them as legacy, never writes them.
-
-```bash
-foster view                 # all seven, this account's value, and where each lives
-foster view set --status archived --sort name --env local,ssh --yes
-foster view copy --from <accountUuid> --yes    # per-account half (all five) only; the machine-wide half needs no copying
-```
-
-Grouping by "Estado" only makes sense with the active filter, and the app enforces that itself —
-`foster view set --group-by state` sets `status active` along with it, and says so. Both files are
-the app's own, so both need it closed to write, and `--restart` does the same quit-write-start `foster
-layout` does. `foster layout` also carries the per-account half of this menu — status and the
-activity window included — from another account when the target has none of it set yet — the
-machine-wide half needs no copying, since it already applies to every account on the installation.
-
-## What about switching accounts?
-
-Nothing on your disk can switch **the app's** account — not `foster`, not anything else. This is
-worth stating precisely, because it is the first thing people try, and because the answer for the
-CLI is now the opposite one: a config directory's account is a file, `foster` moves it, and
-[Switching a client's account](#switching-a-clients-account) is that section. The two answers differ
-because the two programs keep the account in different places, and the rest of this section is why.
-
-Inside one installation the account is not stored anywhere. The app keeps it in memory only —
-deliberately non-persistent, and cleared whenever its web view navigates — and just three things ever
-set it: an IPC call the app's own signed-in page makes, the app noticing that page navigate to
-`/logout`, and a backfill that asks the server who you are using the cookies you already have. The
-`lastKnownAccountUuid` in the config is a leftover of that answer, not the source of it: nothing reads
-it to decide who you are signed in as. (It is not entirely dead — it feeds a check against reusing a
-token across identities — but it selects nothing, and `foster` reads it only as a hint about which
-directory the sidebar is on.) So there is no file to edit and no flag to pass. Deep links,
-command-line arguments, environment variables, config files and group policy were each checked, and
-none of them selects an account.
-
-**A second profile does give you a second account, with one manual step.** Both
-`CLAUDE_USER_DATA_DIR` and the `--user-data-dir` switch relocate `userData` outright: the profile
-starts, populates its own store, takes its own instance lock, and runs beside the default
-installation without disturbing it.
-
-Signing in is where it gets awkward, and it is worth understanding why rather than giving up at the
-symptom. Claude Desktop ships as an MSIX package, and Windows resolves the `claude://` protocol
-through **package activation**, not the classic per-user registry key you might expect to find and
-edit — that key still exists, but it is MSIX registry virtualization's private copy, visible only
-from inside the app's own container, and a browser running outside the container never sees it. So
-the browser's OAuth callback always lands on package activation, which starts an instance on
-whichever `userData` the packaged registration currently names — normally the default installation.
-The profile never receives its own callback and sits on the sign-in screen forever.
-
-**Measured on 05/09/2026 (Claude Desktop 1.46388.2, foster 0.40.0): two Claude Desktop windows
-signed into two accounts, the second through the ordinary Google flow.** Three facts made it work:
-
-- What actually decides the destination is a **packaged ProgID** —
-  `HKCU\Software\Classes\AppX<hash>`, the key Windows creates when it registers the package for
-  `claude://` — not the classic `…\claude\shell\open\command` key. Its `Shell\open` subkey carries
-  `AppUserModelID` (which package this is) and `Parameters`, the argument string appended to the
-  package's own executable the moment a link is activated — normally just `"%1"`.
-- `Parameters` is the user's own registry value (`FullControl`, no elevation needed), so pointing it
-  at `--user-data-dir=<profile> "%1"` for the length of one sign-in routes the very next callback to
-  that profile. This is the one registry **value** `foster` ever writes — never a key, never a
-  level — restored verbatim once the sign-in lands, times out, or is cancelled.
-- The callback process only _finds_ the profile it is meant to forward to when that profile's own
-  instance was itself started **with package identity** (`Invoke-CommandInDesktopPackage`, not a
-  bare `Claude.exe` child process). A profile started by running the executable directly never sees
-  the callback at all and ends up a second, broken instance on the same `userData`. `foster app
-start` and `foster app login` both start a profile this way now, falling back to a direct launch
-  only when the cmdlet is missing or fails.
-
-```bash
-foster --store work app login --yes
-```
-
-**Arm first, then sign in.** `app login` only prints the instruction to click "Continue with
-Google" once the handler is actually routed — not a moment before — because Edge and some Chrome
-profiles hold a standing permission to auto-launch `claude://` from claude.ai with no dialog in
-between, so the routing has to already be in place before the sign-in can possibly fire the
-callback. If the browser opens Claude by itself the instant you start the Google flow, that is
-expected: the link is routed. Success is detected without reading the callback at all — the
-profile's own token cache appears, or its account changes, either of which ends the wait early and
-restores `Parameters` on the spot; `--timeout <seconds>` caps the wait instead of leaving it open
-until Ctrl+C. If the profile is running without package identity, `app login` refuses rather than
-arming a handler whose callback cannot land — `--restart-profile` closes it and starts it again the
-right way in one step. There is one hazard worth knowing regardless: if any Claude window restarts
-while the login is armed (an app update or repair), the packaged registration gets rewritten out
-from under it, and `app login` says so rather than overwriting what the app just wrote. A login left
-routed by a crash, or by Ctrl+C reaching something other than this process, is what
-`foster app login --restore --yes` and the warning in `foster doctor` are for.
-
-For the cases `app login` cannot change the routing for — an installed app that already owns the
-handler, or a machine where the registry value cannot be touched — manual delivery and the e-mail
-code are the fallbacks. Manual delivery works off what the packaged registration actually is:
-
-```
-HKCU\Software\Classes\AppX<hash>\Shell\open
-  AppUserModelID = Claude_<publisher>!Claude
-  Parameters     = "%1"
-```
-
-Just an argument string appended to the package's own executable at activation — no broker beyond
-that. And a second invocation carrying the same `--user-data-dir` finds that profile's
-single-instance lock and forwards its argv to the instance holding it (again, only when that
-instance was itself started with package identity). So the callback can simply be delivered by hand:
-
-```powershell
-& "…\app\Claude.exe" --user-data-dir="<profile>" "claude://<the callback URL>"
-```
-
-The profile started the login, so it is the instance holding the pending state; the URL only ever
-needed to reach it. Capture the URL from the browser's network tab (or a fallback link on the page),
-cancel the browser's "Open Claude?" prompt so the default instance never sees it, and run that. The
-authorization code is single-use and short-lived, so do it promptly.
-
-`foster` does that part for you, without needing the executable's path:
-
-```bash
-foster --store "D:\Claude-Work" app link "claude://<the callback URL>"
-```
-
-It refuses anything that is not a `claude://` link, and never prints or records the URL — the same
-rule `app login` follows: a single-use sign-in code has no business in foster's own output.
-
-This has been demonstrated both ways — the browser flow above, and hand-delivering the callback URL
-— with two accounts signed in simultaneously in the same Windows session, each in its own instance,
-the default installation untouched. An account whose organization requires SSO will still refuse —
-that is the account's policy, not this mechanism.
-
-`foster` works in either profile. It looks at `CLAUDE_USER_DATA_DIR` first when that is set;
-for a profile started with the `--user-data-dir` switch instead, `foster doctor` lists the
-directories of every running instance so you know what to pass to `--store` — or give it a name
-once with `foster profile new|register` so you never have to retype the path (see `foster stores`
-under [Usage](#usage)).
-
-It can also start one. `foster --store <profile> app start` prefers
-`Invoke-CommandInDesktopPackage` when the executable found is a real MSIX install — see the package
-identity fact above — falling back to running the executable directly, and says which one it used;
-`app restart` works there too:
-
-```bash
-foster --store "D:\Claude-Work" app restart --terminate
-```
-
-A profile that comes back from a restart can come up with its window hidden (signed in, but nothing
-visible — the "closed to tray" state carried across the relaunch); `app start` and `app login` both
-give it a few seconds to appear and, if it has not, send one more launch to raise it, and say so.
-
-Everything that inspects or closes an app is scoped to the store you name. The installed app is the
-one whose main process carries no switch; a profile is matched by its own path. And `foster` refuses
-to close the app it is running inside — which, with two instances up, means the one holding the Code
-session that started it, not both of them.
-
-If you are simply moving between accounts on one profile, staging still works and is the shortest
-path: send copies to the other account first (`--to`, or "Send them somewhere else" in the menu),
-then sign into it. They are waiting when you arrive.
-
-### More than one client at once
-
-The CLI has none of this awkwardness. One `claude` is one config directory — `CLAUDE_CONFIG_DIR`
-when it is set, `~/.claude` otherwise — and credential, settings and conversations all live inside
-it, so a second directory is a second account, and the two run side by side without ceremony. The
-CLI's sign-in never rides `claude://`: the browser hands back a code you paste into the terminal,
-which is exactly the transport the app's second profile is missing.
-
-Two things the pattern does not say out loud. The browser authorizes whichever claude.ai account it
-is already signed into, so the first login of a new client belongs in a private window — the only
-moment it matters. And a second account multiplies usage limits only if it has a plan, or API
-credits, of its own.
-
-`foster clients` lists the directories that exist and who is signed into each:
-
-```
-* ~\.claude        You · you@example.com · Max  (default, 2 live, 348 conversations, used today)
-  ~\.claude-work   not signed in  (0 conversations)
-```
-
-The identity is read from the client's own `.claude.json` — the profile the CLI cached for itself,
-the same at-rest category as the session files — and the credential beside it is not read, here or
-anywhere: its presence is what "signed in" means. `restore`, `purge` and `live` already search
-every `~/.claude*` sibling this way, which is how a machine with two such clients gets the whole
-answer rather than the default's half — but a root added with `foster client register`, below,
-does not join that search: it feeds `clients` and launch only, and `--config-dir` is still how
-`restore`, `purge` and `live` reach it, on purpose (see the `foster stores` section above).
-
-Launching can stay in the shell, or go through `foster client open <client>`, which alone knows
-name -> directory -> identity -> live writers -> junction target, and refuses the cases that bite
-instead of opening into them. Staying in the shell is the portable option: a function that sets the
-variable, hands every argument through, and puts the environment back whatever happens is all it
-takes — the two halves the obvious one-liner gets wrong are the `finally` and the `@args`:
-
-```powershell
-function claude-as {
-  param([string]$Client)
-  if (-not $Client) { Write-Error 'usage: claude-as <client> [claude args]'; return }
-  $dir = Join-Path $env:USERPROFILE ".claude-$Client"
-  if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
-    Write-Error "client '$Client' does not exist ($dir). If it is meant to: mkdir $dir"
-    return
-  }
-  $prev = $env:CLAUDE_CONFIG_DIR
-  try {
-    $env:CLAUDE_CONFIG_DIR = $dir
-    claude @args
-  } finally {
-    $env:CLAUDE_CONFIG_DIR = $prev
-  }
-}
-```
-
-`claude-as work`, `claude-as work --resume`, and a new client is `mkdir ~\.claude-<name>` — a
-`~/.claude*` sibling needs no registration, `foster clients` finds it on its own. A directory
-that does not live there — `~\.claude-contas\<name>`, or a whole folder of them — does:
-`foster client register <path>` names one directory, `--container` names a directory that holds
-one client per immediate child, and `foster client forget <path>` withdraws either without
-touching anything underneath it. Both are dry runs unless you pass `--yes`, in the shape below.
-
-```bash
-foster client register ~\.claude-contas --container            # dry run
-foster client register ~\.claude-contas --container --yes      # list its children in `clients`
-foster client forget ~\.claude-contas --yes                     # stop listing them
-```
-
-`foster client new` makes a better one than `mkdir` does. A bare directory plus a login
-authenticates, but sessions run there quietly have fewer capabilities than sessions run anywhere
-else: no settings, no `CLAUDE.md`, no agents, and — the one that actually bites — no skills, with
-nothing in any output saying so. So settings, instructions, agents, commands and output styles are
-copied, and `skills/` is **linked** rather than copied, because skills are a warehouse and a copy
-starts drifting the day either side changes.
-
-Three things are never copied, and each exclusion is load-bearing. The credential, because one
-account living in two directories is the exact state the vault rule below exists to prevent.
-`projects/`, because that is the whole conversation history and a second copy of it is a second set
-of transcripts for every other command here to find. And `.claude.json`, because it holds the cached
-profile `foster clients` reads — copy it and a directory nobody has signed into reports somebody
-else's identity.
-
-```bash
-foster client new ~\.claude-work            # dry run
-foster client new ~\.claude-work --yes      # make it, signed out
-```
-
-#### One entry per client in the Windows Terminal menu
-
-`foster clients --fragment` prints a Windows Terminal fragment (JSON) with one profile per client
-this machine lists — registered roots included, a junction resolved to its target — so every client
-gets its own entry in the `wt` menu without hand-editing `settings.json`. Run these two commands in
-this order: the `Fragments` folder does not exist until something creates it, and PowerShell's `>`
-does not create one on the way.
-
-```powershell
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster" | Out-Null
-foster clients --fragment > "$env:LOCALAPPDATA\Microsoft\Windows Terminal\Fragments\foster\clients.json"
-```
-
-Three things worth knowing before you rely on it. The Terminal writes a stub of the profile into
-your own `settings.json` the first time it loads the fragment, so this is not without side effects
-on a file that is yours. `wt -p <name>` with a name that does not match opens the **default**
-profile silently (microsoft/terminal#6086) — on a machine where `~/.claude` is the default, that is
-a tab on the wrong account with no error at all, so prefer `foster client open` when being certain
-matters more than a menu entry. And the fragment has to stay UTF-8: PowerShell 7's `>` writes it
-that way, but Windows PowerShell 5.1's writes UTF-16 and breaks the file.
-
-Restart Windows Terminal if the entry does not appear.
-
-### Switching a client's account
-
-A client's account is one file. `<configDir>/.credentials.json` is plain JSON of about 1.4 KB, every
-`claude` process reads it at birth, and nothing else binds a directory to an account — so replacing
-it replaces who the next process runs as, with no logout, no restart, and nothing else touched.
-
-The obvious way to do that by hand is a logout and a login, and it is the wrong way: a logout throws
-away a working credential to make room for one you then have to go and get. `foster switch` moves
-them instead.
-
-```bash
-foster switch                               # who is here, and what the vault holds
-foster switch alice@example.com             # dry run
-foster switch alice@example.com --yes       # swap
-```
-
-The credential that was there is recorded in foster's vault; the one asked for is installed from it.
-Two rules decide the shape of that vault, and both were arrived at the hard way.
-
-**The identity of a credential is `(client, account)`, not an account.** One account signed into two
-config directories has two independent token families, from two separate logins, whose refresh tokens
-rotate separately — so a credential taken from one client cannot be installed into another, and
-foster will not offer it. Keyed by account alone, a single `guard` on the second client would
-overwrite the first's copy with a credential that does not work there.
-
-**Nothing in the vault is ever replaced or removed.** The obvious design is positional — one live
-copy per account, a swap trades one for the other — and foster implemented that first, for a real
-reason: a refresh token can be rotated on every renewal, so a copy left on a shelf quietly stops
-working. But positional means destructive. Every swap deletes a credential, and a deleted credential
-is one that no later feature can reach and no operator can fall back on. So the vault is
-**append-only**, in the same idiom as foster's ledger: one JSONL file per `(client, account)`, newest
-line wins, and every version before it stays legible underneath.
-
-> **The cost, plainly.** This keeps more credentials at rest than the minimum, for ever, and
-> unencrypted — which makes the vault a more valuable target than a positional one would be. It also
-> means a stale record can be installed and fail. Both are accepted deliberately: staleness is
-> detectable, because every record carries when it was taken and a switch verifies before it commits,
-> while deletion is not detectable at all — and nothing foster does can make a credential
-> unrecoverable.
-
-Foster never logs in. An account it has no record of is a login you do once, in that directory, after
-which it can be switched to freely. Two things write to the vault, and no command that merely reads
-does: **a switch** records the account it displaces, and **`foster guard`** records the account in
-use. So the first account to become switchable is the one `guard` sees. A credential that has not
-changed since the last look appends nothing, so `guard` is cheap to run on a timer.
-
-A credential that has sat unused can expire on its own, so the swap is **verified against the API**,
-not against the file it just wrote: a stored credential that no longer authenticates is put back, and
-you are asked for a fresh login rather than told it worked. For the same reason foster **refuses to
-switch at all** while it cannot verify who is signed in — an unverified answer is not good enough to
-file the outgoing credential under, and filing it wrong would overwrite another account's entry. That
-is also why `--offline` plans but never applies.
-
-One thing a switch cannot fix, and says so instead: the CLI caches its own profile in `.claude.json`
-and only rewrites it when it next runs, so `foster clients` keeps naming the previous account until
-then. Foster will not edit the app's cache to cover for itself.
-
-**The failure the vault is really for** is the one with no other answer: another `claude` process,
-started before the switch, holds its token in memory and rewrites the credential file when it
-renews — putting its account back over yours, minutes later, silently. Foster cannot prevent that; no
-lock exists to take. So it does the two things it can. It names the processes that could do it, with
-pids and working directories, before writing:
-
-```
-  ! 2 live session(s) in this client can rewrite the credential:
-      pid 4242  D:\work\api-gateway
-```
-
-And the account that gets overwritten is already recorded, so the damage is a command to undo rather
-than a login to redo. That is the whole argument for keeping history: the process that clobbers you
-cannot reach what the vault has already written down.
-
-`foster vault` lists what is held — grouped by client, newest first, with how many versions stand
-behind each — read from each record's own fields rather than its filename, and without opening a
-credential. `foster guard` records the account a client currently holds, for anything that wants a
-fixed cadence; it is what makes an account switchable in the first place, since foster can only
-install a credential it has seen.
-
-The record shape is documented because it is the way back if foster is ever gone. Each line is a JSON
-object with `surface`, `email`, `savedAt` and the credential verbatim under `credential`, so
-recovering one by hand is one command in any shell:
-
-```powershell
-(Get-Content <file> | Select-Object -Last 1 | ConvertFrom-Json).credential |
-  Set-Content ~\.claude\.credentials.json
-```
-
-**The other kind of switch changes it for one consumer rather than for the machine.** Give each
-account its own directory, log into each once, and point a junction at whichever is active:
-
-```bash
-foster point ~\.claude-live --to ~\.claude-accounts\alice --yes
-```
-
-Anything running with `CLAUDE_CONFIG_DIR` set to the link follows the flip; your own terminals carry
-on wherever they were. No credential moves and nothing is logged out. One property is worth knowing
-because it is counter-intuitive: the path is resolved on **every** file open, so a process that
-started before the flip writes through it after. A link does not isolate a running process from a
-switch — only a directory that the process's own environment names does that.
-
-## Install
+**1. Install** (PowerShell). The installer pins the release it came from and verifies the bundle's
+SHA256 before running anything:
 
 ```powershell
 irm https://github.com/cfigueiroa/foster/releases/latest/download/install.ps1 | iex
 ```
 
-That URL always serves the installer from the newest release. The installer itself pins the tag it
-was published from and verifies the downloaded bundle's SHA256 against that release's checksum before
-running anything, so the integrity check is unaffected by the URL being version-independent. To pin a
-specific version instead, fetch it by tag:
-`https://raw.githubusercontent.com/cfigueiroa/foster/v0.11.1/install.ps1`.
+Pass `-NoLaunch` to skip opening the guided menu at the end. To pin a version, fetch
+`https://raw.githubusercontent.com/cfigueiroa/foster/v<version>/install.ps1` instead.
 
-When it finishes it opens the menu straight away; pass `-NoLaunch` to skip that. For development,
-clone the repo and use `npm run dev -- <command>`.
-
-## Usage
-
-Run it with no arguments for a guided menu that stays open — tick the accounts to
-read from, choose sessions, review, confirm, and carry on without relaunching:
+**2. Check the machine** — which store, which account, whether the app is running:
 
 ```bash
-foster
+foster doctor
 ```
 
-You do not have to close Claude Desktop first. When the copies are written it
-offers to restart the app so they show up.
-
-The source screen is ticked rather than chosen: an account, one of its
-organizations, several accounts at once, or the row that stands for every account
-in the installation. One pass reads them all, so consolidating three accounts is
-one run rather than three.
-
-Copies go to the account you are signed into by default. The confirmation names
-the destination and the title prefix, and either can be changed from there — any
-organization of any account is a valid target, though copies written outside the
-account in use only appear once you switch to it.
-
-Sessions can also come from **another installation or profile**. A second profile
-is a separate store that nothing in this one points at, so the source picker
-offers it as its own entry: the profiles running right now are listed, and one
-that is not running can be given by path. It is a scan of its own rather than one
-more tick — a run reads one installation, and asking for both at once is refused
-instead of quietly resolved to one. Copies made that way record which store they
-came from, because two installations can hold the same account identifier.
-
-"Work on another installation" goes further and points the whole menu at a
-different profile — everything after it reads and writes there — so a second
-account is not a reason to quit and relaunch.
-
-The same operations are available as one-shot commands, for scripting. `--help` files them under
-these same headings, so the list below and the one the program prints are the same shape:
+**3. Sweep.** Without `--yes` nothing is written; read the plan first:
 
 ```bash
-# Start here
-foster doctor    # environment check: store location, app state, whether it is running
-foster stores    # installations foster knows about, and what to pass to --store
-foster clients   # the CLI's config directories, and who is signed into each
-foster clients --fragment # print a Windows Terminal fragment (JSON), one profile per client
-
-# Bringing conversations in
-foster sweep     # the whole job: every account, archived and deleted included
-foster sweep --sync-titles # also re-title copies whose original has been renamed since
-foster sweep --prove # after planning, independently check every conversation is fully reachable
-foster sweep --cloud # also pull every other signed-in account's cloud sessions into local rows
-foster sweep --no-archive-sync # leave archived flags alone (on by default: they follow the
-                 #   account last used on each conversation)
-foster scan      # read-only inventory of accounts, organizations and sessions
-foster list      # sessions from other accounts that are available to foster
-foster foster    # create the copies
-foster restore   # bring back sessions deleted in the app
-
-# After the sweep
-foster where <query> # every account/store holding a card for one conversation, and which to
-                 #   continue in (a session id, a cliSessionId prefix, or a title fragment)
-foster verify    # after a restart, check nothing foster wrote (marks, pins, groups, routines)
-                 #   was undone
-foster return    # remove fostered copies, restoring the previous state
-foster consolidate # one row per piece of work, on the branch that carried on
-foster unclaim   # release the worktree claim a copy inherited from its original
-foster status    # what is currently fostered
-foster pin       # pin sessions in the sidebar, or see what is pinned
-foster purge     # destroy the conversations behind deleted sessions, permanently
-
-# Accounts
-foster accounts  # every account here: who, which plan, whether it is still paid for
-foster whoami    # the signed-in account's name, email and plan, from the app's own cache
-foster identify  # name an account by asking the API with a credential already on the machine
-foster label     # give an account a human name (--clear takes it back, --forget drops the sighting)
-foster labels    # the name each account goes by — a label you gave, or its e-mail
-foster usage     # the signed-in account's live 5-hour and weekly limits, from the API
-foster renewals  # usage resets and billing dates across every account, in one place
-
-# Credentials and clients
-foster switch    # sign a client in as another account, without a logout
-foster vault     # the credentials foster is holding, and whose they are
-foster guard     # record the account a client holds, so it can be put back later
-foster point     # repoint a directory link at another client
-foster client new  # seed a config directory that is a working client
-foster client register|forget # remember (or withdraw) a directory outside ~/.claude* for clients/launch
-foster client open # a Windows Terminal tab signed in as one client (--print shows the command)
-foster profile   # name a Desktop profile — new|register|forget|list — for --store
-
-# Live sessions
-foster live      # conversations a claude process is holding open right now (--stop ends one,
-                 #   --prune clears registry entries whose process is gone)
-foster rescue    # conversations stranded by a crash, and the resumes that bring them back
-                 #   (--open puts each one in its own Windows Terminal tab)
-foster unstarted # background-task requests whose session died before answering once
-foster transcript  # read a conversation's transcript, by cliSessionId
-foster resume    # send one prompt to an existing conversation, headlessly
-foster grep      # search every transcript on this machine by what was actually said
-foster export    # render one conversation to Markdown, HTML or JSONL
-
-# Reports
-foster disk      # bytes per account and per project, for cards and transcripts
-foster stats     # token usage, sessions and usage-limit stops, from the transcripts
-
-# Cloud sessions
-foster cloud list             # every cloud session (code.claude.com) this account can see
-foster cloud pull <id> --into <cwd> --yes  # fabricate a local transcript + sidebar card from one
-
-# The app
-foster app       # status | quit | start | restart — drive Claude Desktop itself
-foster app login # sign a second profile in through the ordinary browser flow (--restore undoes
-                 #   an interrupted run)
-foster agent     # hand a task to a Claude agent that drives the operations above
+foster sweep          # what it would do
+foster sweep --yes    # do it
 ```
 
-`return` only touches copies in the installation it is pointed at; copies written into another
-profile are counted and left alone unless you pass `--all-stores`. The ledger spans every
-installation, and quietly deleting from one while working in another is not something a tool should
-do on its own.
-
-It also reads the axis the copies were written along. `foster` chooses a destination with `--to`, so
-`return --to <accountUuid>` removes the copies in one account and leaves the rest — which is what
-"clean up the account I stopped using" means, and what the unfiltered command cannot express: with
-several accounts fostered into, a bare `return` removes the copies in the one you are using too.
+**4. Bring the layout and restart** — the app only sees new sessions after it starts again, and
+groups, pins and routines can only be written while it is closed:
 
 ```bash
-foster return --to 00000000          # dry run, scoped to that account
-foster return --to 00000000 --yes    # with Claude Desktop closed
+foster layout --yes --restart --detach
 ```
 
-### Naming accounts, and when foster can do it for you
+Run with no arguments (`foster`) for a guided menu that stays open. Details:
+[the whole sweep](docs/guide/sweep-and-forks.md) ·
+[why a restart is needed](docs/guide/restart-and-detach.md) ·
+[long-form usage](docs/guide/usage.md).
 
-Accounts are UUIDs here because that is all the directory names carry. The app knows better — it
-shows the account's email under your avatar — and the plainest copy of that email on this disk is
-inside `oauth:tokenCache` in the app's config, which the safety model does not read as a shortcut to
-a name. (It is not in the config as plain text, not in the logs, and not in any file keyed by
-account; the one other copy is buried in an opaque IndexedDB blob that describes only the account
-currently signed in.) So a name comes from one of three places, in the order foster prefers them: a
-label you set, an identity foster read from the app's own profile cache, or — new — an answer the API
-gave when foster presented a credential the account itself left behind (see `identify`, below). Only
-when none of those is available does the pairing fall to you — and even then only the name, because
-foster already knows which account the sidebar is reading:
+## 🧬 Inside the sweep
+
+Each pass works from one scan and one walk of the transcript tree, and the run repeats (up to three
+rounds in one process) until a re-plan finds nothing left.
+
+```mermaid
+flowchart TD
+    S([foster sweep]) --> P1["Copies<br/>every fosterable card, archived included"]
+    P1 --> P2["Branches<br/>one row per branch of a fork"]
+    P2 --> P3["Second files<br/>elect the row to continue in"]
+    P3 --> P4["Restores<br/>deleted conversations nothing points at"]
+    P4 --> P5["Unclaim<br/>release inherited worktree claims"]
+    P5 --> P6["Title sync<br/>--sync-titles"]
+    P6 --> P7["Archive sync 🆕 0.63"]
+    P7 --> P8["Cloud 🆕 0.63<br/>--cloud"]
+    P8 --> R{"Re-scan:<br/>anything left?"}
+    R -- "yes (≤ 3 rounds)" --> P1
+    R -- no --> Z(["Nothing is left to sweep"])
+```
+
+The sweep also counts what can **never** come — scheduled tasks, sessions never opened, files over the
+10 MB the app refuses to load — so a gap is named rather than hidden.
+
+### 🌿 Forks: which row to open
+
+A fork is one conversation continued in more than one account, each continuation on a transcript of
+its own. The sweep does not choose between them; it labels them.
+
+```mermaid
+flowchart TD
+    F["Forked conversation"] --> T["Tip: holds the most records<br/>no sibling holds"]
+    F --> S["Branch whose last answer<br/>is older than the tip's"]
+    F --> W["Branch whose last answer is newer<br/>and holds records of its own"]
+    T --> T1["Keeps its title<br/>stays in the sidebar"]
+    S --> S1["(stale, stopped DD/MM HH:MM) …<br/>filed in the archived view"]
+    W --> W1["(other branch, went on DD/MM HH:MM) …<br/>stays in the sidebar"]
+```
+
+"Went on" is judged on the last **answer**, never the last record — opening a stale row appends a
+click, not work. The words are yours: `--stale-prefix`, `--branch-prefix`, `--other-file-prefix`.
+More in [sweep & forks](docs/guide/sweep-and-forks.md) and
+[one conversation, two files](docs/guide/two-file-conversations.md).
+
+## 🗺️ Where each piece of state lives
+
+Nothing in Claude Desktop keeps "a session" in one place. foster reads all of these, and writes each
+only the way — and at the moment — it is safe to.
+
+```mermaid
+graph LR
+    subgraph Desktop["Claude Desktop store"]
+        CARDS["Session cards (JSON)<br/>claude-code-sessions/account/org/local_id.json"]
+        CFG["claude_desktop_config.json<br/>groups · per-account filters · app prefs"]
+        LS["Local Storage (LevelDB)<br/>group-by · sort · group mirrors"]
+        IDB["IndexedDB (LevelDB)<br/>pins — one list per installation"]
+        RT["scheduled-tasks.json<br/>routines, per account/org"]
+    end
+    subgraph CLI["Claude Code CLI"]
+        TR["Transcripts (JSONL)<br/>~/.claude/projects/cwd/id.jsonl<br/>account-agnostic"]
+    end
+    SRV[("Server user settings<br/>sidebar groups sync")]
+    LEDGER[("~/.foster/ledger.jsonl<br/>append-only record of every write")]
+    CARDS -- cliSessionId --> TR
+    CFG <-- startup sync --> SRV
+    LS <-- startup sync --> SRV
+    FOSTER{{foster}} -- "copies, marks, restores" --> CARDS
+    FOSTER -- "layout, app closed" --> CFG
+    FOSTER -- "layout, app closed" --> LS
+    FOSTER -- "pins, app closed" --> IDB
+    FOSTER -- "layout, app closed" --> RT
+    FOSTER -- records --> LEDGER
+```
+
+Why the app has to be closed for some of these, and how groups survive the server's startup sync:
+[pins, groups, routines and the filter menu](docs/guide/layout-pins-groups-settings.md).
+
+## 📈 Measured, not assumed
+
+Every number in this repository comes from a real store — one machine, one set of accounts — and is
+stated with the date it was measured in [AGENTS.md](AGENTS.md). A few of the performance ones:
+
+```mermaid
+xychart-beta
+    title "Seconds, before and after (one real store, 24/09/2026)"
+    x-axis ["sweep dry run, before", "after slim scans", "grep miss, before", "after byte pre-check"]
+    y-axis "seconds" 0 --> 140
+    bar [131, 45, 30, 8]
+```
+
+<sub>Sweep dry run with the <code>/fosteia</code> flags on a store of 25,174 cards; <code>foster grep</code> for an absent term over
+11,202 transcripts (13.6 GB), after-figure 7–9 s.</sub>
+
+And why `revive` learned to look past usage limits: how the last turn of every transcript ended, over
+one week on the same machine (570 files):
+
+```mermaid
+pie showData
+    title How transcripts ended (one machine, one week)
+    "Answered" : 396
+    "Usage limit" : 53
+    "Ended on a tool result" : 43
+    "Ended on a task notification" : 13
+    "Unanswered tool call" : 7
+    "Interrupted by hand" : 6
+    "Unanswered prompt" : 2
+    "Local command" : 1
+```
+
+## 🧭 Commands
+
+`foster --help` files every command under these same headings. Every write command is a dry run
+without `--yes`; most take `--json`.
+
+<details open>
+<summary><b>Start here</b></summary>
+
+| Command                     | What it does                                                    |
+| --------------------------- | --------------------------------------------------------------- |
+| `foster`                    | Guided menu: tick sources, choose sessions, review, confirm     |
+| `foster doctor`             | Environment check: store location, app state, process table     |
+| `foster stores`             | Installations foster knows about, and what to pass to `--store` |
+| `foster clients`            | The CLI's config directories, and who is signed into each       |
+| `foster clients --fragment` | A Windows Terminal fragment (JSON), one profile per client      |
+
+</details>
+
+<details open>
+<summary><b>Bringing conversations in</b></summary>
+
+| Command                             | What it does                                                                      |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `foster sweep`                      | The whole job: every account, archived and deleted included                       |
+| `foster sweep --sync-titles`        | Also re-title copies whose original has been renamed since                        |
+| `foster sweep --dates`              | Advance a card's date to its transcript's last answer                             |
+| `foster sweep --prove`              | Independently check every conversation is fully reachable (exit 1 on a gap)       |
+| `foster sweep --undo-retitles`      | Put every marked card back to the title and archived flag it had                  |
+| `foster sweep --cloud` 🆕           | Also pull every other signed-in account's cloud sessions (`--cloud-archived` too) |
+| `foster sweep --no-archive-sync` 🆕 | Leave archived flags alone (on by default: they follow the account used last)     |
+| `foster scan`                       | Read-only inventory of accounts, organizations and sessions                       |
+| `foster list`                       | Sessions from other accounts that are available to foster                         |
+| `foster foster`                     | Create the copies, one selection at a time                                        |
+| `foster restore`                    | Bring back sessions deleted in the app                                            |
+| `foster import-codex`               | Bring Codex CLI threads in as Claude conversations                                |
+
+</details>
+
+<details open>
+<summary><b>After the sweep</b></summary>
+
+| Command                                    | What it does                                                                          |
+| ------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `foster layout --yes --restart [--detach]` | Groups, routines, pins, filter menu and app settings, written while the app is closed |
+| `foster view` / `view set` / `view copy`   | Show or change the sidebar's filter menu                                              |
+| `foster where <query>`                     | Every account holding a card for one conversation, and which row to continue in       |
+| `foster verify`                            | After a restart, check nothing foster wrote was undone                                |
+| `foster return`                            | Remove fostered copies, restoring the previous state                                  |
+| `foster consolidate`                       | One row per piece of work, on the branch that carried on                              |
+| `foster unclaim`                           | Release the worktree claim a copy inherited from its original                         |
+| `foster dates`                             | Advance card dates to their transcript's last answer                                  |
+| `foster status`                            | What is currently fostered                                                            |
+| `foster pin`                               | Pin sessions in the sidebar, or see what is pinned                                    |
+| `foster cache clear`                       | Delete the persistent scan cache (safe; it rebuilds)                                  |
+| `foster purge`                             | ⚠️ Destroy the conversations behind deleted sessions — no undo                        |
+
+</details>
+
+<details>
+<summary><b>Accounts</b></summary>
+
+| Command                   | What it does                                                       |
+| ------------------------- | ------------------------------------------------------------------ |
+| `foster accounts`         | Every account here: who, which plan, whether it is still paid for  |
+| `foster whoami`           | The signed-in account's name, email and plan, from the app's cache |
+| `foster identify`         | Name an account by asking the API with a credential already here   |
+| `foster label` / `labels` | Give an account a human name; list the name each goes by           |
+| `foster usage`            | Live 5-hour and weekly limits of the signed-in account             |
+| `foster renewals`         | Usage resets and billing dates across every account                |
+
+</details>
+
+<details>
+<summary><b>Credentials and clients</b></summary>
+
+| Command                                      | What it does                                                       |
+| -------------------------------------------- | ------------------------------------------------------------------ |
+| `foster switch`                              | Sign a CLI config directory in as another account, no logout       |
+| `foster vault`                               | The credentials foster is holding, and whose they are              |
+| `foster guard`                               | Record who is signed into a client, so the vault can put them back |
+| `foster point <link>`                        | Repoint a directory link at another client                         |
+| `foster client new\|register\|forget`        | Seed a working client; remember or withdraw a directory            |
+| `foster client open <client>`                | A Windows Terminal tab signed in as one client                     |
+| `foster profile new\|register\|forget\|list` | Name a Desktop profile (a second userData root) for `--store`      |
+
+</details>
+
+<details>
+<summary><b>Live sessions</b></summary>
+
+| Command                       | What it does                                                      |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `foster live`                 | Conversations a claude process holds open (`--stop`, `--prune`)   |
+| `foster revive`               | Sessions a usage limit stopped — the work list for `/retoma`      |
+| `foster rescue`               | Conversations stranded by a crash (`--open` for a tab each)       |
+| `foster unstarted`            | Background-task requests whose session died before answering once |
+| `foster detached --last`      | What the last `--detach` run did — read after the app comes back  |
+| `foster transcript <id>`      | Read a conversation's transcript                                  |
+| `foster resume <id> <prompt>` | Send one prompt to an existing conversation, headlessly           |
+| `foster grep <regex>`         | Search every transcript by what was actually said                 |
+| `foster export <id>`          | Render one conversation to Markdown, HTML or JSONL                |
+
+</details>
+
+<details>
+<summary><b>Reports, cloud and the app</b></summary>
+
+| Command                                     | What it does                                                  |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| `foster disk`                               | Bytes per account and per project, for cards and transcripts  |
+| `foster stats`                              | Token usage, sessions and usage-limit stops                   |
+| `foster cloud list`                         | Every cloud session (code.claude.com) a signed-in CLI can see |
+| `foster cloud pull <id> --into <cwd> --yes` | A local transcript and sidebar card from one cloud session    |
+| `foster app status\|quit\|start\|restart`   | Drive Claude Desktop itself                                   |
+| `foster app pref` / `app link`              | Read or change the app's settings; hand it a `claude://` link |
+| `foster app login`                          | Sign a second profile in through the browser (a human's job)  |
+| `foster agent "<task>"`                     | A Claude agent with foster's operations as its tools          |
+
+</details>
+
+Global options: `--store <path|name>`, `--ledger <path>`, `--no-cache`. Full reference, with the
+reasoning behind each command: [usage](docs/guide/usage.md) ·
+[accounts & clients](docs/guide/accounts-and-clients.md) ·
+[revive & rescue](docs/guide/revive-and-rescue.md) · [reports](docs/guide/reports.md) ·
+[cloud sessions](docs/guide/cloud-sessions.md) · [the agent](docs/guide/agent.md).
+
+## 🔒 Safety model
+
+- **Originals are never modified.** Fostering only adds a file, with a fresh session id the server has
+  never seen; deleting a copy can never reach the original.
+- **Dry run by default.** Nothing is written without `--yes`.
+- **Everything is recorded.** Each finished write is appended to `~/.foster/ledger.jsonl`, and the
+  ledger — not the titles, not a marker the app may drop — decides what `return`, `sync-titles` and
+  `verify` do.
+- **Adding is safe while the app runs; removing is not.** `return` refuses a copy the running app has
+  already loaded, and offers to close the app first.
+- **One command destroys data:** `purge`. `--yes` alone will not run it, and the agent cannot reach it.
+- **Credentials are copied, never minted or refreshed**, never logged, printed or put on a command
+  line.
+
+The whole model, including the one registry value `app login` touches and what is not supported:
+[safety model](docs/guide/safety-model.md).
+
+## 🤖 Claude Desktop slash commands
+
+This repository ships two commands for a Claude Code session running inside Claude Desktop
+([`.claude/commands`](.claude/commands)):
+
+| Command    | What it does                                                                                                                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/fosteia` | The whole switch in one go: checks the installed foster is current, runs `foster sweep --yes --sync-titles --restart` with the three marks in Portuguese, then a detached `foster layout` restart. |
+| `/retoma`  | The step after: reads `foster revive --json` and sends each stopped session one message — the quota is back, carry on by highest return — through the app's own session tools.                     |
+
+Neither asks for confirmation: every copy is undone by `foster return`, and running the command is
+the decision.
+
+## 🛠️ Development
 
 ```bash
-foster label "John · johndoe@…"           # names the account you are signed into
-foster label 00000000 "old personal"      # names any other
+npm ci
+npm run dev -- doctor   # run from source
+npm run check           # typecheck, lint, format, privacy guard, coverage floor
+npm run build           # single-file bundle in dist/
 ```
 
-An identifier given on its own is refused rather than recorded as a name. From then on the name
-appears in `scan`, `status` and the menu, and "Name an account" starts on the account in use —
-the one whose email you can actually go and read right now.
-
-`foster whoami` reads your name, email and plan for you, from the app's own cache rather than off the
-screen — `John · johndoe@… · Max`, the same pieces the app shows under your avatar. The
-authoritative copy is behind the API; `whoami` chooses not to spend the token on it (that is
-`identify`'s and `usage`'s job, on request) and reads the app's own download instead — having fetched
-its profile once, the app keeps a copy at rest in the web-origin storage under `Local Storage/` and
-`IndexedDB/`, which is page data rather than a credential, so foster may read it offline. `foster label --from-cache` names the signed-in account with what it finds, and
-the menu's "Name an account" pre-fills the same suggestion.
-
-It is read the crudest way that cannot fail: the files are loaded as bytes, capped by size, and
-searched as text. Parsing that storage as a database — which an earlier version did, with the reader
-foster uses for the pin list — corrupted the heap on a real table and crashed the process outright,
-because the format is the app's to change and foster's reader was built for one narrow database.
-Reading bytes trusts nothing: it finds less (a value hidden inside a compressed block is missed) and
-crashes never.
-
-**It reads and remembers, because the source is volatile.** The profile lands in that storage when
-the app fetches it and leaves when Chromium compacts the database: measured here, the plan was
-readable minutes after signing in and absent from every non-credential file an hour later. No amount
-of careful parsing finds what is no longer written down, so `whoami` records what it sees in
-foster's own ledger and falls back to that when the cache has forgotten. A remembered answer says
-so, with the date it was last confirmed — that is a different claim from a fresh reading, and the
-difference is worth keeping visible.
-
-Remembering is also what makes the **other** accounts nameable. Web storage only ever describes the
-session in front of you, so the cache alone can name one account; the ledger accumulates them, one
-per visit, and `label` offers what it knows for whichever account you pick.
-
-`foster identify` closes part of that gap without a visit. An account foster has never seen signed in
-is a bare UUID because the app never fetched its profile here — but a credential _for_ that account
-may already be on the machine, in a CLI client (`foster clients` lists them) or in foster's own
-vault. The profile endpoint answers for whatever token it is given, so foster presents those
-credentials and keeps the answer only when the profile's own `account.uuid` matches the account
-asked about. That match is the safety: a token belonging to someone else is discarded, never written
-against the account that was asked. The sighting lands in the ledger the same way a sign-in's would,
-so the dashboard, `accounts` and the menu pick it up. `foster identify <account>` names one,
-`foster identify --all` sweeps every account that has no identity yet, and the menu offers "Identify
-it" on an unnamed account when a key to ask with is on hand. When foster holds no live credential for
-an account it says so rather than guessing.
-
-It also asks on its own, ahead of the commands that print an account by name — `accounts`, `labels`,
-`stores`, `live`, `status`, `sweep`, `scan`, `clients`, `doctor`, `whoami`. What makes that
-affordable is asking per _credential_ rather than per account: a token answers with its own
-`account.uuid`, so a single round names everyone it can reach, where asking per account would be one
-request per pair. A credential whose owner is already on disk — the app's own config hint, a client's
-cached profile, a vault entry the API has answered for before — is skipped once that owner has an
-identity, so on the ordinary machine, after the first time, the run asks nothing at all. Failures are
-silent: a name is a courtesy, and the command you actually asked for runs regardless. `purge`,
-`return`, `switch` and the rest never trigger it — they act on ids and paths, and a run that only
-means to move files should not be waiting on the network.
-
-And a name, once known, is used. Every screen used to print eight hex digits for an account whose
-e-mail was already sitting in the ledger, because it read the labels map and nothing else. The order
-now is the label first — someone sat down and chose it — then the e-mail the API answered with, then
-the abbreviation. Only the `label` field in JSON still means strictly what a person named, because
-that is what it promises.
-
-**Two servers, and why only one of them answers.** This is worth understanding, because it is the
-line between what `identify` and `accounts` can tell you and what they cannot. Anthropic runs the
-account behind two different hosts, and they are not interchangeable:
-
-- **`api.anthropic.com`** is the programmatic host. The OAuth token the app holds was _issued to
-  talk to it_, so a request there is authenticated, expected, and ordinary — no trick involved. It
-  answers with **identity, plan, subscription status and live usage**. This is the front door, and
-  it is the only one foster ever knocks on: `usage`, `renewals` and `identify` all go here.
-- **`claude.ai`** is the website you open in a browser. The **billing** details — next charge date,
-  card on file, cancellation — live only here, and this host sits behind a **bot-check**: the
-  "confirm you're human" challenge (Cloudflare's) that a browser passes silently and a script does
-  not. For a program to read billing off `claude.ai` it would have to _defeat that challenge_ —
-  impersonate a human-driven browser. **foster does not do that, by policy.** So billing is
-  reachable only when the app itself already fetched it and left a copy on disk (which is why you may
-  see a card and a renewal date for the account signed in now, and never for one that was only
-  identified over the API).
-
-Put plainly: identity, plan and usage come through the front door and `identify` can fetch them for
-any account whose key is on this machine; billing is behind the bot-check, so it is only ever read
-from a cache the app already filled, never fetched by foster. The card and renewal you saw on the
-signed-in account are the app's own download at rest — not something foster went to `claude.ai` to
-get.
-
-Two honesties beyond that. It is **best-effort**: a version that keeps the profile differently makes
-`whoami` find nothing new rather than something wrong, and the manual `label` is always there. And
-what it extracts is tied to the account by proximity — the email must sit beside the account’s own
-UUID, and the name and plan beside that email — so a correspondent’s address quoted in a conversation
-cannot end up as the account’s name, and a workspace called "Sales" cannot end up as its owner.
-
-**Where it actually reads.** The app keeps its own profile in two places and only one of them is
-current. It used to persist the answer into Local Storage, inside the React Query cache, and that is
-what the byte search was built for; on a machine running today that cache persists _empty_ and the
-live copy is a cached HTTP response body under `Cache/`. So the profile is read from there first —
-gzip or brotli, decompressed, and then **parsed**, because it is JSON and an object either carries
-`account.uuid` equal to the account being asked about or it does not. That is a comparison rather
-than a guess, which is why this source is preferred over everything below it. What it yields is the
-whole profile: name, email, organization, the raw tier, the subscription's status and start date.
-
-`foster accounts` (and **"Who each account is"** in the menu) is that, for every account in the
-installation at once — plan, subscription, card and renewal where they are known, sessions and
-organizations always. One honesty runs through the screen: a response cache holds what was
-_fetched_, and the app only ever fetches the profile of the session it is in, so exactly one row can
-be read fresh. The others show what foster recorded on the visit that saw them, dated. An account
-never signed into on this machine shows its directories and nothing else — not because the read gave
-up, but because that account's profile has never been on this disk. Signing into it once fills the
-row in for good.
-
-Proximity is not the whole of it, because these files are not text. Local Storage is a stack of
-compressed blocks read as raw bytes, so most of what a pattern sees is rubble — and rubble spells
-email addresses: across one real store, 350 of 676 matches for a plain address were decompression
-noise, things like `3@T.tf` and `6@ai.television.ses`. Nearness cannot tell those from a profile,
-since noise is nearer to the account id than the profile ever is. So the email is read only out of a
-field that says it is an email, from a value that is an address all the way to both quotes.
-
-Remembering has its own failure, and it needs a way out. A sighting that was wrong outlives the cache
-that produced it, and a later reading can only correct a field by finding a different value for it —
-which it cannot do once the app has compacted the profile away. `foster label <accountUuid> --forget`
-discards what is remembered about an account and leaves the name you chose alone; the sighting stays
-in the log, and the next real reading starts the record over.
-
-`--clear` is the opposite half: it drops the name **you** gave and leaves the sighting, so the
-account goes back to being called by its e-mail. That only became worth having once an unlabelled
-account is named by its e-mail rather than by eight hex digits — clearing a label is now a choice to
-be called what the API calls you, not a choice to be anonymous. The log is append-only, so taking a
-name back is a line saying so (`account_labelled` with an empty label) rather than a line removed;
-`label` itself refuses an empty name, so `--clear` is the only thing that ever writes one.
-
-`status` answers the same question the other way round. It summarises by account by default —
-how many copies, and where — because with a few hundred of them a line per copy is not an answer
-anyone can read. `status --all` prints the full list, `status --to <accountUuid>` narrows to one
-account, and `--json` is always complete.
-
-`foster`, `restore`, `return` and `purge` are dry runs unless you pass `--yes`: they print exactly
-what would be written or removed and touch nothing. (`label` only records a name in
-foster's own ledger, so it writes immediately; `purge` wants `--confirm` as well as
-`--yes`.) Add `--restart` to any of the first three to restart Claude Desktop when it
-finishes.
-
-Narrow what gets fostered with `--title`, `--cwd`, `--since 30d`, `--session <id...>`,
-`--from <accountUuid>` or `--from-org <organizationUuid>`, and choose where the copies land with
-`--to <accountUuid>` / `--to-org <organizationUuid>`. Identifiers may be abbreviated to any unique
-prefix; an ambiguous one is reported rather than guessed at.
-
-`--from-store <path>` reads the sessions from a different installation or profile while still
-writing into the store `--store` names, which is how sessions move between two profiles:
-
-```bash
-foster --store "$env:LOCALAPPDATA\Claude-Work" foster --from-store "<the default store>" --yes
-```
-
-An account can hold several organizations and the sidebar only reads one of them, so any
-organization other than that one is a valid source — including another organization of the account
-you are already signed into. Sessions that could not appear in the sidebar are excluded by default —
-scheduled tasks, sessions that were never opened, and sessions whose file is over the 10 MB the app
-refuses to load. `list --all` shows them anyway, and `--include-scheduled` brings the first of the
-three across as ordinary conversations.
-
-Archived sessions are excluded too, but for a different reason and with a way out. Archiving is a
-decision you made, not a limitation of the file: the session has a place in the app, just not in
-Recents. A sweep should not drag back what you tucked away, so `--archived` is opt-in — and when the
-only card a conversation has left is archived in an account you are not signed into, it is the only
-way to reach it at all. The copy keeps the flag and lands in the destination's archived view, which
-brings the conversation across without undoing your decision about it.
-
-### A scheduled task's conversation
-
-A scheduled task is excluded for a reason that turns out to be narrower than it looks. What the app
-refuses to list under Recents is the **card**, because it carries a `scheduledTaskId`; the
-conversation behind it is an ordinary transcript. So a copy of one is only invisible if it keeps
-that field — and `--include-scheduled` drops it, along with giving the copy a focus time, since a
-card without one counts as never opened and is the other way to be correct and invisible.
-
-It is opt-in because the copy is not the task. The schedule, its trigger and its history stay in
-the account that owns them, and nothing runs again; what crosses is the reading of what it did.
-That is a different thing from what the row meant in its own account, so it is asked for rather
-than swept up. The original is left untouched, still a scheduled task where it belongs.
-
-### A copy can be the last card its conversation has
-
-Copies are not sources. Fostering one would make a second copy of a conversation whose original is
-right there, with a longer provenance chain and nothing gained. That rule is right until the
-original stops existing — deleted in the app, or never there at all because the copy came from
-`restore` — and then it strands the conversation: it sits in one account, perfectly readable, and no
-sweep will ever offer it again. Moving to a third account leaves it behind for good.
-
-So the rule is about the conversation rather than the file. A copy is refused while its conversation
-still has a card of its own **somewhere in the store**, and is a legitimate source once it does not.
-That question can only be answered by looking at every account, including the ones not being
-offered — deciding it from the source account alone would call a copy stranded while its original
-sat in the account the copies were going to. Two stranded copies of one conversation are both
-eligible and the destination check still allows only one row, so nothing doubles.
-
-`--store` and `--from-store` take a distinctive piece of a path as well as the whole thing, matched
-against the installations below — `--store work` finds `D:\Claude-Work`. A piece that matches two of
-them is reported rather than guessed at, and one that matches nothing and is not a directory is an
-error rather than an empty store.
-
-`foster stores` lists the installations it can name without being told, from **four** sources: the
-installed app; whatever is running right now; the profiles the ledger has already been fostered
-into; and — new — the ones registered on purpose, `foster profile new` or `profile register`,
-for a profile that has neither run nor been fostered into yet. Each line carries the account it
-holds, which is the question a second profile exists to answer, and the menu offers the same
-list, so a profile you have worked in once never has to be typed again.
-
-```
-* C:\…\Claude_…\LocalCache\Roaming\Claude  (installed app, running) last seen as 9866b1e8
-  D:\Claude-Work                           (profile, running) last seen as not signed in
-  work                                     (registered, gone) last seen as not signed in
-```
-
-A registered name is the one row that survives its own directory disappearing — `(registered,
-gone)` above — because a name is the one thing foster remembers on purpose past that; `foster
-profile forget` is how you stop hearing about it. `--json` adds `signedIn`: whether that
-installation's config carries a cached OAuth token entry at all, presence only, the same
-existence check `doctor` reports and never the token itself — reading that stays `usage`'s job
-alone (see [Safety model](#safety-model)).
-
-On Windows, the packaged app answers to two paths — a `Packages\Claude_<hash>\...` directory and
-the pre-virtualisation `%APPDATA%\Claude` one — and whether those fold into a single row or list
-as two depends on where this command runs. Run from inside the app's own container (a Code
-session it hosts), MSIX virtualisation makes them the same physical directory and one row is
-printed. Run from an ordinary terminal, the virtualisation does not apply and the two are genuinely
-different directories on disk — so `%APPDATA%\Claude` gets its own row, marked `(installed app,
-legacy (pre-MSIX))`: it is the store from before the app was packaged, and a `sweep` run inside the
-app never sees whatever conversations are still sitting in it. That label only appears when a
-packaged install is actually present on the same machine; on macOS and Linux, and on a Windows
-machine that was never packaged at all, `%APPDATA%\Claude` (or its platform equivalent) is simply
-the store, unlabelled.
-
-`--store` resolves an argument against exactly this list, trying each in turn: a path that
-exists is always taken as a path; failing that, a registered name, exact, tried before a path
-piece that happens to match too; failing that, an account — a label, an e-mail, or a unique uuid
-prefix, the same three `foster clients` already prints; and last, a distinctive piece of a path,
-because a profile's is long and nobody remembers it exactly. A piece matching more than one
-installation is reported rather than guessed at, the same as an ambiguous session identifier,
-because with `--store` the guess decides which installation gets written to.
-
-**What `--store <name>` means for the verbs that already existed: they now act on that profile
-instead of the installed app, by design.** `foster --store work sweep` scans **that** profile's
-other accounts and writes the copies inside it — each profile keeps its own
-`claude-code-sessions`, so two profiles mean two independent sweeps, and neither ever sees the
-other's cards — and `sweep --restart` already restarts the instance that was actually named.
-`foster --store work rescue` lists that profile's stranded cards; the transcripts it reads for
-them still come from `transcriptRoots`, which is CLI-side and shared, so one transcript can
-legitimately show up under two profiles. `foster --store work consolidate` and
-`foster --store work return` still require **that** profile's own app closed, with the
-refuse-to-close-the-one-you-are-running-inside rule intact. None of these verbs learns a new
-**client** directory from a profile — that stays `client register`'s job, a separate registry on
-purpose (see [More than one client at once](#more-than-one-client-at-once)); what changes here is
-only which store they read and write.
-
-`foster clients` is the same list for the CLI: its config directories — one per account — with who
-is signed into each, read from each client's own cached profile; the credential contributes only its
-existence. Everything that reads conversations already searches every client, so this is the map of
-what those commands will look at, and `--config-dir` adds a directory that lives where naming
-cannot find it.
-
-`transcript`, `resume` and `live` are the deterministic counterparts of what the agent (below) does
-with its tools — for when you know exactly what you want and a model in the middle would only add
-cost. `foster transcript <cliSessionId>` prints the most recent part of a conversation (`--head` for
-the start, `--chars` for how much; the id comes from `list --json` or `status --json`).
-`foster resume <cliSessionId> "<prompt>"` runs `claude -p --resume` behind the same gate the agent
-has: it refuses while a live `claude` process holds that conversation, because two writers on one
-transcript is how transcripts get corrupted. `foster live` shows exactly what is being held.
-
-That gate rests on the CLI's own registry — a file per running session under `<configDir>/sessions/`,
-naming the pid holding the conversation — and a pid on its own is not an identity. Windows reissues
-pids quickly, and after a reboot a day-old registry file points at whatever took the number next: a
-service worker, a git process, the desktop app. So the pid is checked against the creation time the
-record kept for its writer (`procStart`, Windows' own clock): two processes can share a pid, but not
-a pid and a creation instant. Records too old to carry one fall back to what the pid is now and
-whether it is even older than the record describing it. An entry that fails is not a live writer,
-and `foster live --stop` will not end a process it cannot identify — the kill is `taskkill /F /T`,
-and the tree it takes with it would be a stranger's. Reading the process table is the Windows half
-of foster: anywhere else there is none, every entry stays listed, and `--stop` refuses everything
-rather than guessing.
-
-Reading the table itself has its own fallback. PowerShell's `Get-CimInstance Win32_Process` answers
-first — it is the only reader that reports a parent pid — but PowerShell can hang at start-up rather
-than fail quickly: measured 05/09/2026, a machine whose PowerShell was blocked at start-up by a
-WinFsp/Cryptomator drive that had stopped answering made every `powershell.exe` invocation wait 20 s
-and then error, and every foster command that reads the process table reported an empty machine as a
-result. When PowerShell fails or is missing, `wmic` answers next with the same six fields (pid,
-parent pid, name, path, command line, start time); when wmic also fails or is not installed (it is a
-Feature on Demand as of Windows 11 24H2, so a fresh install may not have it), `tasklist` answers with
-pid and name only. A table read through `wmic` changes nothing; a table read through `tasklist`
-changes what foster is willing to conclude from it: `app status` reports that it cannot tell the app
-from a Claude Code session rather than guessing "not running", `live --stop` refuses a partial row
-outright rather than risk `taskkill /F /T` against the wrong process, and `sweep --restart` hands
-over the command instead of trying. `foster doctor` names which reader actually answered and why the
-ones before it were passed over. A PowerShell that fails once is not retried for the rest of that
-run — the hang is paid at most once, not once per read. The native readers decode their output as
-`latin1` rather than Unicode, so a path or command line containing non-ASCII characters can come back
-wrong; the ASCII markers foster actually greps for are unaffected.
-
-The session foster is running in is never ended, for the same reason it refuses to close the app it
-runs inside — the kill would take the command with it, part-way through. That used to be answered by
-walking parent links, which breaks the moment any process in the chain has exited: launched through
-a wrapper whose shell was gone, `--stop` offered to end the session it was running in. The CLI marks
-every process it starts with the conversation and the pid holding it, however deep, so the question
-is now answered outright.
-
-`foster live --prune` clears the files whose process is provably gone or provably somebody else;
-without `--yes` it only lists them. That includes the peer key a session leaves beside its record —
-it carries the same creation time, so it is answerable by the same rule, and it is what a machine
-that has been up for a week is actually full of: the CLI clears records it finds stale but never
-the keys.
-
-`scan`, `list`, `status`, `stores`, `clients`, `doctor`, `app status`, `transcript`, `live`,
-`purge` and `whoami` take `--json`.
-
-## Agent
-
-`foster agent` hands a task, in plain language, to a Claude agent that knows foster's domain and
-carries foster's operations as first-class tools:
-
-```bash
-foster agent "which of my old accounts has sessions about the billing rework, and what state was that work left in?"
-foster agent --yes "foster everything from my old account that touched the api-gateway repo, then clean up any duplicate copies"
-foster agent --yes "bring everything here, archived and deleted included"
-```
-
-That last one used to be unanswerable: `restore` was never one of the agent's tools, so an agent
-asked for the deleted ones could only tell you to run a command yourself. The sweep is a tool, so
-it is one call.
-
-It works the way Claude Desktop itself runs Code sessions, with the roles reversed: foster is the
-parent process, it spawns the agent headlessly via the
-[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), and serves it an in-process
-MCP server (`foster_session_mgmt`) over the same stdio pair. That server carries ten tools —
-account and session inventory, fostering status, app status, transcript reading, labelling,
-fostering, [sweeping](#the-whole-sweep), returning, and a headless resume — and alongside it the
-agent has Claude Code's full toolset: shell, files, web. The foster tools remain the required path for anything touching the
-session store, because they are what goes through the engine's gates and ledger; the general tools
-are there for whatever else the task turns out to need.
-
-**One switch governs all writing, and it is the same one the CLI has: `--yes`.** Without it the run
-is read-only end to end — foster mutations are dry runs, and built-in tools that write or execute
-(shell, edits, web fetches) are denied by the permission layer, since a headless run has no
-terminal to ask in. The model asking nicely does not count: a gated attempt comes back marked
-"writes are disabled" so it reports that instead of retrying. With `--yes`, foster mutations apply
-and the general tools run unrestricted (the SDK's bypass-permissions mode) — give it the flag only
-with a task you would be comfortable typing into Claude Code itself. Two gates hold even then:
-removing copies still refuses while Claude Desktop may hold them in memory, with the same message
-the CLI prints, and the headless resume (`claude -p --resume` against a conversation's transcript)
-is refused when a live `claude` process is holding that conversation open — two writers on one
-transcript is how transcripts get corrupted.
-
-One honesty note: foster reads the credential in exactly one command (`foster usage` — see the safety
-model), and nowhere else, including here; the agent is not handed the token or the reader. But an
-agent with general read tools is as able to open files on your machine as any Claude Code session is.
-`foster agent` is Claude Code with extra knowledge, not a sandbox.
-
-The Agent SDK is not part of foster's single-file release — it is megabytes of runtime with a
-per-platform binary. Install it once with:
-
-```bash
-foster agent --setup
-```
-
-which runs a normal npm install into `~/.foster/agent`, where foster finds it from then on. The
-model itself runs through your existing Claude Code sign-in (or `ANTHROPIC_API_KEY`).
-
-**The default model is Haiku** — the tools do the heavy lifting and most agent tasks here are
-orchestration, so the cheap tier ($1/$5 per million tokens, roughly a fifth of Opus) is the right
-default. Pass `--model sonnet` or `--model opus` when the task needs more judgment — cross-reading
-many transcripts, deciding what is worth fostering — and `--max-turns` bounds the run (default 50).
-And before reaching for the agent at all: if the task is a known, mechanical one, the deterministic
-commands above do it for free.
-
-### Related surface: the app's own session tools
-
-The arrangement `foster agent` reverses is worth knowing in its own right: Claude Desktop injects
-an MCP server of its own, `ccd_session_mgmt`, into every Code and Cowork session it opens (observed
-August 2026 — the surface is undocumented, so treat the details as a snapshot, not a contract). Its
-tools are the running app's view of the current account: list the other sessions, read their
-transcripts, search them full-text — archived ones included — retitle or archive them, even send a
-message into one. From inside a Desktop session, "which of my sessions talked about X" is answered
-natively, with no foster involved.
-
-Its limits are exactly the boundary between the two. It sees one account, only while the app is
-running, and it never touches the store on disk — anything cross-account, anything against a closed
-app, and any write that should carry a ledger entry stays foster's job. `foster agent` never meets
-this server either: it runs headless through the Agent SDK, outside the app, so nothing here is a
-capability the agent gains.
-
-They do compose, though, in one direction: fostering feeds it. A copy, once the app has loaded it,
-is one of the account's sessions like any other, and it opens the original's full transcript — so a
-conversation lived under another account becomes something these tools can list, read and search
-natively. foster adds no API to the app; it widens what the app's own API can know.
-
-## Safety model
-
-- **Reads and writes are separated.** The scanner never writes. All mutation goes through a single
-  engine module, and every completed operation is appended to a ledger (`~/.foster/ledger.jsonl`) so
-  it can be replayed in reverse. The write comes first and only a finished write is recorded: a
-  ledger entry for a write that failed would mark the session as fostered for ever, with no file to
-  show for it.
-- **The originals are never modified.** Fostering only ever _adds_ a file to the current account's
-  folder. There is no move, and no rewrite of anything under the old account.
-- **Naming a profile or a client root is a write; opening one is not.** The ledger's four newest
-  event kinds — `profile_registered`, `profile_forgotten`, `client_root_registered`,
-  `client_root_forgotten` — are append-only records of what foster calls something, never of an
-  account or a credential; folding them (`LedgerState.profiles`, `LedgerState.clientRoots`) is
-  what lets `--store <name>` and `foster clients` still find a root days after the command that
-  named it. `profile new`, `profile register`, `profile forget`, `client register` and
-  `client forget` all follow `client new`'s shape: blockers first, a dry run by default, `--yes`
-  to apply, the ledger entry only after a finished write. Starting an instance, opening a terminal,
-  or handing it a link is not a write at all — `app start`, `app restart`, `app link` and
-  `client open` never touch the ledger, because launching a profile or a client that already exists
-  changes nothing foster remembers about it.
-- **One system setting is ever touched, and only for the length of one sign-in.** The `Parameters`
-  value under the packaged ProgID's `Shell\open` key (`HKCU\Software\Classes\AppX<hash>\Shell\open`)
-  is the only registry value, or setting of any kind outside `~/.foster`, that `foster` ever writes —
-  never a key, never a level: the key always already exists, because it is the app's own
-  registration. What the run is about to overwrite is recorded in the ledger, verbatim, before it
-  happens, then undone once the sign-in lands or the wait gives up — the real previous value is
-  written back exactly as read. `app login --restore` and the warning `foster doctor` prints when
-  `Parameters` is still routed cover the run that does not get to undo it itself. It also refuses to
-  run at all from inside Claude Desktop's own container, where the registry it would read and write
-  is MSIX's private, virtualized copy — a change there could never reach the browser in the first
-  place.
-- **One command destroys data, and it is the only one.** `purge` deletes conversations the app has
-  already deleted the cards for, and nothing brings them back — no backup, no ledger copy, no undo.
-  It is fenced off accordingly: candidates are limited to transcripts nothing on disk points at,
-  `--yes` alone will not run it, and the agent is not allowed near it. Every other command in
-  foster adds a file, removes one foster itself wrote, or — in the case of `switch` — replaces one
-  whose previous contents it put in the vault first, in that order, so that the step after the
-  crash is always a command rather than a login.
-- **Adding is safe while the app runs; removing is the case that is not.** Every copy carries a
-  session id the app has never seen, so a running app neither reads that file (it is past its one
-  read) nor writes it (it only writes sessions it holds) — it is simply invisible until the app
-  starts again. A copy the app _did_ load is different: it may be written back at any time, which
-  would recreate a file `foster` had just deleted. So `return` refuses for copies that already
-  existed when the app started, and offers to close it for you.
-- **It will not put the same conversation in a sidebar twice.** An account can already have its own
-  card for the conversation being fostered — made when that work was resumed while signed into it —
-  and the fostering key cannot see that, because the origin is the _other_ account's card and has
-  never been fostered before. The result was two live rows for one conversation, differing only in
-  which account watched which part of it. Fostering now refuses, naming what is already there
-  (including when it is archived, where the answer is to unarchive rather than duplicate), and
-  `--session` still overrides. For pairs already on disk, `status` counts them and
-  `foster return --duplicates` removes the copies. Note that a `↪ ` in a title no longer proves a row
-  is foster's: the app carries the title over when it makes a card of its own from one.
-- **Nor the same conversation under two identifiers.** The check above compares `cliSessionId`, which
-  is the one field a branch changes — so for a while the pair it existed to prevent was arriving
-  through the branch. One conversation is forked (see below), each half ends up in a different
-  account, and fostering both puts two identical-looking rows in one sidebar with nothing to tell
-  them apart. What a branch cannot change is the conversation it was forked from: the two transcripts
-  share every record up to the moment they parted, so the first `uuid` in the file identifies the
-  work rather than the file. Fostering compares that too, and refuses with `already has a branch`
-  rather than pretending it is the same conversation — because it is not, quite. Each side holds
-  turns the other never got, so read both before choosing; `--session` overrides, and for pairs
-  already on disk `status` counts them and `foster return --branches` removes them.
-
-  Refusing it is right for `foster foster`, and refusing it silently was not, because the account
-  keeps whichever half reached it first. When the half being turned away is the one that carried
-  on, the command weighs the two and says so — how many records each holds that the other does not
-  — and names `foster consolidate`. The other direction gets no such line: skipping the half that
-  stopped is simply correct, and a note under every refusal would bury the handful that matter.
-  `foster sweep` does not refuse at all: it brings every branch as its own row, the branch that
-  carried on under its title and the rest marked stale, so the account never keeps the wrong half
-  by accident.
-
-  Removal keeps one row per piece of work, always: a card foster did not write if there is one,
-  otherwise the half that carried on after the fork — measured by the records it holds that no
-  sibling holds, not by which file was written last, which the app moves whenever a card is opened.
-  Reporting every row of a group is true of each and ruinous together, and would have taken the work
-  out of the sidebar entirely.
-
-- **One card may be rewritten, and only in one field.** `foster consolidate` moves a card onto the
-  half of a fork that carried on, which is the single place foster writes to a file it did not
-  create. It changes the pointer and the date and carries every other key through untouched; it
-  refuses outright while an app holding the card is running, because a card in memory is written back
-  from memory; it records where the card was, so `--undo` restores it without reading anything but
-  the ledger; and it leaves a second card the _app_ made for the same work alone, reported rather
-  than removed. It also refuses to collapse a fork whose halves are both substantial — see
-  [When one conversation becomes two](#when-one-conversation-becomes-two).
-
-- **A copy is the same conversation, which is the point and the one hazard.** The copy carries the
-  original's `cliSessionId`, so both rows open one transcript: work done under the other account is
-  there when you open the original, and returning the copy loses none of it. What does not travel is
-  the row itself — the app only writes the sessions of the account it is holding, so the original
-  keeps the title and date it had when it was fostered until you open it. `status` marks a
-  conversation that carried on, and `return` says so rather than letting an old date read as lost
-  work. The hazard is only this: **a conversation can be continued in one place at a time**, and a
-  second card opened while something else is writing it makes the app branch instead — a new
-  transcript, a new id, and that card moved onto the branch. It takes two installations for two
-  sidebars to be live at once, and `foster` warns about that. But it takes only a **running Code
-  session** for a conversation to have a writer, and that needs no second installation at all: foster
-  a session you are working in, switch account, open the copy, and the copy becomes a snapshot that
-  stops at the moment you opened it while your work carries on where you left it. `foster` warns when
-  a copy it is making has a live writer, before and after writing, in the command and in the menu —
-  and names it, with the pid and the directory it was started in, because "finish there first" is not
-  advice anyone can act on without knowing where _there_ is. A pid on its own would not carry that
-  claim: Windows hands them back out, so a registry file left behind by a crash can name an unrelated
-  process. The record keeps the creation time of the process that wrote it, and that is what foster
-  checks, so the warning is about a writer that is actually there. When finishing is not possible,
-  `foster live --stop <id>` ends the writer. That is a kill and says so: the CLI has no window to
-  close politely, so whatever the session had not yet written is lost, while everything already in
-  the transcript stays. It refuses the session foster is itself running in, for the same reason it
-  refuses to close the app it is running inside.
-
-  When it does happen, nothing is lost — both transcripts are on disk — and foster notices. A copy
-  the app has repointed at another conversation is recognised rather than counted as still standing,
-  and what happens next depends on **what it now holds**:
-
-  - **A branch of the very work it was fostered for.** The card is still one row, still showing that
-    work, and further along than the original — so foster follows it. The fostering goes on tracking
-    the same file, with its pointer moved onto the branch, and the sweep says
-    `the app branched it and the copy here follows the branch`. This is a fix, and the bug it fixes
-    was foster's worst: the fostering used to be dropped, the next sweep found the origin session
-    untracked, and it wrote a **second** copy of the half the card had just moved off. One
-    conversation, two rows in one sidebar, created by the run that was meant to tidy up. Measured on
-    a real store, every one of the six copies the app had branched came back as a duplicate row. The
-    record of the move is deliberately not the one `consolidate --undo` reads: the app moved that
-    card, not foster, and offering to put it back would promise something foster cannot honour — and
-    where foster _had_ moved that card earlier, the app overtaking it ends the undo claim rather than
-    leaving a stale one for `--undo` to act on.
-
-    Tracking it again does not make it ordinary. A sweep-wide `foster return` skips it, because the
-    conversation on that card was born from opening that row and usually has no other card anywhere:
-    removing it would take the work out of every sidebar, and `restore` could not offer it back,
-    since a file foster unlinks leaves no deletion marker for that scan to find. Naming it with
-    `--session` still reaches it — the same line foster draws around a copy you deleted in the app.
-
-  - **Anything else.** Then the copy really is gone as a copy — it is a working card for unrelated
-    work — and the conversation it was made for can be fostered again instead of being refused as
-    "already fostered" forever. The card itself is left exactly where it is: the app made it what it
-    is now, and removing it would delete something you can see.
-
-- **It never ends the app behind your back.** Where a polite close would work (tray off) it uses one;
-  where it would not, it says so and waits for an explicit yes rather than quietly escalating, and it
-  names what that costs. `foster` refuses outright to close an app it is running inside — detected
-  both from the process tree and from the environment the app stamps on the sessions it spawns,
-  because an exited intermediate can break the first signal and the failure mode is killing the
-  caller mid-write.
-- **It handles credentials in named places, for named reasons, and never mints one.** For most of
-  its life foster refused to touch an OAuth token at all, and everything else in this file grew up
-  under that rule. The rule has been widened twice — first to read one, then to move one — and both
-  times deliberately, so it is worth being exact about what changed and what did not.
-
-  **The two credentials are not the same file, and the difference decides everything.** The Desktop
-  app's token is a sealed blob in its config; foster reads it and could not usefully write it,
-  because the app holds its account in memory and re-seals on its own schedule. The CLI's token is
-  plain JSON at `<configDir>/.credentials.json`; every `claude` reads it at birth, which is what
-  makes replacing it a switch and what makes it worth handling at all.
-
-  **What reads the app's:** one command, `foster usage` (and the matching "Usage right now" in the
-  menu). Nothing else does — not `foster`, `return`, `restore`, `purge`, `scan`, `status`, `whoami`,
-  `accounts`, `guard`, or the agent. `guard` copies the CLI's own credential (see "What copies the
-  CLI's" below); it never touches the app's sealed token. The reader lives in one file,
-  `store/credential.ts`.
-
-  `foster stores` and `foster doctor` come closer than any of those and still stop short on
-  purpose: `signedIn` in `--json` (and "gone"/"not signed in" in the text) says only whether a
-  config carries a cached OAuth token entry at all — checked directly against the parsed JSON's
-  own keys, the value itself never assigned anywhere — which is presence, not proof, and a
-  different question from what the token is worth. Listing installations never doubles as reading
-  one of them.
-
-  **What copies the CLI's:** `switch`, `guard`, and `client open --guard`, which runs the same
-  read-then-remember pair `guard` does before opening the tab. All of them go through
-  `store/cliCredential.ts` and `engine/vault.ts`, and what they do is _copy bytes_: foster never
-  mints a credential, never refreshes one, never removes one, and never signs anyone in. OAuth is
-  interactive and stays yours.
-  The bytes are copied verbatim rather than re-serialised, because a field this version does not know
-  about is a field a rewrite would drop — and a dropped field in a credential produces a file that
-  parses, looks right and does not authenticate.
-
-  **Where the copies rest:** `~/.foster/vault`, under your own profile, one append-only JSONL file
-  per `(client, account)`, each record naming whose it is so the vault can be listed without opening
-  anything. It is not encrypted, and that is a choice rather than an omission: the file it copies is
-  sitting unencrypted in the config directory already, so encrypting the copy would protect the shelf
-  and not the shop, while adding a key foster would then have to keep somewhere.
-
-  **The honest shape of the risk**, since it grew: the vault keeps every credential it has ever seen
-  rather than the minimum, which is a deliberate trade of a larger at-rest footprint for the property
-  that nothing foster does can make a credential unrecoverable. That makes it worth more to an
-  attacker who already has your user account than a positional vault would be — and worth exactly
-  nothing to one who does not, since it never leaves your machine, is never written to the
-  repository, never logged, never printed, and never put on a command line. `foster vault` warns when
-  `FOSTER_HOME` has moved it outside your profile. The credential object refuses to serialise itself
-  through either of Node's two paths, so a future `--json` or stray `console.log` cannot leak one by
-  accident. The ledger records that a switch happened, between which addresses, and how old the
-  installed credential was; it never records a token, a refresh token, or their shape.
-
-  **The agent is fenced off from all of it**, on the same footing as `purge`: `switch`, `point`,
-  `client new` and `vault` are not among its tools and it is told not to reach for them through the
-  shell. Changing who you are signed in as is not a step on the way to something else, and a
-  credential is not a file for a model to move. The same fence covers naming an installation and
-  opening one: `profile new|register|forget`, `client register|forget`, `profile open` and
-  `client open` start interactive programs or change what foster remembers about accounts, so
-  none of them is a tool either — the system prompt names all four families and tells the model to
-  say which account needs an app or a terminal open and let the user do it, rather than reach for
-  the shell. The read-only half — `clients`, `accounts`, `usage`, `renewals`, `identify` — answers
-  "which account has quota" without any of it.
-
-  **What it does with it:** decrypts the token in memory, sends it as a bearer credential on two
-  read-only `GET`s to `api.anthropic.com` — `/api/oauth/profile` and `/api/oauth/usage` — and drops
-  it. The token is never written to disk, never logged, never put on a command line, and never sent
-  to any host but `api.anthropic.com`. What it buys is the only data no cached file holds: your live
-  5-hour and weekly limits, and a profile that is current rather than whatever the app last persisted.
-  `identify` asks the same `/api/oauth/profile` for a different reason — to put a name on an account
-  foster has never seen signed in. It works by presenting a credential that account itself left
-  behind, in a CLI client or in foster's own vault, and keeping the answer only when the profile's
-  own `accountUuid` matches the account asked about; a token belonging to someone else is discarded,
-  never recorded against the wrong account. Like the rest of this half it goes to the network only
-  when you run it, never on its own.
-
-  **What still stops it cold:** the token is not stored in the open. Claude Desktop keeps it the way
-  Chromium keeps a cookie — an AES-256-GCM blob under a key sealed with Windows DPAPI in `Local
-State` — so reading it needs the Windows user who sealed it, on the machine that sealed it. A
-  profile copied to another machine cannot be unsealed there, and neither can foster do it off a
-  backup. It is Windows-only, current-account-only, and returns nothing rather than guessing when the
-  token is absent or expired. `claude.ai`'s own billing endpoints (next charge, card, cancellation)
-  sit behind a browser bot-check that foster does not attempt to defeat, so those remain unreachable
-  from here and only `api.anthropic.com` is used.
-
-  None of this reaches the app's account, which stays unswitchable for the reasons in
-  [What about switching accounts?](#what-about-switching-accounts), and it changes none of the write-path
-  guarantees above.
-
-- **A copy shares one thing with its original: the conversation.** That is the point — it is what
-  makes the copy open the real thing rather than an empty session — but it means the file is not
-  private to either of them. `foster` only ever reads it. The app does write to it: renaming a
-  session syncs the new title into the transcript, and its own import rewrites the file in place. So
-  renaming a copy is not confined to the copy. Nothing is lost by it; it is simply not the isolation
-  the word "copy" suggests, and you should know which part is shared.
-- **Scheduled-task sessions are treated separately.** Sessions carrying a `scheduledTaskId` are not
-  listed in the sidebar's recents and are excluded from ordinary fostering.
-- **One request, and only about versions.** Because the install URL pins a tag, an install would
-  never learn about later releases on its own. So `foster` asks GitHub for the latest release tag,
-  at most once a day, and tells you when you are behind. It sends nothing beyond the request itself,
-  gives up after 2.5s, and stays silent if it fails — being offline never slows anything down.
-  Set `FOSTER_NO_UPDATE_CHECK=1` to turn it off.
-
-### What is not supported
-
-**Cowork sessions are not supported — but not for the reason this file used to give.** Earlier
-versions said the Cowork list came from the server and so could never be restored locally. That was
-wrong: `local-agent-mode-sessions/<accountUuid>/<organizationUuid>/local_<id>.json` is the
-authoritative store, and the app builds the list by reading those folders, exactly as it does for
-Code sessions.
-
-So the mechanism probably transfers. It is not supported because it has not been established that it
-_works_, and there are specific reasons to check rather than assume: a Cowork session owns a sandbox
-whose state a copy does not carry, and the app picks between full and shortened directory names for
-that tree, so writing into the wrong one would produce a copy it never reads. Until someone verifies
-it end to end, this remains a Code-session tool — which is a different statement from the one that
-was here before, and an honest one.
-
-## Development
-
-```bash
-npm install
-npm run typecheck
-npm run lint
-npm test
-npm run build
-```
-
-Tests run against **synthetic** store fixtures created in a temporary directory. They never read or
-write a real Claude Desktop installation. `npm run check` (and CI's `privacy-guard` job, which runs
-the same `scripts/privacy.mjs` rather than a second copy of its patterns) fails the build if
-realistic account identifiers or personal filesystem paths appear anywhere `git add -A` would pick
-up — tracked, staged, or merely untracked-but-not-`.gitignore`d (issue #134: a plain `git grep` sees
-only tracked files, so a fixture written but not yet `git add`-ed used to pass locally and only fail
-once CI saw it tracked, after the push).
-
-CI (`.github/workflows/ci.yml`) runs the checks above on Node 22 and 24, on Ubuntu and Windows — not
-20, which vitest 5 (picked up to clear three high-severity dependency advisories) refuses to start
-under at all; `package.json`'s own `"engines": ">=20"` is unaffected, since that floor describes the
-built CLI, which carries no vitest dependency, not the dev toolchain. The `check` job runs `npm run
-coverage`, not a plain `npm test`, since the coverage floor below is only ever collected and enforced
-under `--coverage`; `npm run check` (`package.json`) calls the same script, so a local run fails the
-same way CI would. Three more CI jobs: a build + bundle smoke test (single self-contained file,
-starts quietly, `--version` matches) that used to run only on a tag in `release.yml` and now runs on
-every PR and push too, from the same `scripts/smoke-bundle.sh` both workflows call — on Node 20 as
-well as 24, since this job never touches vitest and Node 20 is the floor the shipped bundle actually
-promises; `npm audit --omit=dev --audit-level=high`, scoped to the two runtime dependencies
-(`commander`, `picocolors`) since the dev toolchain's own advisories never reach anything foster
-installs or executes; and the coverage floor itself.
-
-`npm run coverage` measures `src/**/*.ts` including `src/cli/**` (excluding it made the number
-optimistic — 88% became 66.6% once the CLI entrypoints were counted), and `vitest.config.ts` sets a
-coverage floor with margin below the real level — measured coverage here is genuinely
-environment-dependent, not just noisy: several code paths branch on what actually exists under the
-home directory and on OS, and GitHub Actions' `ubuntu-latest` reads a few tenths of a point lower
-across the board than a developer's own Windows machine or `windows-latest`. The floor sits under
-the real low point of that range (`ubuntu-latest`), not under whichever environment was measured
-most recently: a genuine drop still fails CI, an improvement is free to raise it, and the floor is
-never lowered just to make a drop pass.
-
-### Releasing
-
-The version lives in four files — `package.json`, `package-lock.json` (which restates it twice, and
-which `npm install` alone would leave reporting a version the release never had), `src/version.ts`
-(stamped into every copy foster writes) and `install.ps1` (which pins the release it downloads).
-`npm run version:set X.Y.Z` (`scripts/version.mjs`) bumps all four together, then tag:
-
-```bash
-npm run version:set 0.11.1
-git commit -am "chore: release 0.11.1" && git tag -a v0.11.1 -m "foster v0.11.1"
-git push && git push origin v0.11.1
-```
-
-Pushing the tag runs the release workflow, which refuses to publish unless the four versions agree
-with each other and with the tag. It then builds the bundle, smoke-tests that it actually starts,
-generates the SHA256 the installer verifies, and creates the release with both assets. Run the
-workflow manually from the Actions tab to exercise all of that without publishing anything.
-
-## License
+Tests run against synthetic stores in a temporary directory and never touch a real installation.
+The repository is public, so `npm run privacy` rejects any Windows user-profile path or realistic
+account uuid anywhere `git add -A` would pick up — fixture uuids look like
+`00000000-0000-4000-8000-00000000000a`. CI, the coverage floor and releasing:
+[development](docs/guide/development.md). Notes for agents working here: [AGENTS.md](AGENTS.md).
+
+## ❓ FAQ
+
+<details>
+<summary><b>Why does the app need a restart before the copies show up?</b></summary>
+
+Claude Desktop reads its session directory once, while it initialises, and keeps what it found in
+memory. Nothing watches the directory afterwards, and reloading the window (F5) redraws from memory,
+not from disk. `--restart` does it for you; from a session the app itself hosts, add `--detach` so the
+restart runs from a process outside the app's tree.
+[More →](docs/guide/restart-and-detach.md)
+
+</details>
+
+<details>
+<summary><b>Why aren't copies marked in their title?</b></summary>
+
+They used to be (`↪ <title>`). On a swept store 704 of 764 rows were copies, so the mark was on 92%
+of the sidebar and separated nothing. It was also unreliable: the title belongs to the app, which
+drops or inherits it. foster's own list draws its arrow from the ledger, which cannot be wrong;
+`--prefix` still exists if you want the old behaviour.
+[More →](docs/guide/how-it-works.md#why-a-copy-is-not-marked-in-its-own-title)
+
+</details>
+
+<details>
+<summary><b>Can I undo a sweep?</b></summary>
+
+Yes. `foster return` deletes the copies foster wrote (scope it with `--to <accountUuid>`, `--title`,
+`--session`); the originals were never touched, so the sidebar is simply as it was.
+`foster sweep --undo-retitles` puts every marked card back to the title and archived flag it had.
+The one thing with no undo is `purge`, which no sweep ever runs.
+
+</details>
+
+<details>
+<summary><b>Does foster touch my login or my tokens?</b></summary>
+
+Only where a command says so. `usage` and `identify` read a token in memory and send it on read-only
+`GET`s to `api.anthropic.com`, then drop it. `switch` and `guard` copy the CLI's credential file
+byte for byte into a local vault. foster never mints, refreshes or removes a credential, never signs
+anyone in, and never logs, prints or puts a token on a command line.
+[More →](docs/guide/safety-model.md)
+
+</details>
+
+<details>
+<summary><b>Can I switch the Desktop app's account without signing out?</b></summary>
+
+Not by editing anything on disk — the app keeps its account in memory, and no file, flag or deep link
+selects one. A second Desktop profile is a second account beside the first (`foster profile`,
+`foster app login`). What foster does instead is make the account you switch to look like the one you
+left, and switch **CLI** clients between accounts, where the account really is a file.
+[More →](docs/guide/accounts-and-clients.md#what-about-switching-accounts)
+
+</details>
+
+## 📚 Documentation
+
+| Guide                                                                        | Covers                                               |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------- |
+| [How foster works](docs/guide/how-it-works.md)                               | Why sessions disappear, what a copy is               |
+| [The sweep, forks and worktree claims](docs/guide/sweep-and-forks.md)        | Every pass of `foster sweep`, fork marks, title sync |
+| [One conversation, two files](docs/guide/two-file-conversations.md)          | Repository/worktree splits, `where`, `--prove`       |
+| [Deleted conversations](docs/guide/deleted-conversations.md)                 | `restore` and `purge`                                |
+| [Revive and rescue](docs/guide/revive-and-rescue.md)                         | Usage-limit stops, crash-stranded cards              |
+| [Restart and `--detach`](docs/guide/restart-and-detach.md)                   | Why a restart, and how to do it from inside the app  |
+| [Pins, groups, routines, filters](docs/guide/layout-pins-groups-settings.md) | `layout`, `pin`, `view`, `verify`                    |
+| [Accounts, clients and switching](docs/guide/accounts-and-clients.md)        | Multiple CLI clients, switching a client's account   |
+| [Reports](docs/guide/reports.md)                                             | `disk` and `stats`                                   |
+| [Cloud sessions](docs/guide/cloud-sessions.md)                               | `cloud list` and `cloud pull`                        |
+| [Usage (long form)](docs/guide/usage.md)                                     | Install, the menu, naming accounts, scheduled tasks  |
+| [The agent](docs/guide/agent.md)                                             | `foster agent` and the app's own session tools       |
+| [Safety model](docs/guide/safety-model.md)                                   | What foster writes, where, and what it never does    |
+| [Development](docs/guide/development.md)                                     | Tests, CI, coverage floor, releasing                 |
+
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
