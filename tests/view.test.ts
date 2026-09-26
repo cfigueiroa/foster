@@ -18,7 +18,8 @@ import {
   writeEpitaxyPrefs,
 } from '../src/store/viewPrefs.js';
 import type { ProcessRow } from '../src/util/processes.js';
-import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT } from './helpers/store.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
+import { Ledger } from '../src/ledger/log.js';
 
 const LOG_NUMBER = 4;
 const SCRIPT_KEY = 'dframe-store';
@@ -50,11 +51,15 @@ const {
   GROUP_BY_STORED_TO_WORD,
   GROUP_BY_WORDS,
   planLayoutViewCarry,
+  planMachineViewCarry,
   planViewCopy,
   planViewSet,
   readViewState,
+  recordViewSeen,
   SORT_STORED_TO_WORD,
   SORT_WORDS,
+  viewCarriedFor,
+  viewSeenFor,
 } = await import('../src/engine/view.js');
 
 beforeEach(() => {
@@ -202,6 +207,16 @@ describe('store/viewPrefs: the five per-account keys (22/09/2026 re-measurement)
       ['code-sessions-state-activity-days', 'code-sessions-status-filter'].sort(),
     );
     expect(readViewAccountPrefs(store, NEW_ACCOUNT).status).toBe('active');
+  });
+
+  it('inventories an unrecognised account-suffixed epitaxyPrefs key, without touching a known one', () => {
+    const store = makeStore();
+    writeDesktopConfig(store, {
+      [statusKey(NEW_ACCOUNT)]: 'active',
+      [`some-future-setting.${NEW_ACCOUNT.accountUuid}`]: true,
+    });
+    const state = readViewState(store, NEW_ACCOUNT);
+    expect(state.unknownAccountKeys).toEqual([`some-future-setting.${NEW_ACCOUNT.accountUuid}`]);
   });
 
   it('preserves unrelated epitaxyPrefs and preferences keys on write', () => {
@@ -579,5 +594,108 @@ describe('readEpitaxyPrefs (sanity: the config reader survives a missing file)',
   it('returns {} rather than throwing when the file does not exist', () => {
     const store = makeStore();
     expect(readEpitaxyPrefs(store)).toEqual({});
+  });
+});
+
+function newLedger(store: StoreLayout): Ledger {
+  return new Ledger(path.join(store.root, '.foster-home', 'ledger.jsonl'));
+}
+
+describe('recordViewSeen / viewSeenFor', () => {
+  it('appends a sighting the first time, and never repeats an unchanged one', () => {
+    const store = makeStore();
+    makeMachineStore(store, { groupByByMode: { code: 'date' }, sortByByMode: { code: 'alpha' } });
+    const ledger = newLedger(store);
+
+    recordViewSeen(ledger, store, OLD_ACCOUNT);
+    expect(viewSeenFor(ledger.read(), OLD_ACCOUNT)).toEqual({ groupBy: 'date', sortBy: 'alpha' });
+    expect(ledger.read().filter((e) => e.kind === 'view_seen')).toHaveLength(1);
+
+    // Same value again — no second event.
+    recordViewSeen(ledger, store, OLD_ACCOUNT);
+    expect(ledger.read().filter((e) => e.kind === 'view_seen')).toHaveLength(1);
+  });
+
+  it('appends a new sighting once the value actually changes', () => {
+    const store = makeStore();
+    makeMachineStore(store, { groupByByMode: { code: 'date' } });
+    const ledger = newLedger(store);
+    recordViewSeen(ledger, store, OLD_ACCOUNT);
+
+    makeMachineStore(store, { groupByByMode: { code: 'custom' } });
+    recordViewSeen(ledger, store, OLD_ACCOUNT);
+    expect(ledger.read().filter((e) => e.kind === 'view_seen')).toHaveLength(2);
+    expect(viewSeenFor(ledger.read(), OLD_ACCOUNT)?.groupBy).toBe('custom');
+  });
+});
+
+describe('viewCarriedFor', () => {
+  it('folds to the latest value foster wrote for one account/key', () => {
+    const store = makeStore();
+    const ledger = newLedger(store);
+    ledger.append({ kind: 'view_carried', account: NEW_ACCOUNT, key: 'groupBy', value: 'date' });
+    ledger.append({ kind: 'view_carried', account: NEW_ACCOUNT, key: 'groupBy', value: 'custom' });
+    expect(viewCarriedFor(ledger.read(), NEW_ACCOUNT, 'groupBy')).toBe('custom');
+    expect(viewCarriedFor(ledger.read(), NEW_ACCOUNT, 'sortBy')).toBeUndefined();
+    expect(viewCarriedFor(ledger.read(), OLD_ACCOUNT, 'groupBy')).toBeUndefined();
+  });
+});
+
+describe('planMachineViewCarry', () => {
+  it('carries groupBy/sort from the most recently active other account’s sighting', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'src1', cliSessionId: 'conv-1', lastActivityAt: 5_000 }),
+    );
+    makeMachineStore(store, {}); // target has never set either key
+    const ledger = newLedger(store);
+    ledger.append({ kind: 'view_seen', account: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });
+
+    const carry = planMachineViewCarry(store, NEW_ACCOUNT, ledger.read());
+    expect(carry).toEqual({ from: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });
+  });
+
+  it('never overwrites a value the user (or the app) set, only foster’s own earlier carry', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'src1', cliSessionId: 'conv-1', lastActivityAt: 5_000 }),
+    );
+    // The target already shows something else, by hand.
+    makeMachineStore(store, { groupByByMode: { code: 'date' } });
+    const ledger = newLedger(store);
+    ledger.append({
+      kind: 'view_seen',
+      account: OLD_ACCOUNT,
+      groupBy: 'custom',
+      sortBy: 'recency',
+    });
+
+    const carry = planMachineViewCarry(store, NEW_ACCOUNT, ledger.read());
+    expect(carry.groupBy).toBeUndefined();
+  });
+
+  it('carries a value foster itself wrote before, when the source has since changed', () => {
+    const store = makeStore();
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'src1', cliSessionId: 'conv-1', lastActivityAt: 5_000 }),
+    );
+    makeMachineStore(store, { groupByByMode: { code: 'date' } });
+    const ledger = newLedger(store);
+    ledger.append({ kind: 'view_carried', account: NEW_ACCOUNT, key: 'groupBy', value: 'date' });
+    ledger.append({
+      kind: 'view_seen',
+      account: OLD_ACCOUNT,
+      groupBy: 'custom',
+      sortBy: 'recency',
+    });
+
+    const carry = planMachineViewCarry(store, NEW_ACCOUNT, ledger.read());
+    expect(carry.groupBy).toBe('custom');
   });
 });

@@ -1,14 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { listAccountDirs } from '../domain/paths.js';
-import {
-  DEFAULT_DIVERGED_TEMPLATE,
-  DEFAULT_OTHER_FILE_TEMPLATE,
-  DEFAULT_STALE_TEMPLATE,
-  looksMarked,
-  stripMarks,
-  templatesSeen,
-} from '../domain/stale.js';
+import { listAccountDirs, sameAccount } from '../domain/paths.js';
+import { templatesSeen } from '../domain/stale.js';
+import { DEFAULT_MARK_TEMPLATES, resolveContinuingCard } from './continuingCard.js';
+import { planPinParity, type PinParityPlan } from './pinParity.js';
 import type { AccountRef, DiscoveredSession, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerEvent } from '../ledger/types.js';
@@ -38,11 +33,22 @@ import {
   readLocalStorageText,
   readLocalStorageValue,
   writeLocalStorageEntries,
+  writeLocalStorageValue,
   type LocalStorageWrite,
 } from '../store/localStorage.js';
 import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
+import {
+  planAccountPrefsCarry,
+  writeAccountPrefsCarry,
+  type AccountPrefCarryPlan,
+} from '../store/appPrefs.js';
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
-import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
+import {
+  planLayoutViewCarry,
+  planMachineViewCarry,
+  type LayoutViewCarry,
+  type MachineViewCarry,
+} from './view.js';
 import { applyPinMoves, planPinMoves, type PinMovesPlan } from './pinMoves.js';
 import { planMarksBack } from './marksBack.js';
 import { retitleCards, type RetitleRequest } from './retitle.js';
@@ -66,11 +72,7 @@ import { readProcesses, type ProcessLister } from './desktop.js';
  * exactly what the plan says and nothing it does not.
  */
 
-const DEFAULT_TEMPLATES = [
-  DEFAULT_STALE_TEMPLATE,
-  DEFAULT_DIVERGED_TEMPLATE,
-  DEFAULT_OTHER_FILE_TEMPLATE,
-];
+const DEFAULT_TEMPLATES = DEFAULT_MARK_TEMPLATES;
 
 // ---------------------------------------------------------------------------
 // Groups
@@ -79,11 +81,35 @@ const DEFAULT_TEMPLATES = [
 export interface GroupAssignItem {
   cardId: string;
   title: string;
+  /** Set when this assignment moves the card out of a group it already sat in. */
+  movedFrom?: string;
 }
 
 export interface GroupSkipped {
   title: string;
-  reason: 'missing' | 'archived';
+  reason: 'missing' | 'archived' | 'filed-by-hand';
+  /** For `filed-by-hand`: the group name the card is currently filed in. */
+  currentGroup?: string;
+}
+
+/**
+ * Every card this installation's ledger says `applyLayout` itself filed into a
+ * group for this account, keyed by card id and folded to the latest
+ * assignment — the "local change wins" rule for moving a card between groups:
+ * a card already sitting in a group is only ever moved when that current
+ * filing is one foster wrote, never one the user made by hand (in the app,
+ * or by a manual edit `foster` never touched).
+ */
+export function layoutAssignedByCard(
+  events: readonly LedgerEvent[],
+  target: AccountRef,
+): Map<string, string> {
+  const owned = new Map<string, string>();
+  for (const event of events) {
+    if (event.kind !== 'layout_assigned' || !sameAccount(event.account, target)) continue;
+    for (const { cardId, groupName } of event.assignments) owned.set(cardId, groupName);
+  }
+  return owned;
 }
 
 export interface GroupPlanItem {
@@ -123,10 +149,6 @@ interface GroupCandidate {
   sourceCard: DiscoveredSession;
 }
 
-function isCleanTitle(title: string, templates: readonly string[]): boolean {
-  return stripMarks(title, templates) === title && !looksMarked(title);
-}
-
 type TargetResolution =
   { status: 'ok'; card: DiscoveredSession } | { status: 'missing' } | { status: 'archived' };
 
@@ -144,17 +166,8 @@ function resolveTarget(
 ): TargetResolution {
   const candidates = targetCards.filter((card) => card.data.cliSessionId === cliSessionId);
   if (candidates.length === 0) return { status: 'missing' };
-
-  const notArchived = candidates.filter((card) => !card.data.isArchived);
-  if (notArchived.length === 0) return { status: 'archived' };
-
-  const clean = notArchived.filter((card) => isCleanTitle(card.data.title ?? '', templates));
-  const pool = clean.length > 0 ? clean : notArchived;
-
-  const card = pool.reduce((best, next) =>
-    (next.data.lastActivityAt ?? 0) > (best.data.lastActivityAt ?? 0) ? next : best,
-  );
-  return { status: 'ok', card };
+  const card = resolveContinuingCard(candidates, templates);
+  return card ? { status: 'ok', card } : { status: 'archived' };
 }
 
 /**
@@ -233,15 +246,17 @@ function planGroups(
   // order pass below can tell which source's `order` list this run actually
   // acted on.
   const resolvedTargetCard = new Map<string, string>();
+  // The most recently active source, overall — whose own group list decides
+  // the order brand-new groups are appended in (see the ordering pass below).
+  const latestActivityBySource = new Map<string, number>();
 
   for (const [cliSessionId, candidates] of byConversation) {
     let winner = candidates[0]!;
     for (const candidate of candidates) {
-      if (
-        (candidate.sourceCard.data.lastActivityAt ?? 0) >
-        (winner.sourceCard.data.lastActivityAt ?? 0)
-      ) {
-        winner = candidate;
+      const at = candidate.sourceCard.data.lastActivityAt ?? 0;
+      if (at > (winner.sourceCard.data.lastActivityAt ?? 0)) winner = candidate;
+      if (at > (latestActivityBySource.get(candidate.sourceKey) ?? -Infinity)) {
+        latestActivityBySource.set(candidate.sourceKey, at);
       }
     }
     const names = new Set(candidates.map((candidate) => candidate.groupName));
@@ -254,6 +269,15 @@ function planGroups(
       });
     }
     winners.set(cliSessionId, winner);
+  }
+
+  let mostRecentSourceKey: string | undefined;
+  let mostRecentAt = -Infinity;
+  for (const [key, at] of latestActivityBySource) {
+    if (at > mostRecentAt) {
+      mostRecentAt = at;
+      mostRecentSourceKey = key;
+    }
   }
 
   const groupItems = new Map<string, GroupPlanItem>();
@@ -284,10 +308,13 @@ function planGroups(
     return item;
   };
 
-  // A target card already filed anywhere is left alone — the user's own filing
-  // wins, and idempotency depends on this staying a snapshot taken once, before
-  // this run adds anything of its own.
-  const alreadyAssigned = new Set(Object.keys(targetScope.assignments));
+  // A target card already filed in the *same* group is a no-op — the snapshot
+  // taken once, before this run adds anything of its own. One filed in a
+  // *different* group is moved only when that filing is foster's own doing
+  // (`layoutAssignedByCard`, folded from the ledger); otherwise it is the
+  // user's own filing and is left exactly where it is.
+  const groupNameById = new Map(targetScope.groups.map((group) => [group.id, group.name]));
+  const fosterFiled = layoutAssignedByCard(ledgerEvents, target);
 
   for (const [cliSessionId, winner] of winners) {
     const item = ensureItem(winner.groupName);
@@ -305,7 +332,28 @@ function planGroups(
 
     const targetCardId = groupCardId(resolution.card.data.sessionId);
     resolvedTargetCard.set(`${winner.sourceKey}\u0000${winner.sourceCardId}`, targetCardId);
-    if (alreadyAssigned.has(targetCardId)) continue;
+
+    const currentGroupId = targetScope.assignments[targetCardId];
+    if (currentGroupId === item.groupId) continue; // already correctly filed here
+
+    if (currentGroupId !== undefined) {
+      const currentGroupName = groupNameById.get(currentGroupId);
+      const ownedAs = fosterFiled.get(targetCardId);
+      if (ownedAs === undefined || ownedAs !== currentGroupName) {
+        item.skipped.push({
+          title,
+          reason: 'filed-by-hand',
+          ...(currentGroupName !== undefined ? { currentGroup: currentGroupName } : {}),
+        });
+        continue;
+      }
+      item.assign.push({
+        cardId: targetCardId,
+        title: resolution.card.data.title ?? resolution.card.data.sessionId,
+        movedFrom: currentGroupName,
+      });
+      continue;
+    }
 
     item.assign.push({
       cardId: targetCardId,
@@ -349,7 +397,23 @@ function planGroups(
   }
 
   const sourceAccounts = new Set(sourceEntries.map(([key]) => key.split('/')[0]));
-  return { items: [...groupItems.values()], conflicts, sources: sourceAccounts.size };
+
+  // Brand-new groups are appended in the order the most recently active
+  // source scope lists them, not discovery order — a name the most-recent
+  // source does not have at all falls to the end, in whatever order it was
+  // first encountered. Groups the target already had keep their existing
+  // relative order, ahead of anything new.
+  const mostRecentScope = mostRecentSourceKey ? scopes[mostRecentSourceKey] : undefined;
+  const orderIndex = new Map<string, number>(
+    (mostRecentScope?.groups ?? []).map((group, index) => [group.name, index]),
+  );
+  const items = [...groupItems.values()];
+  const existingItems = items.filter((item) => !item.created);
+  const newItems = items
+    .filter((item) => item.created)
+    .sort((a, b) => (orderIndex.get(a.name) ?? Infinity) - (orderIndex.get(b.name) ?? Infinity));
+
+  return { items: [...existingItems, ...newItems], conflicts, sources: sourceAccounts.size };
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +557,19 @@ export interface LayoutPlan {
    */
   viewPrefs: LayoutViewCarry;
   /**
+   * The sidebar filter menu's machine-wide half (`groupBy`/`sort`), carried
+   * from a `view_seen` sighting of the most recently active other account —
+   * see `engine/view.ts`'s `planMachineViewCarry`. Absent only on a plan
+   * built by hand without the field.
+   */
+  machineViewPrefs?: MachineViewCarry;
+  /**
+   * The three account-uuid-keyed app prefs, carried from the most recently
+   * active other account into the target's own entry — see
+   * `store/appPrefs.ts`'s `planAccountPrefsCarry`.
+   */
+  accountPrefsCarry?: AccountPrefCarryPlan;
+  /**
    * Pin moves a sweep marked a pinned row for and could not write, because the
    * app was open — see `engine/pinMoves.ts`. The pin list is the app's own
    * IndexedDB, safe to write in the same closed-app gap as everything above.
@@ -504,6 +581,12 @@ export interface LayoutPlan {
    * app cannot undo them before it reads them.
    */
   marks?: RetitleRequest[];
+  /**
+   * Cross-account pin parity — see `engine/pinParity.ts`. Absent only on a
+   * plan built by hand without the field, the same convention `pins` above
+   * already keeps.
+   */
+  pinsParity?: PinParityPlan;
 }
 
 export interface PlanLayoutOptions {
@@ -525,6 +608,34 @@ export interface PlanLayoutOptions {
   cache?: ScanCache;
 }
 
+/**
+ * The other account whose own cards show the latest `lastActivityAt`,
+ * overall — the same "most recent source wins" rule the rest of this module
+ * already applies per conversation, asked once across every conversation.
+ * Shared by the account-uuid-keyed app prefs carry below; `engine/view.ts`
+ * keeps its own, narrower version of this for the machine-wide filter menu.
+ */
+export function mostRecentlyActiveOtherAccount(
+  store: StoreLayout,
+  target: AccountRef,
+  cache?: ScanCache,
+): AccountRef | undefined {
+  const others = listAccountDirs(store).filter((account) => !sameAccount(account, target));
+  let best: AccountRef | undefined;
+  let bestAt = -Infinity;
+  for (const account of others) {
+    const cards = scanAccount(store, account, undefined, { slim: true, cache });
+    for (const card of cards) {
+      const at = card.data.lastActivityAt ?? 0;
+      if (at > bestAt) {
+        bestAt = at;
+        best = account;
+      }
+    }
+  }
+  return best;
+}
+
 export function planLayout(options: PlanLayoutOptions): LayoutPlan {
   const { store, target, cache } = options;
   return {
@@ -532,8 +643,15 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     groups: planGroups(store, target, options.ledgerEvents ?? [], cache),
     routines: planRoutines(store, target, options.now ?? Date.now()),
     viewPrefs: planLayoutViewCarry(store, target),
+    machineViewPrefs: planMachineViewCarry(store, target, options.ledgerEvents ?? []),
     pins: planPinMoves(store, options.ledgerEvents ?? [], target, undefined, cache),
     marks: planMarksBack(options.ledgerEvents ?? [], target, store),
+    pinsParity: planPinParity(store, target, options.ledgerEvents ?? [], undefined, cache),
+    accountPrefsCarry: planAccountPrefsCarry(
+      store,
+      target,
+      mostRecentlyActiveOtherAccount(store, target, cache),
+    ),
   };
 }
 
@@ -551,6 +669,14 @@ export interface LayoutPendingCounts {
   pinsMoved?: number;
   /** Marks the running app saved back over, to write again. Absent on a hand-built count. */
   marksBack?: number;
+  /** Pins another account's parity would newly add. Absent on a hand-built count. */
+  pinsToPin?: number;
+  /** Pins parity would remove — always foster's own earlier pin. Absent on a hand-built count. */
+  pinsToUnpin?: number;
+  /** Machine-wide filter-menu keys (`groupBy`/`sort`) that would be carried. Absent on a hand-built count. */
+  machineViewKeysCarried?: number;
+  /** Account-uuid-keyed app prefs that would be carried. Absent on a hand-built count. */
+  accountPrefsCarried?: number;
 }
 
 /**
@@ -579,6 +705,12 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
     // written before pins joined the layout.
     pinsMoved: plan.pins?.moves.length ?? 0,
     marksBack: plan.marks?.length ?? 0,
+    pinsToPin: plan.pinsParity?.toPin.length ?? 0,
+    pinsToUnpin: plan.pinsParity?.toUnpin.length ?? 0,
+    machineViewKeysCarried:
+      (plan.machineViewPrefs?.groupBy !== undefined ? 1 : 0) +
+      (plan.machineViewPrefs?.sortBy !== undefined ? 1 : 0),
+    accountPrefsCarried: Object.keys(plan.accountPrefsCarry?.changes ?? {}).length,
   };
 }
 
@@ -591,7 +723,11 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     counts.routinesBrought +
     counts.viewKeysCarried +
     (counts.pinsMoved ?? 0) +
-    (counts.marksBack ?? 0)
+    (counts.marksBack ?? 0) +
+    (counts.pinsToPin ?? 0) +
+    (counts.pinsToUnpin ?? 0) +
+    (counts.machineViewKeysCarried ?? 0) +
+    (counts.accountPrefsCarried ?? 0)
   );
 }
 
@@ -654,8 +790,16 @@ export interface ApplyLayoutResult {
   viewPrefsCarried: boolean;
   /** Sidebar filter-menu (view) keys carried this run — 0 when `viewPrefsCarried` is false. */
   viewKeysCarried: number;
+  /** Machine-wide filter-menu keys (`groupBy`/`sort`) carried this run — see `engine/view.ts`. */
+  machineViewKeysCarried: number;
+  /** Account-uuid-keyed app prefs carried this run — see `store/appPrefs.ts`. */
+  accountPrefsCarried: number;
   /** Deferred pin moves written this run — see `engine/pinMoves.ts`. */
   pinsMoved?: number;
+  /** Cross-account pins newly pinned this run — see `engine/pinParity.ts`. */
+  pinsPinned?: number;
+  /** Cross-account pins removed this run — always foster's own earlier pin. */
+  pinsUnpinned?: number;
   /**
    * Why the pin moves could not be written, when they could not. Never a
    * reason the run failed — see the pin step at the end of `applyLayout`.
@@ -930,7 +1074,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     // filing (or the app's) still wins, the same rule `planGroups` already
     // applies to the snapshot it read at plan time.
     const nameToId = new Map(current.groups.map((g) => [g.name, g.id]));
-    const assignedOnDisk = new Set(Object.keys(current.assignments));
+    const currentGroupNameById = new Map(current.groups.map((g) => [g.id, g.name]));
 
     let groupsCreated = 0;
     let cardsAssigned = 0;
@@ -939,11 +1083,35 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     const assigned: LayoutAssignment[] = [];
 
     for (const item of plannedGroups) {
+      const existingId = nameToId.get(item.name);
+      const groupId = existingId ?? item.groupId;
+
+      // Rechecked against the group the card is *actually* filed in on disk
+      // right now, not the snapshot planning read (#R2): an entry already in
+      // this exact group is a no-op. A plain new assignment (no
+      // `movedFrom`) is dropped, not written, the moment the disk shows the
+      // card filed in some *other* group by the time this runs — planning
+      // never checked ownership for that case, only "was it unassigned", so
+      // a group that appeared since is the user's own filing and wins, same
+      // as before this milestone. A move (`entry.movedFrom` set) is only
+      // carried through when the disk still shows the card in the exact
+      // group `planGroups` found it in — `movedFrom` is foster's own filing
+      // by the plan-time check, but a *second* move since planning is new
+      // information this phase never re-verified against the ledger, so it
+      // is left alone rather than assumed still safe to override.
       const droppedCardIds = new Set<string>();
       const assign = item.assign.filter((entry) => {
-        if (assignedOnDisk.has(entry.cardId)) {
+        const currentGroupId = current.assignments[entry.cardId];
+        if (currentGroupId === groupId) {
           droppedCardIds.add(entry.cardId);
           return false;
+        }
+        if (currentGroupId !== undefined) {
+          const currentName = currentGroupNameById.get(currentGroupId);
+          if (entry.movedFrom === undefined || currentName !== entry.movedFrom) {
+            droppedCardIds.add(entry.cardId);
+            return false;
+          }
         }
         return true;
       });
@@ -953,16 +1121,12 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
       const appendedOrder = item.appendedOrder.filter((cardId) => !droppedCardIds.has(cardId));
       if (assign.length === 0 && appendedOrder.length === 0) continue; // #9, rechecked
 
-      const existingId = nameToId.get(item.name);
-      const groupId = existingId ?? item.groupId;
-
       if (existingId === undefined && !nextGroups.some((g) => g.id === groupId)) {
         nextGroups.push({ id: groupId, name: item.name });
         groupsCreated += 1;
       }
       for (const entry of assign) {
         nextAssignments[entry.cardId] = groupId;
-        assignedOnDisk.add(entry.cardId);
         assigned.push({ cardId: entry.cardId, groupId, groupName: item.name });
       }
       if (appendedOrder.length > 0) {
@@ -1080,6 +1244,16 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     landed.cardsAssigned = groups.cardsAssigned;
     landed.orderEntriesAdded = groups.orderEntriesAdded;
     assigned = groups.assigned;
+    if (assigned.length > 0) {
+      ledger.append({
+        kind: 'layout_assigned',
+        account: plan.target,
+        assignments: assigned.map((entry) => ({
+          cardId: entry.cardId,
+          groupName: entry.groupName,
+        })),
+      });
+    }
 
     if (groups.localStorageWrites) {
       try {
@@ -1155,23 +1329,123 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     viewPrefsCarried = true;
   }
 
+  // The machine-wide half of the filter menu — `groupBy`/`sort` — carried
+  // from a `view_seen` sighting, in `dframe-store` itself (the same Local
+  // Storage record the groups write above shares, but this write is
+  // independent: it can be needed with no group work pending at all).
+  let machineViewKeysCarried = 0;
+  if (plan.machineViewPrefs) {
+    const { groupBy, sortBy } = plan.machineViewPrefs;
+    if (groupBy !== undefined || sortBy !== undefined) {
+      try {
+        const record = readLocalStorageValue(store, 'dframe-store');
+        if (!record) {
+          throw new Error(
+            'Local Storage has never recorded the sidebar filters — open the Code sidebar in ' +
+              'Claude Desktop once, so there is a record for foster to change.',
+          );
+        }
+        backups.push(backupLocalStorage(store, { now: options.now, env: options.env }));
+        const state = { ...((record.document.state as Record<string, unknown>) ?? {}) };
+        if (groupBy !== undefined) {
+          state.groupByByMode = { ...((state.groupByByMode as object) ?? {}), code: groupBy };
+        }
+        if (sortBy !== undefined) {
+          state.sortByByMode = { ...((state.sortByByMode as object) ?? {}), code: sortBy };
+        }
+        writeLocalStorageValue(record, 'dframe-store', { ...record.document, state });
+        written.push('view (machine-wide)');
+        if (groupBy !== undefined) {
+          ledger.append({
+            kind: 'view_carried',
+            account: plan.target,
+            key: 'groupBy',
+            value: groupBy,
+          });
+        }
+        if (sortBy !== undefined) {
+          ledger.append({
+            kind: 'view_carried',
+            account: plan.target,
+            key: 'sortBy',
+            value: sortBy,
+          });
+        }
+        machineViewKeysCarried = (groupBy !== undefined ? 1 : 0) + (sortBy !== undefined ? 1 : 0);
+      } catch (error) {
+        appendLedgerIfLanded();
+        throw new LayoutWriteError(written, 'view (machine-wide)', error);
+      }
+    }
+  }
+
+  // The account-uuid-keyed app prefs — rechecked fresh (#R2): a target that
+  // has gained its own entry since the plan was taken is left alone, the
+  // same "target already has one, leave it" rule this run follows for the
+  // per-account view prefs above.
+  let accountPrefsCarried = 0;
+  if (plan.accountPrefsCarry && Object.keys(plan.accountPrefsCarry.changes).length > 0) {
+    try {
+      const raw = readFileSync(store.desktopConfigFile, 'utf8');
+      const current = JSON.parse(raw) as { preferences?: Record<string, unknown> };
+      const preferences = current.preferences ?? {};
+      const stillMissing = Object.fromEntries(
+        Object.entries(plan.accountPrefsCarry.changes).filter(([name]) => {
+          const map = preferences[name];
+          const record =
+            map && typeof map === 'object' && !Array.isArray(map)
+              ? (map as Record<string, unknown>)
+              : {};
+          return !Object.hasOwn(record, plan.target.accountUuid);
+        }),
+      );
+      if (Object.keys(stillMissing).length > 0) {
+        const result = writeAccountPrefsCarry(store, plan.target, stillMissing, {
+          now: options.now,
+          env: options.env,
+        });
+        backups.push(result.backup);
+        written.push('app prefs (by account)');
+        accountPrefsCarried = Object.keys(stillMissing).length;
+      }
+    } catch (error) {
+      appendLedgerIfLanded();
+      throw new LayoutWriteError(written, 'app prefs (by account)', error);
+    }
+  }
+
   // Last, and in a database of its own: the pin list is the app's IndexedDB,
   // not either file above, so nothing here can leave those half-written. It
-  // records its own ledger event (`pins_moved`), settling the moves a sweep
-  // deferred — see `engine/pinMoves.ts`.
+  // records its own ledger events (`pins_moved`, `pins_synced`), settling the
+  // moves a sweep deferred and syncing cross-account pin parity — see
+  // `engine/pinMoves.ts` and `engine/pinParity.ts` — in one read/write batch,
+  // never two separate database writes in the same gap.
   //
   // A failure here is reported, not thrown. Everything above has landed by
   // now, and a pin is an extra: throwing would call the whole run failed, and
   // since nothing settles the move, every later layout run would fail at the
   // same step and never get to write anything else either.
   let pinsMoved = 0;
+  let pinsSyncedCount = { pinned: 0, unpinned: 0 };
   let pinsError: string | undefined;
-  if (plan.pins && (plan.pins.moves.length > 0 || plan.pins.settled.length > 0)) {
+  const pinsParity = plan.pinsParity;
+  const hasPinWork =
+    (plan.pins && (plan.pins.moves.length > 0 || plan.pins.settled.length > 0)) ||
+    (pinsParity && (pinsParity.toPin.length > 0 || pinsParity.toUnpin.length > 0));
+  if (hasPinWork) {
     try {
-      const result = applyPinMoves(store, ledger, plan.pins, { now: options.now });
+      const result = applyPinMoves(
+        store,
+        ledger,
+        plan.pins ?? { moves: [], settled: [] },
+        { now: options.now },
+        pinsParity,
+      );
       if (result.backup) backups.push(result.backup);
       if (result.moved > 0) written.push('pins');
+      if ((result.pinned ?? 0) > 0 || (result.unpinned ?? 0) > 0) written.push('pins (parity)');
       pinsMoved = result.moved;
+      pinsSyncedCount = { pinned: result.pinned ?? 0, unpinned: result.unpinned ?? 0 };
     } catch (error) {
       pinsError = error instanceof Error ? error.message : String(error);
     }
@@ -1198,7 +1472,11 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     routinesBrought: landed.routinesBrought,
     viewPrefsCarried,
     viewKeysCarried: landed.viewKeysCarried,
+    machineViewKeysCarried,
+    accountPrefsCarried,
     pinsMoved,
+    pinsPinned: pinsSyncedCount.pinned,
+    pinsUnpinned: pinsSyncedCount.unpinned,
     ...(pinsError ? { pinsError } : {}),
     marksBack,
     backups,

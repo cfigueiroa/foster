@@ -130,6 +130,36 @@ export function legacyViewKeysPresent(store: StoreLayout): string[] {
   return LEGACY_VIEW_KEYS.filter((key) => Object.hasOwn(epitaxy, key));
 }
 
+/** The five per-account key *names*, without any account uuid suffixed on. */
+const ACCOUNT_KEY_PREFIXES = [
+  'code-sessions-selected-environments-v2.',
+  'code-sessions-show-empty-projects.',
+  'code-sessions-show-pr-status.',
+  'code-sessions-status-filter.',
+  'code-sessions-state-activity-days.',
+];
+
+/** A bare v4-ish uuid, loosely — good enough to recognise the shape, not to validate one. */
+const UUID_SUFFIX = /\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Every `epitaxyPrefs` key that is suffixed with what looks like an account
+ * uuid, under a name none of the five per-account keys use — an inventory,
+ * not a refusal: nothing here is ever written or deleted, only named, so a
+ * future app version's own new per-account setting shows up as a line to
+ * investigate rather than silently vanishing from `foster view`'s report.
+ * `dframe-group-scopes` (`store/groupScopes.ts`) is not suffixed this way —
+ * it is one object keyed by every account, not one key per account — so it
+ * is never mistaken for one of these regardless.
+ */
+export function unknownAccountSuffixedEpitaxyKeys(store: StoreLayout): string[] {
+  const epitaxy = readEpitaxyPrefs(store);
+  return Object.keys(epitaxy).filter((key) => {
+    if (!UUID_SUFFIX.test(key)) return false;
+    return !ACCOUNT_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+  });
+}
+
 /**
  * Write any number of `epitaxyPrefs` keys in one atomic change — `view set` can
  * touch several at once (environment, empty groups, PR status, activity days

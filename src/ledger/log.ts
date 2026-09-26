@@ -40,6 +40,10 @@ const EVENT_KINDS = new Set<string>([
   'layout_applied',
   'pin_move_deferred',
   'pins_moved',
+  'pins_synced',
+  'layout_assigned',
+  'view_carried',
+  'view_seen',
 ]);
 
 /**

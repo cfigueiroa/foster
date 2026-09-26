@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs';
-import { listAccountDirs } from '../domain/paths.js';
+import { listAccountDirs, sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
+import type { Ledger } from '../ledger/log.js';
+import type { LedgerEvent } from '../ledger/types.js';
+import { scanAccount } from '../store/scanner.js';
 import {
   backupLocalStorage,
   readLocalStorageValue,
@@ -15,6 +18,7 @@ import {
   prStatusKey,
   readViewAccountPrefs,
   statusKey,
+  unknownAccountSuffixedEpitaxyKeys,
   writeEpitaxyPrefs,
   type ViewAccountPrefs,
 } from '../store/viewPrefs.js';
@@ -80,6 +84,13 @@ export interface ViewState {
   /** The five per-account settings, status and activity window included. */
   account: ViewAccountPrefs;
   legacy: string[];
+  /**
+   * `epitaxyPrefs` keys suffixed with what looks like an account uuid, under
+   * a name none of the five per-account keys use — see
+   * `store/viewPrefs.ts`'s `unknownAccountSuffixedEpitaxyKeys`. Never a
+   * refusal, only an inventory line.
+   */
+  unknownAccountKeys: string[];
   /** Absent when Local Storage has never recorded this key at all. */
   machineRecord?: LocalStorageRecord;
 }
@@ -97,6 +108,7 @@ export function readViewState(store: StoreLayout, account: AccountRef): ViewStat
     sort: typeof sortByMode?.code === 'string' ? sortByMode.code : 'recency',
     account: readViewAccountPrefs(store, account),
     legacy: legacyViewKeysPresent(store),
+    unknownAccountKeys: unknownAccountSuffixedEpitaxyKeys(store),
     ...(machineRecord ? { machineRecord } : {}),
   };
 }
@@ -540,4 +552,139 @@ export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): Lay
   }
 
   return { changes: [], account: {} };
+}
+
+// ---------------------------------------------------------------------------
+// The machine-wide half (`groupBy`/`sort`) — a sighting-based carry.
+//
+// `dframe-store`'s `groupByByMode.code`/`sortByByMode.code` is one record for
+// the whole installation, and the page re-syncs it with the *signed-in*
+// account's server copy at every startup (see AGENTS.md, "Desktop: grupos
+// sincronizam com o servidor" — inferred to cover this same record, since it
+// is the same server-synced store the groups scope lives in; not directly
+// measured for `groupBy`/`sort` specifically). That means this machine can
+// never simply read what a *different* account last showed — by the time
+// that account is not signed in, the record has already been overwritten.
+// `view_seen` is the workaround: a sighting taken while an account happened
+// to be signed in, kept in the ledger so a later run — signed into a
+// different account — can still ask what it saw. `recordViewSeen` is the
+// write half; nothing in this codebase calls it yet — see AGENTS.md.
+// ---------------------------------------------------------------------------
+
+/** The latest `view_seen` sighting recorded for one account, if any. */
+export function viewSeenFor(
+  events: readonly LedgerEvent[],
+  account: AccountRef,
+): { groupBy?: string; sortBy: string } | undefined {
+  let latest: { groupBy?: string; sortBy: string } | undefined;
+  for (const event of events) {
+    if (event.kind !== 'view_seen' || !sameAccount(event.account, account)) continue;
+    latest = {
+      ...(event.groupBy !== undefined ? { groupBy: event.groupBy } : {}),
+      sortBy: event.sortBy,
+    };
+  }
+  return latest;
+}
+
+/** The latest `view_carried` value foster itself wrote for one account/key, if any. */
+export function viewCarriedFor(
+  events: readonly LedgerEvent[],
+  account: AccountRef,
+  key: 'groupBy' | 'sortBy',
+): unknown {
+  let latest: unknown;
+  let found = false;
+  for (const event of events) {
+    if (event.kind !== 'view_carried' || !sameAccount(event.account, account)) continue;
+    if (event.key !== key) continue;
+    latest = event.value;
+    found = true;
+  }
+  return found ? latest : undefined;
+}
+
+/**
+ * Take a sighting of the target's own current `groupBy`/`sort`, if it differs
+ * from the latest sighting already on file for that account — never spamming
+ * the ledger with an unchanged value. Read-only apart from the one append;
+ * callers decide when it is worth calling (a sweep or a layout run, per the
+ * spec), which nothing in this codebase does yet.
+ */
+export function recordViewSeen(ledger: Ledger, store: StoreLayout, account: AccountRef): void {
+  const state = readViewState(store, account);
+  const groupBy = state.groupBy;
+  const sortBy = state.sort;
+  const previous = viewSeenFor(ledger.read(), account);
+  if (previous && previous.groupBy === groupBy && previous.sortBy === sortBy) return;
+  ledger.append({
+    kind: 'view_seen',
+    account,
+    ...(groupBy !== undefined ? { groupBy } : {}),
+    sortBy,
+  });
+}
+
+export interface MachineViewCarry {
+  from?: AccountRef;
+  groupBy?: string;
+  sortBy?: string;
+}
+
+/**
+ * The desired `groupBy`/`sort`, carried from the most recently active *other*
+ * account's own latest `view_seen` sighting — the same "most recent source
+ * wins" rule the rest of `foster layout` already applies. "Local change
+ * wins": a key is only ever written when the target's current value is one
+ * foster itself wrote before (`view_carried`), or the target has never shown
+ * anything different from what is desired — never a value the user (or the
+ * app, syncing from the server) set since.
+ */
+export function planMachineViewCarry(
+  store: StoreLayout,
+  target: AccountRef,
+  events: readonly LedgerEvent[],
+): MachineViewCarry {
+  const others = listAccountDirs(store).filter((account) => !sameAccount(account, target));
+
+  let bestAccount: AccountRef | undefined;
+  let bestAt = -Infinity;
+  for (const account of others) {
+    const cards = scanAccount(store, account, undefined, { slim: true });
+    for (const card of cards) {
+      const at = card.data.lastActivityAt ?? 0;
+      if (at > bestAt) {
+        bestAt = at;
+        bestAccount = account;
+      }
+    }
+  }
+  if (!bestAccount) return {};
+
+  const sighting = viewSeenFor(events, bestAccount);
+  if (!sighting) return {};
+
+  const current = readViewState(store, target);
+  const result: MachineViewCarry = { from: bestAccount };
+
+  if (sighting.groupBy !== undefined && sighting.groupBy !== current.groupBy) {
+    const owned =
+      current.groupBy === undefined ||
+      current.groupBy === viewCarriedFor(events, target, 'groupBy');
+    if (owned) result.groupBy = sighting.groupBy;
+  }
+  if (sighting.sortBy !== current.sort) {
+    const carriedSort = viewCarriedFor(events, target, 'sortBy');
+    // `current.sort` defaults to `'recency'` the moment the key is absent —
+    // the app's own rule, per `readViewState` — so "never set" has to be
+    // read off the raw state rather than off that defaulted value, or a
+    // record that exists for other reasons (groupBy, say) but has never
+    // carried a `sortByByMode` key would look owned when it never was.
+    const rawState = current.machineRecord?.document.state as Record<string, unknown> | undefined;
+    const neverSetSort = !rawState || !Object.hasOwn(rawState, 'sortByByMode');
+    const owned = neverSetSort || current.sort === carriedSort;
+    if (owned) result.sortBy = sighting.sortBy;
+  }
+
+  return result;
 }

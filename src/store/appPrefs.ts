@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { StoreLayout } from '../domain/types.js';
+import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { BackupOptions } from '../util/backups.js';
 import { asObject, rewriteDesktopConfig } from './desktopConfig.js';
 
@@ -315,4 +315,75 @@ export function writeAppPref(
     },
     backup,
   };
+}
+
+// ---------------------------------------------------------------------------
+// `foster layout`'s carry of the three preferences keyed *by account uuid*
+// rather than by name — `bypassPermissionsGateByAccount`,
+// `bypassPermissionsOptInByAccount` and `coworkModelAutoFallbackByAccount`.
+// Each is a map from an accountUuid to whatever that account has set, so
+// "carry this preference" here means "copy one entry of the map", never the
+// whole preference — the map already holds every account's own entry side by
+// side, and nothing about copying one entry disturbs another.
+// ---------------------------------------------------------------------------
+
+export const ACCOUNT_KEYED_PREFS = [
+  'bypassPermissionsGateByAccount',
+  'bypassPermissionsOptInByAccount',
+  'coworkModelAutoFallbackByAccount',
+] as const;
+
+export interface AccountPrefCarryPlan {
+  from?: AccountRef;
+  /** Pref name -> the value to set under the target's own accountUuid entry. */
+  changes: Record<string, unknown>;
+}
+
+/**
+ * Which of the three maps the target has no entry in yet, and the source
+ * (the most recently active *other* account, chosen by the caller — see
+ * `engine/layout.ts`'s `mostRecentlyActiveOtherAccount`) has one for. Nothing
+ * here decides which account is "most recent"; that is a question about
+ * cards, not about preferences, so it stays out of this module.
+ */
+export function planAccountPrefsCarry(
+  store: StoreLayout,
+  target: AccountRef,
+  source: AccountRef | undefined,
+): AccountPrefCarryPlan {
+  if (!source) return { changes: {} };
+  const stored = settingsOf(store) ?? {};
+  const changes: Record<string, unknown> = {};
+  for (const name of ACCOUNT_KEYED_PREFS) {
+    const map = stored[name];
+    const record =
+      map && typeof map === 'object' && !Array.isArray(map) ? (map as Record<string, unknown>) : {};
+    if (Object.hasOwn(record, target.accountUuid)) continue; // target already has its own entry
+    if (!Object.hasOwn(record, source.accountUuid)) continue; // source has nothing to give
+    changes[name] = record[source.accountUuid];
+  }
+  return Object.keys(changes).length > 0 ? { from: source, changes } : { changes: {} };
+}
+
+export function writeAccountPrefsCarry(
+  store: StoreLayout,
+  target: AccountRef,
+  changes: Record<string, unknown>,
+  options: BackupOptions = {},
+): { backup: string } {
+  return rewriteDesktopConfig(
+    store,
+    'accountPrefsCarry',
+    Object.keys(changes).map((name) => ['preferences', name]),
+    (after) => {
+      const preferences = asObject(after.preferences);
+      for (const [name, value] of Object.entries(changes)) {
+        const map = asObject(preferences[name]);
+        map[target.accountUuid] = value;
+        preferences[name] = map;
+      }
+      after.preferences = preferences;
+    },
+    options,
+  );
 }

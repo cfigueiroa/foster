@@ -1191,6 +1191,75 @@ layout read-only alongside its own passes (`ops/sweep.ts`, never applied there) 
 `sweepSummary` when anything is pending; that line never counts toward "nothing is left to sweep",
 because a layout needs the app closed and a sweep run from inside the app can never close it.
 
+## Layout parity: pins, group moves, and the filter menu across accounts
+
+Added 26/09/2026. The goal: after `foster layout --yes --restart`, the signed-in target shows the
+same pins, groups and sidebar settings the most recently active _other_ account already does — not
+just the groups/routines this section already covers.
+
+**Pins are one list for the whole installation.** Measured 26/09/2026: the pin list (IndexedDB
+`store:pin-state:dframe-starred-code`, `document.state.starredIds`, `store/pinstate.ts`'s
+`readPinState`) holds card ids from every account on the machine at once — 92 ids across 20 accounts
+on the store measured. A copy always arrives unpinned, because foster mints it a fresh id. `foster
+layout` now closes that gap with `engine/pinParity.ts`: per conversation, the source is the card in
+whichever _other_ account has the latest `lastActivityAt`, the target row is the same "row to
+continue in" choice `planGroups` already makes (`resolveContinuingCard`, moved into its own module,
+`engine/continuingCard.ts`, so `pinParity.ts` and `layout.ts` can share it without importing each
+other), and a pin is added when the source has it and the target row does not. An unwanted pin is
+removed only when the ledger's own `pins_synced` events say foster pinned it before — never a pin
+the user set by hand, here or anywhere else. Applied in the same read-once/write-once IndexedDB
+batch as the pre-existing pin-move pass (`engine/pinMoves.ts`'s `applyPinMoves`, now taking an
+optional `parity` argument), so a layout run never opens the pin database twice in one gap.
+
+**A card already filed in a group can now move, but only if the filing was foster's own.** Before
+this, a target card assigned to _any_ group — right one or wrong one — was left alone outright.
+`layout_assigned` (new ledger event, folded by `layoutAssignedByCard`) records every card `applyLayout`
+itself files, by group name; a card `planGroups` finds filed in a _different_ group is moved there only
+when the current filing matches the latest `layout_assigned` entry for it — otherwise it is reported
+`skipped` with reason `filed-by-hand` and the current group name, never touched. The reconciliation
+`applyLayout` already does against fresh disk state (#R2) applies to a move the same way it applies to
+a fresh assignment: a card whose group changed _again_ between planning and writing is left alone
+rather than assumed still safe to move.
+
+**Brand-new groups are ordered by the most recently active source's own list, not discovery order.**
+`planGroups` now tracks, per source scope, the latest `lastActivityAt` any of its winning candidates
+carries, and orders the groups this run would create (never the ones the target already has) by
+that source's own `groups` array — a name the most-recent source does not have falls to the end in
+whatever order it was otherwise encountered.
+
+**The filter menu's machine-wide half (`groupBy`/`sort`) needs a sighting, and nothing writes one
+yet.** `dframe-store`'s `groupByByMode`/`sortByByMode` is one Local Storage record for the whole
+installation, and — inferred from the same server-sync behaviour this file's "Desktop: grupos
+sincronizam com o servidor" section measures for groups, **not directly measured for `groupBy`/`sort`
+itself** — the page likely re-syncs it from the signed-in account's own server copy at every startup.
+That means this machine can never simply read what a _different_ account last showed once that
+account is no longer signed in; the record has already moved on. `engine/view.ts`'s `recordViewSeen`
+takes a sighting (a new `view_seen` ledger event, only when it differs from the account's own last
+sighting) and `planMachineViewCarry` carries the most recently active other account's latest sighting
+into the target, under the same local-change-wins rule as everything else here (`view_carried` events
+mark what foster itself wrote). **Nothing in this codebase calls `recordViewSeen` yet** — the natural
+call sites (`foster sweep`, `foster layout`) would need to know which account is _actually_ signed in
+right now to attribute the sighting correctly, which needs `signedInAccount(store)` wiring this
+milestone did not reach; calling it from `applyLayout` itself would be wrong, since that runs in the
+closed-app gap _before_ the restart into the target, when the record still reflects whichever account
+was signed in before. The carry mechanism and its tests stand on their own regardless — they read
+whatever `view_seen` sightings exist, however they get there.
+
+**Three preferences are keyed by account uuid, not by name**: `bypassPermissionsGateByAccount`,
+`bypassPermissionsOptInByAccount`, `coworkModelAutoFallbackByAccount` (`store/appPrefs.ts`'s
+`APP_PREFS` table). `planAccountPrefsCarry`/`writeAccountPrefsCarry` copy the most recently active
+other account's own entry into the target's, only when the target has no entry of its own yet — the
+same closed-app-gap write every other config change here needs, via `rewriteDesktopConfig`.
+
+**`foster view` now inventories, rather than silently ignores, an `epitaxyPrefs` key it does not
+recognise but that looks account-suffixed** (`store/viewPrefs.ts`'s `unknownAccountSuffixedEpitaxyKeys`,
+a loose uuid-shaped suffix check) — one dim line, nothing written or deleted, so a future app version's
+own new per-account setting shows up as something to investigate instead of vanishing from the report.
+
+**`foster verify` reads all of the above back too**: cross-account pins still pinned, `view_carried`
+values still in place, and `layout_assigned` filings still held — each reported the same way marks and
+pins already were, from the ledger alone, in a fresh process, no re-derivation from the plan.
+
 ## One rewrite path for `claude_desktop_config.json`
 
 `appPrefs.ts`, `groupScopes.ts` and `viewPrefs.ts` each used to carry their own copy of the same

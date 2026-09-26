@@ -3353,6 +3353,7 @@ const view = program
         showPrStatus: state.account.showPrStatus ?? true,
         activityDays: state.account.activityDays ?? null,
         legacy: state.legacy,
+        unknownAccountKeys: state.unknownAccountKeys,
       });
       return;
     }
@@ -3395,6 +3396,14 @@ const view = program
       console.log(
         pc.dim(
           `\n${state.legacy.length} legacy key(s) still on disk, unread by the app: ${state.legacy.join(', ')}`,
+        ),
+      );
+    }
+    if (state.unknownAccountKeys.length > 0) {
+      console.log(
+        pc.dim(
+          `${state.unknownAccountKeys.length} unrecognised account-suffixed key(s) in ` +
+            `epitaxyPrefs: ${state.unknownAccountKeys.join(', ')}`,
         ),
       );
     }

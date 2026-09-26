@@ -31,7 +31,11 @@ export type LedgerEvent =
   | ConversationImportUndoneEvent
   | LayoutAppliedEvent
   | PinMoveDeferredEvent
-  | PinsMovedEvent;
+  | PinsMovedEvent
+  | PinsSyncedEvent
+  | LayoutAssignedEvent
+  | ViewCarriedEvent
+  | ViewSeenEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -669,6 +673,72 @@ export interface PinsMovedEvent extends BaseEvent {
 }
 
 /**
+ * Cross-account pin parity, written by `foster layout` — see
+ * `engine/pinParity.ts`. The pin list (`store/pinstate.ts`) is one list per
+ * Desktop installation, holding card ids from every account at once, so a
+ * card newly minted for a copy always arrives unpinned; this event is what
+ * lets a later run tell "foster pinned this" from "the user pinned this" for
+ * the ids it unpins later — `pinned` is the full set of ids this write left
+ * pinned that foster itself is responsible for, so the fold only needs the
+ * latest event per account rather than replaying every write.
+ */
+export interface PinsSyncedEvent extends BaseEvent {
+  kind: 'pins_synced';
+  account: AccountRef;
+  /** Card ids in `account` that this run pinned, or found already pinned by foster. */
+  pinned: string[];
+  /** Card ids this run unpinned — always ids `pinned` named in an earlier event. */
+  unpinned: string[];
+}
+
+/**
+ * One card filed into one group by `applyLayout`, kept apart from the
+ * summary counts `LayoutAppliedEvent` already carries so a later run can tell
+ * whether the *current* group a target card sits in is one foster itself put
+ * it in — the "local change wins" rule for moving a card between groups (see
+ * AGENTS.md, "Groups and routines"). Folded to the latest assignment per
+ * card, since a card can only ever be in one group at a time.
+ */
+export interface LayoutAssignedEvent extends BaseEvent {
+  kind: 'layout_assigned';
+  account: AccountRef;
+  assignments: { cardId: string; groupName: string }[];
+}
+
+/**
+ * One sidebar filter-menu, per-account key (`store/viewPrefs.ts`) carried by
+ * `foster layout` from another account into the target — see
+ * `engine/view.ts`'s carry rule. Recorded per key so a later run can tell
+ * whether the target's *current* value for that key is still the one foster
+ * wrote, which is what makes a second carry safe: it only overwrites a value
+ * it owns, never a value the user set by hand afterwards.
+ */
+export interface ViewCarriedEvent extends BaseEvent {
+  kind: 'view_carried';
+  account: AccountRef;
+  key: string;
+  value: unknown;
+}
+
+/**
+ * A sighting of the machine-wide sidebar filter menu's `groupBy`/`sort`
+ * (`store/localStorage.ts`'s `dframe-store` record) for one account, taken
+ * whenever `foster sweep` or `foster layout` reads the store. The record
+ * itself is one list for the whole installation, and the page re-syncs it
+ * from the server for whichever account is signed in at startup — so the
+ * only way to know what a *different* account last showed is to have written
+ * it down while that account was the one signed in. Only appended when it
+ * differs from the latest sighting already on file for this account, so an
+ * unchanged value does not spam the ledger on every run.
+ */
+export interface ViewSeenEvent extends BaseEvent {
+  kind: 'view_seen';
+  account: AccountRef;
+  groupBy?: string;
+  sortBy: string;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -703,7 +773,11 @@ export type LedgerEventInput =
   | Draft<ConversationImportUndoneEvent>
   | Draft<LayoutAppliedEvent>
   | Draft<PinMoveDeferredEvent>
-  | Draft<PinsMovedEvent>;
+  | Draft<PinsMovedEvent>
+  | Draft<PinsSyncedEvent>
+  | Draft<LayoutAssignedEvent>
+  | Draft<ViewCarriedEvent>
+  | Draft<ViewSeenEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.

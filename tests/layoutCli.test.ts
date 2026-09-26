@@ -130,6 +130,8 @@ describe('layoutResultLines / layoutFailureLines — R4', () => {
     routinesBrought: 1,
     viewPrefsCarried: false,
     viewKeysCarried: 0,
+    machineViewKeysCarried: 0,
+    accountPrefsCarried: 0,
     backups: [],
     written: ['groups (config)', 'routines'],
     assigned: [],
@@ -261,6 +263,7 @@ describe('viewNoticeLines — R8', () => {
       sort: 'recency',
       account: {},
       legacy: [],
+      unknownAccountKeys: [],
       ...(notices
         ? {
             machineRecord: {
