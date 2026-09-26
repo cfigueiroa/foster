@@ -256,6 +256,7 @@ describe('runSweep', () => {
       secondFiles: 0,
       restorable: 0,
       worktreeClaims: 0,
+      archivesOutOfStep: 0,
       exhausted: true,
     });
     // Finished in the round it started with: nothing it wrote left work behind.
@@ -424,6 +425,7 @@ describe('runSweep — layout preview agrees with what layout --yes would do (fi
       orderEntriesAdded: 0,
       pinsMoved: 0,
       marksBack: 0,
+      archiveMarksBack: 0,
       routinesBrought: 1,
       viewKeysCarried: 0,
     });
@@ -705,6 +707,7 @@ describe('one row per branch', () => {
       secondFiles: 0,
       restorable: 0,
       worktreeClaims: 0,
+      archivesOutOfStep: 0,
       exhausted: true,
     });
 

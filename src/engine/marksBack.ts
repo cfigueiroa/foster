@@ -1,7 +1,8 @@
 import { comparablePath, sameAccount, storeRootOfCopy } from '../domain/paths.js';
 import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
-import type { CardRetitledEvent, LedgerEvent } from '../ledger/types.js';
+import type { ArchiveSyncedEvent, CardRetitledEvent, LedgerEvent } from '../ledger/types.js';
 import { readSessionFile } from '../store/sessionFile.js';
+import type { ArchiveSyncItem } from './archiveSync.js';
 import type { RetitleRequest } from './retitle.js';
 
 /**
@@ -78,4 +79,64 @@ export function planMarksBack(
     });
   }
   return requests;
+}
+
+/**
+ * `planMarksBack`'s own rule, for `archive_synced` instead of `card_retitled`:
+ * a card of this account, in this store, whose *last* archive write this
+ * ledger recorded is an `archive_synced`, is written again when the disk now
+ * shows the flag that write's own `from` carried — the value the app had
+ * before that write, meaning the app has since saved the card back over it.
+ *
+ * Kept separate from `planMarksBack` rather than folded in: the two events
+ * write disjoint fields (a title versus a bare flag) and disjoint files' worth
+ * of history to track (`worn` titles have no equivalent boolean shape worth
+ * building), and `card_retitled`'s own `toArchived` half is already covered
+ * by `planMarksBack` when a mark carries one — this only ever needs to catch
+ * up the other writer, `engine/archiveSync.ts`'s own event.
+ *
+ * Only the *last* archive-touching event per card is read: a `card_retitled`
+ * written after this event lands is the newer intent, and revisiting a flag
+ * `archive_synced` set before that would fight the more recent write instead
+ * of catching up on it — that case is `planMarksBack`'s to answer, not this
+ * one's.
+ */
+export function planArchiveMarksBack(
+  events: readonly LedgerEvent[],
+  target: AccountRef,
+  store: StoreLayout,
+  read: (file: string) => CodeSessionData | undefined = readSessionFile,
+): ArchiveSyncItem[] {
+  const root = comparablePath(store.root);
+  const last = new Map<string, ArchiveSyncedEvent | CardRetitledEvent>();
+  for (const event of events) {
+    if (
+      (event.kind !== 'archive_synced' && event.kind !== 'card_retitled') ||
+      !sameAccount(event.target, target)
+    ) {
+      continue;
+    }
+    if (comparablePath(storeRootOfCopy(event.path)) !== root) continue;
+    if (event.kind === 'card_retitled' && event.toArchived === undefined) continue;
+    last.set(event.sessionId, event);
+  }
+
+  const items: ArchiveSyncItem[] = [];
+  for (const [sessionId, event] of last) {
+    if (event.kind !== 'archive_synced') continue;
+    const card = read(event.path);
+    if (!card) continue;
+    const now = Boolean(card.isArchived);
+    if (now !== event.from || now === event.to) continue;
+    items.push({
+      path: event.path,
+      sessionId,
+      target: event.target,
+      from: now,
+      to: event.to,
+      native: event.native,
+      because: event.native ? 'native-follows-newer-source' : 'copy-follows-source',
+    });
+  }
+  return items;
 }

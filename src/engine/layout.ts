@@ -44,7 +44,8 @@ import { writeEpitaxyPrefs } from '../store/viewPrefs.js';
 import { nonCanonicalNumbers } from '../util/jsonNumbers.js';
 import { planLayoutViewCarry, type LayoutViewCarry } from './view.js';
 import { applyPinMoves, planPinMoves, type PinMovesPlan } from './pinMoves.js';
-import { planMarksBack } from './marksBack.js';
+import { applyArchiveSync, type ArchiveSyncItem } from './archiveSync.js';
+import { planMarksBack, planArchiveMarksBack } from './marksBack.js';
 import { retitleCards, type RetitleRequest } from './retitle.js';
 import { AppRunningError, inspectApp } from './safety.js';
 import { readProcesses, type ProcessLister } from './desktop.js';
@@ -504,6 +505,12 @@ export interface LayoutPlan {
    * app cannot undo them before it reads them.
    */
   marks?: RetitleRequest[];
+  /**
+   * Archived-flag-only writes (`engine/archiveSync.ts`) the running app has
+   * saved back over — see `planArchiveMarksBack`. Written again the same way
+   * `marks` above is, in the same closed-app gap.
+   */
+  archiveMarks?: ArchiveSyncItem[];
 }
 
 export interface PlanLayoutOptions {
@@ -534,6 +541,7 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     viewPrefs: planLayoutViewCarry(store, target),
     pins: planPinMoves(store, options.ledgerEvents ?? [], target, undefined, cache),
     marks: planMarksBack(options.ledgerEvents ?? [], target, store),
+    archiveMarks: planArchiveMarksBack(options.ledgerEvents ?? [], target, store),
   };
 }
 
@@ -551,6 +559,8 @@ export interface LayoutPendingCounts {
   pinsMoved?: number;
   /** Marks the running app saved back over, to write again. Absent on a hand-built count. */
   marksBack?: number;
+  /** Archive-only writes the running app saved back over. Absent on a hand-built count. */
+  archiveMarksBack?: number;
 }
 
 /**
@@ -579,6 +589,7 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
     // written before pins joined the layout.
     pinsMoved: plan.pins?.moves.length ?? 0,
     marksBack: plan.marks?.length ?? 0,
+    archiveMarksBack: plan.archiveMarks?.length ?? 0,
   };
 }
 
@@ -591,7 +602,8 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     counts.routinesBrought +
     counts.viewKeysCarried +
     (counts.pinsMoved ?? 0) +
-    (counts.marksBack ?? 0)
+    (counts.marksBack ?? 0) +
+    (counts.archiveMarksBack ?? 0)
   );
 }
 
@@ -663,6 +675,8 @@ export interface ApplyLayoutResult {
   pinsError?: string;
   /** Marks written again after the running app had saved over them — see `engine/marksBack.ts`. */
   marksBack?: number;
+  /** Archive-only writes written again after the running app undid them — see `planArchiveMarksBack`. */
+  archiveMarksBack?: number;
   /** Every backup this run wrote, before either file was touched. */
   backups: string[];
   /**
@@ -1188,6 +1202,16 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     if (marksBack > 0) written.push('marks');
   }
 
+  // The archive-only writes the running app saved back over, same reasoning
+  // as `marks` above: its own atomic write and its own `archive_synced`,
+  // never thrown for one card.
+  let archiveMarksBack = 0;
+  if (plan.archiveMarks && plan.archiveMarks.length > 0) {
+    const outcomes = applyArchiveSync(plan.archiveMarks, { ledger });
+    archiveMarksBack = outcomes.filter((outcome) => outcome.status === 'written').length;
+    if (archiveMarksBack > 0) written.push('archive marks');
+  }
+
   appendLedgerIfLanded();
 
   return {
@@ -1201,6 +1225,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     pinsMoved,
     ...(pinsError ? { pinsError } : {}),
     marksBack,
+    archiveMarksBack,
     backups,
     written,
     assigned,

@@ -242,6 +242,12 @@ describe('sweepSummary', () => {
       otherFileTemplate: '(other file, stopped {when}) ',
     },
     worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
+    archiveSync: {
+      items: [],
+      skipped: [],
+      outcomes: [],
+      counts: { written: 0, skipped: 0, failed: 0 },
+    },
     archived: 0,
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },

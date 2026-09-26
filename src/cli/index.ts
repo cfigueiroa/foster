@@ -256,6 +256,7 @@ import {
   runSweep,
   sweepFailedCount,
   sweepMarked,
+  type ArchiveSyncPhase,
   type BranchesPhase,
   type FileCardsPhase,
   type SweepReport,
@@ -1119,6 +1120,11 @@ program
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
   .option(
+    '--no-archive-sync',
+    "leave a card's archived flag alone instead of bringing it into step with the account " +
+      'most recently active on the same conversation (on by default)',
+  )
+  .option(
     '--dates',
     "advance a card's date to its transcript's last answer, so a row stops sinking in the sidebar",
   )
@@ -1158,6 +1164,7 @@ program
       branchPrefix: string;
       otherFilePrefix: string;
       syncTitles?: boolean;
+      archiveSync?: boolean;
       dates?: boolean;
       undoRetitles?: boolean;
       restart?: boolean;
@@ -1218,6 +1225,7 @@ async function runSweepCommand(
     branchPrefix: string;
     otherFilePrefix: string;
     syncTitles?: boolean;
+    archiveSync?: boolean;
     dates?: boolean;
     restart?: boolean;
     detach?: boolean;
@@ -1245,6 +1253,7 @@ async function runSweepCommand(
     divergedTemplate: opts.branchPrefix,
     otherFileTemplate: opts.otherFilePrefix,
     syncTitles: Boolean(opts.syncTitles),
+    syncArchive: opts.archiveSync !== false,
     dates: Boolean(opts.dates),
     dryRun,
     configDirs: opts.configDir ?? [],
@@ -1356,6 +1365,7 @@ async function runSweepCommand(
   printPhase('Restoring what the app deleted', report.restored.outcomes);
   printWorktreeClaims(report.worktreeClaims, dryRun);
   if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+  printArchiveSync(report.archiveSync, dryRun);
 
   console.log('');
   for (const line of sweepSummary(report)) console.log(line);
@@ -1584,6 +1594,26 @@ function titleSyncLine(from: string, to: string): string {
   return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
 }
 
+function printArchiveSync(phase: ArchiveSyncPhase, dryRun: boolean): void {
+  if (phase.items.length === 0) return;
+  console.log(pc.bold('\nArchived flag out of step with the account last used'));
+  if (dryRun) {
+    for (const item of phase.items) {
+      console.log(
+        `  ${pc.cyan('~')} ${item.to ? 'archive' : 'unarchive'} ${shortId(item.sessionId)}`,
+      );
+    }
+    return;
+  }
+  for (const outcome of phase.outcomes) {
+    console.log(
+      outcome.status === 'written'
+        ? `  ${pc.cyan('~')} ${outcome.to ? 'archived' : 'unarchived'} ${shortId(outcome.sessionId)}`
+        : `  ${pc.red('!')} ${shortId(outcome.sessionId)}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+    );
+  }
+}
+
 /**
  * `--prove`'s report: sets `process.exitCode` itself, the way a command that
  * finishes past its own `return` cannot otherwise leave a failure behind.
@@ -1673,6 +1703,12 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
           },
         }
       : {}),
+    archiveSync: {
+      counts: report.archiveSync.counts,
+      items: report.archiveSync.items,
+      skipped: report.archiveSync.skipped,
+      outcomes: report.archiveSync.outcomes,
+    },
     ...(report.dates
       ? {
           dates: {
