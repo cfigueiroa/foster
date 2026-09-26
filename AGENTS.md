@@ -1720,6 +1720,111 @@ that root here on purpose). `--config-dir <path>` is not accepted by `cloud` eit
 root's credential is reachable only by pointing `CLAUDE_CONFIG_DIR` at it directly and running
 `foster cloud` from inside that shell.
 
+### Two fixes measured 26/09/2026, ahead of `sweep --cloud`
+
+**`listCloudSessions` read only the first page.** The module comment above used to say every real
+account probed (2026-09-24, seven sessions) fit on one page, so the response's own pagination fields
+were never read. Measured directly against the real endpoint while building `sweep --cloud`
+(26/09/2026, a read-only `GET` with the default client's own token; raw output kept only in a scratch
+temp directory and deleted after reading): a real account with more than 20 sessions returns
+`{ data, next_cursor, resume_token }`, and a 20-item page still carrying a non-empty `next_cursor`.
+Re-requesting with `?cursor=<next_cursor>` returned the next page, a disjoint set of ids, with its own
+`next_cursor` — the same opaque base64 cursor `fetchTeleportEventsFrom` already reads for a different
+endpoint, not the `has_more`/`last_id` shape a first guess assumed before this was actually measured
+against the real API. `listCloudSessions` now follows `next_cursor` the same way, capped at 50 pages.
+`resume_token` is read by nothing here — it names a different resume mechanism outside this command's
+scope.
+
+**`cloud pull` wrote the transcript under the wrong root.** `pullCloudSession` writes wherever
+`env.CLAUDE_CONFIG_DIR` says (`claudeProjectsDir`, `store/transcripts.ts`) — correct on its own, since
+the function only ever does what its caller tells it. The CLI's own `cloud pull` action handed it
+`{ ...process.env, CLAUDE_CONFIG_DIR: client.configDir }` — the _source_ client's directory, the one
+`--client` named to fetch the session with. The Desktop app reads a card's transcript from the CLI's
+default `projects/` root (`~/.claude/projects`), the one every existing card's own transcript already
+lives under — not from an arbitrary client directory a `--client` flag happened to name. A pull from a
+non-default client wrote a transcript the app's session index never scans: the card existed, but
+opening it hit the same "cannot reach your computer" a stranded card shows. Fixed by using
+`scrubbedEnv(process.env)` (`engine/launchEnv.ts`, already used to keep a launched `Claude.exe` from
+inheriting a hosted session's own `CLAUDE*` markers) instead — it strips any inherited
+`CLAUDE_CONFIG_DIR` rather than pointing one at the source client, so the transcript always lands
+under the default root regardless of which client's credential fetched the session.
+
+## `foster sweep --cloud`: the fourth thing a sweep reaches
+
+Added 26/09/2026. `runSweep`'s own four passes (fostering, branches, restore, second-file) bring in
+every _local_ account's sidebar; `--cloud` adds a fifth kind of source a plain sweep cannot see at
+all — every cloud session (code.claude.com) any other signed-in CLI credential on this machine can
+reach — so switching to a different Desktop account still shows what was running in the cloud.
+
+Off by default, unlike the four in-process passes: it calls a private, undocumented API (see
+`engine/cloudApi.ts`'s own module comment) and decides where to write by guessing a local checkout
+from a git remote, neither of which the plain passes do. `--cloud-archived` additionally brings a
+session the cloud itself has archived, the same convention `--include-archived` follows elsewhere.
+
+**Implementation lives in `src/ops/cloudSweep.ts`, not inside `runSweep`.** Every existing pass reads
+from one synchronous scan and one `Lineage` built up front; this one makes network calls per account,
+which would have meant threading `async` through a function that has none today. `runSweepCommand`
+(`cli/index.ts`) calls `planCloudSweep` after `runSweep` returns, and `applyCloudSweep` when `--yes`
+was passed, folding the result into the same `--json` object (`cloud: {...}`), the same text summary,
+and the same exit code (a cloud-pull failure sets `process.exitCode = 1` on a real run, same as
+`sweepFailedCount` does for the other four passes).
+
+**Credentials**: every client `listClients(process.env)` names — never a `foster client register`ed
+fleet root, the same rule `resolveCloudClient` follows for a bare `foster cloud` — is asked for a
+cloud credential via `readCloudAuth`. The target account's own client is skipped outright (its cloud
+sessions are already in its own sidebar), and a second client signed into an account this plan has
+already read is skipped too, so two config directories sharing one login never pull the same session
+twice. An account whose credential refuses (expired, signed out, no cached organization) is reported
+per account with the fix ("run `claude` in `<dir>` to refresh") — never refreshed by this pass, same
+as `foster cloud` itself never refreshes one.
+
+**Matching a session to a local checkout**: a session names its repository, when it names one at all,
+as `config.sources[].url` or `config.outcomes[].git_info.repo` (`CloudRepoHint`, `cloudApi.ts`) —
+`normalizeRepoSlug` reduces either form (a clone URL, an `owner/repo` string, an scp-style
+`git@host:owner/repo`) to a lowercased `owner/repo` for comparison, never for a git operation. The
+candidate directories checked against it are: every `cwd`/`originCwd` the _target_ account's own cards
+name, every `cwd`/`originCwd` the _source_ account's cards name (found by matching the credential's
+own `accountUuid` against every organization directory `listAccountDirs` gives this store — a
+credential for an account this store has never fostered into contributes nothing extra, not an
+error), and, Windows only, every immediate child of `C:\repos` — the convention this machine's own
+`AGENTS.md`/`CLAUDE.md` already commit to for where a checkout lives. Each candidate is asked once
+per whole plan (`git -C <dir> remote get-url origin`, 5s timeout, cached by directory) rather than
+once per session, since the same directories are checked against every session that still needs a
+repo match. A session with no repo named at all, or whose repo matches no candidate, is skipped and
+named in the report (`no repository named on the session`, or `no local checkout for <owner/repo>`)
+rather than guessed at — the same "prove it, don't guess" rule the rest of this codebase follows for
+a filesystem match.
+
+**Already-imported and already-a-copy**: a session the ledger already shows as `conversation_imported`
+(from an earlier `cloud pull` or an earlier `--cloud` sweep) is skipped as `already pulled`, read the
+same way `pullCloudSession` itself checks before writing. Separately — and this is a correctness fix
+to `unfosterableReasons` (`domain/fostering.ts`), not part of the cloud-sweep pass itself — a card
+`import-codex` or `cloud pull` fabricated now always carries `already-a-copy` in its own account. Before
+this fix a fabricated card had no `_foster` marker (it is native to its own account, not a sweep's
+copy) and was not in the ledger's `activeByKey`, so nothing stopped an _ordinary_ `foster sweep` run
+against that account from copying the import onward into a third account as though it were the
+original conversation — and `sweep --cloud` would have hit the same hole from the cloud side, re-cloud-
+pulling a session that had already been imported to a _different_ local account by hand. `filter.ts`'s
+`applyFilter`/`blockingReasons` needed no change: they already exclude any session whose `reasons`
+is non-empty, so the one fix was making `unfosterableReasons` itself notice `_fosterImport`.
+
+**Apply**: for each planned item, `applyCloudSweep` re-reads the credential (a local file, not a
+network call) and calls the same `fetchCloudSession`/`fetchTeleportEvents`/`pullCloudSession` triple
+`foster cloud pull --yes` uses by hand, one session at a time — a failure on one session (network
+blip, a session deleted since the plan was read) is reported and does not abort the rest of the run,
+the same "per session, never fatal" convention `foster sweep`'s own passes already follow. The ledger
+is re-read fresh before every write, since an earlier item in the same apply may have just appended
+to it.
+
+**Real read-only run, this machine, 26/09/2026** (`FOSTER_HOME` pointed at a scratch copy of the real
+`ledger.jsonl`, `sweep --cloud --json`, no `--yes`): 12 sessions planned from the one client with a
+usable credential (`~/.claude` — matching the earlier-recorded fact that `~/.claude-frota`'s token was
+expired), 94 skipped for naming no repository, 19 skipped as archived in the cloud, zero accounts
+needing login and zero account errors in this run. Every session that did name a repository matched a
+local checkout — no `no local checkout for <owner/repo>` gaps surfaced this run, so that skip reason
+is exercised only by the test suite's synthetic fixtures (`tests/cloudSweep.test.ts`), not by this
+measurement. Session titles and repository names are personal data and are not reproduced here.
+
 ## Before pushing
 
 ```bash

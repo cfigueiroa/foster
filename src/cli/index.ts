@@ -96,6 +96,7 @@ import {
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
 import { formatLaunchCommand, openTerminalTab, planLaunch } from '../engine/launch.js';
+import { scrubbedEnv } from '../engine/launchEnv.js';
 import { buildFragment } from '../engine/fragment.js';
 import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
@@ -262,6 +263,14 @@ import {
   type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
+import {
+  applyCloudSweep,
+  cloudSweepJson,
+  cloudSweepSummary,
+  planCloudSweep,
+  type CloudSweepApplyResult,
+  type CloudSweepPlan,
+} from '../ops/cloudSweep.js';
 import { restartAround, type RestartAroundResult } from '../ops/restart.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
@@ -1144,6 +1153,12 @@ program
     'after planning, independently check every conversation is fully reachable from this account ' +
       '(exit 1 on any gap) — see `foster verify` for the layout-groups half of the same question',
   )
+  .option(
+    '--cloud',
+    'also bring in every cloud session (code.claude.com) any other signed-in CLI credential on ' +
+      'this machine can see, into a matching local git checkout — off by default; see `foster cloud`',
+  )
+  .option('--cloud-archived', 'with --cloud, also bring a session the cloud itself has archived')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
@@ -1165,6 +1180,8 @@ program
       detachDelay?: string;
       detachEvenWithLive?: boolean;
       prove?: boolean;
+      cloud?: boolean;
+      cloudArchived?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
@@ -1223,6 +1240,8 @@ async function runSweepCommand(
     detach?: boolean;
     detachEvenWithLive?: boolean;
     prove?: boolean;
+    cloud?: boolean;
+    cloudArchived?: boolean;
     json?: boolean;
     configDir?: string[];
   },
@@ -1287,6 +1306,28 @@ async function runSweepCommand(
       )
     : undefined;
 
+  // `--cloud` runs after the four in-process passes above, not folded into
+  // `runSweep` itself — see `ops/cloudSweep.ts`'s own module comment for why.
+  // A dry run only plans; `--yes` plans and then writes, same as every other
+  // pass. A cloud-pull failure counts toward the exit code the same way a
+  // failed write anywhere else in this command does.
+  let cloudFailedCount = 0;
+  const cloudResult: CloudSweepPlan | CloudSweepApplyResult | undefined = opts.cloud
+    ? await (async (): Promise<CloudSweepPlan | CloudSweepApplyResult> => {
+        const plan = await planCloudSweep({
+          store,
+          ledger,
+          target,
+          includeArchived: Boolean(opts.cloudArchived),
+        });
+        if (dryRun) return plan;
+        const applied = await applyCloudSweep({ store, ledger, target, plan });
+        cloudFailedCount = applied.failed;
+        return applied;
+      })()
+    : undefined;
+  if (!dryRun && cloudFailedCount > 0) process.exitCode = 1;
+
   // Named here, not in `sweepRestart` itself: a layout is planned but never
   // applied by the sweep, so the command handed over on a restart has to be
   // the one that actually finishes the job — `foster layout` restarts the
@@ -1315,6 +1356,7 @@ async function runSweepCommand(
       print({
         ...sweepJson(report),
         ...(proveReport ? { prove: proveReport } : {}),
+        ...(cloudResult ? { cloud: cloudSweepJson(cloudResult) } : {}),
         detach:
           outcome.ok && outcome.plan && outcome.launch
             ? {
@@ -1340,7 +1382,12 @@ async function runSweepCommand(
       restartCommand,
       deferredSweepGap(store, ledger, target, report),
     );
-    print({ ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}), restart });
+    print({
+      ...sweepJson(report),
+      ...(proveReport ? { prove: proveReport } : {}),
+      ...(cloudResult ? { cloud: cloudSweepJson(cloudResult) } : {}),
+      restart,
+    });
     if (proveReport && !proveReport.complete) process.exitCode = 1;
     return;
   }
@@ -1359,6 +1406,11 @@ async function runSweepCommand(
 
   console.log('');
   for (const line of sweepSummary(report)) console.log(line);
+
+  if (cloudResult) {
+    console.log('');
+    for (const line of cloudSweepSummary(cloudResult, dryRun)) console.log(line);
+  }
 
   if (proveReport) printProve(proveReport);
 
@@ -7412,6 +7464,19 @@ cloud
     }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
+    // The transcript goes under the CLI's *default* `projects/` root
+    // (`~/.claude/projects`, `claudeProjectsDir`'s own fallback), never
+    // `--client`'s config directory. `--client` only names which credential
+    // fetches the session; the Desktop app reads a card's transcript from the
+    // one CLI root every account's existing cards already live under, and a
+    // build that instead pointed `CLAUDE_CONFIG_DIR` at the source client
+    // wrote the transcript somewhere the app's own session index never scans
+    // — the card would exist but "cannot reach your computer" the same way a
+    // stranded card does. `scrubbedEnv` — the same helper a launched
+    // Claude.exe gets, see `engine/launchEnv.ts` — strips any `CLAUDE_CONFIG_DIR`
+    // (and every other `CLAUDE*` variable) this process itself inherited, so a
+    // `foster cloud pull` run from inside a hosted or non-default session does
+    // not silently write there either.
     const outcome: CloudPullOutcome = pullCloudSession(resolvedId, detail, events, {
       store,
       ledger,
@@ -7419,7 +7484,7 @@ cloud
       target,
       cwd,
       dryRun,
-      env: { ...process.env, CLAUDE_CONFIG_DIR: client.configDir },
+      env: scrubbedEnv(process.env),
     });
 
     if (outcome.status === 'failed') {

@@ -7,6 +7,7 @@ import type { AccountRef, CodeSessionData, StoreLayout } from '../src/domain/typ
 import type { CloudSessionDetail, TeleportEvent } from '../src/engine/cloudApi.js';
 import { pullCloudSession } from '../src/engine/cloudImportWrite.js';
 import { undoCodexImports } from '../src/engine/codexImportWrite.js';
+import { scrubbedEnv } from '../src/engine/launchEnv.js';
 import { Ledger } from '../src/ledger/log.js';
 import { listImported, project } from '../src/ledger/project.js';
 import { claudeProjectsDir, projectDirName } from '../src/store/transcripts.js';
@@ -284,5 +285,45 @@ describe('sessionPath agrees with what pullCloudSession wrote', () => {
     const outcome = run(false);
     const card = JSON.parse(readFileSync(outcome.cardPath!, 'utf8')) as CodeSessionData;
     expect(outcome.cardPath).toBe(sessionPath(store, TARGET, card.sessionId));
+  });
+});
+
+describe('the transcript root a real cloud pull writes under', () => {
+  // Regression for the CLI wiring bug: `foster cloud pull` used to hand
+  // `pullCloudSession` an `env` with `CLAUDE_CONFIG_DIR` pointed at the
+  // *source* client's own config directory (the one `--client` names, which
+  // fetched the session), not the CLI's default root the Desktop app's own
+  // session index actually scans. `pullCloudSession` itself only ever does
+  // what its `env` says — this reproduces the caller's own construction,
+  // `scrubbedEnv(process.env)`, rather than re-testing `claudeProjectsDir`.
+  it('lands under the default CLI root, never a --client config directory', () => {
+    const sourceClientDir = mkdtempSync(path.join(tmpdir(), 'foster-cloud-src-client-'));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = sourceClientDir;
+    try {
+      const outcome = pullCloudSession(CLOUD_ID, detail(), events(), {
+        store,
+        ledger,
+        state: project(ledger.read()),
+        target: TARGET,
+        cwd: CWD,
+        dryRun: false,
+        env: scrubbedEnv(process.env),
+        now: 1_700_000_000_000,
+      });
+      expect(outcome.status).toBe('imported');
+      expect(outcome.transcriptPath).toBeDefined();
+      expect(outcome.transcriptPath!.startsWith(sourceClientDir)).toBe(false);
+      // `{}` rather than `process.env`: at this point in the test
+      // `process.env.CLAUDE_CONFIG_DIR` is still the source client's
+      // directory, and the point of this assertion is what the default root
+      // is *without* that override — the same default `scrubbedEnv` restores.
+      const expectedRoot = path.join(claudeProjectsDir({}), projectDirName(CWD));
+      expect(path.dirname(outcome.transcriptPath!)).toBe(expectedRoot);
+      expect(existsSync(outcome.transcriptPath!)).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
   });
 });
