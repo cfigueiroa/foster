@@ -200,6 +200,21 @@ function settingsOf(store: StoreLayout): Record<string, unknown> | undefined {
  * add one at any release, and silently dropping it would make this reader a
  * worse witness than the file it is reading.
  */
+/** One preference's effective value — the stored one, or the app's default when none is stored. */
+export function appPrefValue(store: StoreLayout, name: string): unknown {
+  return readAppPrefs(store).find((reading) => reading.name === name)?.value;
+}
+
+/**
+ * Whether the app re-archives this card on its own at startup: `ccAutoArchiveOnPrClose` is on and
+ * the card carries a pull request (`prs`). Measured 26/09/2026: eleven rows `archive_synced`
+ * unarchived were archived again by the app four minutes later, at its next start, every one with
+ * a long-closed PR on the card — un-archiving such a row is a write the app always takes back.
+ */
+export function appArchivesOnPrClose(data: { prs?: unknown }, enabled: boolean): boolean {
+  return enabled && Array.isArray(data.prs) && data.prs.length > 0;
+}
+
 export function readAppPrefs(store: StoreLayout, all = false): PrefReading[] {
   const stored = settingsOf(store) ?? {};
   const names = all

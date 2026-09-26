@@ -4,6 +4,7 @@ import type { AccountRef, DiscoveredSession } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { lastForsterArchiveWrite, project, type LedgerState } from '../ledger/project.js';
 import type { ActiveFostering } from '../ledger/types.js';
+import { appArchivesOnPrClose } from '../store/appPrefs.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import { errorMessage } from '../util/fs.js';
 import { writeFileAtomic } from '../util/fsatomic.js';
@@ -121,6 +122,7 @@ export interface ArchiveSyncSkipped {
     | 'tied-sources'
     | 'marked'
     | 'used-here-last'
+    | 'app-archives'
     | 'changed-by-hand'
     | 'foster-marked';
 }
@@ -149,6 +151,11 @@ export interface PlanArchiveSyncOptions {
    * so `lastForsterArchiveWrite` cannot see the mark on its own.
    */
   markedThisRound?: ReadonlySet<string>;
+  /**
+   * The app's own `ccAutoArchiveOnPrClose`. When on, a row carrying a pull request is never
+   * un-archived here: the app archives it again at its next start (`appArchivesOnPrClose`).
+   */
+  appArchivesOnPrClose?: boolean;
 }
 
 export function planArchiveSync(
@@ -202,6 +209,14 @@ export function planArchiveSync(
     const current = Boolean(card.data.isArchived);
     if (desired === current) {
       skipped.push({ sessionId, reason: 'already-matches' });
+      continue;
+    }
+
+    if (
+      !desired &&
+      appArchivesOnPrClose(card.data as { prs?: unknown }, options.appArchivesOnPrClose ?? false)
+    ) {
+      skipped.push({ sessionId, reason: 'app-archives' });
       continue;
     }
 

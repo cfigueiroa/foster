@@ -26,6 +26,7 @@ import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/
 import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
 import { applyPinMoves, planPinMoves, type PinMove } from '../engine/pinMoves.js';
 import { planArchiveMarksBack, planMarksBack } from '../engine/marksBack.js';
+import { appPrefValue } from '../store/appPrefs.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -1283,6 +1284,7 @@ function confirm(
         target,
         targetCards: hereCards,
         otherCards: run.fromSources,
+        appArchivesOnPrClose: appPrefValue(run.store, 'ccAutoArchiveOnPrClose') === true,
       }).items.length
     : undefined;
 
@@ -1660,6 +1662,7 @@ function runArchiveSync(
     otherCards: run.fromSources,
     runTemplates,
     markedThisRound,
+    appArchivesOnPrClose: appPrefValue(run.store, 'ccAutoArchiveOnPrClose') === true,
   });
   const outcomes = dryRun ? [] : applyArchiveSync(plan.items, { ledger });
   const counts = { written: 0, skipped: 0, failed: 0 };

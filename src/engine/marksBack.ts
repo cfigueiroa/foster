@@ -2,6 +2,7 @@ import { statSync } from 'node:fs';
 import { comparablePath, sameAccount, storeRootOfCopy } from '../domain/paths.js';
 import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { ArchiveSyncedEvent, CardRetitledEvent, LedgerEvent } from '../ledger/types.js';
+import { appArchivesOnPrClose, appPrefValue } from '../store/appPrefs.js';
 import { readSessionFile } from '../store/sessionFile.js';
 import type { ArchiveSyncItem } from './archiveSync.js';
 import type { RetitleRequest } from './retitle.js';
@@ -110,6 +111,9 @@ export function planArchiveMarksBack(
   mtimeOf: (file: string) => number | undefined = fileMtime,
 ): ArchiveSyncItem[] {
   const root = comparablePath(store.root);
+  let prClose: boolean | undefined;
+  const archivesOnPrClose = (): boolean =>
+    (prClose ??= appPrefValue(store, 'ccAutoArchiveOnPrClose') === true);
   const last = new Map<string, ArchiveSyncedEvent | CardRetitledEvent>();
   for (const event of events) {
     if (
@@ -130,6 +134,8 @@ export function planArchiveMarksBack(
     if (!card) continue;
     const now = Boolean(card.isArchived);
     if (now !== event.from || now === event.to) continue;
+    // An un-archive the app takes back by its own rule is not a write to repeat.
+    if (!event.to && appArchivesOnPrClose(card as { prs?: unknown }, archivesOnPrClose())) continue;
     // A bare flag carries no history the way a title does (`worn`), so the
     // app saving its stale copy back over the write and a person flipping it
     // back by hand look identical on disk. Timing tells them apart: the app's

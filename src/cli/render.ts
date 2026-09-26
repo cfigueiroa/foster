@@ -1069,6 +1069,12 @@ export function sweepSummary(report: SweepReport): string[] {
       `${usedHereLast} archived flag(s) left alone: used here more recently than the account that would set the flag.`,
     );
   }
+  const appArchives = archives.skipped.filter((skip) => skip.reason === 'app-archives').length;
+  if (appArchives > 0) {
+    lines.push(
+      `${appArchives} row(s) left archived: each carries a pull request, and the app re-archives those on its own (ccAutoArchiveOnPrClose).`,
+    );
+  }
 
   const confirmation = report.confirmation;
   if (confirmation) {
