@@ -5085,7 +5085,7 @@ profile
       'name it answers to for --store.\n\n' +
       'foster writes nothing inside it beyond the directory itself: Claude Desktop populates a\n' +
       'profile — config.json, Local State, everything else — the first time it runs with\n' +
-      '--user-data-dir pointed there (see "What about switching accounts?" in the README).\n' +
+      '--user-data-dir pointed there (see "What about switching accounts?" in docs/guide/accounts-and-clients.md).\n' +
       'This does not sign anything in, and a profile is never copied, synced, restored from\n' +
       'backup, or moved to another machine — its credential cache is sealed to the one that\n' +
       'made it, so doing any of that only signs it out in silence.',
