@@ -333,6 +333,33 @@ describe('unfosterableReasons', () => {
     const copy = buildFosterCopy(session(), { origin: OLD_ACCOUNT });
     expect(unfosterableReasons(copy)).toContain('already-a-copy');
   });
+
+  it('rejects a card foster cloud pull fabricated, so it is never swept onward as a native source', () => {
+    const imported = session({
+      _fosterImport: {
+        source: 'cloud',
+        sourceRolloutPath: 'cloud session cse_1',
+        rolloutId: 'cse_1',
+        contentHash: 'abc',
+        importedAt: 1,
+        toolVersion: '1.0.0',
+      },
+    });
+    expect(unfosterableReasons(imported)).toContain('already-a-copy');
+  });
+
+  it('rejects a card import-codex fabricated the same way, with no source field at all', () => {
+    const imported = session({
+      _fosterImport: {
+        sourceRolloutPath: '/home/x/.codex/sessions/rollout.jsonl',
+        rolloutId: 'rollout-1',
+        contentHash: 'abc',
+        importedAt: 1,
+        toolVersion: '1.0.0',
+      },
+    });
+    expect(unfosterableReasons(imported)).toContain('already-a-copy');
+  });
 });
 
 describe('identity', () => {

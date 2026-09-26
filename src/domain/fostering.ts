@@ -105,6 +105,18 @@ export function unfosterableReasons(data: CodeSessionData, knownCopy = false): U
   // session back through a fixed list of fields, so a copy it has loaded and
   // saved comes back without `_foster`. The caller passes what the ledger knows.
   if (data._foster || knownCopy) reasons.push('already-a-copy');
+  // A card `import-codex`/`foster cloud pull` fabricated is native to this
+  // account — nothing elsewhere reaches it the way a sweep's own copy does —
+  // but it is still a copy of something that lives outside this account
+  // entirely (a Codex rollout, a cloud session), and offering it back to the
+  // sweep as a *source* would let `foster sweep --cloud` (or an ordinary
+  // sweep run against another account that already ran `import-codex`) copy
+  // an import onward as though it were the origin. `_foster` above already
+  // catches this for a card without `knownCopy` set; `_fosterImport` is the
+  // one shape that check misses, since it never runs through the ledger's
+  // fostering-key fold at all — it is folded from `conversation_imported`
+  // instead.
+  else if (data._fosterImport) reasons.push('already-a-copy');
   return reasons;
 }
 

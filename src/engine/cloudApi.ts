@@ -205,53 +205,86 @@ export interface CloudSessionSummary {
   repo: CloudRepoHint;
 }
 
+/** Kept so a runaway cursor cannot page forever — the same reasoning as `TELEPORT_MAX_PAGES`. */
+const SESSIONS_MAX_PAGES = 50;
+
 /**
- * `GET /v1/code/sessions` — every cloud session on this account.
+ * `GET /v1/code/sessions` — every cloud session on this account, paginated.
  *
  * Sends no `x-organization-uuid`: measured against the real endpoint (and
  * matching the bundle's own `iar()`), the list call authenticates purely off
- * the bearer token's own account. Only one page is read — the bundle's
- * `x9r`/cursor-paginated variant exists for a larger `ccr:list` internal
- * surface this command does not need, and every real account probed here
- * returned its whole list (seven sessions) in one page.
+ * the bearer token's own account.
+ *
+ * The first cut of this function read only the first page: every account
+ * probed while this module was first written (2026-09-24) returned its whole
+ * list — seven sessions — in one page, so the response's own pagination
+ * fields were never read. Measured directly against the real endpoint while
+ * fixing `foster sweep --cloud` (2026-09-26, a read-only `GET` with the
+ * default client's own token, raw output kept only in a scratch temp
+ * directory and deleted after reading): a real account with more than one
+ * page returns `{ data, next_cursor, resume_token }`, and a page 20 items
+ * long (this account has more than that) still carries a non-empty
+ * `next_cursor`. Re-requesting with `?cursor=<next_cursor>` returned the next
+ * 20, a different set of ids, with its own `next_cursor` — the same opaque
+ * base64 cursor `fetchTeleportEventsFrom` already reads for a different
+ * endpoint, not the `has_more`/`last_id` shape an earlier guess assumed
+ * before this was actually measured. An empty or absent `next_cursor` is what
+ * ends the loop; `resume_token` is read by neither this function nor anything
+ * downstream — it names a different resume mechanism the bundle uses
+ * elsewhere, outside this command's scope.
  */
 export async function listCloudSessions(
   auth: CloudAuth,
 ): Promise<CloudSessionSummary[] | CloudApiError> {
-  const result = await get(`${BASE}/v1/code/sessions`, baseHeaders(auth));
-  if (isError(result)) return result;
-
-  let body: { data?: unknown[] };
-  try {
-    body = (await result.json()) as { data?: unknown[] };
-  } catch (error) {
-    return { code: 'unexpected', message: `could not parse the session list: ${String(error)}` };
-  }
-
   const out: CloudSessionSummary[] = [];
-  for (const raw of body.data ?? []) {
-    if (typeof raw !== 'object' || raw === null) continue;
-    const s = raw as Record<string, unknown>;
-    if (typeof s.id !== 'string') continue;
-    const config =
-      typeof s.config === 'object' && s.config !== null
-        ? (s.config as Record<string, unknown>)
-        : undefined;
-    out.push({
-      id: s.id,
-      title: typeof s.title === 'string' && s.title !== '' ? s.title : 'Untitled',
-      status:
-        s.status === 'archived'
-          ? 'archived'
-          : typeof s.worker_status === 'string'
-            ? s.worker_status
-            : 'idle',
-      ...(typeof s.environment_kind === 'string' ? { environmentKind: s.environment_kind } : {}),
-      ...(typeof s.created_at === 'string' ? { createdAt: s.created_at } : {}),
-      ...(typeof s.last_event_at === 'string' ? { lastEventAt: s.last_event_at } : {}),
-      repo: repoHintFrom(config),
-    });
+  let cursor: string | undefined;
+
+  for (let page = 0; page < SESSIONS_MAX_PAGES; page++) {
+    const params: Record<string, string> = {};
+    if (cursor !== undefined) params.cursor = cursor;
+
+    const result = await get(`${BASE}/v1/code/sessions`, baseHeaders(auth), params);
+    if (isError(result)) return result;
+
+    let body: { data?: unknown[]; next_cursor?: unknown };
+    try {
+      body = (await result.json()) as typeof body;
+    } catch (error) {
+      return {
+        code: 'unexpected',
+        message: `could not parse the session list: ${String(error)}`,
+      };
+    }
+
+    for (const raw of body.data ?? []) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const s = raw as Record<string, unknown>;
+      if (typeof s.id !== 'string') continue;
+      const config =
+        typeof s.config === 'object' && s.config !== null
+          ? (s.config as Record<string, unknown>)
+          : undefined;
+      out.push({
+        id: s.id,
+        title: typeof s.title === 'string' && s.title !== '' ? s.title : 'Untitled',
+        status:
+          s.status === 'archived'
+            ? 'archived'
+            : typeof s.worker_status === 'string'
+              ? s.worker_status
+              : 'idle',
+        ...(typeof s.environment_kind === 'string' ? { environmentKind: s.environment_kind } : {}),
+        ...(typeof s.created_at === 'string' ? { createdAt: s.created_at } : {}),
+        ...(typeof s.last_event_at === 'string' ? { lastEventAt: s.last_event_at } : {}),
+        repo: repoHintFrom(config),
+      });
+    }
+
+    const next = typeof body.next_cursor === 'string' ? body.next_cursor : undefined;
+    if (!next) break;
+    cursor = next;
   }
+
   return out;
 }
 

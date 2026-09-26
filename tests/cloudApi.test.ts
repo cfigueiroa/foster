@@ -98,6 +98,57 @@ describe('listCloudSessions', () => {
     const result = await listCloudSessions(AUTH);
     expect(isCloudApiError(result) && result.code).toBe('unauthorized');
   });
+
+  it('follows next_cursor across pages, the shape measured against the real endpoint', async () => {
+    const calls = stubFetch([
+      {
+        status: 200,
+        body: {
+          data: [{ id: 'cse_page1' }],
+          next_cursor: 'CURSOR_1',
+        },
+      },
+      {
+        status: 200,
+        body: {
+          data: [{ id: 'cse_page2' }],
+          next_cursor: '',
+        },
+      },
+    ]);
+    const result = await listCloudSessions(AUTH);
+    expect(isCloudApiError(result)).toBe(false);
+    expect((result as { id: string }[]).map((s) => s.id)).toEqual(['cse_page1', 'cse_page2']);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.url).not.toContain('cursor=');
+    expect(calls[1]!.url).toContain('cursor=CURSOR_1');
+  });
+
+  it('stops at one page when next_cursor is absent', async () => {
+    const calls = stubFetch([{ status: 200, body: { data: [{ id: 'cse_only' }] } }]);
+    const result = await listCloudSessions(AUTH);
+    expect(isCloudApiError(result)).toBe(false);
+    expect((result as { id: string }[]).map((s) => s.id)).toEqual(['cse_only']);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('caps pagination rather than looping forever on a cursor that never ends', async () => {
+    let requestCount = 0;
+    vi.stubGlobal('fetch', () => {
+      requestCount++;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        statusText: 'ok',
+        json: () =>
+          Promise.resolve({ data: [{ id: `cse_${requestCount}` }], next_cursor: 'ALWAYS_MORE' }),
+      } as Response);
+    });
+    const result = await listCloudSessions(AUTH);
+    expect(isCloudApiError(result)).toBe(false);
+    expect(requestCount).toBe(50);
+    expect((result as { id: string }[]).length).toBe(50);
+  });
 });
 
 describe('fetchCloudSession', () => {
