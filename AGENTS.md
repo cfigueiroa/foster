@@ -2012,6 +2012,15 @@ already cleared it — except a copy the branch pass archived on purpose (`Foste
 `ActiveFostering.archivedByFoster`), which is that pass's own decision to own, the same as a title
 mark, and is left alone here too (`foster-marked`).
 
+**The app re-archives a row with a pull request, so this pass never un-archives one.** Measured
+26/09/2026, first real `/fosteia` on 0.63.0: of 12 rows this pass un-archived, 11 were archived again
+by the app itself four minutes later, at its next start, and `foster verify` reported all 11 as
+"reverted". Every one carried a long-closed pull request on its card (`prs`), and the app's own
+`ccAutoArchiveOnPrClose` preference was on: the app archives such a row on its own, every start. With
+that preference on (`appArchivesOnPrClose`, `store/appPrefs.ts`), a row carrying `prs` is left
+archived (`app-archives`) rather than un-archived, and `planArchiveMarksBack` does not repeat such an
+un-archive either, so `verify` stops flagging a write the app always takes back.
+
 A tie in recency between two sources that disagree on the flag settles nothing — a spawned or
 never-opened card's `lastActivityAt` is a placeholder rather than a real moment, and picking one
 side would be an array-order accident — so the card is left alone (`tied-sources`) rather than

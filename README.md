@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/assets/banner.svg" alt="foster — every Claude Desktop Code session, in the account you are signed into now" width="100%"/>
+  <img src="docs/assets/banner.svg" alt="foster: every Claude Desktop Code session, in the account you are signed into now" width="100%"/>
 </p>
 
 <h1 align="center">foster</h1>
 
 <p align="center">
   <strong>Switch Claude Desktop accounts without losing a single Code session.</strong><br/>
-  One sweep brings every conversation — archived, deleted and forked — into the account signed in now.<br/>
+  One sweep brings every conversation (archived, deleted and forked) into the account signed in now.<br/>
   One layout brings its pins, sidebar groups, routines and settings along.
 </p>
 
@@ -26,7 +26,7 @@
   <a href="docs/guide/README.md">Full guide</a>
 </p>
 
-> **Status:** early, and Windows-first — that is where Claude Desktop ships as an MSIX package.
+> **Status:** early, and Windows-first, since that is where Claude Desktop ships as an MSIX package.
 > Every command that writes is a dry run until you pass `--yes`. Read the
 > [safety model](docs/guide/safety-model.md) before running anything that writes.
 
@@ -35,7 +35,7 @@
 ## 😩 The problem
 
 Claude Desktop files each Code session under the folder of the **account** you were signed into.
-There is no account field inside the session — only the folder. So when one account runs out of
+There is no account field inside the session, only the folder. So when one account runs out of
 quota and you sign into another, the sidebar goes empty: every conversation you had is still on your
 disk, intact, and invisible. The transcripts themselves are account-agnostic; only a pointer has to
 move. [How it works →](docs/guide/how-it-works.md)
@@ -46,8 +46,8 @@ move. [How it works →](docs/guide/how-it-works.md)
   <tr>
     <td width="33%" valign="top">
       <h3>🧹 One sweep, everything</h3>
-      <code>foster sweep</code> copies every session from every other account — <b>archived included</b>
-      — and brings back conversations the app deleted that nothing points at. It re-scans until it can
+      <code>foster sweep</code> copies every session from every other account, <b>archived included</b>,
+      and brings back conversations the app deleted that nothing points at. It re-scans until it can
       say <i>“Nothing is left to sweep”</i>.
     </td>
     <td width="33%" valign="top">
@@ -108,14 +108,14 @@ move. [How it works →](docs/guide/how-it-works.md)
     </td>
     <td valign="top">
       <h3>👥 Accounts and clients</h3>
-      Who is signed in where, which plan, live 5-hour and weekly limits, renewals — and CLI clients
+      Who is signed in where, which plan, live 5-hour and weekly limits, renewals, and CLI clients
       opened as any account in their own terminal tab.
     </td>
   </tr>
 </table>
 
 > 🆕 marks what is new in **0.63.0** (PRs
-> [#159](https://github.com/cfigueiroa/foster/pull/159)–[#163](https://github.com/cfigueiroa/foster/pull/163)).
+> [#159](https://github.com/cfigueiroa/foster/pull/159) to [#163](https://github.com/cfigueiroa/foster/pull/163)).
 
 ## 🔀 The account switch, end to end
 
@@ -141,7 +141,7 @@ irm https://github.com/cfigueiroa/foster/releases/latest/download/install.ps1 | 
 Pass `-NoLaunch` to skip opening the guided menu at the end. To pin a version, fetch
 `https://raw.githubusercontent.com/cfigueiroa/foster/v<version>/install.ps1` instead.
 
-**2. Check the machine** — which store, which account, whether the app is running:
+**2. Check the machine:** which store, which account, whether the app is running:
 
 ```bash
 foster doctor
@@ -154,7 +154,7 @@ foster sweep          # what it would do
 foster sweep --yes    # do it
 ```
 
-**4. Bring the layout and restart** — the app only sees new sessions after it starts again, and
+**4. Bring the layout and restart.** The app only sees new sessions after it starts again, and
 groups, pins and routines can only be written while it is closed:
 
 ```bash
@@ -186,8 +186,8 @@ flowchart TD
     R -- no --> Z(["Nothing is left to sweep"])
 ```
 
-The sweep also counts what can **never** come — scheduled tasks, sessions never opened, files over the
-10 MB the app refuses to load — so a gap is named rather than hidden.
+The sweep also counts what can **never** come (scheduled tasks, sessions never opened, files over the
+10 MB the app refuses to load), so a gap is named rather than hidden.
 
 ### 🌿 Forks: which row to open
 
@@ -204,7 +204,7 @@ flowchart TD
     W --> W1["(other branch, went on DD/MM HH:MM) …<br/>stays in the sidebar"]
 ```
 
-"Went on" is judged on the last **answer**, never the last record — opening a stale row appends a
+"Went on" is judged on the last **answer**, never the last record: opening a stale row appends a
 click, not work. The words are yours: `--stale-prefix`, `--branch-prefix`, `--other-file-prefix`.
 More in [sweep & forks](docs/guide/sweep-and-forks.md) and
 [one conversation, two files](docs/guide/two-file-conversations.md).
@@ -212,7 +212,7 @@ More in [sweep & forks](docs/guide/sweep-and-forks.md) and
 ## 🗺️ Where each piece of state lives
 
 Nothing in Claude Desktop keeps "a session" in one place. foster reads all of these, and writes each
-only the way — and at the moment — it is safe to.
+only the way, and at the moment, it is safe to.
 
 ```mermaid
 graph LR
@@ -220,7 +220,7 @@ graph LR
         CARDS["Session cards (JSON)<br/>claude-code-sessions/account/org/local_id.json"]
         CFG["claude_desktop_config.json<br/>groups · per-account filters · app prefs"]
         LS["Local Storage (LevelDB)<br/>group-by · sort · group mirrors"]
-        IDB["IndexedDB (LevelDB)<br/>pins — one list per installation"]
+        IDB["IndexedDB (LevelDB)<br/>pins: one list per installation"]
         RT["scheduled-tasks.json<br/>routines, per account/org"]
     end
     subgraph CLI["Claude Code CLI"]
@@ -244,7 +244,7 @@ Why the app has to be closed for some of these, and how groups survive the serve
 
 ## 📈 Measured, not assumed
 
-Every number in this repository comes from a real store — one machine, one set of accounts — and is
+Every number in this repository comes from a real store (one machine, one set of accounts) and is
 stated with the date it was measured in [AGENTS.md](AGENTS.md). A few of the performance ones:
 
 ```mermaid
@@ -256,7 +256,7 @@ xychart-beta
 ```
 
 <sub>Sweep dry run with the <code>/fosteia</code> flags on a store of 25,174 cards; <code>foster grep</code> for an absent term over
-11,202 transcripts (13.6 GB), after-figure 7–9 s.</sub>
+11,202 transcripts (13.6 GB), after-figure 7 to 9 s.</sub>
 
 And why `revive` learned to look past usage limits: how the last turn of every transcript ended, over
 one week on the same machine (570 files):
@@ -328,7 +328,7 @@ without `--yes`; most take `--json`.
 | `foster status`                            | What is currently fostered                                                            |
 | `foster pin`                               | Pin sessions in the sidebar, or see what is pinned                                    |
 | `foster cache clear`                       | Delete the persistent scan cache (safe; it rebuilds)                                  |
-| `foster purge`                             | ⚠️ Destroy the conversations behind deleted sessions — no undo                        |
+| `foster purge`                             | ⚠️ Destroy the conversations behind deleted sessions, no undo                         |
 
 </details>
 
@@ -367,10 +367,10 @@ without `--yes`; most take `--json`.
 | Command                       | What it does                                                      |
 | ----------------------------- | ----------------------------------------------------------------- |
 | `foster live`                 | Conversations a claude process holds open (`--stop`, `--prune`)   |
-| `foster revive`               | Sessions a usage limit stopped — the work list for `/retoma`      |
+| `foster revive`               | Sessions a usage limit stopped: the work list for `/retoma`       |
 | `foster rescue`               | Conversations stranded by a crash (`--open` for a tab each)       |
 | `foster unstarted`            | Background-task requests whose session died before answering once |
-| `foster detached --last`      | What the last `--detach` run did — read after the app comes back  |
+| `foster detached --last`      | What the last `--detach` run did, read after the app comes back   |
 | `foster transcript <id>`      | Read a conversation's transcript                                  |
 | `foster resume <id> <prompt>` | Send one prompt to an existing conversation, headlessly           |
 | `foster grep <regex>`         | Search every transcript by what was actually said                 |
@@ -406,7 +406,7 @@ reasoning behind each command: [usage](docs/guide/usage.md) ·
   never seen; deleting a copy can never reach the original.
 - **Dry run by default.** Nothing is written without `--yes`.
 - **Everything is recorded.** Each finished write is appended to `~/.foster/ledger.jsonl`, and the
-  ledger — not the titles, not a marker the app may drop — decides what `return`, `sync-titles` and
+  ledger (not the titles, not a marker the app may drop) decides what `return`, `sync-titles` and
   `verify` do.
 - **Adding is safe while the app runs; removing is not.** `return` refuses a copy the running app has
   already loaded, and offers to close the app first.
@@ -425,7 +425,7 @@ This repository ships two commands for a Claude Code session running inside Clau
 | Command    | What it does                                                                                                                                                                                       |
 | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/fosteia` | The whole switch in one go: checks the installed foster is current, runs `foster sweep --yes --sync-titles --restart` with the three marks in Portuguese, then a detached `foster layout` restart. |
-| `/retoma`  | The step after: reads `foster revive --json` and sends each stopped session one message — the quota is back, carry on by highest return — through the app's own session tools.                     |
+| `/retoma`  | The step after. Reads `foster revive --json` and sends each session a usage limit stopped, or a restart cut off, one message through the app's own session tools: carry on, highest return first.  |
 
 Neither asks for confirmation: every copy is undone by `foster return`, and running the command is
 the decision.
@@ -441,7 +441,7 @@ npm run build           # single-file bundle in dist/
 
 Tests run against synthetic stores in a temporary directory and never touch a real installation.
 The repository is public, so `npm run privacy` rejects any Windows user-profile path or realistic
-account uuid anywhere `git add -A` would pick up — fixture uuids look like
+account uuid anywhere `git add -A` would pick up; fixture uuids look like
 `00000000-0000-4000-8000-00000000000a`. CI, the coverage floor and releasing:
 [development](docs/guide/development.md). Notes for agents working here: [AGENTS.md](AGENTS.md).
 
@@ -493,7 +493,7 @@ anyone in, and never logs, prints or puts a token on a command line.
 <details>
 <summary><b>Can I switch the Desktop app's account without signing out?</b></summary>
 
-Not by editing anything on disk — the app keeps its account in memory, and no file, flag or deep link
+Not by editing anything on disk: the app keeps its account in memory, and no file, flag or deep link
 selects one. A second Desktop profile is a second account beside the first (`foster profile`,
 `foster app login`). What foster does instead is make the account you switch to look like the one you
 left, and switch **CLI** clients between accounts, where the account really is a file.
@@ -522,4 +522,4 @@ left, and switch **CLI** clients between accounts, where the account really is a
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

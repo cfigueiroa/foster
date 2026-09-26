@@ -151,6 +151,31 @@ describe('planArchiveSync / applyArchiveSync', () => {
     expect(plan.skipped).toEqual([{ sessionId: 'local_clean', reason: 'no-source' }]);
   });
 
+  it('never unarchives a row with a pull request while the app re-archives those on its own', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+    const pr = [{ prNumber: 1, repo: 'acme/widgets', url: 'https://example.invalid/pr/1' }];
+    const hereData = card('local_copy', {
+      isArchived: true,
+      lastActivityAt: 1_000,
+      prs: pr,
+    } as never);
+    const copyPath = writeCard(store, TARGET, hereData);
+    const sourceData = card('local_origin', { isArchived: false, lastActivityAt: 3_000 });
+    const originPath = writeCard(store, OTHER_A, sourceData);
+
+    const options = {
+      target: TARGET,
+      targetCards: [ds(copyPath, TARGET, hereData)],
+      otherCards: [ds(originPath, OTHER_A, sourceData)],
+    };
+    expect(planArchiveSync(ledger, { ...options, appArchivesOnPrClose: true }).skipped).toEqual([
+      { sessionId: 'local_copy', reason: 'app-archives' },
+    ]);
+    // With the app's rule off, the row follows its source as before.
+    expect(planArchiveSync(ledger, options).items).toHaveLength(1);
+  });
+
   it('a copy follows its source back into being unarchived, once foster already owns the flag', () => {
     const store = makeStore();
     const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
@@ -530,6 +555,32 @@ describe('planArchiveMarksBack', () => {
 
     const items = planArchiveMarksBack(ledger.read(), TARGET, store, undefined, () => handFlip);
     expect(items).toHaveLength(0);
+  });
+
+  it('does not repeat an unarchive the app takes back for a row with a pull request', () => {
+    const store = makeStore();
+    writeFileSync(
+      store.desktopConfigFile,
+      JSON.stringify({ preferences: { ccAutoArchiveOnPrClose: true } }),
+    );
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+    const pr = [{ prNumber: 1, repo: 'acme/widgets', url: 'https://example.invalid/pr/1' }];
+    const cardPath = writeCard(
+      store,
+      TARGET,
+      card('local_copy', { isArchived: true, prs: pr } as never),
+    );
+    ledger.append({
+      kind: 'archive_synced',
+      sessionId: 'local_copy',
+      target: TARGET,
+      path: cardPath,
+      from: true,
+      to: false,
+      native: false,
+    });
+
+    expect(planArchiveMarksBack(ledger.read(), TARGET, store)).toHaveLength(0);
   });
 
   it('does nothing once the card already shows the write it made', () => {
