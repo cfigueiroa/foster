@@ -1,5 +1,5 @@
 import { activityOf, byRecency } from '../domain/filter.js';
-import { stripMarks, templatesSeen } from '../domain/stale.js';
+import { looksMarked, stripMarks, templatesSeen } from '../domain/stale.js';
 import type { AccountRef, DiscoveredSession } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import { lastForsterArchiveWrite, project, type LedgerState } from '../ledger/project.js';
@@ -166,6 +166,11 @@ export function planArchiveSync(
   for (const session of otherCards) {
     const id = session.data.cliSessionId?.toLowerCase();
     if (!id) continue;
+    // A row a sweep marked in another account — "(stale…)", "(other file…)" —
+    // wears the archived flag that pass filed it under, not the state of the
+    // conversation; following it would archive this account's clean row.
+    const sourceTitle = session.data.title ?? '';
+    if (stripMarks(sourceTitle, templates) !== sourceTitle || looksMarked(sourceTitle)) continue;
     const list = bySource.get(id) ?? [];
     list.push(session);
     bySource.set(id, list);

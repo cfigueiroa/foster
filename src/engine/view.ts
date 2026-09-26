@@ -3,6 +3,7 @@ import { currentAccount } from './account.js';
 import { listAccountDirs, sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
+import { copySessionIds } from '../ledger/project.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import { scanAccount } from '../store/scanner.js';
 import {
@@ -685,11 +686,16 @@ export function planMachineViewCarry(
 ): MachineViewCarry {
   const others = listAccountDirs(store).filter((account) => !sameAccount(account, target));
 
+  // Only native cards say which account was used: a foster copy inherits its
+  // origin's `lastActivityAt`, so the newest conversation's copies tie across
+  // every account a sweep reached, and the first one listed would win.
+  const copies = copySessionIds([...events]);
   let bestAccount: AccountRef | undefined;
   let bestAt = -Infinity;
   for (const account of others) {
-    const cards = scanAccount(store, account, undefined, { slim: true });
+    const cards = scanAccount(store, account, copies, { slim: true });
     for (const card of cards) {
+      if (card.isCopy) continue;
       const at = card.data.lastActivityAt ?? 0;
       if (at > bestAt) {
         bestAt = at;

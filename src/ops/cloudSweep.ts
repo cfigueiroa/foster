@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { comparablePath, listAccountDirs } from '../domain/paths.js';
@@ -268,7 +268,15 @@ export async function planCloudSweep(options: PlanCloudSweepOptions): Promise<Cl
   const seenAccountUuids = new Set<string>([target.accountUuid]);
 
   for (const client of list(env)) {
-    if (!client.signedIn) continue;
+    if (!client.signedIn) {
+      // Reported, not skipped silently: a signed-out client may be the only
+      // way to reach a source account's cloud sessions.
+      accountsNeedingLogin.push({
+        configDir: client.configDir,
+        reason: refusalMessage('signed-out', client.configDir),
+      });
+      continue;
+    }
     const result = auth(client.configDir, client.isDefault, home);
     if (!result.ok) {
       accountsNeedingLogin.push({
@@ -348,7 +356,12 @@ function planOneSession(
   if (session.status === 'archived' && !ctx.includeArchived) {
     return { kind: 'skip', reason: 'archived in the cloud' };
   }
-  if (ctx.state.imported.has(session.id)) {
+  // `state.imported` is keyed on the cloud id alone, not on the account it was
+  // pulled into: "already pulled" holds only while that card is still on disk,
+  // since the ordinary sweep (imports are fosterable) is what carries it to the
+  // account signed in now. A card that is gone is pulled again.
+  const already = ctx.state.imported.get(session.id);
+  if (already && existsSync(already.cardPath)) {
     return { kind: 'skip', reason: 'already pulled' };
   }
 

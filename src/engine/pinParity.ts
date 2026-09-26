@@ -91,19 +91,22 @@ export function planPinParity(
   const others = listAccountDirs(store).filter((account) => !sameAccount(account, target));
   const pinnedIds = new Set(pins.ids);
 
-  // The best (most recently active) source card per conversation, across
-  // every other account — one scan per account, slim, the same cost
-  // `planGroups`' own `cardsOf` already pays.
-  const bestSource = new Map<string, DiscoveredSession>();
+  // The most recently active source cards per conversation, across every other
+  // account — one scan per account, slim, the same cost `planGroups`' own
+  // `cardsOf` already pays. Every card tied for the latest activity is kept,
+  // not just the first scanned: a foster copy inherits its origin's
+  // `lastActivityAt`, so the pinned original ties with every unpinned copy the
+  // sweeps left in other accounts, and directory order must not decide which.
+  const bestSources = new Map<string, { at: number; cards: DiscoveredSession[] }>();
   for (const account of others) {
     const cards = scanAccount(store, account, undefined, { slim: true, cache });
     for (const card of cards) {
       const conversation = card.data.cliSessionId?.toLowerCase();
       if (!conversation) continue;
-      const current = bestSource.get(conversation);
-      if (!current || (card.data.lastActivityAt ?? 0) > (current.data.lastActivityAt ?? 0)) {
-        bestSource.set(conversation, card);
-      }
+      const at = card.data.lastActivityAt ?? 0;
+      const current = bestSources.get(conversation);
+      if (!current || at > current.at) bestSources.set(conversation, { at, cards: [card] });
+      else if (at === current.at) current.cards.push(card);
     }
   }
 
@@ -129,8 +132,8 @@ export function planPinParity(
     if (decided.has(cardId)) continue;
     decided.add(cardId);
 
-    const source = bestSource.get(conversation);
-    const desired = source ? pinnedIds.has(source.data.sessionId) : false;
+    const sources = bestSources.get(conversation)?.cards ?? [];
+    const desired = sources.some((source) => pinnedIds.has(source.data.sessionId));
     const currentlyPinned = pinnedIds.has(cardId);
     const title = row.data.title ?? cardId;
 

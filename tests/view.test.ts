@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as FsAtomic from '../src/util/fsatomic.js';
+import { buildFosterCopy } from '../src/domain/fostering.js';
 import type { AccountRef, StoreLayout } from '../src/domain/types.js';
 import { AppRunningError } from '../src/engine/safety.js';
 import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
@@ -701,6 +702,35 @@ describe('planMachineViewCarry', () => {
     makeMachineStore(store, {}); // target has never set either key
     const ledger = newLedger(store);
     ledger.append({ kind: 'view_seen', account: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });
+
+    const carry = planMachineViewCarry(store, NEW_ACCOUNT, ledger.read());
+    expect(carry).toEqual({ from: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });
+  });
+
+  it('picks the account by its own cards, never by a foster copy that inherited a newer activity', () => {
+    const store = makeStore();
+    const COPY_ACCOUNT = {
+      accountUuid: '00000000-0000-4000-8000-0000000000c1',
+      organizationUuid: '00000000-0000-4000-8000-0000000000c2',
+    };
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'src1', cliSessionId: 'conv-1', lastActivityAt: 5_000 }),
+    );
+    // A copy of a newer conversation sits in another account; it says nothing
+    // about which account was used last.
+    writeSession(
+      store,
+      COPY_ACCOUNT,
+      buildFosterCopy(session({ sessionId: 'cp', cliSessionId: 'conv-2', lastActivityAt: 9_000 }), {
+        origin: OLD_ACCOUNT,
+      }),
+    );
+    makeMachineStore(store, {});
+    const ledger = newLedger(store);
+    ledger.append({ kind: 'view_seen', account: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });
+    ledger.append({ kind: 'view_seen', account: COPY_ACCOUNT, groupBy: 'date', sortBy: 'recency' });
 
     const carry = planMachineViewCarry(store, NEW_ACCOUNT, ledger.read());
     expect(carry).toEqual({ from: OLD_ACCOUNT, groupBy: 'custom', sortBy: 'alpha' });

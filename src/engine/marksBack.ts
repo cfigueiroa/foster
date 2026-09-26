@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import { comparablePath, sameAccount, storeRootOfCopy } from '../domain/paths.js';
 import type { AccountRef, CodeSessionData, StoreLayout } from '../domain/types.js';
 import type { ArchiveSyncedEvent, CardRetitledEvent, LedgerEvent } from '../ledger/types.js';
@@ -106,6 +107,7 @@ export function planArchiveMarksBack(
   target: AccountRef,
   store: StoreLayout,
   read: (file: string) => CodeSessionData | undefined = readSessionFile,
+  mtimeOf: (file: string) => number | undefined = fileMtime,
 ): ArchiveSyncItem[] {
   const root = comparablePath(store.root);
   const last = new Map<string, ArchiveSyncedEvent | CardRetitledEvent>();
@@ -128,6 +130,14 @@ export function planArchiveMarksBack(
     if (!card) continue;
     const now = Boolean(card.isArchived);
     if (now !== event.from || now === event.to) continue;
+    // A bare flag carries no history the way a title does (`worn`), so the
+    // app saving its stale copy back over the write and a person flipping it
+    // back by hand look identical on disk. Timing tells them apart: the app's
+    // save-over was measured within minutes of the write (24/09/2026, three
+    // minutes); a flip made later than `SAVE_OVER_WINDOW_MS` after the write is
+    // somebody's change, and local change wins.
+    const changedAt = mtimeOf(event.path);
+    if (changedAt === undefined || changedAt - event.ts > SAVE_OVER_WINDOW_MS) continue;
     items.push({
       path: event.path,
       sessionId,
@@ -139,4 +149,15 @@ export function planArchiveMarksBack(
     });
   }
   return items;
+}
+
+/** How long after an `archive_synced` write a flip back still reads as the app saving over it. */
+const SAVE_OVER_WINDOW_MS = 30 * 60 * 1000;
+
+function fileMtime(file: string): number | undefined {
+  try {
+    return statSync(file).mtimeMs;
+  } catch {
+    return undefined;
+  }
 }

@@ -1945,19 +1945,16 @@ named in the report (`no repository named on the session`, or `no local checkout
 rather than guessed at — the same "prove it, don't guess" rule the rest of this codebase follows for
 a filesystem match.
 
-**Already-imported and already-a-copy**: a session the ledger already shows as `conversation_imported`
-(from an earlier `cloud pull` or an earlier `--cloud` sweep) is skipped as `already pulled`, read the
-same way `pullCloudSession` itself checks before writing. Separately — and this is a correctness fix
-to `unfosterableReasons` (`domain/fostering.ts`), not part of the cloud-sweep pass itself — a card
-`import-codex` or `cloud pull` fabricated now always carries `already-a-copy` in its own account. Before
-this fix a fabricated card had no `_foster` marker (it is native to its own account, not a sweep's
-copy) and was not in the ledger's `activeByKey`, so nothing stopped an _ordinary_ `foster sweep` run
-against that account from copying the import onward into a third account as though it were the
-original conversation — and `sweep --cloud` would have hit the same hole from the cloud side, re-cloud-
-pulling a session that had already been imported to a _different_ local account by hand. `filter.ts`'s
-`applyFilter`/`blockingReasons` needed no change: they already exclude any session whose `reasons`
-is non-empty, so the one fix was making `unfosterableReasons` itself notice `_fosterImport`.
-
+**Already pulled, and why an import stays fosterable**: a session the ledger already shows as
+`conversation_imported` is skipped as `already pulled` only while the card that pull wrote is still
+on disk (`imported`'s `cardPath`). The ledger keys a pull on the cloud id alone, not on the account it
+went into, and the ordinary sweep is what carries the pulled card to the next account the user
+switches to — so a card that is gone is pulled again instead of being skipped forever. For the same
+reason a card `import-codex` or `cloud pull` fabricated (`_fosterImport`) is deliberately **not**
+`already-a-copy` (`unfosterableReasons`, `domain/fostering.ts`): it is the only card its conversation
+has anywhere. A first cut of this pass marked it a copy to stop it being "copied onward as the
+original"; review (26/09/2026) caught that this stranded every Codex import and every cloud pull in
+the account it was imported into — the next switch never brought it.
 **Apply**: for each planned item, `applyCloudSweep` re-reads the credential (a local file, not a
 network call) and calls the same `fetchCloudSession`/`fetchTeleportEvents`/`pullCloudSession` triple
 `foster cloud pull --yes` uses by hand, one session at a time — a failure on one session (network

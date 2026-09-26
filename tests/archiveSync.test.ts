@@ -110,6 +110,47 @@ describe('planArchiveSync / applyArchiveSync', () => {
     });
   });
 
+  it('never follows a source row a sweep marked and filed away in another account', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+
+    // In OTHER_A the second-file pass marked and archived one row of the
+    // conversation; it was clicked later, so it is the most recently active.
+    const markedPath = writeCard(
+      store,
+      OTHER_A,
+      card('local_marked', {
+        title: '(other file, stopped 01/09 10:00) Some work',
+        isArchived: true,
+        lastActivityAt: 3_000,
+      }),
+    );
+    const cleanPath = writeCard(
+      store,
+      TARGET,
+      card('local_clean', { isArchived: false, lastActivityAt: 1_000 }),
+    );
+
+    const plan = planArchiveSync(ledger, {
+      target: TARGET,
+      targetCards: [ds(cleanPath, TARGET, card('local_clean', { lastActivityAt: 1_000 }))],
+      otherCards: [
+        ds(
+          markedPath,
+          OTHER_A,
+          card('local_marked', {
+            title: '(other file, stopped 01/09 10:00) Some work',
+            isArchived: true,
+            lastActivityAt: 3_000,
+          }),
+        ),
+      ],
+    });
+
+    expect(plan.items).toEqual([]);
+    expect(plan.skipped).toEqual([{ sessionId: 'local_clean', reason: 'no-source' }]);
+  });
+
   it('a copy follows its source back into being unarchived, once foster already owns the flag', () => {
     const store = makeStore();
     const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
@@ -467,6 +508,28 @@ describe('planArchiveMarksBack', () => {
     const outcomes = applyArchiveSync(items, { ledger });
     expect(outcomes[0]!.status).toBe('written');
     expect(readCard(cardPath).isArchived).toBe(true);
+  });
+
+  it('leaves alone a flip back made long after the write: somebody changed it by hand', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+
+    const cardPath = writeCard(store, TARGET, card('local_copy', { isArchived: false }));
+    ledger.append({
+      kind: 'archive_synced',
+      sessionId: 'local_copy',
+      target: TARGET,
+      path: cardPath,
+      from: false,
+      to: true,
+      native: false,
+    });
+    const writtenAt = ledger.read().at(-1)!.ts;
+    // Unarchived by hand two hours after foster archived it.
+    const handFlip = writtenAt + 2 * 60 * 60 * 1000;
+
+    const items = planArchiveMarksBack(ledger.read(), TARGET, store, undefined, () => handFlip);
+    expect(items).toHaveLength(0);
   });
 
   it('does nothing once the card already shows the write it made', () => {

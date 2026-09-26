@@ -334,7 +334,7 @@ describe('unfosterableReasons', () => {
     expect(unfosterableReasons(copy)).toContain('already-a-copy');
   });
 
-  it('rejects a card foster cloud pull fabricated, so it is never swept onward as a native source', () => {
+  it('offers a card foster cloud pull fabricated, so the next account switch carries it', () => {
     const imported = session({
       _fosterImport: {
         source: 'cloud',
@@ -345,10 +345,10 @@ describe('unfosterableReasons', () => {
         toolVersion: '1.0.0',
       },
     });
-    expect(unfosterableReasons(imported)).toContain('already-a-copy');
+    expect(unfosterableReasons(imported)).not.toContain('already-a-copy');
   });
 
-  it('rejects a card import-codex fabricated the same way, with no source field at all', () => {
+  it('offers a card import-codex fabricated the same way, with no source field at all', () => {
     const imported = session({
       _fosterImport: {
         sourceRolloutPath: '/home/x/.codex/sessions/rollout.jsonl',
@@ -358,7 +358,7 @@ describe('unfosterableReasons', () => {
         toolVersion: '1.0.0',
       },
     });
-    expect(unfosterableReasons(imported)).toContain('already-a-copy');
+    expect(unfosterableReasons(imported)).not.toContain('already-a-copy');
   });
 });
 

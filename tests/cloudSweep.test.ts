@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -202,6 +202,60 @@ describe('planCloudSweep', () => {
     });
     expect(plan.items).toEqual([]);
     expect(plan.skipped).toEqual([{ reason: 'already pulled', count: 1 }]);
+  });
+
+  it('pulls again a session whose earlier pull left no card on disk', async () => {
+    writeCard(TARGET, 'local_target-1', { cwd: repoDir, originCwd: repoDir });
+    const detail: CloudSessionDetail = {
+      id: 'cse_00000000000000000000000001',
+      title: 'Fix the thing',
+      status: 'idle',
+      repo: { repo: 'acme/widgets' },
+    };
+    const first = pullCloudSession('cse_00000000000000000000000001', detail, [], {
+      store,
+      ledger,
+      state: { imported: new Map(), active: new Map() } as never,
+      target: TARGET,
+      cwd: repoDir,
+      dryRun: false,
+      now: 1,
+    });
+    // The pulled card is gone (removed, or its account left this store): the
+    // ledger still remembers the pull, but nothing will carry it here.
+    rmSync(first.cardPath!, { force: true });
+
+    const plan = await planCloudSweep({
+      store,
+      ledger,
+      target: TARGET,
+      deps: {
+        listClients: () => [client('/home/other/.claude')],
+        readCloudAuth: (): CloudAuthResult => ({
+          ok: true,
+          auth: { accessToken: 'tok', organizationUuid: OTHER.organizationUuid },
+        }),
+        listCloudSessions: async () => [session()],
+        gitRemoteOrigin: () => 'acme/widgets',
+      },
+    });
+    expect(plan.items).toHaveLength(1);
+  });
+
+  it('names a signed-out client instead of skipping it silently', async () => {
+    const plan = await planCloudSweep({
+      store,
+      ledger,
+      target: TARGET,
+      deps: {
+        listClients: () => [client('/home/other/.claude', { signedIn: false })],
+        readCloudAuth: () => {
+          throw new Error('must not be asked for a signed-out client');
+        },
+      },
+    });
+    expect(plan.accountsNeedingLogin).toHaveLength(1);
+    expect(plan.accountsNeedingLogin[0]!.reason).toContain('sign in');
   });
 
   it('skips an archived-in-the-cloud session unless includeArchived is set', async () => {

@@ -71,6 +71,33 @@ describe('planPinParity', () => {
     expect(plan.toUnpin).toEqual([]);
   });
 
+  it('pins when the pinned original ties with an unpinned copy in another account', () => {
+    const store = makeStore();
+    // A copy inherits its origin's lastActivityAt, so the two tie exactly.
+    const COPY_ACCOUNT = {
+      accountUuid: '00000000-0000-4000-8000-0000000000c1',
+      organizationUuid: '00000000-0000-4000-8000-0000000000c2',
+    };
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'a1', cliSessionId: CONVERSATION_A, lastActivityAt: 2_000 }),
+    );
+    writeSession(
+      store,
+      COPY_ACCOUNT,
+      session({ sessionId: 'a3', cliSessionId: CONVERSATION_A, lastActivityAt: 2_000 }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'a2', cliSessionId: CONVERSATION_A, lastActivityAt: 1_000 }),
+    );
+
+    const plan = planPinParity(store, NEW_ACCOUNT, [], () => fakePinState(['local_a1']));
+    expect(plan.toPin.map((item) => item.cardId)).toEqual(['local_a2']);
+  });
+
   it('does nothing when the source is not pinned', () => {
     const store = makeStore();
     writeSession(
