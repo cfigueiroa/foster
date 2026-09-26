@@ -65,6 +65,7 @@ describe('findStopped', () => {
         title: 'Cut off',
         cwd: '/workspace/project',
         branch: 'feat/a',
+        why: 'limit',
         stoppedAt: NOW - HOUR,
         limit: "You've hit your weekly limit",
       },
@@ -78,6 +79,34 @@ describe('findStopped', () => {
     );
 
     expect(stopped).toEqual([]);
+  });
+
+  it('lists a session cut off mid-turn, and says so', () => {
+    const { stopped } = run(
+      [card({ sessionId: A, title: 'Restarted under it' })],
+      deps({ [A]: { at: NOW - HOUR, cutOff: true } }),
+    );
+
+    expect(stopped).toEqual([
+      {
+        sessionId: `local_${A}`,
+        cliSessionId: A,
+        title: 'Restarted under it',
+        cwd: '/workspace/project',
+        why: 'cut-off',
+        stoppedAt: NOW - HOUR,
+      },
+    ]);
+  });
+
+  it('names a session whose folder is gone rather than listing it', () => {
+    const d: ReviveDeps = { ...deps({ [A]: limited(NOW) }), folderExists: () => false };
+    const { stopped, passedOver } = run([card({ sessionId: A, title: 'Moved' })], d);
+
+    expect(stopped).toEqual([]);
+    expect(passedOver).toEqual([
+      { sessionId: `local_${A}`, title: 'Moved', reason: 'no-folder', cwd: '/workspace/project' },
+    ]);
   });
 
   it('leaves out a limit hit before the window', () => {
@@ -208,6 +237,60 @@ describe('lastAnswer', () => {
     ]);
 
     expect(lastAnswer(file)).toEqual({ at: Date.parse('2026-09-20T01:00:00.000Z') });
+  });
+
+  const at = (minute: number) => `2026-09-26T09:${String(minute).padStart(2, '0')}:00.000Z`;
+  const answer = (minute: number, content: unknown[] = [{ type: 'text', text: 'Done.' }]) => ({
+    type: 'assistant',
+    uuid: `a${minute}`,
+    timestamp: at(minute),
+    message: { content },
+  });
+
+  it('reads a turn left open as cut off: a tool result, a task notification, a prompt', () => {
+    for (const content of [
+      [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }],
+      '<task-notification> <task-id>x</task-id> </task-notification>',
+      'go on',
+    ]) {
+      const file = write([
+        answer(1),
+        { type: 'user', uuid: 'u2', timestamp: at(2), message: { content } },
+        { type: 'last-prompt', lastPrompt: 'go on' },
+      ]);
+      expect(lastAnswer(file)).toEqual({ at: Date.parse(at(2)), cutOff: true });
+    }
+  });
+
+  it('reads a tool call that never got its result as cut off', () => {
+    const file = write([answer(1, [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }])]);
+
+    expect(lastAnswer(file)).toEqual({ at: Date.parse(at(1)), cutOff: true });
+  });
+
+  it('reads a stop somebody chose, a local command and a meta record as no cut', () => {
+    const file = write([
+      answer(1),
+      { type: 'user', uuid: 'u2', timestamp: at(2), isMeta: true, message: { content: 'caveat' } },
+      {
+        type: 'user',
+        uuid: 'u3',
+        timestamp: at(3),
+        message: { content: '<command-name>/reload-skills</command-name>' },
+      },
+    ]);
+    expect(lastAnswer(file)).toEqual({ at: Date.parse(at(1)) });
+
+    const interrupted = write([
+      answer(1),
+      {
+        type: 'user',
+        uuid: 'u2',
+        timestamp: at(2),
+        message: { content: [{ type: 'text', text: '[Request interrupted by user]' }] },
+      },
+    ]);
+    expect(lastAnswer(interrupted)).toEqual({ at: Date.parse(at(2)) });
   });
 
   it('is undefined for a file that is not there', () => {

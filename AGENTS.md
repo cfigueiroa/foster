@@ -775,6 +775,22 @@ widens the read (×4 each retry, capped at 8 MB) when a window comes back with n
 a transcript like the cited 22 is found rather than missed; the ordinary transcript, whose answer is
 already in the first 256 KB, pays nothing extra.
 
+A usage limit is not the only way a session is left waiting. Measured 26/09/2026: the detached
+restart that ends `/fosteia` quit the app under eight sessions mid-turn — each transcript ended on
+a tool result or a `<task-notification>` with nothing after it, no limit record anywhere — and
+`revive` listed none of them. `lastAnswer` now also reads the last main-chain `user` record, and a
+turn that never closed (a user record after the last answer, or an answer whose last block is a
+`tool_use`) comes back `cutOff`; `revive` lists those as `why: "cut-off"` beside `why: "limit"`.
+Three kinds of `user` record are not turns and are passed over or read as an answer: `isMeta`, a
+local slash command or `!` shell line (`<command-name>`, `<local-command-stdout>`, `<bash-input>`,
+…), and "[Request interrupted by user]", a stop somebody chose. Over one week of this machine's
+transcripts (570 files), the endings split 396 answered, 53 limit, 43 tool result, 13 task
+notification, 7 unanswered tool call, 2 unanswered prompt, 6 interrupted by hand, 1 local command.
+
+A row whose working directory is gone is named in `passedOver` as `no-folder` instead of listed:
+the app answers a message to it with "The project folder … no longer exists" and never starts the
+turn. Measured the same day, on four copies whose cwd was a checkout that had since moved.
+
 ## `foster disk` and `foster stats`: read-only reports across every account
 
 Neither writes anything, and neither decides what is safe to remove — that judgement stays

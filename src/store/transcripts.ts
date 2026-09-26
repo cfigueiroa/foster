@@ -650,6 +650,13 @@ export interface LastAnswer {
   error?: string;
   /** The text shown, for an error: "You've hit your weekly limit · resets …". */
   text?: string;
+  /**
+   * The conversation ends mid-turn: a tool result, a background task's
+   * notification or a prompt the model never answered, or a tool call that
+   * never ran. `at` is then that record's own time. Nothing the model said
+   * closed the turn — the app was quit, restarted or switched account under it.
+   */
+  cutOff?: true;
 }
 
 /**
@@ -684,6 +691,14 @@ export interface LastAnswer {
  * rare file that needs one; `MAX_TAIL_BYTES` is where it gives up instead of
  * reading a hundreds-of-megabytes transcript for an answer that plainly is
  * not there.
+ *
+ * A `user` record written after the last answer means the turn it opened never
+ * closed — `cutOff`. Measured 26/09/2026: a `foster layout --restart --detach`
+ * quit the app under eight sessions mid-turn; each transcript ended on a tool
+ * result or a `<task-notification>`, with no limit record anywhere, so a
+ * limit-only reading listed none of them. A user record that is the app's own
+ * (`isMeta`) is passed over, and "[Request interrupted by user]" is a stop
+ * somebody chose, read as an answer rather than as a cut.
  */
 export function lastAnswer(file: string): LastAnswer | undefined {
   let bytes = TAIL_CWD_BYTES;
@@ -693,10 +708,20 @@ export function lastAnswer(file: string): LastAnswer | undefined {
 
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const record = parseRecord(lines[index]!);
-      if (!record || record.type !== 'assistant' || record.isSidechain === true) continue;
+      if (!record || record.isSidechain === true) continue;
+      if (record.type !== 'assistant' && record.type !== 'user') continue;
       const at = Date.parse(typeof record.timestamp === 'string' ? record.timestamp : '');
       if (Number.isNaN(at)) continue;
-      if (record.isApiErrorMessage !== true) return { at };
+      if (record.type === 'user') {
+        if (record.isMeta === true) continue;
+        const text = textOf(record.message);
+        if (text !== undefined && LOCAL_COMMAND.test(text)) continue;
+        if (text?.startsWith('[Request interrupted by user')) return { at };
+        return { at, cutOff: true };
+      }
+      if (record.isApiErrorMessage !== true) {
+        return endsOnToolCall(record.message) ? { at, cutOff: true } : { at };
+      }
       const error = typeof record.error === 'string' ? record.error : 'unknown';
       const text = textOf(record.message);
       return { at, error, ...(text === undefined ? {} : { text }) };
@@ -711,6 +736,25 @@ export function lastAnswer(file: string): LastAnswer | undefined {
     if (bytes >= size || bytes >= MAX_TAIL_BYTES) return undefined;
     bytes = Math.min(bytes * TAIL_GROWTH, MAX_TAIL_BYTES, size);
   }
+}
+
+/**
+ * A slash command or `!` shell line the CLI ran on its own, and its output: written
+ * as `user` records, but no turn for the model to answer. Measured 26/09/2026, a
+ * transcript ending on `/reload-skills` after a finished answer.
+ */
+const LOCAL_COMMAND =
+  /^\s*<(command-name|command-message|local-command-stdout|local-command-stderr|local-command-caveat|bash-input|bash-stdout|bash-stderr)>/;
+
+/** An assistant message whose last block is a tool call: the call never got its result. */
+function endsOnToolCall(message: unknown): boolean {
+  if (typeof message !== 'object' || message === null) return false;
+  const content = (message as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return false;
+  const last: unknown = content[content.length - 1];
+  return (
+    typeof last === 'object' && last !== null && (last as { type?: unknown }).type === 'tool_use'
+  );
 }
 
 /** How much larger each retry's window is, when the previous one found no answer. */
