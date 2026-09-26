@@ -40,6 +40,7 @@ const EVENT_KINDS = new Set<string>([
   'layout_applied',
   'pin_move_deferred',
   'pins_moved',
+  'archive_synced',
 ]);
 
 /**

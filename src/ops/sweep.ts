@@ -43,6 +43,13 @@ import {
   type TitleSyncSkipped,
 } from '../engine/titleSync.js';
 import {
+  applyArchiveSync,
+  planArchiveSync,
+  type ArchiveSyncItem,
+  type ArchiveSyncOutcome,
+  type ArchiveSyncSkipped,
+} from '../engine/archiveSync.js';
+import {
   candidatesFromStore,
   dateCards,
   planDates,
@@ -155,6 +162,14 @@ export interface SweepOptions {
    */
   syncTitles?: boolean;
   /**
+   * Bring a card's archived flag into step with the account most recently
+   * active on the same conversation — see `engine/archiveSync.ts`. On by
+   * default, unlike `syncTitles`/`dates`: a mismatched archived flag reads as
+   * lost or unfinished work, which is a sharper cost than a stale title, so
+   * `--no-archive-sync` is the opt-out rather than an opt-in.
+   */
+  syncArchive?: boolean;
+  /**
    * Advance a card's `lastActivityAt` to its transcript's last answer — the
    * sixth pass, off by default. See `engine/dates.ts`.
    *
@@ -253,6 +268,20 @@ export interface TitleSyncPhase {
   skipped: TitleSyncSkipped[];
   outcomes: RetitleOutcome[];
   counts: { synced: number; skipped: number; failed: number };
+}
+
+/**
+ * The archive pass: cards whose archived flag is out of step with the
+ * account most recently active on the same conversation.
+ *
+ * Same convention as `TitleSyncPhase`: `outcomes` is empty on a dry run.
+ * Always present, unlike `titleSync`, since this pass runs by default.
+ */
+export interface ArchiveSyncPhase {
+  items: ArchiveSyncItem[];
+  skipped: ArchiveSyncSkipped[];
+  outcomes: ArchiveSyncOutcome[];
+  counts: { written: number; skipped: number; failed: number };
 }
 
 /** The branch pass: what it brought, what it marked, per fork. */
@@ -408,6 +437,12 @@ export interface SweepConfirmation {
    * not unfinished for having left them alone.
    */
   titlesOutOfStep?: number;
+  /**
+   * Cards a second archive pass would still bring into step. Counted only
+   * when the pass ran at all — `--no-archive-sync` turns it off the same way
+   * `syncTitles` gates the field above.
+   */
+  archivesOutOfStep?: number;
   exhausted: boolean;
 }
 
@@ -427,6 +462,12 @@ export interface SweepReport {
   worktreeClaims: WorktreeClaimsPhase;
   /** The title pass, only on a run that asked for it — see `TitleSyncPhase`. */
   titleSync?: TitleSyncPhase;
+  /**
+   * The archive pass — see `ArchiveSyncPhase`. Always present, like `files`;
+   * empty (every count 0) on a run given `--no-archive-sync`, so a caller
+   * never has to check whether the field exists before reading it.
+   */
+  archiveSync: ArchiveSyncPhase;
   /** The dates pass, when `--dates` asked for it. */
   dates?: DatesPhase;
   /**
@@ -568,6 +609,7 @@ export function runSweep(options: SweepOptions): SweepReport {
   const otherFileTemplate = options.otherFileTemplate ?? DEFAULT_OTHER_FILE_TEMPLATE;
   const configDirs = options.configDirs ?? [];
   const syncTitles = options.syncTitles ?? false;
+  const syncArchive = options.syncArchive ?? true;
   const accounts = listAccountDirs(store);
   const target = options.target ?? requireCurrentAccount(store, accounts);
   const live = options.live ?? liveConversationIds(env);
@@ -625,17 +667,27 @@ export function runSweep(options: SweepOptions): SweepReport {
   // one of those re-read 6.7 GB of transcripts to rebuild the lineage it had
   // just thrown away. A round here reuses it, and the scan of every other
   // account, and pays only for the destination's own cards.
-  let round = runRound(run, scanned, fromAccounts(scanned, [target]), syncTitles, dryRun);
+  let round = runRound(
+    run,
+    scanned,
+    fromAccounts(scanned, [target]),
+    syncTitles,
+    syncArchive,
+    dryRun,
+  );
   // Nothing was written on a dry run, so nothing has changed and a second pass
   // would report exactly what the first one just did. Saying "finished" off
   // that would be a claim about a run that never happened.
-  let check = dryRun ? undefined : confirm(run, scanned, syncTitles);
+  let check = dryRun ? undefined : confirm(run, scanned, syncTitles, syncArchive);
   let rounds = 1;
   while (check && !check.confirmation.exhausted && rounds < SWEEP_ROUNDS) {
     const before = pendingOf(check.confirmation);
     // The destination as the re-plan just read it: nothing has written since.
-    round = mergeRounds(round, runRound(run, scanned, check.hereCards, syncTitles, false));
-    check = confirm(run, scanned, syncTitles);
+    round = mergeRounds(
+      round,
+      runRound(run, scanned, check.hereCards, syncTitles, syncArchive, false),
+    );
+    check = confirm(run, scanned, syncTitles, syncArchive);
     rounds += 1;
     // A round that left as much to do as it found is not converging — a write
     // that fails every time, or two passes undoing each other. Another round
@@ -643,7 +695,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     if (pendingOf(check.confirmation) >= before) break;
   }
   const confirmation = check?.confirmation;
-  const { passes, files, worktreeClaims, titleSync } = round;
+  const { passes, files, worktreeClaims, titleSync, archiveSync } = round;
 
   // After every marking round, over what all of them marked: the pin list is
   // asked about the marks and the fresh copies this run decided on, which the
@@ -709,6 +761,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     files: { ...files, otherFileTemplate },
     worktreeClaims,
     ...(titleSync ? { titleSync } : {}),
+    archiveSync,
     ...(dates ? { dates } : {}),
     archived:
       countArchived(run.fromSources, passes.fostered) + passes.branches.archived + files.archived,
@@ -752,7 +805,8 @@ export function pendingOf(confirmation: SweepConfirmation): number {
     confirmation.secondFiles +
     confirmation.restorable +
     confirmation.worktreeClaims +
-    (confirmation.titlesOutOfStep ?? 0)
+    (confirmation.titlesOutOfStep ?? 0) +
+    (confirmation.archivesOutOfStep ?? 0)
   );
 }
 
@@ -765,9 +819,13 @@ export function pendingOf(confirmation: SweepConfirmation): number {
  * Shared by the CLI command and the TUI's own sweep flow — see `pendingOf`
  * above for why the TUI needs it too.
  */
-export function sweepMarked(report: Pick<SweepReport, 'branches' | 'files'>): boolean {
-  return [...report.branches.retitled, ...report.files.retitled].some(
-    (outcome) => outcome.status === 'retitled',
+export function sweepMarked(
+  report: Pick<SweepReport, 'branches' | 'files' | 'archiveSync'>,
+): boolean {
+  return (
+    [...report.branches.retitled, ...report.files.retitled].some(
+      (outcome) => outcome.status === 'retitled',
+    ) || report.archiveSync.outcomes.some((outcome) => outcome.status === 'written')
   );
 }
 
@@ -797,6 +855,7 @@ export function sweepFailedCount(report: SweepReport): number {
     report.restored.counts.failed +
     report.worktreeClaims.counts.failed +
     (report.titleSync?.counts.failed ?? 0) +
+    report.archiveSync.counts.failed +
     (report.dates?.counts.failed ?? 0) +
     retitleFailures(report.files.retitled)
   );
@@ -866,6 +925,7 @@ export interface Round {
   files: FileCardsResult;
   worktreeClaims: WorktreeClaimsPhase;
   titleSync?: TitleSyncPhase;
+  archiveSync: ArchiveSyncPhase;
 }
 
 function runRound(
@@ -873,6 +933,7 @@ function runRound(
   scanned: DiscoveredSession[],
   hereCards: DiscoveredSession[],
   syncTitles: boolean,
+  syncArchive: boolean,
   dryRun: boolean,
 ): Round {
   const { store, ledger, target, kin, staleTemplate, divergedTemplate } = run;
@@ -908,7 +969,20 @@ function runRound(
     ? runTitleSync(store, ledger, target, dryRun, [staleTemplate, divergedTemplate], cards.read)
     : undefined;
 
-  return { passes, files, worktreeClaims, ...(titleSync ? { titleSync } : {}) };
+  // After the title pass too, so a title just synced does not read as a mark
+  // this pass has to leave alone — syncing a title never touches the archived
+  // flag (see `titleSync.ts`'s own note on that), but it does mean the row's
+  // own on-disk title, which `archiveSync`'s mark check reads, is now settled.
+  const markedThisRound = new Set(
+    [...passes.branches.retitled, ...files.retitled]
+      .filter((outcome) => outcome.status === 'retitled')
+      .map((outcome) => outcome.sessionId),
+  );
+  const archiveSync = syncArchive
+    ? runArchiveSync(run, settled, dryRun, [staleTemplate, divergedTemplate], markedThisRound)
+    : { items: [], skipped: [], outcomes: [], counts: { written: 0, skipped: 0, failed: 0 } };
+
+  return { passes, files, worktreeClaims, ...(titleSync ? { titleSync } : {}), archiveSync };
 }
 
 /**
@@ -963,6 +1037,16 @@ export function mergeRounds(first: Round, later: Round): Round {
           },
         }
       : (first.titleSync ?? later.titleSync);
+  const archiveSync: ArchiveSyncPhase = {
+    items: [...first.archiveSync.items, ...later.archiveSync.items],
+    skipped: later.archiveSync.skipped,
+    outcomes: [...first.archiveSync.outcomes, ...later.archiveSync.outcomes],
+    counts: {
+      written: first.archiveSync.counts.written + later.archiveSync.counts.written,
+      skipped: later.archiveSync.counts.skipped,
+      failed: first.archiveSync.counts.failed + later.archiveSync.counts.failed,
+    },
+  };
   return {
     passes: {
       fostered: mergeOutcomes(first.passes.fostered, later.passes.fostered),
@@ -980,6 +1064,7 @@ export function mergeRounds(first: Round, later: Round): Round {
       },
     },
     ...(titleSync ? { titleSync } : {}),
+    archiveSync,
   };
 }
 
@@ -1151,6 +1236,7 @@ function confirm(
   run: SweepRun,
   scanned: DiscoveredSession[],
   syncTitles: boolean,
+  syncArchive: boolean,
 ): { confirmation: SweepConfirmation; hereCards: DiscoveredSession[] } {
   const { store, ledger, target } = run;
   const events = ledger.read();
@@ -1187,6 +1273,13 @@ function confirm(
   const titlesOutOfStep = syncTitles
     ? planTitleSync(store, ledger, target, undefined, [], cards.read).items.length
     : undefined;
+  const archivesOutOfStep = syncArchive
+    ? planArchiveSync(ledger, {
+        target,
+        targetCards: hereCards,
+        otherCards: run.fromSources,
+      }).items.length
+    : undefined;
 
   const confirmation: SweepConfirmation = {
     fosterable,
@@ -1195,6 +1288,7 @@ function confirm(
     restorable,
     worktreeClaims,
     ...(titlesOutOfStep === undefined ? {} : { titlesOutOfStep }),
+    ...(archivesOutOfStep === undefined ? {} : { archivesOutOfStep }),
     exhausted: false,
   };
   return { confirmation: { ...confirmation, exhausted: pendingOf(confirmation) === 0 }, hereCards };
@@ -1532,6 +1626,40 @@ function runTitleSync(
   const counts = { synced: 0, skipped: 0, failed: 0 };
   for (const outcome of outcomes) {
     if (outcome.status === 'retitled') counts.synced += 1;
+    else counts[outcome.status] += 1;
+  }
+  return { items: plan.items, skipped: plan.skipped, outcomes, counts };
+}
+
+/**
+ * The archive pass: cards whose archived flag disagrees with the account most
+ * recently active on the same conversation — see `engine/archiveSync.ts`.
+ *
+ * Reads the destination's cards *after* every marking pass has written
+ * (`settled`, passed in): a row the branch or second-file pass just marked
+ * this very round has no `card_retitled` in the ledger's fold yet, which is
+ * why `markedThisRound` is passed alongside — the ledger alone cannot see a
+ * mark this round wrote until the fold is asked again.
+ */
+function runArchiveSync(
+  run: SweepRun,
+  settled: DiscoveredSession[],
+  dryRun: boolean,
+  runTemplates: readonly string[],
+  markedThisRound: ReadonlySet<string>,
+): ArchiveSyncPhase {
+  const { ledger, target } = run;
+  const plan = planArchiveSync(ledger, {
+    target,
+    targetCards: settled,
+    otherCards: run.fromSources,
+    runTemplates,
+    markedThisRound,
+  });
+  const outcomes = dryRun ? [] : applyArchiveSync(plan.items, { ledger });
+  const counts = { written: 0, skipped: 0, failed: 0 };
+  for (const outcome of outcomes) {
+    if (outcome.status === 'written') counts.written += 1;
     else counts[outcome.status] += 1;
   }
   return { items: plan.items, skipped: plan.skipped, outcomes, counts };

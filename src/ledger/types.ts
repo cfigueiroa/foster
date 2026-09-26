@@ -31,7 +31,8 @@ export type LedgerEvent =
   | ConversationImportUndoneEvent
   | LayoutAppliedEvent
   | PinMoveDeferredEvent
-  | PinsMovedEvent;
+  | PinsMovedEvent
+  | ArchiveSyncedEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -669,6 +670,40 @@ export interface PinsMovedEvent extends BaseEvent {
 }
 
 /**
+ * A card's archived flag brought into step with the account another card of
+ * the same conversation was most recently active in — see `engine/archiveSync.ts`.
+ *
+ * Deliberately as thin as `CardDatedEvent`: the flag before and after, and
+ * nothing about the source card beyond its session id — no title, no account,
+ * no content. `sourceSessionId` is kept only so a report can say which row this
+ * followed, not to let anything be read back from it; `fold`'s own state (the
+ * `archiveSynced` map) never carries it forward across writes.
+ *
+ * A card_retitled event with `toArchived` set already changes this same flag,
+ * for the branch and second-file marking passes — this is the third writer of
+ * it, alongside those and the fostering that first sets it. Kept as its own
+ * kind rather than folded into `card_retitled` because nothing here ever
+ * touches the title, and a reader asking "does foster still own this card's
+ * archived flag" needs both writers' timestamps to find the latest.
+ */
+export interface ArchiveSyncedEvent extends BaseEvent {
+  kind: 'archive_synced';
+  /** The card's own session id, which the write does not change. */
+  sessionId: string;
+  /** The account directory it sits in. */
+  target: AccountRef;
+  path: string;
+  /** The archived flag it wore before. */
+  from: boolean;
+  /** The archived flag it wears now. */
+  to: boolean;
+  /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
+  native: boolean;
+  /** The card whose account was most recently active — named for the report, never read back. */
+  sourceSessionId?: string;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -703,7 +738,8 @@ export type LedgerEventInput =
   | Draft<ConversationImportUndoneEvent>
   | Draft<LayoutAppliedEvent>
   | Draft<PinMoveDeferredEvent>
-  | Draft<PinsMovedEvent>;
+  | Draft<PinsMovedEvent>
+  | Draft<ArchiveSyncedEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
@@ -820,6 +856,28 @@ export interface ImportedConversation {
   sessionId: string;
   title?: string;
   importedAt: number;
+}
+
+/**
+ * A card whose archived flag foster's own `archive_synced` write last set,
+ * keyed by session id — the folded projection of `ArchiveSyncedEvent`.
+ *
+ * Unlike `RetitledCard`, `from` here is the *most recent* write's own `from`,
+ * not the original value carried forward: `engine/archiveSync.ts` only ever
+ * needs "what did this write set the flag to, and when", to decide whether a
+ * later disagreement is the user overriding foster or foster catching up with
+ * a source that moved on again. `card_retitled`'s own `toArchived` is a
+ * second, independent source of the same fact and is read alongside this one
+ * rather than merged into it — see `lastForsterArchiveWrite`.
+ */
+export interface ArchiveSyncedCard {
+  sessionId: string;
+  path: string;
+  target: AccountRef;
+  from: boolean;
+  to: boolean;
+  native: boolean;
+  syncedAt: number;
 }
 
 /** A fostering that is currently in place, derived by folding the log. */

@@ -3,6 +3,7 @@ import type { KnownIdentity } from '../domain/identity.js';
 import { comparablePath } from '../domain/paths.js';
 import type {
   ActiveFostering,
+  ArchiveSyncedCard,
   DatedCard,
   ImportedConversation,
   LedgerEvent,
@@ -50,6 +51,11 @@ export interface LedgerState {
    * session id — see `CardDatedEvent`.
    */
   dated: Map<string, DatedCard>;
+  /**
+   * Cards whose archived flag foster's own `archive_synced` write last set,
+   * keyed by session id — see `ArchiveSyncedEvent` and `engine/archiveSync.ts`.
+   */
+  archiveSynced: Map<string, ArchiveSyncedCard>;
   /**
    * Copies whose worktree claim was released and not yet put back, keyed by
    * path — see `WorktreeReleasedEvent`.
@@ -135,6 +141,7 @@ function cloneState(state: LedgerState): LedgerState {
     repointed: new Map(state.repointed),
     retitled: new Map(state.retitled),
     dated: new Map(state.dated),
+    archiveSynced: new Map(state.archiveSynced),
     worktreeReleased: new Map(state.worktreeReleased),
     imported: new Map(state.imported),
     profiles: new Map(state.profiles),
@@ -151,6 +158,7 @@ function foldEvents(events: LedgerEvent[]): LedgerState {
   const repointed = new Map<string, RepointedCard>();
   const retitled = new Map<string, RetitledCard>();
   const dated = new Map<string, DatedCard>();
+  const archiveSynced = new Map<string, ArchiveSyncedCard>();
   const worktreeReleased = new Map<string, WorktreeReleasedCard>();
   const imported = new Map<string, ImportedConversation>();
   const profiles = new Map<string, string>();
@@ -388,6 +396,25 @@ function foldEvents(events: LedgerEvent[]): LedgerState {
         break;
       }
 
+      case 'archive_synced':
+        // No history to carry forward the way `card_retitled`'s `from` is: a
+        // write that lands the flag back on `from` still says something —
+        // that a source moved on and back — and `engine/archiveSync.ts` only
+        // ever reads the latest write's own `to` and timestamp, never asks
+        // "what did the app have before foster touched this at all". So this
+        // is a plain overwrite, keyed on session id like every other of these
+        // small per-card maps.
+        archiveSynced.set(event.sessionId, {
+          sessionId: event.sessionId,
+          path: event.path,
+          target: event.target,
+          from: event.from,
+          to: event.to,
+          native: event.native,
+          syncedAt: event.ts,
+        });
+        break;
+
       case 'worktree_released':
         // Keyed the same way `storeRootOfCopy` comparisons are everywhere else in
         // this fold: two spellings of one file must not become two open releases,
@@ -495,6 +522,7 @@ function foldEvents(events: LedgerEvent[]): LedgerState {
     repointed,
     retitled,
     dated,
+    archiveSynced,
     worktreeReleased,
     imported,
     profiles,
@@ -516,6 +544,39 @@ export function listRetitled(state: LedgerState): RetitledCard[] {
 /** Cards wearing a `lastActivityAt` the app did not give them, oldest write first. */
 export function listDated(state: LedgerState): DatedCard[] {
   return [...state.dated.values()].sort((a, b) => a.datedAt - b.datedAt);
+}
+
+/** Cards whose archived flag `archive_synced` last set, oldest write first. */
+export function listArchiveSynced(state: LedgerState): ArchiveSyncedCard[] {
+  return [...state.archiveSynced.values()].sort((a, b) => a.syncedAt - b.syncedAt);
+}
+
+/**
+ * The latest value foster itself established for a card's archived flag,
+ * whichever of the two writers set it last — `archive_synced`
+ * (`state.archiveSynced`) or a `card_retitled` whose `toArchived` this fold
+ * already carries in `state.retitled` — plus when.
+ *
+ * `undefined` means neither has ever touched this card's flag: the card is
+ * either a bare fostering that took the default (unarchived, unless the
+ * branch pass archived it on purpose — see `FosteredEvent.archived`) or a
+ * native card foster has never written to at all. `engine/archiveSync.ts`
+ * reads this to tell a value the *user* changed by hand from one it can
+ * still bring back into step.
+ */
+export function lastForsterArchiveWrite(
+  state: LedgerState,
+  sessionId: string,
+): { value: boolean; at: number } | undefined {
+  const synced = state.archiveSynced.get(sessionId);
+  const retitled = state.retitled.get(sessionId);
+  const candidates: { value: boolean; at: number }[] = [];
+  if (synced) candidates.push({ value: synced.to, at: synced.syncedAt });
+  if (retitled?.toArchived !== undefined) {
+    candidates.push({ value: retitled.toArchived, at: retitled.retitledAt });
+  }
+  if (candidates.length === 0) return undefined;
+  return candidates.reduce((latest, next) => (next.at >= latest.at ? next : latest));
 }
 
 /** Copies whose worktree claim is released and not yet put back, oldest first. */

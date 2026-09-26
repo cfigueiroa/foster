@@ -1793,6 +1793,68 @@ that root here on purpose). `--config-dir <path>` is not accepted by `cloud` eit
 root's credential is reachable only by pointing `CLAUDE_CONFIG_DIR` at it directly and running
 `foster cloud` from inside that shell.
 
+## Archived state follows the account last used
+
+Added alongside the sweep's existing marking passes: a card's archived flag should read the
+same way in every account as it does wherever the conversation was most recently active — a
+copy of an archived conversation reopened where it came from, or a native card archived in one
+account while work went on in another, otherwise stays out of step for as long as foster runs.
+`src/engine/archiveSync.ts` (`planArchiveSync`/`applyArchiveSync`) is the pass, modelled on
+`titleSync.ts`: plan read-only, apply through `retitle.ts`'s own writer (`writeFileAtomic`), no
+closed-app guard, for the same reason a retitle needs none — a lost write costs a re-decided
+flag the next sweep round writes again, never a silent divergence, since the plan is always
+built fresh from what is on disk. It runs by default (`--no-archive-sync` opts out), unlike
+`--sync-titles`/`--dates`, on the view that a mismatched archived flag reads as lost or
+unfinished work — a sharper cost than a stale title.
+
+"Most recently active" is `domain/filter.ts`'s own `activityOf`/`byRecency`, asked across every
+card sharing a `cliSessionId` in every account but the target.
+
+**Only a source that moved on after this row was last used here is ever followed — for every
+row, copy or native, ledger record or not.** The source's `lastActivityAt` has to be strictly
+greater than this row's own, or the row is left alone (`used-here-last`). This is the rule that
+keeps an on-purpose change safe, not an optimisation: the house's own archive ritual archives a
+session in the account it ran in, which gives that account the higher activity, and leaves every
+other account's card on the same conversation unarchived and — because nothing has touched it
+since — older. A first cut of this pass asked only "does foster own this card's flag" and, for an
+old copy with no ledger record at all, defaulted to "yes, safe to sync" without ever checking
+which side had actually moved more recently — which meant a sweep into the account holding that
+older, untouched, unarchived card would undo the archive the ritual had just made on purpose. The
+recency gate is now unconditional rather than only asked for a native card, precisely to close
+that hole.
+
+**Local change wins, once the recency gate above is already cleared.** A target card whose
+current flag is not the one _foster itself_ last set is left alone (`changed-by-hand`) — read
+from the ledger via `lastForsterArchiveWrite` (`ledger/project.ts`), the later of an
+`archive_synced` write (the new ledger event this pass adds) or a `card_retitled` carrying
+`toArchived` (the branch/second-file passes' own writer), never guessed from the strings on disk.
+A card neither writer has ever touched has no such record and is simply followed, once recency has
+already cleared it — except a copy the branch pass archived on purpose (`FosteredEvent.archived`/
+`ActiveFostering.archivedByFoster`), which is that pass's own decision to own, the same as a title
+mark, and is left alone here too (`foster-marked`).
+
+A tie in recency between two sources that disagree on the flag settles nothing — a spawned or
+never-opened card's `lastActivityAt` is a placeholder rather than a real moment, and picking one
+side would be an array-order accident — so the card is left alone (`tied-sources`) rather than
+guessed at. A row carrying a mark this ledger has ever seen foster write (the same
+`templatesSeen`/`stripMarks` set `titleSync.ts` reads), or one the branch/second-file pass marked
+earlier in this very sweep round (`markedThisRound` — no `card_retitled` for it has reached the
+ledger's fold yet), is never touched either.
+
+`engine/marksBack.ts`'s `planArchiveMarksBack` is `planMarksBack`'s own rule for this new event: a
+card whose last archive-touching write this ledger recorded is an `archive_synced`, now showing
+that write's own `from` again, is written back the moment the app is closed — `engine/layout.ts`
+carries it as `LayoutPlan.archiveMarks`/`ApplyLayoutResult.archiveMarksBack`, alongside `marks`/
+`marksBack`, and `engine/verify.ts` reports one the app has since undone as `VerifyArchiveMarks`.
+Kept as its own event and its own marks-back pass rather than folded into `card_retitled`: the two
+writers touch disjoint fields (a title versus a bare flag), and `card_retitled`'s own `toArchived`
+half is already `planMarksBack`'s to catch up when a mark carries one.
+
+Not yet measured against a real store, unlike most of this file's other claims: this pass has only
+been exercised against synthetic fixtures (`tests/archiveSync.test.ts`) and a read-only dry run
+(`foster sweep --json`, no `--yes`) against a scratch copy of the real ledger — see the PR that
+added this section for that run's counts.
+
 ## Before pushing
 
 ```bash

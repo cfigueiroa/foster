@@ -1168,6 +1168,7 @@ describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied le
       orderEntriesAdded: 2,
       pinsMoved: 0,
       marksBack: 0,
+      archiveMarksBack: 0,
       routinesBrought: 1,
       viewKeysCarried: 1,
     });

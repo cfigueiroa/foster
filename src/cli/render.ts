@@ -988,6 +988,30 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  // Archived-flag-only writes: same reasoning as the worktree and title lines
+  // above, a card repaired rather than a row brought.
+  const archives = report.archiveSync;
+  if (archives.items.length > 0) {
+    const one = archives.items.length === 1;
+    lines.push(
+      report.dryRun
+        ? `${archives.items.length} archived flag${one ? '' : 's'} out of step with the account last used.`
+        : `${archives.counts.written} archived flag${archives.counts.written === 1 ? '' : 's'} brought into step` +
+            (archives.counts.skipped + archives.counts.failed > 0
+              ? ` (${archives.counts.skipped} skipped, ${archives.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+  // Called out on its own: this is the recency gate protecting an on-purpose
+  // change, not a failure — see `engine/archiveSync.ts`'s own module doc.
+  const usedHereLast = archives.skipped.filter((skip) => skip.reason === 'used-here-last').length;
+  if (usedHereLast > 0) {
+    lines.push(
+      `${usedHereLast} archived flag(s) left alone: used here more recently than the account that would set the flag.`,
+    );
+  }
+
   const confirmation = report.confirmation;
   if (confirmation) {
     lines.push(
@@ -995,9 +1019,11 @@ export function sweepSummary(report: SweepReport): string[] {
         ? pc.green(
             'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
               'mark 0 second files, restore 0, and release 0 worktree claims' +
-              (confirmation.titlesOutOfStep === undefined
-                ? '.'
-                : ', and bring 0 titles into step.'),
+              (confirmation.titlesOutOfStep === undefined ? '' : ', bring 0 titles into step') +
+              (confirmation.archivesOutOfStep === undefined
+                ? ''
+                : ', and bring 0 archived flags into step') +
+              '.',
           )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
@@ -1007,6 +1033,9 @@ export function sweepSummary(report: SweepReport): string[] {
               `${confirmation.worktreeClaims} worktree claim(s) still to release` +
               (confirmation.titlesOutOfStep
                 ? `, ${confirmation.titlesOutOfStep} title(s) still out of step`
+                : '') +
+              (confirmation.archivesOutOfStep
+                ? `, ${confirmation.archivesOutOfStep} archived flag(s) still out of step`
                 : '') +
               '. Run it again.',
           ),

@@ -1,6 +1,7 @@
 import { sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
+import type { ArchiveSyncItem } from './archiveSync.js';
 import { planLayout, type LayoutPlan } from './layout.js';
 import type { PinMove } from './pinMoves.js';
 import type { RetitleRequest } from './retitle.js';
@@ -44,6 +45,11 @@ export interface VerifyMarks {
   pending: RetitleRequest[];
 }
 
+export interface VerifyArchiveMarks {
+  /** Cards whose archived flag the app reverted — see `planArchiveMarksBack`. */
+  pending: ArchiveSyncItem[];
+}
+
 export interface VerifyPins {
   /** Moves that still need writing — never landed, or landed and were undone. */
   pending: PinMove[];
@@ -82,6 +88,7 @@ export interface VerifyRoutines {
 export interface VerifyReport {
   target: AccountRef;
   marks: VerifyMarks;
+  archiveMarks: VerifyArchiveMarks;
   pins: VerifyPins;
   groups: VerifyGroups;
   routines: VerifyRoutines;
@@ -117,6 +124,7 @@ export function verifyFromPlan(
   plan: LayoutPlan,
 ): VerifyReport {
   const marks: VerifyMarks = { pending: plan.marks ?? [] };
+  const archiveMarks: VerifyArchiveMarks = { pending: plan.archiveMarks ?? [] };
   const pinsPlan = plan.pins;
   const pins: VerifyPins = {
     pending: pinsPlan?.moves ?? [],
@@ -152,9 +160,13 @@ export function verifyFromPlan(
   };
 
   const undone =
-    marks.pending.length > 0 || pins.pending.length > 0 || groups.reset || routines.reset;
+    marks.pending.length > 0 ||
+    archiveMarks.pending.length > 0 ||
+    pins.pending.length > 0 ||
+    groups.reset ||
+    routines.reset;
 
-  return { target, marks, pins, groups, routines, undone };
+  return { target, marks, archiveMarks, pins, groups, routines, undone };
 }
 
 export function planVerify(

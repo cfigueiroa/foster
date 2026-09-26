@@ -31,6 +31,12 @@ function round(parts: {
     },
     files: { plans: parts.plans ?? [], retitled: parts.fileRetitled ?? [], archived: 0 },
     worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
+    archiveSync: {
+      items: [],
+      skipped: [],
+      outcomes: [],
+      counts: { written: 0, skipped: 0, failed: 0 },
+    },
   };
 }
 
