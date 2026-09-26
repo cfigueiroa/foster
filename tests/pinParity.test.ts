@@ -164,6 +164,33 @@ describe('planPinParity', () => {
     expect(plan.toUnpin.map((item) => item.cardId)).toEqual(['local_b2']);
   });
 
+  it('never pins again a row foster pinned and somebody unpinned since', () => {
+    const store = makeStore();
+    // The source still has its pin.
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'b1', cliSessionId: CONVERSATION_B, lastActivityAt: 2_000 }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'b2', cliSessionId: CONVERSATION_B, lastActivityAt: 1_000 }),
+    );
+    const ledger = newLedger();
+    ledger.append({
+      kind: 'pins_synced',
+      account: NEW_ACCOUNT,
+      pinned: ['local_b2'],
+      unpinned: [],
+    });
+
+    // Unpinned by hand: the list no longer holds the target row.
+    const plan = planPinParity(store, NEW_ACCOUNT, ledger.read(), () => fakePinState(['local_b1']));
+    expect(plan.toPin).toEqual([]);
+    expect(plan.keptUnpinned?.map((item) => item.cardId)).toEqual(['local_b2']);
+  });
+
   it('never unpins a target row the user pinned by hand', () => {
     const store = makeStore();
     writeSession(

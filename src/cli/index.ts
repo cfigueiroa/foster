@@ -5244,6 +5244,10 @@ program
   )
   .option('--session <id...>', 'sessions to pin, by id or unique prefix')
   .option('--remove', 'unpin them instead')
+  .option(
+    '--clear-all',
+    'empty the whole pin list, every account; with the app open, queued for the next layout --restart',
+  )
   .option('--backup-dir <path>', 'where to copy the database before writing')
   .option('--start', 'start Claude Desktop afterwards')
   .option('--yes', 'actually write; without it nothing is written')
@@ -5253,6 +5257,7 @@ program
     const opts = this.opts<{
       session?: string[];
       remove?: boolean;
+      clearAll?: boolean;
       backupDir?: string;
       start?: boolean;
       yes?: boolean;
@@ -5276,6 +5281,38 @@ program
       for (const note of state.notices) {
         console.log(pc.yellow(`warning: ${note}`));
       }
+    }
+
+    // A fresh start: every pin, every account's. Pin parity (`foster layout`) only ever copies a
+    // pin some other account still has, so emptying the one shared list is what keeps an old pin
+    // from coming back on the next account switch.
+    if (opts.clearAll) {
+      if (opts.dryRun || !opts.yes) {
+        console.log(
+          pc.bold(`Dry run: all ${state.ids.length} pin(s) would be removed, every account's.`),
+        );
+        console.log(pc.dim('Re-run with --yes to write.'));
+        return;
+      }
+      const running = inspectApp(store);
+      if (running.running) {
+        ledger.append({ kind: 'pins_clear_deferred' });
+        console.log(
+          `Claude Desktop is running, so its pin list cannot be written now. Queued: the next\n` +
+            `"foster layout --yes --restart" (or /fosteia's last step) empties all ${state.ids.length} pin(s) while the app is closed.`,
+        );
+        return;
+      }
+      const backup = backupPinState(
+        store,
+        opts.backupDir ??
+          path.join(path.dirname(ledger.path), 'backups', `pin-state-${Date.now()}`),
+      );
+      writePinState(state, []);
+      ledger.append({ kind: 'pins_cleared', removed: state.ids.length });
+      console.log(pc.dim(`Database copied to ${backup}`));
+      console.log(pc.bold(`All ${state.ids.length} pin(s) removed.`));
+      return;
     }
 
     const onDisk = new Map(scanStore(store).map((found) => [found.data.sessionId, found]));

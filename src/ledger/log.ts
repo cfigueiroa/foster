@@ -42,6 +42,8 @@ const EVENT_KINDS = new Set<string>([
   'pins_moved',
   'archive_synced',
   'pins_synced',
+  'pins_clear_deferred',
+  'pins_cleared',
   'layout_assigned',
   'view_carried',
   'view_seen',

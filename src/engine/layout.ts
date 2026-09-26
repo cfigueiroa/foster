@@ -50,7 +50,7 @@ import {
   type LayoutViewCarry,
   type MachineViewCarry,
 } from './view.js';
-import { applyPinMoves, planPinMoves, type PinMovesPlan } from './pinMoves.js';
+import { applyPinMoves, pinClearPending, planPinMoves, type PinMovesPlan } from './pinMoves.js';
 import { applyArchiveSync, type ArchiveSyncItem } from './archiveSync.js';
 import { planMarksBack, planArchiveMarksBack } from './marksBack.js';
 import { retitleCards, type RetitleRequest } from './retitle.js';
@@ -609,6 +609,8 @@ export interface LayoutPlan {
    * already keeps.
    */
   pinsParity?: PinParityPlan;
+  /** `foster pin --clear-all` is waiting: the gap empties the whole pin list (`pinClearPending`). */
+  pinsClear?: boolean;
 }
 
 export interface PlanLayoutOptions {
@@ -670,6 +672,7 @@ export function planLayout(options: PlanLayoutOptions): LayoutPlan {
     marks: planMarksBack(options.ledgerEvents ?? [], target, store),
     archiveMarks: planArchiveMarksBack(options.ledgerEvents ?? [], target, store),
     pinsParity: planPinParity(store, target, options.ledgerEvents ?? [], undefined, cache),
+    pinsClear: pinClearPending(options.ledgerEvents ?? []),
     accountPrefsCarry: planAccountPrefsCarry(
       store,
       target,
@@ -698,6 +701,8 @@ export interface LayoutPendingCounts {
   pinsToPin?: number;
   /** Pins parity would remove — always foster's own earlier pin. Absent on a hand-built count. */
   pinsToUnpin?: number;
+  /** 1 when the whole pin list is to be emptied (`foster pin --clear-all`). */
+  pinsClear?: number;
   /** Machine-wide filter-menu keys (`groupBy`/`sort`) that would be carried. Absent on a hand-built count. */
   machineViewKeysCarried?: number;
   /** Account-uuid-keyed app prefs that would be carried. Absent on a hand-built count. */
@@ -733,6 +738,7 @@ export function pendingLayoutCounts(plan: LayoutPlan): LayoutPendingCounts {
     archiveMarksBack: plan.archiveMarks?.length ?? 0,
     pinsToPin: plan.pinsParity?.toPin.length ?? 0,
     pinsToUnpin: plan.pinsParity?.toUnpin.length ?? 0,
+    ...(plan.pinsClear ? { pinsClear: 1 } : {}),
     machineViewKeysCarried:
       (plan.machineViewPrefs?.groupBy !== undefined ? 1 : 0) +
       (plan.machineViewPrefs?.sortBy !== undefined ? 1 : 0),
@@ -753,6 +759,7 @@ export function totalLayoutPending(counts: LayoutPendingCounts): number {
     (counts.archiveMarksBack ?? 0) +
     (counts.pinsToPin ?? 0) +
     (counts.pinsToUnpin ?? 0) +
+    (counts.pinsClear ?? 0) +
     (counts.machineViewKeysCarried ?? 0) +
     (counts.accountPrefsCarried ?? 0)
   );
@@ -827,6 +834,8 @@ export interface ApplyLayoutResult {
   pinsPinned?: number;
   /** Cross-account pins removed this run — always foster's own earlier pin. */
   pinsUnpinned?: number;
+  /** Ids removed when the whole pin list was emptied (`foster pin --clear-all`). */
+  pinsCleared?: number;
   /**
    * Why the pin moves could not be written, when they could not. Never a
    * reason the run failed — see the pin step at the end of `applyLayout`.
@@ -1458,7 +1467,9 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
   let pinsSyncedCount = { pinned: 0, unpinned: 0 };
   let pinsError: string | undefined;
   const pinsParity = plan.pinsParity;
+  let pinsCleared: number | undefined;
   const hasPinWork =
+    plan.pinsClear ||
     (plan.pins && (plan.pins.moves.length > 0 || plan.pins.settled.length > 0)) ||
     (pinsParity && (pinsParity.toPin.length > 0 || pinsParity.toUnpin.length > 0));
   if (hasPinWork) {
@@ -1467,9 +1478,13 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
         store,
         ledger,
         plan.pins ?? { moves: [], settled: [] },
-        { now: options.now },
+        { now: options.now, ...(plan.pinsClear ? { clear: true } : {}) },
         pinsParity,
       );
+      if (result.cleared !== undefined) {
+        pinsCleared = result.cleared;
+        written.push('pins (cleared)');
+      }
       if (result.backup) backups.push(result.backup);
       if (result.moved > 0) written.push('pins');
       if ((result.pinned ?? 0) > 0 || (result.unpinned ?? 0) > 0) written.push('pins (parity)');
@@ -1516,6 +1531,7 @@ export function applyLayout(plan: LayoutPlan, options: ApplyLayoutOptions): Appl
     pinsMoved,
     pinsPinned: pinsSyncedCount.pinned,
     pinsUnpinned: pinsSyncedCount.unpinned,
+    ...(pinsCleared !== undefined ? { pinsCleared } : {}),
     ...(pinsError ? { pinsError } : {}),
     marksBack,
     archiveMarksBack,

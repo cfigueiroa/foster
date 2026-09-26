@@ -264,6 +264,7 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
         `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}` +
         `${result.pinsPinned ? `, ${result.pinsPinned} pin(s) added` : ''}` +
         `${result.pinsUnpinned ? `, ${result.pinsUnpinned} pin(s) removed` : ''}` +
+        `${result.pinsCleared !== undefined ? `, pin list emptied (${result.pinsCleared} removed)` : ''}` +
         `${result.machineViewKeysCarried ? `, ${result.machineViewKeysCarried} sidebar setting(s) carried` : ''}` +
         `${result.accountPrefsCarried ? `, ${result.accountPrefsCarried} app setting(s) carried` : ''}` +
         `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}` +
@@ -1151,6 +1152,7 @@ export function sweepSummary(report: SweepReport): string[] {
       parts.push(`${layout.pinsToPin} pin${layout.pinsToPin === 1 ? '' : 's'} from other accounts`);
     if (layout.pinsToUnpin)
       parts.push(`${layout.pinsToUnpin} pin${layout.pinsToUnpin === 1 ? '' : 's'} to remove`);
+    if (layout.pinsClear) parts.push('the whole pin list to empty (foster pin --clear-all)');
     if (layout.machineViewKeysCarried)
       parts.push(
         `${layout.machineViewKeysCarried} sidebar setting${layout.machineViewKeysCarried === 1 ? '' : 's'}`,
