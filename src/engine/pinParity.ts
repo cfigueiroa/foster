@@ -47,6 +47,28 @@ export interface PinParityPlan {
   toUnpin: PinParityItem[];
   /** Set when there was something to compare and the pin list could not be read. */
   unreadable?: string;
+  /**
+   * Rows foster pinned before and somebody unpinned since: the source still has its pin, but
+   * local change wins, so they stay unpinned.
+   */
+  keptUnpinned?: PinParityItem[];
+}
+
+/**
+ * The last thing foster itself did to each card's pin in this account, from `pins_synced`.
+ * `pinned` with the card no longer pinned means a person took it off, and that is left alone.
+ */
+export function lastFosterPinAction(
+  events: readonly LedgerEvent[],
+  target: AccountRef,
+): Map<string, 'pinned' | 'unpinned'> {
+  const last = new Map<string, 'pinned' | 'unpinned'>();
+  for (const event of events) {
+    if (event.kind !== 'pins_synced' || !sameAccount(event.account, target)) continue;
+    for (const id of event.pinned) last.set(id, 'pinned');
+    for (const id of event.unpinned) last.set(id, 'unpinned');
+  }
+  return last;
 }
 
 /**
@@ -121,6 +143,8 @@ export function planPinParity(
   }
 
   const owned = fosterOwnedPins(events, target);
+  const lastAction = lastFosterPinAction(events, target);
+  const keptUnpinned: PinParityItem[] = [];
   const toPin: PinParityItem[] = [];
   const toUnpin: PinParityItem[] = [];
   const decided = new Set<string>();
@@ -138,11 +162,16 @@ export function planPinParity(
     const title = row.data.title ?? cardId;
 
     if (desired && !currentlyPinned) {
+      if (lastAction.get(cardId) === 'pinned') {
+        // Foster pinned it once and it is not pinned now: somebody took it off.
+        keptUnpinned.push({ cardId, title });
+        continue;
+      }
       toPin.push({ cardId, title });
     } else if (!desired && currentlyPinned && owned.has(cardId)) {
       toUnpin.push({ cardId, title });
     }
   }
 
-  return { target, toPin, toUnpin };
+  return { target, toPin, toUnpin, ...(keptUnpinned.length > 0 ? { keptUnpinned } : {}) };
 }

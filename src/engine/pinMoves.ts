@@ -180,6 +180,8 @@ export interface ApplyPinMovesResult {
   /** Cross-account pin parity written this call — see `engine/pinParity.ts`. */
   pinned?: number;
   unpinned?: number;
+  /** Ids removed when the whole list was emptied (`pins_clear_deferred`). */
+  cleared?: number;
   /** The backup taken before the write, when there was one. */
   backup?: string;
 }
@@ -196,13 +198,27 @@ export interface ApplyPinMovesResult {
  * The caller owns the "app is closed" check: `applyLayout` refuses a running
  * app before it gets here, and the sweep's pin pass asks `inspectApp` first.
  */
+/**
+ * Whether `foster pin --clear-all` left an emptying of the whole pin list waiting for a closed-app
+ * gap: a `pins_clear_deferred` with no `pins_cleared` after it.
+ */
+export function pinClearPending(events: readonly LedgerEvent[]): boolean {
+  let pending = false;
+  for (const event of events) {
+    if (event.kind === 'pins_clear_deferred') pending = true;
+    else if (event.kind === 'pins_cleared') pending = false;
+  }
+  return pending;
+}
+
 export function applyPinMoves(
   store: StoreLayout,
   ledger: Ledger,
   plan: PinMovesPlan,
-  options: { now?: () => Date } = {},
+  options: { now?: () => Date; clear?: boolean } = {},
   parity?: PinParityPlan,
 ): ApplyPinMovesResult {
+  if (options.clear) return clearAllPins(store, ledger, plan, options);
   const hasMoves = plan.moves.length > 0 || plan.settled.length > 0;
   const hasParity = (parity?.toPin.length ?? 0) > 0 || (parity?.toUnpin.length ?? 0) > 0;
   if (!hasMoves && !hasParity) return { moved: 0 };
@@ -280,4 +296,41 @@ export function applyPinMoves(
     ...(parity ? { pinned: toPin.length, unpinned: toUnpin.length } : {}),
     backup,
   };
+}
+
+/**
+ * Empty the whole pin list — every account's — in the same one write a closed-app gap already
+ * makes for pins. A pending move or parity pin would only put back what was asked to go, so the
+ * moves are settled as not written and parity is not applied.
+ */
+function clearAllPins(
+  store: StoreLayout,
+  ledger: Ledger,
+  plan: PinMovesPlan,
+  options: { now?: () => Date },
+): ApplyPinMovesResult {
+  const pins = readPinState(store);
+  const settle = [...plan.settled, ...plan.moves];
+  if (settle.length > 0) {
+    ledger.append({
+      kind: 'pins_moved',
+      moves: settle.map((move) => ({
+        staleSessionId: move.staleSessionId,
+        cleanSessionId: move.cleanSessionId,
+        written: false,
+      })),
+    });
+  }
+  if (!pins || pins.ids.length === 0) {
+    ledger.append({ kind: 'pins_cleared', removed: 0 });
+    return { moved: 0, cleared: 0 };
+  }
+  const stamp = (options.now?.() ?? new Date()).getTime();
+  const backup = backupPinState(
+    store,
+    path.join(path.dirname(ledger.path), 'backups', `pin-state-${stamp}`),
+  );
+  writePinState(pins, []);
+  ledger.append({ kind: 'pins_cleared', removed: pins.ids.length });
+  return { moved: 0, cleared: pins.ids.length, backup };
 }

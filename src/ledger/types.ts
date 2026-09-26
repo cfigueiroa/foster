@@ -34,6 +34,8 @@ export type LedgerEvent =
   | PinsMovedEvent
   | ArchiveSyncedEvent
   | PinsSyncedEvent
+  | PinsClearDeferredEvent
+  | PinsClearedEvent
   | LayoutAssignedEvent
   | ViewCarriedEvent
   | ViewSeenEvent;
@@ -727,6 +729,23 @@ export interface PinsSyncedEvent extends BaseEvent {
 }
 
 /**
+ * `foster pin --clear-all` asked, with the app open, for the whole pin list to be emptied. The
+ * list is the app's IndexedDB and can only be written while it is closed, so the next closed-app
+ * gap (`foster layout --restart`, `sweep --restart`) empties it and settles this with
+ * `pins_cleared`.
+ */
+export interface PinsClearDeferredEvent extends BaseEvent {
+  kind: 'pins_clear_deferred';
+}
+
+/** The whole pin list, every account's, was emptied; settles any earlier `pins_clear_deferred`. */
+export interface PinsClearedEvent extends BaseEvent {
+  kind: 'pins_cleared';
+  /** How many ids the list held before. */
+  removed: number;
+}
+
+/**
  * One card filed into one group by `applyLayout`, kept apart from the
  * summary counts `LayoutAppliedEvent` already carries so a later run can tell
  * whether the *current* group a target card sits in is one foster itself put
@@ -811,6 +830,8 @@ export type LedgerEventInput =
   | Draft<PinsMovedEvent>
   | Draft<ArchiveSyncedEvent>
   | Draft<PinsSyncedEvent>
+  | Draft<PinsClearDeferredEvent>
+  | Draft<PinsClearedEvent>
   | Draft<LayoutAssignedEvent>
   | Draft<ViewCarriedEvent>
   | Draft<ViewSeenEvent>;

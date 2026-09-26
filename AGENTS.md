@@ -1265,6 +1265,19 @@ the user set by hand, here or anywhere else. Applied in the same read-once/write
 batch as the pre-existing pin-move pass (`engine/pinMoves.ts`'s `applyPinMoves`, now taking an
 optional `parity` argument), so a layout run never opens the pin database twice in one gap.
 
+**A pin somebody took off stays off, and the whole list can be emptied.** Measured 26/09/2026: the
+user unpinned every row after the first 0.63 run, and the next layout would have pinned 15 of them
+again, because pin parity pinned whatever a source still had pinned, whether or not foster had
+pinned that row before and a person had since taken it off. `lastFosterPinAction`
+(`engine/pinParity.ts`) now reads the last thing foster did to each row's pin (`pins_synced`); a row
+foster pinned that is no longer pinned is left unpinned (`keptUnpinned`). For a fresh start,
+`foster pin --clear-all --yes` empties the whole list, every account's, since parity only ever
+copies a pin some other account still holds. The list is the app's IndexedDB: with the app closed
+it is written at once; with it open, `pins_clear_deferred` is appended and the next closed-app gap
+(`foster layout --restart`, `/fosteia`'s last step) empties it in the same single pin write
+(`applyPinMoves`'s `clear`, which settles pending moves unwritten and skips parity), recording
+`pins_cleared`.
+
 **A card already filed in a group can now move, but only if the filing was foster's own.** Before
 this, a target card assigned to _any_ group — right one or wrong one — was left alone outright.
 `layout_assigned` (new ledger event, folded by `layoutAssignedByCard`) records every card `applyLayout`

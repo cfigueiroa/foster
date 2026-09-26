@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Ledger } from '../src/ledger/log.js';
-import { applyPinMoves, planPinMoves } from '../src/engine/pinMoves.js';
+import { applyPinMoves, pinClearPending, planPinMoves } from '../src/engine/pinMoves.js';
 import { planPinParity } from '../src/engine/pinParity.js';
 import {
   PIN_STATE_KEY,
@@ -455,6 +455,41 @@ function makePinDatabase(store: StoreLayout, ids: string[]): void {
     ),
   );
 }
+
+describe('emptying the whole pin list (foster pin --clear-all)', () => {
+  it('is pending from a deferral until a clear settles it', () => {
+    const ledger = new Ledger(
+      path.join(mkdtempSync(path.join(tmpdir(), 'foster-pinclear-')), 'l.jsonl'),
+    );
+    expect(pinClearPending(ledger.read())).toBe(false);
+    ledger.append({ kind: 'pins_clear_deferred' });
+    expect(pinClearPending(ledger.read())).toBe(true);
+    ledger.append({ kind: 'pins_cleared', removed: 3 });
+    expect(pinClearPending(ledger.read())).toBe(false);
+  });
+
+  it('empties every id in the gap, parity included, and settles the deferral', () => {
+    const store = makeStore();
+    const ledger = new Ledger(
+      path.join(mkdtempSync(path.join(tmpdir(), 'foster-pinclear-')), 'l.jsonl'),
+    );
+    makePinDatabase(store, ['local_a', 'local_b', 'local_c']);
+    ledger.append({ kind: 'pins_clear_deferred' });
+
+    const parity = { target: NEW_ACCOUNT, toPin: [{ cardId: 'local_d', title: 'd' }], toUnpin: [] };
+    const result = applyPinMoves(
+      store,
+      ledger,
+      { moves: [], settled: [] },
+      { clear: true },
+      parity,
+    );
+
+    expect(result.cleared).toBe(3);
+    expect(readPinState(store)!.ids).toEqual([]);
+    expect(pinClearPending(ledger.read())).toBe(false);
+  });
+});
 
 describe('applyPinMoves — combined with cross-account pin parity in one batch', () => {
   it('writes a pin-move and a parity pin/unpin together, in one append, with both ledger events', () => {
