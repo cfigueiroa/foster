@@ -307,3 +307,57 @@ describe('viewNoticeLines — R8', () => {
     expect(viewNoticeLines(state([]))).toEqual([]);
   });
 });
+
+describe('layoutPlanLines / layoutPendingCountsChanged — account parity and archive marks', () => {
+  it('names pins from other accounts, filed-by-hand skips, moves and archived flags the app undid', () => {
+    const plan = basePlan({
+      groups: {
+        items: [
+          {
+            name: 'Work',
+            created: false,
+            assign: [{ cardId: 'code:local_a', title: 'A', movedFrom: 'Old' }],
+            skipped: [{ title: 'B', reason: 'filed-by-hand', currentGroup: 'Mine' }],
+          } as unknown as LayoutPlan['groups']['items'][number],
+        ],
+        conflicts: [],
+        sources: 1,
+      },
+      pinsParity: {
+        target: ACCOUNT_A,
+        toPin: [{ cardId: 'local_p', title: 'Pinned elsewhere' }],
+        toUnpin: [],
+      },
+      archiveMarks: [
+        {
+          path: 'x.json',
+          sessionId: 'local_z',
+          target: ACCOUNT_A,
+          from: false,
+          to: true,
+          native: false,
+          because: 'copy-follows-source',
+        },
+      ],
+    });
+
+    const lines = layoutPlanLines(plan).map(plain).join('\n');
+    expect(lines).toContain('1 moved from another group');
+    expect(lines).toContain('B — filed by hand in "Mine", left alone');
+    expect(lines).toContain('+ Pinned elsewhere');
+    expect(lines).toContain('local_z -> archived');
+  });
+
+  it('counts a change in pin parity or archive marks as a changed plan', () => {
+    const base = {
+      groupsCreated: 0,
+      cardsAssigned: 0,
+      orderEntriesAdded: 0,
+      routinesBrought: 0,
+      viewKeysCarried: 0,
+    };
+    expect(layoutPendingCountsChanged({ ...base }, { ...base, pinsToPin: 1 })).toBe(true);
+    expect(layoutPendingCountsChanged({ ...base }, { ...base, archiveMarksBack: 2 })).toBe(true);
+    expect(layoutPendingCountsChanged({ ...base }, { ...base })).toBe(false);
+  });
+});
