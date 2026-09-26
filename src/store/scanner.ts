@@ -64,6 +64,17 @@ export interface ScanOptions {
   slim?: boolean;
   cache?: ScanCache;
   persistentCache?: SlimCardCache;
+  /**
+   * A card whose file `scanAccount` could not read or parse vanishes from the
+   * scan silently otherwise — `readSessionFile`/`readSessionCard` already
+   * return `undefined` for both a file that is simply gone (an ordinary race
+   * with whatever else is touching the store) and one that is unreadable or
+   * unparseable, and neither of those returns says which. Passing an array
+   * here has `scanAccount` push every path it skipped that way onto it, so a
+   * caller that cares — `foster sweep`'s summary, so far — can say how many
+   * cards were left out rather than reporting a store as smaller than it is.
+   */
+  unreadable?: string[];
 }
 
 interface CachedCard {
@@ -107,12 +118,15 @@ export class ScanCache {
     file: string,
     slim: boolean,
     persistentCache?: SlimCardCache,
+    unreadable?: string[],
   ): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
     let stat: { mtimeMs: number; size: number };
     try {
       const s = statSync(file);
       stat = { mtimeMs: s.mtimeMs, size: s.size };
     } catch {
+      // Gone before it could even be stat'd — an ordinary race with whatever
+      // else touches the store, not a card this run failed to read.
       this.entries.delete(file);
       return undefined;
     }
@@ -124,6 +138,9 @@ export class ScanCache {
 
     const card = slim ? readSessionCardCached(file, persistentCache) : wholeCard(file);
     if (!card) {
+      // The file exists — `stat` above succeeded — but reading or parsing it
+      // did not. This is the case `unreadable` exists for.
+      unreadable?.push(file);
       this.entries.delete(file);
       return undefined;
     }
@@ -136,9 +153,13 @@ function readUncached(
   file: string,
   slim: boolean,
   persistentCache?: SlimCardCache,
+  unreadable?: string[],
 ): { card: { data: CodeSessionData; slim: boolean }; size: number } | undefined {
   const card = slim ? readSessionCardCached(file, persistentCache) : wholeCard(file);
-  if (!card) return undefined;
+  if (!card) {
+    unreadable?.push(file);
+    return undefined;
+  }
   return { card, size: sizeOf(file) };
 }
 
@@ -157,8 +178,8 @@ export function scanAccount(
 
     const file = path.join(dir, entry);
     const read = options.cache
-      ? options.cache.read(file, slim, options.persistentCache)
-      : readUncached(file, slim, options.persistentCache);
+      ? options.cache.read(file, slim, options.persistentCache, options.unreadable)
+      : readUncached(file, slim, options.persistentCache, options.unreadable);
     if (!read) continue;
     const { card, size } = read;
     const { data } = card;

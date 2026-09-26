@@ -68,6 +68,21 @@ export interface GrepConversation {
   cards: GrepCard[];
 }
 
+/**
+ * `grepTranscripts`'s whole answer: every conversation with a hit, plus every
+ * file this run could not even open to check — a file over V8's string/buffer
+ * ceiling, a permission error, anything but the file simply having vanished
+ * since the directory walk (ENOENT, treated the ordinary way: no match,
+ * nothing said). Silently reading such a file as "no match" would be the same
+ * mistake `exportConversation.ts` and `store/codex.ts` were fixed for in the
+ * same pass — a search that cannot see a file must say so, not report a false
+ * negative as if it were a real answer.
+ */
+export interface GrepReport {
+  conversations: GrepConversation[];
+  unreadable: string[];
+}
+
 export interface GrepOptions {
   /** Only conversations with at least one card in this exact account. */
   accountUuid?: string;
@@ -227,10 +242,14 @@ function scanTranscriptFile(
   let bytes: Buffer;
   try {
     bytes = readFileSync(file);
-  } catch {
-    // Vanished between the directory walk and the read, or turned unreadable.
-    // Not a match, the same as every other reader here treats a missing file.
-    return [];
+  } catch (error) {
+    // ENOENT — vanished between the directory walk and the read — is not a
+    // match, the same as every other reader here treats a missing file.
+    // Anything else means the search could not see this file at all, and the
+    // caller (`grepTranscripts`) needs to know that rather than silently
+    // treat it as "no match".
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
 
   let raw: string | undefined;
@@ -317,7 +336,7 @@ export function grepTranscripts(
   store: StoreLayout,
   pattern: RegExp,
   options: GrepOptions = {},
-): GrepConversation[] {
+): GrepReport {
   const index = indexAllTranscripts(options.projectsDirs ?? transcriptRoots(process.env));
 
   const flags = pattern.flags.replace('g', '');
@@ -338,6 +357,7 @@ export function grepTranscripts(
   const forceFullScan = !isLiteral && hasJsonEscapedChar(pattern.source);
 
   const raw: RawGrepMatch[] = [];
+  const unreadable: string[] = [];
 
   for (const [cliSessionId, files] of index) {
     if (options.limit !== undefined && raw.length >= options.limit) break;
@@ -354,30 +374,41 @@ export function grepTranscripts(
         if (mtime < options.since) continue;
       }
 
-      for (const found of scanTranscriptFile(
-        file,
-        isLiteral,
-        literalSource,
-        literalBytes,
-        prefilter,
-        matcher,
-        options.role,
-        forceFullScan,
-      )) {
+      let found: FileMatch[];
+      try {
+        found = scanTranscriptFile(
+          file,
+          isLiteral,
+          literalSource,
+          literalBytes,
+          prefilter,
+          matcher,
+          options.role,
+          forceFullScan,
+        );
+      } catch {
+        // A real read failure, not the vanished-file case `scanTranscriptFile`
+        // already answers with an empty array — named here rather than
+        // silently counted as "no match" (see `GrepReport`'s own doc comment).
+        unreadable.push(file);
+        continue;
+      }
+
+      for (const match of found) {
         hits.push({
           cliSessionId,
           file,
-          lineNumber: found.lineNumber,
-          ...(found.at !== undefined ? { at: found.at } : {}),
-          role: found.role,
-          snippet: snippetAround(found.text, found.index, found.length),
+          lineNumber: match.lineNumber,
+          ...(match.at !== undefined ? { at: match.at } : {}),
+          role: match.role,
+          snippet: snippetAround(match.text, match.index, match.length),
         });
       }
     }
     if (hits.length > 0) raw.push({ cliSessionId, files, hits });
   }
 
-  if (raw.length === 0) return [];
+  if (raw.length === 0) return { conversations: [], unreadable };
 
   const cardsByConversation = new Map<string, GrepCard[]>();
   for (const session of scanStore(store)) {
@@ -423,5 +454,5 @@ export function grepTranscripts(
     });
   }
 
-  return results;
+  return { conversations: results, unreadable };
 }

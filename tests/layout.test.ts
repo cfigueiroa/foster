@@ -521,6 +521,15 @@ describe('planLayout / applyLayout — groups', () => {
     // must say "1 other account", not 2.
     expect(plan.groups.sources).toBe(1);
   });
+
+  it('names a config file it could not read, rather than planning as if there were no groups at all', () => {
+    const store = makeStore();
+    writeFileSync(store.desktopConfigFile, '{ not json', 'utf8');
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    expect(plan.groups.items).toEqual([]);
+    expect(plan.groups.configUnreadable).toBeDefined();
+  });
 });
 
 describe('planLayout / applyLayout — groups written to all three places (finding #2)', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { restartAround } from '../src/ops/restart.js';
+import { restartAround, restartFailed } from '../src/ops/restart.js';
 import { layoutFor } from '../src/domain/paths.js';
 import type { RestartPlan } from '../src/ops/sweep.js';
 import type { QuitResult } from '../src/engine/desktop.js';
@@ -232,5 +232,23 @@ describe('restartAround — code review follow-ups', () => {
       start: vi.fn(async () => true),
     });
     expect(result.command).toBe('foster app restart --terminate');
+  });
+});
+
+describe('restartFailed', () => {
+  it('is false when nothing asked for a restart, even though done is also false', () => {
+    expect(restartFailed({ requested: false, done: false, closed: false, command: 'x' })).toBe(
+      false,
+    );
+  });
+
+  it('is false once a requested restart actually finished', () => {
+    expect(restartFailed({ requested: true, done: true, closed: true, command: 'x' })).toBe(false);
+  });
+
+  it('is true when a requested restart did not finish', () => {
+    expect(
+      restartFailed({ requested: true, done: false, closed: false, command: 'x', reason: 'no' }),
+    ).toBe(true);
   });
 });

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -42,6 +42,15 @@ describe('Ledger', () => {
 
   it('returns empty for a ledger that does not exist yet', () => {
     expect(makeLedger().read()).toEqual([]);
+  });
+
+  it('throws, naming the path, when the ledger path is a directory rather than missing', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-ledger-'));
+    const asDir = path.join(dir, 'ledger.jsonl');
+    mkdirSync(asDir);
+    const ledger = new Ledger(asDir);
+
+    expect(() => ledger.read()).toThrow(asDir);
   });
 
   it('round-trips the optional template field on a fostered event, old entries folding without it', () => {

@@ -136,6 +136,18 @@ export interface GroupScopesReadReport {
    * worth a second look — `planLayout`'s target included, via `scopeKey`.
    */
   skippedEntries: Record<string, number>;
+  /**
+   * Set when the config file itself could not be read or parsed at all —
+   * EACCES, a file replaced by a directory, JSON that will not parse — as
+   * opposed to it simply not existing yet (ENOENT: an install nothing has
+   * ever grouped, and the ordinary case every fixture store in this suite
+   * builds). Both cases hand back `{ scopes: {} }` either way, since a plan
+   * has nothing to read from the file regardless — but only this one is a
+   * problem worth a warning: "no groups" from a file with none in it and "no
+   * groups" from a file `planLayout` could not even open are not the same
+   * fact, and only the read side of this module can tell them apart.
+   */
+  configUnreadable?: string;
 }
 
 /**
@@ -184,8 +196,15 @@ export function readGroupScopesReport(store: StoreLayout): GroupScopesReadReport
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(store.desktopConfigFile, 'utf8'));
-  } catch {
-    return { scopes: {}, skippedEntries: {} };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { scopes: {}, skippedEntries: {} };
+    }
+    return {
+      scopes: {},
+      skippedEntries: {},
+      configUnreadable: (error as Error).message,
+    };
   }
   const preferences = (parsed as { preferences?: unknown })?.preferences;
   const epitaxy =

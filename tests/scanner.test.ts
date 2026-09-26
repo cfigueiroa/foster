@@ -40,6 +40,40 @@ describe('scanAccount', () => {
     expect(scanAccount(store, OLD_ACCOUNT)).toHaveLength(1);
   });
 
+  it('names a malformed card in options.unreadable instead of only dropping it silently', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    mkdirSync(dir, { recursive: true });
+    const broken = path.join(dir, 'local_broken.json');
+    writeFileSync(broken, '{ not json', 'utf8');
+
+    const unreadable: string[] = [];
+    const found = scanAccount(store, OLD_ACCOUNT, undefined, { unreadable });
+
+    expect(found).toHaveLength(1);
+    expect(unreadable).toEqual([broken]);
+  });
+
+  it('names an unreadable card the same way when a ScanCache is in play', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session());
+    const dir = accountDir(store, OLD_ACCOUNT);
+    mkdirSync(dir, { recursive: true });
+    const broken = path.join(dir, 'local_broken.json');
+    writeFileSync(broken, '{ not json', 'utf8');
+
+    const unreadable: string[] = [];
+    const found = scanAccount(store, OLD_ACCOUNT, undefined, {
+      slim: true,
+      cache: new ScanCache(),
+      unreadable,
+    });
+
+    expect(found).toHaveLength(1);
+    expect(unreadable).toEqual([broken]);
+  });
+
   it('skips valid JSON that is not a session, and still loads the neighbor', () => {
     const store = makeStore();
     const good = writeSession(

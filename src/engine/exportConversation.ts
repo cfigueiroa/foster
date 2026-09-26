@@ -46,10 +46,15 @@ export function readConversationRecords(files: readonly string[]): ExportRecord[
     let text: string;
     try {
       text = readFileSync(file, 'utf8');
-    } catch {
-      // A file the index named that vanished, or turned unreadable, since.
-      // What the other files hold is still the best answer available.
-      continue;
+    } catch (error) {
+      // ENOENT alone is "vanished since the index named it" — what the other
+      // files hold is still the best answer available, so skip it and carry
+      // on. Anything else (a file past V8's string-length ceiling, EACCES,
+      // ...) must not silently render a partial export as if it were
+      // complete: this is a rendering the user may act on, not a scan whose
+      // job is to degrade gracefully.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error(`could not read ${file}: ${(error as Error).message}`, { cause: error });
     }
 
     for (const line of text.split('\n')) {

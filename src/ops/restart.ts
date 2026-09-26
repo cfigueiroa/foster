@@ -177,3 +177,15 @@ export async function restartAround(
     };
   }
 }
+
+/**
+ * Whether a restart this run asked for did not finish — the one predicate
+ * `layout`, `view set` and `view copy` already use (each inline, at their own
+ * `if (!restart.done)`) to decide `process.exitCode = 1` for a `--restart`
+ * outcome. Gated on `requested`: a result nobody asked to restart (`--restart`
+ * never passed) is `done: false` by construction — see the early return above
+ * — and must never read as a failure on that account alone.
+ */
+export function restartFailed(restart: RestartAroundResult): boolean {
+  return restart.requested && !restart.done;
+}
