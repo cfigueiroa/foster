@@ -55,6 +55,7 @@ const {
   planViewCopy,
   planViewSet,
   readViewState,
+  recordSignedInViewSighting,
   recordViewSeen,
   SORT_STORED_TO_WORD,
   SORT_WORDS,
@@ -625,6 +626,54 @@ describe('recordViewSeen / viewSeenFor', () => {
     makeMachineStore(store, { groupByByMode: { code: 'custom' } });
     recordViewSeen(ledger, store, OLD_ACCOUNT);
     expect(ledger.read().filter((e) => e.kind === 'view_seen')).toHaveLength(2);
+    expect(viewSeenFor(ledger.read(), OLD_ACCOUNT)?.groupBy).toBe('custom');
+  });
+});
+
+describe('recordSignedInViewSighting', () => {
+  it('calls recordViewSeen with whichever account resolve() says is signed in', () => {
+    const store = makeStore();
+    const ledger = newLedger(store);
+    const record = vi.fn();
+
+    recordSignedInViewSighting(store, ledger, {
+      resolve: () => OLD_ACCOUNT,
+      record,
+    });
+
+    expect(record).toHaveBeenCalledTimes(1);
+    expect(record).toHaveBeenCalledWith(ledger, store, OLD_ACCOUNT);
+  });
+
+  it('never calls recordViewSeen when nothing is signed in', () => {
+    const store = makeStore();
+    const ledger = newLedger(store);
+    const record = vi.fn();
+
+    recordSignedInViewSighting(store, ledger, {
+      resolve: () => undefined,
+      record,
+    });
+
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('resolves the real signed-in account by default, and actually appends a sighting', () => {
+    const store = makeStore();
+    // `currentAccount` reads `lastKnownAccountUuid` off the config file the
+    // app itself writes — nothing in this test doubles it, so this exercises
+    // the real default `resolve`.
+    writeFileSync(
+      store.configFile,
+      JSON.stringify({ lastKnownAccountUuid: OLD_ACCOUNT.accountUuid }),
+      'utf8',
+    );
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'x1', cliSessionId: 'conv-x' }));
+    makeMachineStore(store, { groupByByMode: { code: 'custom' } });
+    const ledger = newLedger(store);
+
+    recordSignedInViewSighting(store, ledger);
+
     expect(viewSeenFor(ledger.read(), OLD_ACCOUNT)?.groupBy).toBe('custom');
   });
 });

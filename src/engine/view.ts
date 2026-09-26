@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { currentAccount } from './account.js';
 import { listAccountDirs, sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
@@ -568,7 +569,8 @@ export function planLayoutViewCarry(store: StoreLayout, target: AccountRef): Lay
 // `view_seen` is the workaround: a sighting taken while an account happened
 // to be signed in, kept in the ledger so a later run — signed into a
 // different account — can still ask what it saw. `recordViewSeen` is the
-// write half; nothing in this codebase calls it yet — see AGENTS.md.
+// write half; `recordSignedInViewSighting` (below) is what `foster sweep` and
+// `foster layout` actually call, once each, before planning — see AGENTS.md.
 // ---------------------------------------------------------------------------
 
 /** The latest `view_seen` sighting recorded for one account, if any. */
@@ -623,6 +625,42 @@ export function recordViewSeen(ledger: Ledger, store: StoreLayout, account: Acco
     ...(groupBy !== undefined ? { groupBy } : {}),
     sortBy,
   });
+}
+
+/**
+ * `foster sweep`/`foster layout`'s own call to `recordViewSeen`, for
+ * whichever account the store is actually signed into right now.
+ *
+ * `currentAccount` (`engine/account.ts`) is the org-qualified version of the
+ * same fact `signedInAccount` reads (`readConfig(store).lastKnownAccountUuid`)
+ * — `recordViewSeen` needs a full `AccountRef`, which a bare accountUuid
+ * cannot supply on its own. Read-only apart from the one append
+ * `recordViewSeen` itself may make, and silent when nothing is signed in:
+ * a store nobody has opened Claude Desktop on yet has no `lastKnownAccountUuid`
+ * to attribute a sighting to, and guessing one would be worse than skipping.
+ *
+ * Callers take this **before** planning, never inside the closed-app gap a
+ * `--restart` run writes in (`applyLayout` itself never calls this) — by the
+ * time that gap opens, the Local Storage record it would read reflects
+ * whichever account was signed in *before* the restart, not the target the
+ * write is about to sign into.
+ *
+ * `resolve`/`record` are injection seams for a test double, not something a
+ * real caller ever overrides.
+ */
+export function recordSignedInViewSighting(
+  store: StoreLayout,
+  ledger: Ledger,
+  options: {
+    resolve?: (store: StoreLayout, accounts: AccountRef[]) => AccountRef | undefined;
+    record?: (ledger: Ledger, store: StoreLayout, account: AccountRef) => void;
+  } = {},
+): void {
+  const resolve = options.resolve ?? currentAccount;
+  const record = options.record ?? recordViewSeen;
+  const signedIn = resolve(store, listAccountDirs(store));
+  if (!signedIn) return;
+  record(ledger, store, signedIn);
 }
 
 export interface MachineViewCarry {

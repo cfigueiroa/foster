@@ -296,6 +296,7 @@ import {
   planViewCopy,
   planViewSet,
   readViewState,
+  recordSignedInViewSighting,
   SORT_STORED_TO_WORD,
   SORT_WORDS,
   STATUS_WORDS,
@@ -1231,6 +1232,13 @@ async function runSweepCommand(
   cache: FosterCache | undefined,
   restartCarry: SweepRestartCarry,
 ): Promise<void> {
+  // Read-only, and taken before anything else here: a sighting of whichever
+  // account the store is actually signed into right now, for the filter
+  // menu's machine-wide half (`groupBy`/`sort`) to carry into another
+  // account later — see `engine/view.ts`'s `recordSignedInViewSighting`.
+  // Silent when nothing is signed in yet.
+  recordSignedInViewSighting(store, ledger);
+
   // Filled by `runSweep` itself, the moment its own `Lineage` and whole-store
   // scan exist — before any pass has written a thing. Only asked for when
   // `--prove` is, so an ordinary sweep pays nothing for it.
@@ -3132,6 +3140,12 @@ addDetachOptions(layoutCmd)
       if (opts.pins === false) p.pins = { moves: [], settled: [] };
       return p;
     };
+
+    // Read-only, taken once up front — never repeated inside the closed-app
+    // gap `--restart` re-plans in below, where the Local Storage record would
+    // already reflect whichever account is signed in *before* the restart,
+    // not `target`. See `engine/view.ts`'s `recordSignedInViewSighting`.
+    recordSignedInViewSighting(store, ledger);
 
     const plan = applyFlags(planLayout({ store, target, ledgerEvents: ledger.read() }));
 

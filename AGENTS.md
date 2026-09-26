@@ -1227,23 +1227,29 @@ carries, and orders the groups this run would create (never the ones the target 
 that source's own `groups` array — a name the most-recent source does not have falls to the end in
 whatever order it was otherwise encountered.
 
-**The filter menu's machine-wide half (`groupBy`/`sort`) needs a sighting, and nothing writes one
-yet.** `dframe-store`'s `groupByByMode`/`sortByByMode` is one Local Storage record for the whole
-installation, and — inferred from the same server-sync behaviour this file's "Desktop: grupos
-sincronizam com o servidor" section measures for groups, **not directly measured for `groupBy`/`sort`
-itself** — the page likely re-syncs it from the signed-in account's own server copy at every startup.
-That means this machine can never simply read what a _different_ account last showed once that
-account is no longer signed in; the record has already moved on. `engine/view.ts`'s `recordViewSeen`
-takes a sighting (a new `view_seen` ledger event, only when it differs from the account's own last
-sighting) and `planMachineViewCarry` carries the most recently active other account's latest sighting
-into the target, under the same local-change-wins rule as everything else here (`view_carried` events
-mark what foster itself wrote). **Nothing in this codebase calls `recordViewSeen` yet** — the natural
-call sites (`foster sweep`, `foster layout`) would need to know which account is _actually_ signed in
-right now to attribute the sighting correctly, which needs `signedInAccount(store)` wiring this
-milestone did not reach; calling it from `applyLayout` itself would be wrong, since that runs in the
-closed-app gap _before_ the restart into the target, when the record still reflects whichever account
-was signed in before. The carry mechanism and its tests stand on their own regardless — they read
-whatever `view_seen` sightings exist, however they get there.
+**The filter menu's machine-wide half (`groupBy`/`sort`) needs a sighting, taken while the right
+account is signed in.** `dframe-store`'s `groupByByMode`/`sortByByMode` is one Local Storage record
+for the whole installation, and — inferred from the same server-sync behaviour this file's "Desktop:
+grupos sincronizam com o servidor" section measures for groups, **not directly measured for
+`groupBy`/`sort` itself** — the page likely re-syncs it from the signed-in account's own server copy
+at every startup. That means this machine can never simply read what a _different_ account last
+showed once that account is no longer signed in; the record has already moved on. `engine/view.ts`'s
+`recordViewSeen` takes a sighting (a new `view_seen` ledger event, only when it differs from the
+account's own last sighting) and `planMachineViewCarry` carries the most recently active other
+account's latest sighting into the target, under the same local-change-wins rule as everything else
+here (`view_carried` events mark what foster itself wrote).
+
+`recordSignedInViewSighting` is what `foster sweep` and `foster layout` actually call — once each,
+read-only, before planning. It resolves the account the store is signed into right now with
+`engine/account.ts`'s `currentAccount` (the org-qualified version of the same fact
+`signedInAccount(store)` reads off `lastKnownAccountUuid`; `recordViewSeen` needs a full `AccountRef`,
+which a bare accountUuid cannot supply), and does nothing when nothing is signed in yet — no account,
+no sighting, no guess. Neither call site is inside a closed-app gap: `foster layout --restart`
+re-plans fresh once the app is down (see `applyLayout`'s own re-plan below), and that re-plan is
+deliberately **not** where this runs, because by then the Local Storage record already reflects
+whichever account was signed in _before_ the restart, not the target the write is about to sign
+into. Calling it up front, before the first (pre-restart) plan is shown, is what actually catches
+the account that is signed in for real.
 
 **Three preferences are keyed by account uuid, not by name**: `bypassPermissionsGateByAccount`,
 `bypassPermissionsOptInByAccount`, `coworkModelAutoFallbackByAccount` (`store/appPrefs.ts`'s
