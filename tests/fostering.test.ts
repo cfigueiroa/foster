@@ -264,13 +264,33 @@ describe('copyCwd', () => {
     expect(copyCwd(held())).toBe('C:\\home\\repo');
   });
 
-  it('keeps sending it there when the two are tied, or neither is measurable', () => {
-    expect(copyCwd(held(), { atCwd: 3, atOriginCwd: 3 })).toBe('C:\\home\\repo');
-    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: undefined })).toBe('C:\\home\\repo');
+  it('sends a tie, or neither side measurable, to the worktree when its directory still exists on disk', () => {
+    const exists = () => true;
+    expect(copyCwd(held(), { atCwd: 3, atOriginCwd: 3 }, exists)).toBe(
+      'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    );
+    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: undefined }, exists)).toBe(
+      'C:\\home\\repo\\.claude\\worktrees\\wt-a',
+    );
     // A directory nobody could measure never outranks the repository — an
     // unmeasurable `atCwd` is not treated as "reaches nothing", but it does not
-    // win either.
-    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: 1 })).toBe('C:\\home\\repo');
+    // win either. Not a tie (one side is measurable and the other is not), so
+    // `exists` never comes into it.
+    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: 1 }, exists)).toBe('C:\\home\\repo');
+  });
+
+  it('falls back to the repository on a tie once the worktree directory is gone', () => {
+    const exists = () => false;
+    expect(copyCwd(held(), { atCwd: 3, atOriginCwd: 3 }, exists)).toBe('C:\\home\\repo');
+    expect(copyCwd(held(), { atCwd: undefined, atOriginCwd: undefined }, exists)).toBe(
+      'C:\\home\\repo',
+    );
+  });
+
+  it('keeps sending a tie to the repository with no exists check given at all (a caller that passed none)', () => {
+    // `existsSync` in production, against a path this test never created —
+    // the same "old answer" every untaught caller already got before #41.
+    expect(copyCwd(held(), { atCwd: 3, atOriginCwd: 3 })).toBe('C:\\home\\repo');
   });
 
   it('sends the copy to the worktree once it measurably reaches more', () => {

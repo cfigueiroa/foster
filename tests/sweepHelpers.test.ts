@@ -93,6 +93,7 @@ describe('sweepFailedCount', () => {
         viewKeysCarried: 0,
       },
       rounds: 1,
+      unreadableCards: [],
       ...overrides,
     } as SweepReport;
   }

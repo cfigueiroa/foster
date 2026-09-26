@@ -7,7 +7,7 @@ import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { Ledger } from '../ledger/log.js';
 import type { LedgerState } from '../ledger/project.js';
 import type { ImportedConversation } from '../ledger/types.js';
-import { type CodexRolloutMeta, readRolloutRecords } from '../store/codex.js';
+import { type CodexRecord, type CodexRolloutMeta, readRolloutRecords } from '../store/codex.js';
 import { claudeProjectsDir, projectDirName } from '../store/transcripts.js';
 import { removeSafely, writeFileAtomic } from '../util/fsatomic.js';
 import { VERSION } from '../version.js';
@@ -89,7 +89,20 @@ export function importCodexRollouts(
         continue;
       }
 
-      const records = readRolloutRecords(meta.file);
+      let records: CodexRecord[];
+      try {
+        records = readRolloutRecords(meta.file);
+      } catch (error) {
+        // A real read failure (past ENOENT, which reads as empty, not
+        // thrown) — refuse this rollout, naming why, rather than let the
+        // empty-records branch below import it as a conversation with
+        // nothing in it.
+        outcomes.push({
+          ...outcome,
+          reason: `rollout could not be read: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        continue;
+      }
       if (records.length === 0) {
         outcomes.push({ ...outcome, reason: 'rollout could not be read' });
         continue;

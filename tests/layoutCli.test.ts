@@ -121,6 +121,21 @@ describe('layoutPlanLines — R9: unrecognised group-scope entries', () => {
   });
 });
 
+describe('layoutPlanLines — the config file itself could not be read', () => {
+  it('warns, naming the error, rather than only saying "nothing to do"', () => {
+    const plan = basePlan({
+      groups: { items: [], conflicts: [], sources: 0, configUnreadable: 'EACCES: boom' },
+    });
+    const lines = layoutPlanLines(plan).map(plain).join('\n');
+    expect(lines).toContain('could not read the config file: EACCES: boom');
+  });
+
+  it('says nothing about it on the ordinary plan, with no config problem', () => {
+    const lines = layoutPlanLines(basePlan()).map(plain).join('\n');
+    expect(lines).not.toMatch(/could not read the config file/);
+  });
+});
+
 describe('layoutResultLines / layoutFailureLines — R4', () => {
   const result = (overrides: Partial<ApplyLayoutResult> = {}): ApplyLayoutResult => ({
     groupsTouched: 0,

@@ -280,6 +280,16 @@ skipped as already here. The sweep needs it in two places: a fork held in
 two files went to the branch pass, which decides on the id alone, and was retitled rather than
 completed.
 
+`fullerOf` (`domain/fostering.ts`) used to send a genuine tie — the two counts measured equal, or
+neither measurable at all — to the repository unconditionally, same as before the comparison
+existed. It now breaks that tie toward the worktree `cwd` instead, but only when that directory
+still exists on disk (an injected `exists` check, `existsSync` in production, so the function stays
+testable without touching a real one) — existence is not proof the worktree's own transcript is
+current, only that sending the copy there is not strictly worse than the root it would otherwise
+land in. Not measured against a real store yet: this is a logical fix for the tie case the 15/09
+incident above did not itself exercise (that one was a clear, non-tied win for the worktree file),
+not a re-run of the same measurement with a different outcome.
+
 Which of those two rows to continue in is no longer left to the reader. A pass of its own
 (`foster sweep`, `src/engine/fileCards.ts`) elects **the row whose last answer is the most
 recent** — where the work was left — leaves its title clean, and marks every other row of that
@@ -338,6 +348,22 @@ summary so the words can be fixed by hand or the run repeated with the matching 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
 that line rather than leaving the user to wonder what the gap was.
+
+A card `scanAccount` could not read or parse at all used to vanish from the scan the same silent
+way an entry a schema mismatch already skips does — `readSessionFile`/`readSessionCard` already
+returned `undefined` for it, with nothing distinguishing that from a file that simply raced its way
+out of existence. `ScanOptions.unreadable` (`store/scanner.ts`) is an optional array a caller passes
+in to have every such path pushed onto it; `foster sweep`'s own scan now passes one, and the report
+(`SweepReport.unreadableCards`) prints "N card(s) could not be read and were left out" — text and
+`--json` both — when it is not empty, rather than a store simply reading as smaller than it is.
+Loosely counted, not strictly: the uncached read path answers the same `undefined` for a file that
+vanished mid-scan and one that is genuinely unreadable, so a rare race can land in this count too —
+acceptable here since the honest alternative was silence, not a perfectly precise number. A similar
+gap in `readGroupScopesReport` (`store/groupScopes.ts`) — any failure reading
+`claude_desktop_config.json` itself, not just one malformed entry inside it, read as "no groups at
+all" — now sets `configUnreadable` when the file exists but could not be read or parsed (never for
+a genuinely absent file, the ordinary case for a store nothing has grouped yet), and `foster
+layout`'s plan output warns on it instead of silently planning "nothing to do".
 
 One invocation finishes what used to take three. Measured 24/09/2026: `/fosteia` printed "Not
 finished" twice, and each re-run re-read 6.7 GB of transcripts. Two causes, two fixes. A round's
@@ -841,6 +867,12 @@ is matched against a `user`/`assistant` message's _decoded_ text — `textOf(rec
 against the raw JSONL, so a search cannot fire on a `\n` inside a JSON escape or a `uuid` quoted
 inside a tool result; a tool call's own name and arguments are never message text and never match.
 
+A file `readFileSync` genuinely could not open (past `ENOENT`, which just means "vanished between
+the directory walk and the read" and is not a match, same as always) used to read as "no match" —
+silently, no different from a file that really held nothing. `grepTranscripts` now returns
+`{ conversations, unreadable }`; a file it could not read lands in `unreadable` instead, and both
+`--json` and the text report name it rather than let a real read failure hide as a clean negative.
+
 Two passes per file, coarse then real, in the shape `idsMentionedIn` already reads a transcript in
 for lineage. What makes the coarse pass fast enough for a corpus this size is _how_ coarse it is:
 one `Buffer#includes` — raw bytes, no decode — against the whole file at once, before the file is
@@ -899,6 +931,12 @@ stylesheet or script, so it opens on its own; `jsonl` is every record, deduplica
 the shape a real transcript already is, which is what makes it round-trip back through anything that
 reads a transcript. `--out` writes to a file; without it the render goes to stdout so the command
 pipes cleanly, the same convention `transcript` already uses.
+
+A file that vanished since the conversation was resolved (`ENOENT`) is skipped, same as always —
+what the other file(s) hold is still the best answer available. A file that exists but genuinely
+could not be read (past V8's string-length ceiling, a permission error) used to be skipped the same
+silent way, rendering a partial export with no sign anything was missing; it now throws, naming the
+file, rather than let a render the user may act on look complete when it is not.
 
 ## What `foster agent` does and does not cover
 
@@ -1352,7 +1390,16 @@ appended next: the merged line is neither valid JSON nor separated from its neig
 damaged. `Ledger` now checks the last byte of the file once, on its first `append()` per instance
 (an `openSync`/seek/`readSync`, not a full read of a 23 MB file), and prefixes a newline first if it
 is missing — nothing but this instance's own appends can retorn the file once that is fixed, so
-later appends skip the check.
+later appends skip the check. `append()` itself no longer calls `appendFileSync` directly; it goes
+through `util/fsatomic.ts`'s `appendSynced`, the same fsync-before-return write `writeFileAtomic`
+already used elsewhere, so a write this module reports as done cannot still be sitting unflushed in
+cache if the process crashes right after — assumed to matter, not measured against a real crash.
+
+`read()` used to answer `[]` for _any_ `statSync`/`readFileSync` failure, folding a missing ledger
+(the ordinary "nothing written yet" case, `ENOENT`) together with a real one — the path replaced by
+a directory, a permission error — that a caller has no way to tell apart from an honestly empty
+ledger. It now throws, naming the path, for anything other than `ENOENT`; only a genuinely absent
+file still reads as no events.
 
 `doctor` used to read the process table twice — once through `inspectApp`, once through
 `runningStores` a few lines later, each defaulting to `readProcesses` rather than the 5-second
@@ -1674,6 +1721,16 @@ the whole run. Cloud sessions need a `claude.ai` sign-in — an API key is rejec
 API itself (`gL`'s own guard: "Cloud sessions are only available on the first-party Anthropic API
 provider"), a condition `readCloudAuth` cannot even produce since it only ever hands this module a
 token read from `.credentials.json`.
+
+`readRolloutRecords` (`store/codex.ts`) used to answer `[]` for any read failure, `ENOENT` (the
+rollout genuinely vanished) included with everything else. `importCodexRollouts` already treated an
+empty read as "rollout could not be read" and skipped it, so a Codex import was never silently
+imported as an empty conversation — but `import-codex --list`'s read-only inventory had no such
+check, and a rollout that failed to read for a real reason (past `ENOENT`) listed as an ordinary,
+if empty, thread rather than being counted alongside `readRolloutMeta`'s own `unreadable`. Fixed by
+having `readRolloutRecords` throw for anything but `ENOENT`, and having both callers catch that and
+say so — `--list` folds it into the same `unreadable` count `readRolloutMeta` failures already use;
+`importCodexRollouts` names the underlying error in the skip reason instead of the generic one.
 
 **`foster cloud pull <id> --into <cwd>`** fabricates a transcript and a sidebar card the same way
 `import-codex` does (`engine/codexImportWrite.ts`): files first, ledger only after they land, guarded

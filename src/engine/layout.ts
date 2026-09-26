@@ -16,6 +16,7 @@ import { scanAccount, type ScanCache } from '../store/scanner.js';
 import {
   groupCardId,
   readGroupScopes,
+  readGroupScopesReport,
   scopeKey,
   sessionIdOfCard,
   writeGroupScope,
@@ -113,6 +114,14 @@ export interface GroupsPlan {
   conflicts: GroupConflict[];
   /** Distinct source accounts the group scopes named, whether or not they had anything to bring. */
   sources: number;
+  /**
+   * Set when `claude_desktop_config.json` itself could not be read or parsed
+   * — see `GroupScopesReadReport.configUnreadable`. This plan then has
+   * nothing to offer, the same as a store nobody has ever grouped — but
+   * unlike that ordinary case, it is a problem the reader needs to know
+   * about rather than read as "nothing pending".
+   */
+  configUnreadable?: string;
 }
 
 interface GroupCandidate {
@@ -194,7 +203,8 @@ function planGroups(
   ledgerEvents: readonly LedgerEvent[],
   scanCache?: ScanCache,
 ): GroupsPlan {
-  const scopes = readGroupScopes(store);
+  const scopesReport = readGroupScopesReport(store);
+  const scopes = scopesReport.scopes;
   const targetKey = scopeKey(target);
   const targetScope: GroupScope = scopes[targetKey] ?? { groups: [], assignments: {} };
   const sourceEntries = Object.entries(scopes).filter(([key]) => key !== targetKey);
@@ -349,7 +359,12 @@ function planGroups(
   }
 
   const sourceAccounts = new Set(sourceEntries.map(([key]) => key.split('/')[0]));
-  return { items: [...groupItems.values()], conflicts, sources: sourceAccounts.size };
+  return {
+    items: [...groupItems.values()],
+    conflicts,
+    sources: sourceAccounts.size,
+    ...(scopesReport.configUnreadable ? { configUnreadable: scopesReport.configUnreadable } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

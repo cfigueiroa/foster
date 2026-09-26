@@ -98,6 +98,24 @@ describe('readGroupScopesReport / readGroupScopes: a bad entry does not sink its
     expect(report.scopes[targetKey]?.order).toEqual({ g1: ['code:local_a', 'code:local_b'] });
     expect(report.skippedEntries[targetKey]).toBe(1);
   });
+
+  it('reports no groups, with no warning, when the config file simply does not exist yet', () => {
+    const store = makeStore();
+    // makeStore() does not write a config file at all — the ordinary case for
+    // every fixture store this suite builds.
+    const report = readGroupScopesReport(store);
+    expect(report.scopes).toEqual({});
+    expect(report.configUnreadable).toBeUndefined();
+  });
+
+  it('reports configUnreadable, not silently "no groups", when the file exists but is not valid JSON', () => {
+    const store = makeStore();
+    writeFileSync(store.desktopConfigFile, '{ not json', 'utf8');
+
+    const report = readGroupScopesReport(store);
+    expect(report.scopes).toEqual({});
+    expect(report.configUnreadable).toBeDefined();
+  });
 });
 
 describe('writeGroupScope merges into the scope on disk instead of replacing it', () => {

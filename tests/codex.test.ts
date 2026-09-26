@@ -128,4 +128,12 @@ describe('readRolloutRecords', () => {
   it('returns nothing for a file that does not exist', () => {
     expect(readRolloutRecords('/nowhere/rollout.jsonl')).toEqual([]);
   });
+
+  it('throws, naming the file, when it exists but cannot be read', () => {
+    const dir = tempSessionsDir();
+    const asDir = path.join(dir, 'rollout.jsonl');
+    mkdirSync(asDir);
+
+    expect(() => readRolloutRecords(asDir)).toThrow(asDir);
+  });
 });

@@ -470,6 +470,13 @@ export interface SweepReport {
   rounds?: number;
   /** Present only on a run that wrote: a dry run has nothing to confirm. */
   confirmation?: SweepConfirmation;
+  /**
+   * Cards the initial store-wide scan could not read or parse at all — see
+   * `ScanOptions.unreadable` — and so left out of everything else this report
+   * says, including `neverComes` and `confirmation`. Empty on the ordinary
+   * run, which is every run measured against a real store so far.
+   */
+  unreadableCards: string[];
 }
 
 /**
@@ -579,10 +586,11 @@ export function runSweep(options: SweepOptions): SweepReport {
     ? lineageAt(options.projectsDirs, transcriptCache)
     : lineage(env, configDirs, transcriptCache);
   const scanCache = new ScanCache();
+  const unreadableCards: string[] = [];
   const scanned = scanStore(
     store,
     copySessionIds(ledger.read()),
-    slimOptions(scanCache, cardCache),
+    slimOptions(scanCache, cardCache, unreadableCards),
   );
   // Before any pass runs, so a caller asking for `--prove` gets the scan this
   // run itself is about to act on, not a stale one from before a write.
@@ -711,6 +719,7 @@ export function runSweep(options: SweepOptions): SweepReport {
     pinFixes,
     layout,
     rounds,
+    unreadableCards,
   };
 
   return confirmation ? { ...report, confirmation } : report;
@@ -841,11 +850,13 @@ export function deferredSweepGap(
 function slimOptions(
   scanCache: ScanCache | undefined,
   cardCache: FosterCache['cards'] | undefined,
+  unreadable?: string[],
 ): ScanOptions {
   return {
     slim: true,
     ...(scanCache ? { cache: scanCache } : {}),
     ...(cardCache ? { persistentCache: cardCache } : {}),
+    ...(unreadable ? { unreadable } : {}),
   };
 }
 

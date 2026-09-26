@@ -262,7 +262,7 @@ import {
   type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
-import { restartAround, type RestartAroundResult } from '../ops/restart.js';
+import { restartAround, restartFailed, type RestartAroundResult } from '../ops/restart.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
@@ -407,7 +407,6 @@ const NAMES_ACCOUNTS = new Set([
   'accounts',
   'clients',
   'doctor',
-  'installations',
   'labels',
   'live',
   'scan',
@@ -1341,7 +1340,7 @@ async function runSweepCommand(
       deferredSweepGap(store, ledger, target, report),
     );
     print({ ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}), restart });
-    if (proveReport && !proveReport.complete) process.exitCode = 1;
+    if ((proveReport && !proveReport.complete) || restartFailed(restart)) process.exitCode = 1;
     return;
   }
 
@@ -1687,6 +1686,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     neverComes: report.neverComes,
     layout: report.layout,
     rounds: report.rounds ?? 1,
+    unreadableCards: report.unreadableCards,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
   };
 }
@@ -1915,6 +1915,10 @@ function reportSweepRestart(restart: SweepRestart): void {
   if (restart.reason) {
     console.log(pc.yellow(`\n${restart.reason}`));
     console.log(`  ${restart.command}`);
+    // Same predicate `layout`/`view set`/`view copy` use at their own
+    // `if (!restart.done)`: a restart this run asked for (`--restart`) but
+    // that did not finish is a failed run, not a clean one with a note.
+    if (restartFailed(restart)) process.exitCode = 1;
     return;
   }
   console.log(
@@ -5499,7 +5503,7 @@ program
     }
 
     const startedAt = Date.now();
-    const results = grepTranscripts(store, pattern, {
+    const { conversations: results, unreadable } = grepTranscripts(store, pattern, {
       ...(accountUuid !== undefined ? { accountUuid } : {}),
       ...(since !== undefined ? { since } : {}),
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
@@ -5524,8 +5528,17 @@ program
             isArchived: card.isArchived,
           })),
         })),
+        unreadable,
       });
       return;
+    }
+
+    if (unreadable.length > 0) {
+      console.log(
+        pc.yellow(
+          `${unreadable.length} file(s) could not be read and were skipped: ${unreadable.slice(0, 3).join(', ')}${unreadable.length > 3 ? ', …' : ''}`,
+        ),
+      );
     }
 
     if (results.length === 0) {
@@ -7031,7 +7044,17 @@ program
           unreadable++;
           continue;
         }
-        const thread = parseCodexRollout(readRolloutRecords(file));
+        let records: ReturnType<typeof readRolloutRecords>;
+        try {
+          records = readRolloutRecords(file);
+        } catch {
+          // A real read failure, not the vanished-file case that already
+          // reads as empty — counted the same way an unparseable `meta`
+          // already is above, rather than listed as an empty thread.
+          unreadable++;
+          continue;
+        }
+        const thread = parseCodexRollout(records);
         entries.push(inventoryEntry(meta, thread));
       }
       entries.sort((a, b) => b.updatedAt - a.updatedAt);

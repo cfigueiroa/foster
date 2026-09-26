@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -174,6 +181,19 @@ describe('importCodexRollouts', () => {
     const [outcome] = run([meta], false);
     expect(outcome!.status).toBe('skipped');
     expect(outcome!.reason).toMatch(/working directory/);
+  });
+
+  it('refuses a rollout that exists but cannot be read, naming why, rather than importing it empty', () => {
+    const meta = conversation();
+    // Replace the file with a directory of the same name: `readRolloutRecords`
+    // now throws EISDIR on this instead of silently reading as empty.
+    unlinkSync(meta.file);
+    mkdirSync(meta.file);
+
+    const [outcome] = run([meta], false);
+    expect(outcome!.status).toBe('skipped');
+    expect(outcome!.reason).toMatch(/rollout could not be read/);
+    expect(existsSync(cardPathFor(ROLLOUT_ID))).toBe(false);
   });
 
   it('records a failure in the ledger rather than throwing out of the batch', () => {

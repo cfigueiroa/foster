@@ -1,5 +1,4 @@
 import {
-  appendFileSync,
   closeSync,
   fstatSync,
   mkdirSync,
@@ -11,6 +10,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { appendSynced } from '../util/fsatomic.js';
 import { VERSION } from '../version.js';
 import type { LedgerEvent, LedgerEventInput } from './types.js';
 
@@ -146,7 +146,12 @@ export class Ledger {
     // real file exactly, so no future read() would ever re-fetch it).
     const preStat = this.cache ? statSyncOrUndefined(this.file) : undefined;
 
-    appendFileSync(this.file, `${JSON.stringify(full)}\n`, 'utf8');
+    // fsynced rather than a plain appendFileSync: a crash right after this
+    // call returns must not leave the event sitting in cache, unflushed, with
+    // the caller believing it durable (see `appendSynced`'s own docstring —
+    // the same "torn tail is recoverable, missing bytes are not" reasoning
+    // `ensureTrailingNewline` above already assumes when it repairs one).
+    appendSynced(this.file, Buffer.from(`${JSON.stringify(full)}\n`, 'utf8'));
 
     // Kept in step with the write rather than dropped: growing the cached array
     // in place is what lets `read()` skip the reparse on the very next call, and
@@ -233,10 +238,18 @@ export class Ledger {
     let stat: { size: number; mtimeMs: number };
     try {
       stat = statSync(this.file);
-    } catch {
-      // No file (yet, or any more). A ledger is never deleted out from under a
-      // live instance in ordinary use, so this is almost always "yet" — but
-      // either way, the honest answer is empty, not a stale cache from before.
+    } catch (error) {
+      // ENOENT is the only "no events" case: no file (yet, or any more). A
+      // ledger is never deleted out from under a live instance in ordinary
+      // use, so this is almost always "yet" — the honest answer is empty, not
+      // a stale cache from before. Anything else — EISDIR because the path
+      // was replaced by a directory, EACCES, ... — is a real problem the
+      // caller must not silently read as "nothing has ever happened here."
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw new Error(`could not read ledger at ${this.file}: ${(error as Error).message}`, {
+          cause: error,
+        });
+      }
       this.cache = undefined;
       return [];
     }
@@ -248,8 +261,11 @@ export class Ledger {
     let raw: string;
     try {
       raw = readFileSync(this.file, 'utf8');
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw new Error(`could not read ledger at ${this.file}: ${(error as Error).message}`, {
+        cause: error,
+      });
     }
 
     const events: LedgerEvent[] = [];

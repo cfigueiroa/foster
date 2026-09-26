@@ -100,6 +100,13 @@ export function layoutPlanLines(
   const lines: string[] = [];
 
   lines.push(pc.bold(`Groups (from ${sourceWord(groups.sources)})`));
+  if (groups.configUnreadable) {
+    // A genuine read failure on claude_desktop_config.json, not the ordinary
+    // "nothing has ever grouped here" case — see `GroupsPlan.configUnreadable`.
+    // "nothing to do" below would otherwise read as a clean plan over a file
+    // this run could not even open.
+    lines.push(pc.yellow(`  could not read the config file: ${groups.configUnreadable}`));
+  }
   if (groups.items.length === 0) {
     lines.push(pc.dim('  nothing to do'));
   } else {
@@ -1050,6 +1057,20 @@ export function sweepSummary(report: SweepReport): string[] {
 
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
+
+  // Cards the initial scan could not even read — see `ScanOptions.unreadable`.
+  // Left out of every count above, silently, unless said here: a store that
+  // genuinely holds one fewer readable card than it used to must not read as
+  // a clean run that happened to find less to do.
+  if (report.unreadableCards.length > 0) {
+    const n = report.unreadableCards.length;
+    lines.push(
+      pc.yellow(
+        `${n} card${n === 1 ? '' : 's'} could not be read and ${n === 1 ? 'was' : 'were'} left out: ` +
+          `${report.unreadableCards.slice(0, 3).join(', ')}${n > 3 ? ', …' : ''}`,
+      ),
+    );
+  }
 
   if (branches.forks.length > 0) {
     const forks = branches.forks.length;

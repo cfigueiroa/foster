@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -51,6 +51,22 @@ function writeFile(records: string[]): string {
 }
 
 describe('readConversationRecords', () => {
+  it('skips a file that vanished (ENOENT) rather than throwing', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-export-'));
+    const gone = path.join(dir, 'gone.jsonl');
+    const file = writeFile([userRecord('u1', 'hello', '2026-09-01T00:00:00.000Z')]);
+
+    expect(readConversationRecords([gone, file])).toHaveLength(1);
+  });
+
+  it('throws, naming the file, when a file exists but cannot be read', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-export-'));
+    const asDir = path.join(dir, 'transcript.jsonl');
+    mkdirSync(asDir);
+
+    expect(() => readConversationRecords([asDir])).toThrow(asDir);
+  });
+
   it('reads user and assistant turns in timeline order', () => {
     const file = writeFile([
       META,
