@@ -6111,21 +6111,24 @@ program
 program
   .command('revive')
   .helpGroup('Live sessions:')
-  .summary('sessions a usage limit stopped, for the /retoma skill to carry on')
+  .summary('sessions a usage limit stopped or a restart cut off, for /retoma to carry on')
   .description(
     'List the sessions in the account signed in now whose conversation ended on the\n' +
       'app\'s own "You\'ve hit your limit" line — work cut off mid-task when its old\n' +
-      'account ran out, and brought here by `sweep` exactly where it stopped. This is\n' +
-      'what to run after a sweep: the quota here is fresh, and each of these is one\n' +
-      'message away from carrying on.\n\n' +
+      'account ran out, and brought here by `sweep` exactly where it stopped — or in\n' +
+      "the middle of a turn: a tool result, a background task's notification or a\n" +
+      'prompt nothing answered, because the app was quit, restarted or switched\n' +
+      'account under it. This is what to run after a sweep and its restart: the quota\n' +
+      'here is fresh, and each of these is one message away from carrying on.\n\n' +
       'Nothing here sends that message. Only Claude Desktop can deliver a turn to a\n' +
       'session and keep its card attached — `claude --resume` runs the turn and leaves\n' +
       'the row showing the stop — so the list is the work for the /retoma skill, run\n' +
       'inside the app. One row per conversation and per git branch, the most recent\n' +
       'stop kept: two agents on one branch would commit over each other. Sessions a\n' +
-      'live claude is writing are left out and named.',
+      'live claude is writing, and sessions whose folder is gone (the app refuses to\n' +
+      'deliver to those), are left out and named.',
   )
-  .option('--since <age>', 'how long ago the limit may have been hit', '24h')
+  .option('--since <age>', 'how long ago the session may have stopped', '24h')
   .option('--archived', 'include sessions you archived — put away on purpose, so opt-in')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -6150,14 +6153,17 @@ program
     }
 
     if (stopped.length === 0) {
-      console.log(`Nothing stopped on a usage limit in the last ${opts.since}.`);
+      console.log(
+        `Nothing stopped on a usage limit or cut off mid-turn in the last ${opts.since}.`,
+      );
     }
     for (const row of stopped) {
       console.log(
         `  ${formatAge(row.stoppedAt).padStart(8)}  ${row.title ?? pc.dim('(untitled)')}` +
           (row.branch ? pc.dim(`  (${row.branch})`) : ''),
       );
-      if (row.limit) console.log(pc.dim(`           ${row.limit}`));
+      const detail = row.why === 'cut-off' ? 'cut off mid-turn' : row.limit;
+      if (detail) console.log(pc.dim(`           ${detail}`));
     }
     for (const row of passedOver) {
       const why =
@@ -6165,11 +6171,19 @@ program
           ? 'a live claude is writing it'
           : row.reason === 'same-conversation'
             ? 'another row of the same conversation is on the list'
-            : 'another conversation on the same branch is on the list';
+            : row.reason === 'same-branch'
+              ? 'another conversation on the same branch is on the list'
+              : `its folder is gone (${row.cwd ?? '?'}), and the app will not deliver there`;
       console.log(pc.dim(`  left out: ${row.title ?? '(untitled)'} — ${why}`));
     }
     if (stopped.length === 0) return;
-    console.log(pc.bold(`\n${stopped.length} session(s) stopped on a usage limit.`));
+    const limits = stopped.filter((row) => row.why === 'limit').length;
+    console.log(
+      pc.bold(
+        `\n${stopped.length} session(s) to carry on: ${limits} stopped on a usage limit, ` +
+          `${stopped.length - limits} cut off mid-turn.`,
+      ),
+    );
     console.log(
       pc.dim(
         'Run /retoma inside Claude Desktop to tell each one the quota is back and to\n' +
