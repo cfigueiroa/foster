@@ -1735,31 +1735,30 @@ built fresh from what is on disk. It runs by default (`--no-archive-sync` opts o
 unfinished work — a sharper cost than a stale title.
 
 "Most recently active" is `domain/filter.ts`'s own `activityOf`/`byRecency`, asked across every
-card sharing a `cliSessionId` in every account but the target. **Local change wins**: a target
-card is rewritten only when its current flag is the one _foster itself_ last set, read from the
-ledger via `lastForsterArchiveWrite` (`ledger/project.ts`) — the later of an `archive_synced`
-write (the new ledger event this pass adds) or a `card_retitled` carrying `toArchived` (the
-branch/second-file passes' own writer). A card whose current flag disagrees with what that write
-set was changed by a person since, and is left alone (`changed-by-hand`).
+card sharing a `cliSessionId` in every account but the target.
 
-A card neither writer has ever touched has no such record, and is one of two shapes:
+**Only a source that moved on after this row was last used here is ever followed — for every
+row, copy or native, ledger record or not.** The source's `lastActivityAt` has to be strictly
+greater than this row's own, or the row is left alone (`used-here-last`). This is the rule that
+keeps an on-purpose change safe, not an optimisation: the house's own archive ritual archives a
+session in the account it ran in, which gives that account the higher activity, and leaves every
+other account's card on the same conversation unarchived and — because nothing has touched it
+since — older. A first cut of this pass asked only "does foster own this card's flag" and, for an
+old copy with no ledger record at all, defaulted to "yes, safe to sync" without ever checking
+which side had actually moved more recently — which meant a sweep into the account holding that
+older, untouched, unarchived card would undo the archive the ritual had just made on purpose. The
+recency gate is now unconditional rather than only asked for a native card, precisely to close
+that hole.
 
-- **an old copy**, fostered before this pass existed. `buildFosterCopy` (`domain/fostering.ts`)
-  spreads the source's own flag onto every copy it mints, so the flag was never foster's
-  deliberate decision unless the branch pass set it on purpose (`FosteredEvent.archived`/
-  `ActiveFostering.archivedByFoster`) — that one case is left to the branch pass, the same as a
-  title mark. Every other old copy is treated as safe to bring into step: a plain inherited
-  default nothing has ever recorded an opinion about, where the worst a wrong read costs is one
-  boolean flipped on a card no ledger entry has ever taken a stance on, reversible by the same
-  rule on the next sweep. Stated once, honestly, in the module's own header: this is a policy
-  choice, not a provable one — an old copy could in principle have been archived or unarchived by
-  hand with nothing written down to say so, and this pass cannot tell that apart from the
-  ordinary, untouched case.
-- **a native card**, one the app made, with no archive-touching event of its own — the user's
-  row by default, the same default `card_retitled`'s title half already keeps. Touched only the
-  one way that costs the least to be wrong: when this row's own `lastActivityAt` is _older_ than
-  the account that holds the desired state, so following it cannot be mistaken for overwriting
-  fresher work of the user's own.
+**Local change wins, once the recency gate above is already cleared.** A target card whose
+current flag is not the one _foster itself_ last set is left alone (`changed-by-hand`) — read
+from the ledger via `lastForsterArchiveWrite` (`ledger/project.ts`), the later of an
+`archive_synced` write (the new ledger event this pass adds) or a `card_retitled` carrying
+`toArchived` (the branch/second-file passes' own writer), never guessed from the strings on disk.
+A card neither writer has ever touched has no such record and is simply followed, once recency has
+already cleared it — except a copy the branch pass archived on purpose (`FosteredEvent.archived`/
+`ActiveFostering.archivedByFoster`), which is that pass's own decision to own, the same as a title
+mark, and is left alone here too (`foster-marked`).
 
 A tie in recency between two sources that disagree on the flag settles nothing — a spawned or
 never-opened card's `lastActivityAt` is a placeholder rather than a real moment, and picking one

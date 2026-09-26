@@ -306,7 +306,7 @@ describe('planArchiveSync / applyArchiveSync', () => {
     expect(newerPlan.items).toHaveLength(0);
     expect(newerPlan.skipped).toContainEqual({
       sessionId: 'local_native_newer',
-      reason: 'native-left-alone',
+      reason: 'used-here-last',
     });
   });
 
@@ -344,6 +344,101 @@ describe('planArchiveSync / applyArchiveSync', () => {
     // The newer, unarchived account wins over the older, archived one.
     expect(plan.items).toHaveLength(1);
     expect(plan.items[0]).toMatchObject({ from: true, to: false, sourceSessionId: 'local_b' });
+  });
+
+  // The house's own archive ritual archives a session in the account it ran
+  // in — which gives that account the higher activity — and leaves every
+  // other account's card on the same conversation unarchived and, because
+  // nothing has touched it since, older. A recency-blind "does foster own
+  // this flag" check would still let that older, untouched card undo the
+  // archive the moment a sweep next ran into the account holding it.
+  it('never undoes an on-purpose archive with an older, untouched, unarchived card elsewhere', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+
+    // The account the ritual archived it in: higher activity, unarchived here
+    // (the source in this test — this pass is asked from the OTHER side).
+    const sourcePath = writeCard(
+      store,
+      OTHER_A,
+      card('local_source', { isArchived: false, lastActivityAt: 1_000 }),
+    );
+    // The target: archived on purpose, and more recently active than the
+    // untouched source — following the source here would undo the archive.
+    const targetPath = writeCard(
+      store,
+      TARGET,
+      card('local_copy', { isArchived: true, lastActivityAt: 9_000 }),
+    );
+    ledger.append({
+      kind: 'fostered',
+      originSessionId: 'local_source',
+      origin: OTHER_A,
+      target: TARGET,
+      copySessionId: 'local_copy',
+      copyPath: targetPath,
+      prefix: '',
+      cliSessionId: CLI_ID,
+    });
+
+    const plan = planArchiveSync(ledger, {
+      target: TARGET,
+      targetCards: [
+        ds(targetPath, TARGET, card('local_copy', { isArchived: true, lastActivityAt: 9_000 })),
+      ],
+      otherCards: [
+        ds(sourcePath, OTHER_A, card('local_source', { isArchived: false, lastActivityAt: 1_000 })),
+      ],
+    });
+
+    expect(plan.items).toHaveLength(0);
+    expect(plan.skipped).toContainEqual({ sessionId: 'local_copy', reason: 'used-here-last' });
+  });
+
+  // The positive twin of the case above: once the source really has moved on
+  // — more recently active than the row here, and now archived — following
+  // it is exactly right, whether or not any ledger record exists yet.
+  it('still follows a source that is genuinely more recently active and now archived', () => {
+    const store = makeStore();
+    const ledger = new Ledger(path.join(mkdtempSync(path.join(tmpdir(), 'foster-al-')), 'l.jsonl'));
+
+    const sourcePath = writeCard(
+      store,
+      OTHER_A,
+      card('local_source', { isArchived: true, lastActivityAt: 9_000 }),
+    );
+    const targetPath = writeCard(
+      store,
+      TARGET,
+      card('local_copy', { isArchived: false, lastActivityAt: 1_000 }),
+    );
+    ledger.append({
+      kind: 'fostered',
+      originSessionId: 'local_source',
+      origin: OTHER_A,
+      target: TARGET,
+      copySessionId: 'local_copy',
+      copyPath: targetPath,
+      prefix: '',
+      cliSessionId: CLI_ID,
+    });
+
+    const plan = planArchiveSync(ledger, {
+      target: TARGET,
+      targetCards: [
+        ds(targetPath, TARGET, card('local_copy', { isArchived: false, lastActivityAt: 1_000 })),
+      ],
+      otherCards: [
+        ds(sourcePath, OTHER_A, card('local_source', { isArchived: true, lastActivityAt: 9_000 })),
+      ],
+    });
+
+    expect(plan.items).toHaveLength(1);
+    expect(plan.items[0]).toMatchObject({
+      from: false,
+      to: true,
+      because: 'copy-follows-source',
+    });
   });
 });
 

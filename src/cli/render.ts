@@ -996,6 +996,14 @@ export function sweepSummary(report: SweepReport): string[] {
             '.',
     );
   }
+  // Called out on its own: this is the recency gate protecting an on-purpose
+  // change, not a failure — see `engine/archiveSync.ts`'s own module doc.
+  const usedHereLast = archives.skipped.filter((skip) => skip.reason === 'used-here-last').length;
+  if (usedHereLast > 0) {
+    lines.push(
+      `${usedHereLast} archived flag(s) left alone: used here more recently than the account that would set the flag.`,
+    );
+  }
 
   const confirmation = report.confirmation;
   if (confirmation) {

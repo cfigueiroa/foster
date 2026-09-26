@@ -28,42 +28,36 @@ import { writeFileAtomic } from '../util/fsatomic.js';
  * here rescans; it is handed the cards a sweep already read (see `runSweep`
  * passing cards to `planTitleSync` for the shape this follows).
  *
- * **Local change wins.** A target card is only ever rewritten when its
- * current flag is the one *foster itself* last set — read from the ledger,
- * never guessed from the strings on disk. `lastForsterArchiveWrite`
+ * **Only a source that moved on after this row was last used here is ever
+ * followed — for every row, copy or native, with or without a ledger
+ * record.** `bestSource.lastActivityAt` has to be strictly greater than this
+ * card's own `lastActivityAt`, or the row is left alone (`used-here-last`).
+ * This is not an optimisation, it is the rule that keeps an on-purpose change
+ * safe: the house's own archive ritual archives a session in the account it
+ * ran in, which gives that account the higher activity, and leaves every
+ * other account's card on the same conversation unarchived and — because
+ * nothing has touched it since — older. A check that asked only "does foster
+ * own this flag" and not "did the source actually move on" would still let
+ * that older, untouched, unarchived card in another account undo the very
+ * archive the ritual just made on purpose, the moment a sweep next ran into
+ * the account holding it. A first version of this pass made exactly that
+ * mistake for an old copy with no ledger record at all — trusting a "safe to
+ * sync" default the moment the source disagreed, recency unchecked — and it
+ * is why the check is now unconditional rather than only asked for a native
+ * card.
+ *
+ * **Local change wins, once the recency gate above has already been
+ * passed.** A target card whose current flag is not the one *foster itself*
+ * last set is left alone (`changed-by-hand`) — read from the ledger, never
+ * guessed from the strings on disk. `lastForsterArchiveWrite`
  * (`ledger/project.ts`) answers that for a card either of `archive_synced` or
  * a `card_retitled` carrying `toArchived` has touched before: whichever of
- * the two wrote last wins, and if the card's current flag disagrees with what
- * that write set, a person changed it since and the row is left alone.
- *
- * A card neither writer has ever touched has no such record, and the two
- * cases that reach this point are told apart, not merged:
- *
- * - **an old copy**, fostered before this pass existed, carries no
- *   `archive_synced` and its `fostered` event never claimed the flag either.
- *   `buildFosterCopy` (`domain/fostering.ts`) always starts a copy's flag as
- *   a plain spread of the source it was minted from — the flag is never
- *   foster's own decision unless the branch pass set it on purpose
- *   (`FosteredEvent.archived`/`ActiveFostering.archivedByFoster`), which is
- *   the one case treated differently here: a copy the branch pass filed away
- *   is that pass's row to own, the same as a title mark, and this pass leaves
- *   it alone rather than second-guessing a deliberate decision. Every other
- *   old copy — the ordinary case, an inherited default nobody has ever
- *   written an opinion about — is safe to bring into step: the worst a wrong
- *   read costs is one boolean flipped, on a card no ledger entry has ever
- *   claimed a stance on, and reversible by the same rule on the very next
- *   sweep. Stated once, honestly, because it is a policy choice rather than
- *   a provable one: an old copy could in principle have been archived or
- *   unarchived by hand with nothing written down to say so, and this pass
- *   cannot tell that apart from the ordinary, untouched case.
- * - **a native card**, one the app made and foster has never written an
- *   archive event for at all, is the user's own row by default — the same
- *   default `card_retitled`'s title half already keeps for a name nobody
- *   fostered. It is touched only the one way that costs the least to be
- *   wrong: when this row's own `lastActivityAt` is *older* than the source
- *   card's — the account that holds the desired state moved on after this
- *   row was last used here, so following it cannot be mistaken for
- *   overwriting fresher work of the user's own.
+ * the two wrote last wins. A card neither writer has ever touched has no such
+ * record, and is simply followed, once recency has already cleared it —
+ * except a copy the branch pass archived on purpose
+ * (`FosteredEvent.archived`/`ActiveFostering.archivedByFoster`), which is
+ * that pass's own decision to own, the same as a title mark, and is left
+ * alone here (`foster-marked`) rather than second-guessed.
  *
  * **A tie in recency settles nothing.** Two cards can carry the identical
  * `lastActivityAt` — a spawned or never-opened card in particular, whose
@@ -97,11 +91,10 @@ export interface ArchiveSyncItem {
   /** The card whose account was most recently active, for the report. */
   sourceSessionId?: string;
   /**
-   * Why this card may be rewritten: `copy-follows-source` — foster already
-   * owns this card's flag, by ledger record or by the untouched-since
-   * heuristic for an old copy; `native-follows-newer-source` — a native card
-   * nothing has ever touched, brought in line because the source moved on
-   * after this row was last used here.
+   * Why this card may be rewritten: `copy-follows-source` — a copy, the
+   * source moved on after this row was last used here, and nothing here
+   * disagrees with the flag foster itself last set (or nothing has ever set
+   * one); `native-follows-newer-source` — the same, for a native card.
    */
   because: 'copy-follows-source' | 'native-follows-newer-source';
 }
@@ -113,22 +106,23 @@ export interface ArchiveSyncSkipped {
    * `already-matches` — the flag already agrees with the most recent source;
    * `tied-sources` — two or more sources tie for most recently active and
    * disagree on the flag, so "most recent" cannot settle it; `marked` — the
-   * row wears a mark from the branch or second-file pass; `changed-by-hand`
-   * — the flag disagrees with the last value foster itself set, so a person
-   * changed it since; `foster-marked` — a copy the branch pass archived on
-   * purpose (`FosteredEvent.archived`), which is that pass's own decision to
-   * own, not this pass's to second-guess; `native-left-alone` — a native
-   * card nothing has ever touched, whose own activity is not older than the
-   * source's.
+   * row wears a mark from the branch or second-file pass; `used-here-last` —
+   * the source is not strictly more recently active than this row's own
+   * `lastActivityAt`, so following it could undo an on-purpose change made
+   * here after the source's own last activity — see the module doc;
+   * `changed-by-hand` — the flag disagrees with the last value foster itself
+   * set, so a person changed it since; `foster-marked` — a copy the branch
+   * pass archived on purpose (`FosteredEvent.archived`), which is that
+   * pass's own decision to own, not this pass's to second-guess.
    */
   reason:
     | 'no-source'
     | 'already-matches'
     | 'tied-sources'
     | 'marked'
+    | 'used-here-last'
     | 'changed-by-hand'
-    | 'foster-marked'
-    | 'native-left-alone';
+    | 'foster-marked';
 }
 
 export interface PlanArchiveSyncResult {
@@ -212,6 +206,18 @@ export function planArchiveSync(
       continue;
     }
 
+    // The one gate every row goes through, copy or native, ledger record or
+    // not: a source is only ever followed once it has genuinely moved on
+    // *after* this very row was last used here. See the module doc — this is
+    // what stops an on-purpose archive (or unarchive) from being undone by
+    // an older, untouched card in another account.
+    const hereActivity = card.data.lastActivityAt ?? 0;
+    const sourceActivity = bestSource.data.lastActivityAt ?? 0;
+    if (!(sourceActivity > hereActivity)) {
+      skipped.push({ sessionId, reason: 'used-here-last' });
+      continue;
+    }
+
     const fostering = fosteringOf(state, sessionId);
     const established = lastForsterArchiveWrite(state, sessionId);
 
@@ -231,12 +237,6 @@ export function planArchiveSync(
       }
       because = 'copy-follows-source';
     } else {
-      const here = card.data.lastActivityAt ?? 0;
-      const there = activityOf(bestSource);
-      if (here >= there) {
-        skipped.push({ sessionId, reason: 'native-left-alone' });
-        continue;
-      }
       because = 'native-follows-newer-source';
     }
 

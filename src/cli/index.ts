@@ -1595,21 +1595,35 @@ function titleSyncLine(from: string, to: string): string {
 }
 
 function printArchiveSync(phase: ArchiveSyncPhase, dryRun: boolean): void {
-  if (phase.items.length === 0) return;
+  const usedHereLast = phase.skipped.filter((skip) => skip.reason === 'used-here-last').length;
+  if (phase.items.length === 0 && usedHereLast === 0) return;
   console.log(pc.bold('\nArchived flag out of step with the account last used'));
-  if (dryRun) {
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else if (dryRun) {
     for (const item of phase.items) {
       console.log(
         `  ${pc.cyan('~')} ${item.to ? 'archive' : 'unarchive'} ${shortId(item.sessionId)}`,
       );
     }
-    return;
+  } else {
+    for (const outcome of phase.outcomes) {
+      console.log(
+        outcome.status === 'written'
+          ? `  ${pc.cyan('~')} ${outcome.to ? 'archived' : 'unarchived'} ${shortId(outcome.sessionId)}`
+          : `  ${pc.red('!')} ${shortId(outcome.sessionId)}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+      );
+    }
   }
-  for (const outcome of phase.outcomes) {
+  // Named on its own, the way `printTitleSync` calls out a rename left alone:
+  // this is the count that proves the recency gate is doing its job, not a
+  // failure — a row used here more recently than the account that would set
+  // the flag is exactly the case that must never be overwritten.
+  if (usedHereLast > 0) {
     console.log(
-      outcome.status === 'written'
-        ? `  ${pc.cyan('~')} ${outcome.to ? 'archived' : 'unarchived'} ${shortId(outcome.sessionId)}`
-        : `  ${pc.red('!')} ${shortId(outcome.sessionId)}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+      pc.dim(
+        `  ${usedHereLast} left alone: used here more recently than the account that would set the flag.`,
+      ),
     );
   }
 }
