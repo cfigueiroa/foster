@@ -6,6 +6,7 @@ import type { LedgerEvent } from '../ledger/types.js';
 import { scanAccount, type ScanCache } from '../store/scanner.js';
 import { backupPinState, readPinState, writePinState, type PinState } from '../store/pinstate.js';
 import { firstLine } from '../util/fs.js';
+import type { PinParityPlan } from './pinParity.js';
 
 /**
  * Pin moves the sweep had to put off, and the write that finishes them.
@@ -176,6 +177,9 @@ function redirectToVisible(
 export interface ApplyPinMovesResult {
   /** Moves actually written. */
   moved: number;
+  /** Cross-account pin parity written this call — see `engine/pinParity.ts`. */
+  pinned?: number;
+  unpinned?: number;
   /** The backup taken before the write, when there was one. */
   backup?: string;
 }
@@ -183,6 +187,11 @@ export interface ApplyPinMovesResult {
 /**
  * Write the plan's moves in one append, backing the database up first, and
  * settle them in the ledger — the written ones and the ones already done alike.
+ *
+ * `parity` is `engine/pinParity.ts`'s cross-account plan, applied in the same
+ * read-once/write-once batch — the spec's own "don't write the IndexedDB
+ * twice in one gap". Its own ledger event (`pins_synced`) is appended
+ * alongside `pins_moved`, in the same call, once the shared write lands.
  *
  * The caller owns the "app is closed" check: `applyLayout` refuses a running
  * app before it gets here, and the sweep's pin pass asks `inspectApp` first.
@@ -192,10 +201,14 @@ export function applyPinMoves(
   ledger: Ledger,
   plan: PinMovesPlan,
   options: { now?: () => Date } = {},
+  parity?: PinParityPlan,
 ): ApplyPinMovesResult {
-  if (plan.moves.length === 0 && plan.settled.length === 0) return { moved: 0 };
+  const hasMoves = plan.moves.length > 0 || plan.settled.length > 0;
+  const hasParity = (parity?.toPin.length ?? 0) > 0 || (parity?.toUnpin.length ?? 0) > 0;
+  if (!hasMoves && !hasParity) return { moved: 0 };
 
-  const settle = (written: PinMove[], already: PinMove[]): void => {
+  const settleMoves = (written: PinMove[], already: PinMove[]): void => {
+    if (written.length === 0 && already.length === 0) return;
     ledger.append({
       kind: 'pins_moved',
       moves: [
@@ -213,22 +226,36 @@ export function applyPinMoves(
     });
   };
 
-  // Read fresh, not from the plan: the app may have flushed a pin of its own
-  // between planning and this write.
-  const pins = plan.moves.length > 0 ? readPinState(store) : undefined;
+  // Read fresh, once, for both passes: the app may have flushed a pin of its
+  // own between planning and this write, and moves/parity must never disagree
+  // about what was pinned a moment ago.
+  const pins = hasMoves || hasParity ? readPinState(store) : undefined;
   const ids = new Set(pins?.ids ?? []);
-  const toWrite = plan.moves.filter((move) => ids.has(move.staleSessionId));
-  const already = [...plan.settled, ...plan.moves.filter((move) => !ids.has(move.staleSessionId))];
+  const toWriteMoves = plan.moves.filter((move) => ids.has(move.staleSessionId));
+  const alreadyMoves = [
+    ...plan.settled,
+    ...plan.moves.filter((move) => !ids.has(move.staleSessionId)),
+  ];
 
-  if (!pins || toWrite.length === 0) {
-    settle([], already);
+  const toPin = (parity?.toPin ?? []).filter((item) => !ids.has(item.cardId));
+  const toUnpin = (parity?.toUnpin ?? []).filter((item) => ids.has(item.cardId));
+
+  if (!pins || (toWriteMoves.length === 0 && toPin.length === 0 && toUnpin.length === 0)) {
+    settleMoves([], alreadyMoves);
     return { moved: 0 };
   }
 
   let next = pins.ids;
-  for (const move of toWrite) {
+  for (const move of toWriteMoves) {
     next = next.filter((id) => id !== move.staleSessionId);
     if (!next.includes(move.cleanSessionId)) next = [...next, move.cleanSessionId];
+  }
+  for (const item of toPin) {
+    if (!next.includes(item.cardId)) next = [...next, item.cardId];
+  }
+  if (toUnpin.length > 0) {
+    const unpinIds = new Set(toUnpin.map((item) => item.cardId));
+    next = next.filter((id) => !unpinIds.has(id));
   }
 
   const stamp = (options.now?.() ?? new Date()).getTime();
@@ -237,6 +264,20 @@ export function applyPinMoves(
     path.join(path.dirname(ledger.path), 'backups', `pin-state-${stamp}`),
   );
   writePinState(pins, next);
-  settle(toWrite, already);
-  return { moved: toWrite.length, backup };
+  settleMoves(toWriteMoves, alreadyMoves);
+
+  if (parity && (toPin.length > 0 || toUnpin.length > 0)) {
+    ledger.append({
+      kind: 'pins_synced',
+      account: parity.target,
+      pinned: toPin.map((item) => item.cardId),
+      unpinned: toUnpin.map((item) => item.cardId),
+    });
+  }
+
+  return {
+    moved: toWriteMoves.length,
+    ...(parity ? { pinned: toPin.length, unpinned: toUnpin.length } : {}),
+    backup,
+  };
 }

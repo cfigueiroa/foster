@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import type { DiscoveredSession } from '../domain/types.js';
 import { liveConversationIds } from '../ops/foster.js';
 import {
@@ -9,7 +10,8 @@ import {
 } from '../store/transcripts.js';
 
 /**
- * Sessions a usage limit stopped, and that the account they now sit in can carry on.
+ * Sessions a usage limit stopped — or that were cut off mid-turn — and that the
+ * account they now sit in can carry on.
  *
  * The sweep moves every conversation into the account signed in now, and the
  * ones that were working when their old account ran out arrive exactly where
@@ -32,7 +34,12 @@ export interface StoppedSession {
   title?: string;
   cwd?: string;
   branch?: string;
-  /** When the limit was hit: the stopping record's own time. */
+  /**
+   * What stopped it: `limit`, the app's own usage-limit record; `cut-off`, a
+   * turn that never closed — the app quit, restarted or switched account under it.
+   */
+  why: 'limit' | 'cut-off';
+  /** When it stopped: the stopping record's own time. */
   stoppedAt: number;
   /** The app's sentence for it — "You've hit your weekly limit · resets …". */
   limit?: string;
@@ -42,9 +49,11 @@ export interface StoppedSession {
 export interface PassedOver {
   sessionId: string;
   title?: string;
-  reason: 'live' | 'same-conversation' | 'same-branch';
+  reason: 'live' | 'same-conversation' | 'same-branch' | 'no-folder';
   /** The row kept in its place, for the two duplicate reasons. */
   keptSessionId?: string;
+  /** The working directory that is not on disk, for `no-folder`. */
+  cwd?: string;
 }
 
 export interface ReviveSelection {
@@ -61,6 +70,12 @@ export interface ReviveDeps {
   lastAnswer(file: string): LastAnswer | undefined;
   /** Lowercased conversation ids that have a live writer right now. */
   liveIds: ReadonlySet<string>;
+  /**
+   * Whether a card's working directory is on disk. The app refuses to deliver a
+   * message to a session whose folder is gone, so a row there is named rather than
+   * listed. Left out, every folder counts as there.
+   */
+  folderExists?(dir: string): boolean;
 }
 
 export function defaultReviveDeps(env: NodeJS.ProcessEnv = process.env): ReviveDeps {
@@ -71,6 +86,7 @@ export function defaultReviveDeps(env: NodeJS.ProcessEnv = process.env): ReviveD
     filesOf: (id) => lower.get(id.toLowerCase()) ?? [],
     lastAnswer,
     liveIds: liveConversationIds(env),
+    folderExists: existsSync,
   };
 }
 
@@ -97,11 +113,19 @@ export function findStopped(
     }
 
     const answer = answerOpenedBy(cliSessionId, data.cwd, deps);
-    if (answer?.error !== USAGE_LIMIT || answer.at < selection.since) continue;
+    if (answer === undefined || answer.at < selection.since) continue;
+    const why = answer.error === USAGE_LIMIT ? 'limit' : answer.cutOff ? 'cut-off' : undefined;
+    if (why === undefined) continue;
 
     // Something is writing it right now: whatever stopped it, it is not stopped.
     if (deps.liveIds.has(cliSessionId.toLowerCase())) {
       passedOver.push(skipped(session, 'live'));
+      continue;
+    }
+    // Measured 26/09/2026: four copies opened in a folder since moved, and the app
+    // answered each message with "The project folder … no longer exists".
+    if (data.cwd && deps.folderExists && !deps.folderExists(data.cwd)) {
+      passedOver.push({ ...skipped(session, 'no-folder'), cwd: data.cwd });
       continue;
     }
 
@@ -113,6 +137,7 @@ export function findStopped(
         ...(data.title !== undefined ? { title: data.title } : {}),
         ...(data.cwd !== undefined ? { cwd: data.cwd } : {}),
         ...(data.branch ? { branch: data.branch } : {}),
+        why,
         stoppedAt: answer.at,
         ...(answer.text !== undefined ? { limit: answer.text } : {}),
       },

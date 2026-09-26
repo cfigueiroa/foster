@@ -5,11 +5,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   APP_PREFS,
   parsePrefValue,
+  planAccountPrefsCarry,
   readAppPrefs,
   specOf,
+  writeAccountPrefsCarry,
   writeAppPref,
 } from '../src/store/appPrefs.js';
-import type { StoreLayout } from '../src/domain/types.js';
+import type { AccountRef, StoreLayout } from '../src/domain/types.js';
 import { plannedChanges, registerAppPref, resolve } from '../src/cli/appPrefCommand.js';
 import type * as Desktop from '../src/engine/desktop.js';
 import type * as Safety from '../src/engine/safety.js';
@@ -461,5 +463,76 @@ describe('the --restart write, through the real CLI action', () => {
     expect((settingsOf(store).preferences as Record<string, unknown>).menuBarEnabled).toBe(true);
     expect(process.exitCode).toBe(1);
     process.exitCode = undefined;
+  });
+});
+
+describe('account-uuid-keyed app prefs carry (bypassPermissionsGateByAccount etc.)', () => {
+  const TARGET: AccountRef = {
+    accountUuid: '11111111-1111-4111-8111-111111111111',
+    organizationUuid: '11111111-1111-4111-8111-111111111112',
+  };
+  const SOURCE: AccountRef = {
+    accountUuid: '00000000-0000-4000-8000-000000000001',
+    organizationUuid: '00000000-0000-4000-8000-000000000002',
+  };
+
+  function writeConfig(store: StoreLayout, preferences: Record<string, unknown>): void {
+    writeFileSync(store.desktopConfigFile, JSON.stringify({ preferences }), 'utf8');
+  }
+
+  it('carries the source’s entry when the target has none', () => {
+    const store = makeStore();
+    writeConfig(store, {
+      bypassPermissionsGateByAccount: { [SOURCE.accountUuid]: true },
+      coworkModelAutoFallbackByAccount: { [SOURCE.accountUuid]: 'sonnet' },
+    });
+
+    const plan = planAccountPrefsCarry(store, TARGET, SOURCE);
+    expect(plan.changes).toEqual({
+      bypassPermissionsGateByAccount: true,
+      coworkModelAutoFallbackByAccount: 'sonnet',
+    });
+
+    writeAccountPrefsCarry(store, TARGET, plan.changes, {
+      env: { ...process.env, FOSTER_HOME: path.join(store.root, '.foster-home') },
+    });
+    const written = JSON.parse(readFileSync(store.desktopConfigFile, 'utf8')) as {
+      preferences: Record<string, Record<string, unknown>>;
+    };
+    expect(written.preferences.bypassPermissionsGateByAccount).toEqual({
+      [SOURCE.accountUuid]: true,
+      [TARGET.accountUuid]: true,
+    });
+    // The source's own entry is untouched.
+    expect(written.preferences.coworkModelAutoFallbackByAccount?.[SOURCE.accountUuid]).toBe(
+      'sonnet',
+    );
+  });
+
+  it('leaves the target alone when it already has its own entry', () => {
+    const store = makeStore();
+    writeConfig(store, {
+      bypassPermissionsGateByAccount: {
+        [SOURCE.accountUuid]: true,
+        [TARGET.accountUuid]: false,
+      },
+    });
+
+    const plan = planAccountPrefsCarry(store, TARGET, SOURCE);
+    expect(plan.changes).toEqual({});
+  });
+
+  it('carries nothing when there is no source at all', () => {
+    const store = makeStore();
+    writeConfig(store, { bypassPermissionsGateByAccount: { [SOURCE.accountUuid]: true } });
+    const plan = planAccountPrefsCarry(store, TARGET, undefined);
+    expect(plan.changes).toEqual({});
+  });
+
+  it('carries nothing when the source has no entry of its own either', () => {
+    const store = makeStore();
+    writeConfig(store, { bypassPermissionsGateByAccount: {} });
+    const plan = planAccountPrefsCarry(store, TARGET, SOURCE);
+    expect(plan.changes).toEqual({});
   });
 });

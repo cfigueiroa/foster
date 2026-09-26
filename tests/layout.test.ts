@@ -521,6 +521,130 @@ describe('planLayout / applyLayout — groups', () => {
     // must say "1 other account", not 2.
     expect(plan.groups.sources).toBe(1);
   });
+
+  it('names a config file it could not read, rather than planning as if there were no groups at all', () => {
+    const store = makeStore();
+    writeFileSync(store.desktopConfigFile, '{ not json', 'utf8');
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    expect(plan.groups.items).toEqual([]);
+    expect(plan.groups.configUnreadable).toBeDefined();
+  });
+});
+
+describe('planLayout — brand-new groups are appended in the most recently active source scope’s own order', () => {
+  it('orders new groups by the most recently active source, not discovery order', () => {
+    const store = makeStore();
+    // OLD_ACCOUNT is less recently active than THIRD_ACCOUNT, and lists its
+    // own two groups in the opposite order ("Beta" before "Alpha").
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'local_o1', cliSessionId: 'conv-o1', lastActivityAt: 1_000 }),
+    );
+    writeSession(
+      store,
+      THIRD_ACCOUNT,
+      session({ sessionId: 'local_t1', cliSessionId: 'conv-t1', lastActivityAt: 9_000 }),
+    );
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [
+          { id: 'cg-beta', name: 'Beta' },
+          { id: 'cg-alpha', name: 'Alpha' },
+        ],
+        assignments: { [groupCardId('local_o1')]: 'cg-beta' },
+      },
+      [scopeKey(THIRD_ACCOUNT)]: {
+        groups: [
+          { id: 'cg-t-alpha', name: 'Alpha' },
+          { id: 'cg-t-beta', name: 'Beta' },
+        ],
+        assignments: { [groupCardId('local_t1')]: 'cg-t-alpha' },
+      },
+    });
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_o1x', cliSessionId: 'conv-o1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t1x', cliSessionId: 'conv-t1' }));
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    // THIRD_ACCOUNT is the most recently active source, and lists Alpha
+    // before Beta — the target's brand-new groups follow that order, not the
+    // order `Object.entries` happened to walk the source scopes in.
+    expect(plan.groups.items.map((item) => item.name)).toEqual(['Alpha', 'Beta']);
+  });
+});
+
+describe('planLayout / applyLayout — moving a card between groups (local change wins)', () => {
+  it('moves a target card to a new group when its current filing is foster’s own', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'New Home' }],
+        assignments: { [groupCardId('local_s1')]: 'cg-src' },
+      },
+      [scopeKey(NEW_ACCOUNT)]: {
+        groups: [{ id: 'cg-old', name: 'Old Home' }],
+        assignments: { [groupCardId('local_t1')]: 'cg-old' },
+      },
+    });
+
+    const ledger = ledgerAt(store);
+    // A previous `applyLayout` run is what put this card in "Old Home".
+    ledger.append({
+      kind: 'layout_assigned',
+      account: NEW_ACCOUNT,
+      assignments: [{ cardId: groupCardId('local_t1'), groupName: 'Old Home' }],
+    });
+
+    const plan = planLayout({ store, target: NEW_ACCOUNT, ledgerEvents: ledger.read() });
+    const item = plan.groups.items.find((entry) => entry.name === 'New Home')!;
+    expect(item.assign).toEqual([
+      { cardId: groupCardId('local_t1'), title: 'Sample session', movedFrom: 'Old Home' },
+    ]);
+
+    const result = applyLayout(plan, applyOpts(store, ledger));
+    expect(result.cardsAssigned).toBe(1);
+    const targetScope = readTargetScope(store, NEW_ACCOUNT)!;
+    expect(targetScope.assignments[groupCardId('local_t1')]).toBe(
+      targetScope.groups.find((g) => g.name === 'New Home')?.id,
+    );
+
+    // The move itself is now on record, so a later run can tell it apart
+    // from a filing the user made by hand.
+    const events = ledger.read();
+    expect(events.some((event) => event.kind === 'layout_assigned')).toBe(true);
+  });
+
+  it('leaves a card filed by hand alone, and reports why', () => {
+    const store = makeStore();
+    writeSession(store, OLD_ACCOUNT, session({ sessionId: 'local_s1', cliSessionId: 'conv-1' }));
+    writeSession(store, NEW_ACCOUNT, session({ sessionId: 'local_t1', cliSessionId: 'conv-1' }));
+    writeDesktopConfig(store, {
+      [scopeKey(OLD_ACCOUNT)]: {
+        groups: [{ id: 'cg-src', name: 'New Home' }],
+        assignments: { [groupCardId('local_s1')]: 'cg-src' },
+      },
+      [scopeKey(NEW_ACCOUNT)]: {
+        groups: [{ id: 'cg-old', name: "User's Own" }],
+        assignments: { [groupCardId('local_t1')]: 'cg-old' },
+      },
+    });
+
+    // No `layout_assigned` event at all — the user filed this card by hand.
+    const plan = planLayout({ store, target: NEW_ACCOUNT });
+    const item = plan.groups.items.find((entry) => entry.name === 'New Home')!;
+    expect(item.assign).toEqual([]);
+    expect(item.skipped).toEqual([
+      { title: 'Sample session', reason: 'filed-by-hand', currentGroup: "User's Own" },
+    ]);
+
+    const result = applyLayout(plan, applyOpts(store, ledgerAt(store)));
+    expect(result.cardsAssigned).toBe(0);
+    const targetScope = readTargetScope(store, NEW_ACCOUNT)!;
+    expect(targetScope.assignments[groupCardId('local_t1')]).toBe('cg-old');
+  });
 });
 
 describe('planLayout / applyLayout — groups written to all three places (finding #2)', () => {
@@ -1159,8 +1283,13 @@ describe('pendingLayoutCounts / applyLayout agreement, and the layout_applied le
       orderEntriesAdded: 2,
       pinsMoved: 0,
       marksBack: 0,
+      archiveMarksBack: 0,
       routinesBrought: 1,
       viewKeysCarried: 1,
+      pinsToPin: 0,
+      pinsToUnpin: 0,
+      machineViewKeysCarried: 0,
+      accountPrefsCarried: 0,
     });
     expect(totalLayoutPending(preview)).toBe(7);
 

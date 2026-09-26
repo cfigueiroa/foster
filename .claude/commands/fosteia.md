@@ -52,7 +52,7 @@ One command, one tool call. What runs before the sweep is not decoration: those 
 the name this conversation gets at the end, measured rather than remembered.
 
 ```
-"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(continuou, até {when}) " --other-file-prefix "(outro arquivo, parou {when}) "
+"[fosteia] $(Get-Date -Format 'dd/MM HH:mm')"; $c = foster whoami --json | ConvertFrom-Json; $e = $c.email; if (-not $e) { try { $e = (foster identify $c.accountUuid --json | ConvertFrom-Json).name } catch { } }; "[conta] $(if ($e) { $e } else { $c.accountUuid.Split('-')[0] })"; foster sweep --yes --sync-titles --cloud --restart --stale-prefix "(defasada, parou {when}) " --branch-prefix "(continuou, até {when}) " --other-file-prefix "(outro arquivo, parou {when}) "
 ```
 
 Pass **all three** prefixes, always. They are three different verdicts — two on a branch of a
@@ -139,6 +139,14 @@ on rather than re-deriving it:
   own half of the work. `foster consolidate` does **not** join these two, so never offer it here;
 - how many titles were brought back into step with their original, when the run names any, and
   that a copy renamed by hand is left alone on purpose;
+- how many rows were **archived or unarchived to match the account last used** on that
+  conversation, and the "left alone" counts the same pass names: rows changed here by hand, rows
+  used here more recently than anywhere else, and rows whose sources tied and disagreed. Say it as
+  the account following where the work was last touched, not as rows disappearing or reappearing;
+- the **cloud sessions** brought as local rows (`--cloud`): how many per account, which
+  repositories had no local checkout to open them in (those did not come), and which config
+  directories need `claude` run in them again to re-login before their cloud sessions can come.
+  Say plainly that these rows continue **locally**, on this machine, not in the cloud;
 - whether it said **"Nothing is left to sweep"**. The sweep now takes up to three rounds on its
   own when its writes leave work for a next one, and says "Took N rounds" when it did — pass that
   on as it is. If it still said "Not finished", run the same command again and say why;
@@ -164,7 +172,10 @@ on rather than re-deriving it:
 - how many copies were released from a stale worktree claim, if the line names any — a copy
   already on disk that used to fight its original over a branch, now fixed rather than added;
 - if the sweep printed a `Layout:` line, say what is waiting (groups, routines, pins) — it is
-  about to be applied by the command in "Finish it" below, along with the restart;
+  about to be applied by the command in "Finish it" below, along with the restart. Name each kind
+  the line counts: pins brought from other accounts (and any foster pin it removes), groups created,
+  rows moved between groups or put in the source's order, and sidebar/app settings carried from the
+  account last used;
 - say plainly, in this report, that the app is about to close and reopen (about 20 seconds after
   the next command runs), that this session closes with it — and so does **every other session
   the app is hosting right now**, because the command below ends them rather than waiting on
@@ -174,7 +185,7 @@ detached --last` — in a new session, since this one is gone by then;
   some rows back over their mark after the sweep wrote it, and the command below writes those
   marks again while the app is closed;
 - the next step, in one line: once the app has restarted, `/retoma` tells every session a
-  usage limit stopped in the last 24 hours that the quota is back and to carry on. Do not run
+  usage limit stopped, or the restart cut off mid-turn, in the last 24 hours to carry on. Do not run
   it yourself — it spends this account's quota on every one of them at once, and that is the
   user's call.
 
@@ -210,7 +221,8 @@ foster verify
 
 Read-only. It says whether the app saved any of what the sweep and the layout run just wrote
 back over itself — a title/archived-flag mark undone, a pin that never landed, or (rarer) sidebar
-groups reset to none after having been applied before. Exits non-zero when it found anything
+groups reset to none after having been applied before — and, the same way, a pin, group filing or
+sidebar setting carried from another account that the app has since undone. Exits non-zero when it found anything
 undone, and names what. If it does, `foster layout --yes --restart --detach
 --detach-even-with-live` (the same command as "Finish it" above) writes it again — that is a
 fresh run of this whole command's last step, not something to patch by hand.

@@ -280,6 +280,16 @@ skipped as already here. The sweep needs it in two places: a fork held in
 two files went to the branch pass, which decides on the id alone, and was retitled rather than
 completed.
 
+`fullerOf` (`domain/fostering.ts`) used to send a genuine tie — the two counts measured equal, or
+neither measurable at all — to the repository unconditionally, same as before the comparison
+existed. It now breaks that tie toward the worktree `cwd` instead, but only when that directory
+still exists on disk (an injected `exists` check, `existsSync` in production, so the function stays
+testable without touching a real one) — existence is not proof the worktree's own transcript is
+current, only that sending the copy there is not strictly worse than the root it would otherwise
+land in. Not measured against a real store yet: this is a logical fix for the tie case the 15/09
+incident above did not itself exercise (that one was a clear, non-tied win for the worktree file),
+not a re-run of the same measurement with a different outcome.
+
 Which of those two rows to continue in is no longer left to the reader. A pass of its own
 (`foster sweep`, `src/engine/fileCards.ts`) elects **the row whose last answer is the most
 recent** — where the work was left — leaves its title clean, and marks every other row of that
@@ -338,6 +348,22 @@ summary so the words can be fixed by hand or the run repeated with the matching 
 You are done when it prints **"Nothing is left to sweep"**. It also counts what can never come —
 scheduled tasks, sessions never opened, files over the 10 MB the app refuses to load — so report
 that line rather than leaving the user to wonder what the gap was.
+
+A card `scanAccount` could not read or parse at all used to vanish from the scan the same silent
+way an entry a schema mismatch already skips does — `readSessionFile`/`readSessionCard` already
+returned `undefined` for it, with nothing distinguishing that from a file that simply raced its way
+out of existence. `ScanOptions.unreadable` (`store/scanner.ts`) is an optional array a caller passes
+in to have every such path pushed onto it; `foster sweep`'s own scan now passes one, and the report
+(`SweepReport.unreadableCards`) prints "N card(s) could not be read and were left out" — text and
+`--json` both — when it is not empty, rather than a store simply reading as smaller than it is.
+Loosely counted, not strictly: the uncached read path answers the same `undefined` for a file that
+vanished mid-scan and one that is genuinely unreadable, so a rare race can land in this count too —
+acceptable here since the honest alternative was silence, not a perfectly precise number. A similar
+gap in `readGroupScopesReport` (`store/groupScopes.ts`) — any failure reading
+`claude_desktop_config.json` itself, not just one malformed entry inside it, read as "no groups at
+all" — now sets `configUnreadable` when the file exists but could not be read or parsed (never for
+a genuinely absent file, the ordinary case for a store nothing has grouped yet), and `foster
+layout`'s plan output warns on it instead of silently planning "nothing to do".
 
 One invocation finishes what used to take three. Measured 24/09/2026: `/fosteia` printed "Not
 finished" twice, and each re-run re-read 6.7 GB of transcripts. Two causes, two fixes. A round's
@@ -775,6 +801,22 @@ widens the read (×4 each retry, capped at 8 MB) when a window comes back with n
 a transcript like the cited 22 is found rather than missed; the ordinary transcript, whose answer is
 already in the first 256 KB, pays nothing extra.
 
+A usage limit is not the only way a session is left waiting. Measured 26/09/2026: the detached
+restart that ends `/fosteia` quit the app under eight sessions mid-turn — each transcript ended on
+a tool result or a `<task-notification>` with nothing after it, no limit record anywhere — and
+`revive` listed none of them. `lastAnswer` now also reads the last main-chain `user` record, and a
+turn that never closed (a user record after the last answer, or an answer whose last block is a
+`tool_use`) comes back `cutOff`; `revive` lists those as `why: "cut-off"` beside `why: "limit"`.
+Three kinds of `user` record are not turns and are passed over or read as an answer: `isMeta`, a
+local slash command or `!` shell line (`<command-name>`, `<local-command-stdout>`, `<bash-input>`,
+…), and "[Request interrupted by user]", a stop somebody chose. Over one week of this machine's
+transcripts (570 files), the endings split 396 answered, 53 limit, 43 tool result, 13 task
+notification, 7 unanswered tool call, 2 unanswered prompt, 6 interrupted by hand, 1 local command.
+
+A row whose working directory is gone is named in `passedOver` as `no-folder` instead of listed:
+the app answers a message to it with "The project folder … no longer exists" and never starts the
+turn. Measured the same day, on four copies whose cwd was a checkout that had since moved.
+
 ## `foster disk` and `foster stats`: read-only reports across every account
 
 Neither writes anything, and neither decides what is safe to remove — that judgement stays
@@ -841,6 +883,12 @@ is matched against a `user`/`assistant` message's _decoded_ text — `textOf(rec
 against the raw JSONL, so a search cannot fire on a `\n` inside a JSON escape or a `uuid` quoted
 inside a tool result; a tool call's own name and arguments are never message text and never match.
 
+A file `readFileSync` genuinely could not open (past `ENOENT`, which just means "vanished between
+the directory walk and the read" and is not a match, same as always) used to read as "no match" —
+silently, no different from a file that really held nothing. `grepTranscripts` now returns
+`{ conversations, unreadable }`; a file it could not read lands in `unreadable` instead, and both
+`--json` and the text report name it rather than let a real read failure hide as a clean negative.
+
 Two passes per file, coarse then real, in the shape `idsMentionedIn` already reads a transcript in
 for lineage. What makes the coarse pass fast enough for a corpus this size is _how_ coarse it is:
 one `Buffer#includes` — raw bytes, no decode — against the whole file at once, before the file is
@@ -899,6 +947,12 @@ stylesheet or script, so it opens on its own; `jsonl` is every record, deduplica
 the shape a real transcript already is, which is what makes it round-trip back through anything that
 reads a transcript. `--out` writes to a file; without it the render goes to stdout so the command
 pipes cleanly, the same convention `transcript` already uses.
+
+A file that vanished since the conversation was resolved (`ENOENT`) is skipped, same as always —
+what the other file(s) hold is still the best answer available. A file that exists but genuinely
+could not be read (past V8's string-length ceiling, a permission error) used to be skipped the same
+silent way, rendering a partial export with no sign anything was missing; it now throws, naming the
+file, rather than let a render the user may act on look complete when it is not.
 
 ## What `foster agent` does and does not cover
 
@@ -1191,6 +1245,81 @@ layout read-only alongside its own passes (`ops/sweep.ts`, never applied there) 
 `sweepSummary` when anything is pending; that line never counts toward "nothing is left to sweep",
 because a layout needs the app closed and a sweep run from inside the app can never close it.
 
+## Layout parity: pins, group moves, and the filter menu across accounts
+
+Added 26/09/2026. The goal: after `foster layout --yes --restart`, the signed-in target shows the
+same pins, groups and sidebar settings the most recently active _other_ account already does — not
+just the groups/routines this section already covers.
+
+**Pins are one list for the whole installation.** Measured 26/09/2026: the pin list (IndexedDB
+`store:pin-state:dframe-starred-code`, `document.state.starredIds`, `store/pinstate.ts`'s
+`readPinState`) holds card ids from every account on the machine at once — 92 ids across 20 accounts
+on the store measured. A copy always arrives unpinned, because foster mints it a fresh id. `foster
+layout` now closes that gap with `engine/pinParity.ts`: per conversation, the source is the card in
+whichever _other_ account has the latest `lastActivityAt`, the target row is the same "row to
+continue in" choice `planGroups` already makes (`resolveContinuingCard`, moved into its own module,
+`engine/continuingCard.ts`, so `pinParity.ts` and `layout.ts` can share it without importing each
+other), and a pin is added when the source has it and the target row does not. An unwanted pin is
+removed only when the ledger's own `pins_synced` events say foster pinned it before — never a pin
+the user set by hand, here or anywhere else. Applied in the same read-once/write-once IndexedDB
+batch as the pre-existing pin-move pass (`engine/pinMoves.ts`'s `applyPinMoves`, now taking an
+optional `parity` argument), so a layout run never opens the pin database twice in one gap.
+
+**A card already filed in a group can now move, but only if the filing was foster's own.** Before
+this, a target card assigned to _any_ group — right one or wrong one — was left alone outright.
+`layout_assigned` (new ledger event, folded by `layoutAssignedByCard`) records every card `applyLayout`
+itself files, by group name; a card `planGroups` finds filed in a _different_ group is moved there only
+when the current filing matches the latest `layout_assigned` entry for it — otherwise it is reported
+`skipped` with reason `filed-by-hand` and the current group name, never touched. The reconciliation
+`applyLayout` already does against fresh disk state (#R2) applies to a move the same way it applies to
+a fresh assignment: a card whose group changed _again_ between planning and writing is left alone
+rather than assumed still safe to move.
+
+**Brand-new groups are ordered by the most recently active source's own list, not discovery order.**
+`planGroups` now tracks, per source scope, the latest `lastActivityAt` any of its winning candidates
+carries, and orders the groups this run would create (never the ones the target already has) by
+that source's own `groups` array — a name the most-recent source does not have falls to the end in
+whatever order it was otherwise encountered.
+
+**The filter menu's machine-wide half (`groupBy`/`sort`) needs a sighting, taken while the right
+account is signed in.** `dframe-store`'s `groupByByMode`/`sortByByMode` is one Local Storage record
+for the whole installation, and — inferred from the same server-sync behaviour this file's "Desktop:
+grupos sincronizam com o servidor" section measures for groups, **not directly measured for
+`groupBy`/`sort` itself** — the page likely re-syncs it from the signed-in account's own server copy
+at every startup. That means this machine can never simply read what a _different_ account last
+showed once that account is no longer signed in; the record has already moved on. `engine/view.ts`'s
+`recordViewSeen` takes a sighting (a new `view_seen` ledger event, only when it differs from the
+account's own last sighting) and `planMachineViewCarry` carries the most recently active other
+account's latest sighting into the target, under the same local-change-wins rule as everything else
+here (`view_carried` events mark what foster itself wrote).
+
+`recordSignedInViewSighting` is what `foster sweep` and `foster layout` actually call — once each,
+read-only, before planning. It resolves the account the store is signed into right now with
+`engine/account.ts`'s `currentAccount` (the org-qualified version of the same fact
+`signedInAccount(store)` reads off `lastKnownAccountUuid`; `recordViewSeen` needs a full `AccountRef`,
+which a bare accountUuid cannot supply), and does nothing when nothing is signed in yet — no account,
+no sighting, no guess. Neither call site is inside a closed-app gap: `foster layout --restart`
+re-plans fresh once the app is down (see `applyLayout`'s own re-plan below), and that re-plan is
+deliberately **not** where this runs, because by then the Local Storage record already reflects
+whichever account was signed in _before_ the restart, not the target the write is about to sign
+into. Calling it up front, before the first (pre-restart) plan is shown, is what actually catches
+the account that is signed in for real.
+
+**Three preferences are keyed by account uuid, not by name**: `bypassPermissionsGateByAccount`,
+`bypassPermissionsOptInByAccount`, `coworkModelAutoFallbackByAccount` (`store/appPrefs.ts`'s
+`APP_PREFS` table). `planAccountPrefsCarry`/`writeAccountPrefsCarry` copy the most recently active
+other account's own entry into the target's, only when the target has no entry of its own yet — the
+same closed-app-gap write every other config change here needs, via `rewriteDesktopConfig`.
+
+**`foster view` now inventories, rather than silently ignores, an `epitaxyPrefs` key it does not
+recognise but that looks account-suffixed** (`store/viewPrefs.ts`'s `unknownAccountSuffixedEpitaxyKeys`,
+a loose uuid-shaped suffix check) — one dim line, nothing written or deleted, so a future app version's
+own new per-account setting shows up as something to investigate instead of vanishing from the report.
+
+**`foster verify` reads all of the above back too**: cross-account pins still pinned, `view_carried`
+values still in place, and `layout_assigned` filings still held — each reported the same way marks and
+pins already were, from the ledger alone, in a fresh process, no re-derivation from the plan.
+
 ## One rewrite path for `claude_desktop_config.json`
 
 `appPrefs.ts`, `groupScopes.ts` and `viewPrefs.ts` each used to carry their own copy of the same
@@ -1352,7 +1481,16 @@ appended next: the merged line is neither valid JSON nor separated from its neig
 damaged. `Ledger` now checks the last byte of the file once, on its first `append()` per instance
 (an `openSync`/seek/`readSync`, not a full read of a 23 MB file), and prefixes a newline first if it
 is missing — nothing but this instance's own appends can retorn the file once that is fixed, so
-later appends skip the check.
+later appends skip the check. `append()` itself no longer calls `appendFileSync` directly; it goes
+through `util/fsatomic.ts`'s `appendSynced`, the same fsync-before-return write `writeFileAtomic`
+already used elsewhere, so a write this module reports as done cannot still be sitting unflushed in
+cache if the process crashes right after — assumed to matter, not measured against a real crash.
+
+`read()` used to answer `[]` for _any_ `statSync`/`readFileSync` failure, folding a missing ledger
+(the ordinary "nothing written yet" case, `ENOENT`) together with a real one — the path replaced by
+a directory, a permission error — that a caller has no way to tell apart from an honestly empty
+ledger. It now throws, naming the path, for anything other than `ENOENT`; only a genuinely absent
+file still reads as no events.
 
 `doctor` used to read the process table twice — once through `inspectApp`, once through
 `runningStores` a few lines later, each defaulting to `readProcesses` rather than the 5-second
@@ -1675,6 +1813,16 @@ API itself (`gL`'s own guard: "Cloud sessions are only available on the first-pa
 provider"), a condition `readCloudAuth` cannot even produce since it only ever hands this module a
 token read from `.credentials.json`.
 
+`readRolloutRecords` (`store/codex.ts`) used to answer `[]` for any read failure, `ENOENT` (the
+rollout genuinely vanished) included with everything else. `importCodexRollouts` already treated an
+empty read as "rollout could not be read" and skipped it, so a Codex import was never silently
+imported as an empty conversation — but `import-codex --list`'s read-only inventory had no such
+check, and a rollout that failed to read for a real reason (past `ENOENT`) listed as an ordinary,
+if empty, thread rather than being counted alongside `readRolloutMeta`'s own `unreadable`. Fixed by
+having `readRolloutRecords` throw for anything but `ENOENT`, and having both callers catch that and
+say so — `--list` folds it into the same `unreadable` count `readRolloutMeta` failures already use;
+`importCodexRollouts` names the underlying error in the skip reason instead of the generic one.
+
 **`foster cloud pull <id> --into <cwd>`** fabricates a transcript and a sidebar card the same way
 `import-codex` does (`engine/codexImportWrite.ts`): files first, ledger only after they land, guarded
 by `_fosterImport` (now carrying `source: 'cloud'`) and undone the same way (`conversation_imported`
@@ -1719,6 +1867,172 @@ cover registered roots would hand a fleet credential to an external API call wit
 that root here on purpose). `--config-dir <path>` is not accepted by `cloud` either. A registered
 root's credential is reachable only by pointing `CLAUDE_CONFIG_DIR` at it directly and running
 `foster cloud` from inside that shell.
+
+### Two fixes measured 26/09/2026, ahead of `sweep --cloud`
+
+**`listCloudSessions` read only the first page.** The module comment above used to say every real
+account probed (2026-09-24, seven sessions) fit on one page, so the response's own pagination fields
+were never read. Measured directly against the real endpoint while building `sweep --cloud`
+(26/09/2026, a read-only `GET` with the default client's own token; raw output kept only in a scratch
+temp directory and deleted after reading): a real account with more than 20 sessions returns
+`{ data, next_cursor, resume_token }`, and a 20-item page still carrying a non-empty `next_cursor`.
+Re-requesting with `?cursor=<next_cursor>` returned the next page, a disjoint set of ids, with its own
+`next_cursor` — the same opaque base64 cursor `fetchTeleportEventsFrom` already reads for a different
+endpoint, not the `has_more`/`last_id` shape a first guess assumed before this was actually measured
+against the real API. `listCloudSessions` now follows `next_cursor` the same way, capped at 50 pages.
+`resume_token` is read by nothing here — it names a different resume mechanism outside this command's
+scope.
+
+**`cloud pull` wrote the transcript under the wrong root.** `pullCloudSession` writes wherever
+`env.CLAUDE_CONFIG_DIR` says (`claudeProjectsDir`, `store/transcripts.ts`) — correct on its own, since
+the function only ever does what its caller tells it. The CLI's own `cloud pull` action handed it
+`{ ...process.env, CLAUDE_CONFIG_DIR: client.configDir }` — the _source_ client's directory, the one
+`--client` named to fetch the session with. The Desktop app reads a card's transcript from the CLI's
+default `projects/` root (`~/.claude/projects`), the one every existing card's own transcript already
+lives under — not from an arbitrary client directory a `--client` flag happened to name. A pull from a
+non-default client wrote a transcript the app's session index never scans: the card existed, but
+opening it hit the same "cannot reach your computer" a stranded card shows. Fixed by using
+`scrubbedEnv(process.env)` (`engine/launchEnv.ts`, already used to keep a launched `Claude.exe` from
+inheriting a hosted session's own `CLAUDE*` markers) instead — it strips any inherited
+`CLAUDE_CONFIG_DIR` rather than pointing one at the source client, so the transcript always lands
+under the default root regardless of which client's credential fetched the session.
+
+## `foster sweep --cloud`: the one source a local pass cannot see
+
+Added 26/09/2026. `runSweep`'s own in-process passes (fostering, branches, restore, second-file, and
+the title/archived-flag follow-ups after them) bring in every _local_ account's sidebar; `--cloud`
+adds a kind of source a plain sweep cannot see at all — every cloud session (code.claude.com) any other signed-in CLI credential on this machine can
+reach — so switching to a different Desktop account still shows what was running in the cloud.
+
+Off by default, unlike the in-process passes: it calls a private, undocumented API (see
+`engine/cloudApi.ts`'s own module comment) and decides where to write by guessing a local checkout
+from a git remote, neither of which the plain passes do. `--cloud-archived` additionally brings a
+session the cloud itself has archived, the same convention `--include-archived` follows elsewhere.
+
+**Implementation lives in `src/ops/cloudSweep.ts`, not inside `runSweep`.** Every existing pass reads
+from one synchronous scan and one `Lineage` built up front; this one makes network calls per account,
+which would have meant threading `async` through a function that has none today. `runSweepCommand`
+(`cli/index.ts`) calls `planCloudSweep` after `runSweep` returns, and `applyCloudSweep` when `--yes`
+was passed, folding the result into the same `--json` object (`cloud: {...}`), the same text summary,
+and the same exit code (a cloud-pull failure sets `process.exitCode = 1` on a real run, same as
+`sweepFailedCount` does for the in-process passes). The cloud result sits beside `SweepReport`,
+not inside it: "Nothing is left to sweep" is the local re-plan's verdict, and the `Cloud:` line
+printed after it is the one that says whether any cloud session is still to pull.
+
+**Credentials**: every client `listClients(process.env)` names — never a `foster client register`ed
+fleet root, the same rule `resolveCloudClient` follows for a bare `foster cloud` — is asked for a
+cloud credential via `readCloudAuth`. The target account's own client is skipped outright (its cloud
+sessions are already in its own sidebar), and a second client signed into an account this plan has
+already read is skipped too, so two config directories sharing one login never pull the same session
+twice. An account whose credential refuses (expired, signed out, no cached organization) is reported
+per account with the fix ("run `claude` in `<dir>` to refresh") — never refreshed by this pass, same
+as `foster cloud` itself never refreshes one.
+
+**Matching a session to a local checkout**: a session names its repository, when it names one at all,
+as `config.sources[].url` or `config.outcomes[].git_info.repo` (`CloudRepoHint`, `cloudApi.ts`) —
+`normalizeRepoSlug` reduces either form (a clone URL, an `owner/repo` string, an scp-style
+`git@host:owner/repo`) to a lowercased `owner/repo` for comparison, never for a git operation. The
+candidate directories checked against it are: every `cwd`/`originCwd` the _target_ account's own cards
+name, every `cwd`/`originCwd` the _source_ account's cards name (found by matching the credential's
+own `accountUuid` against every organization directory `listAccountDirs` gives this store — a
+credential for an account this store has never fostered into contributes nothing extra, not an
+error), and, Windows only, every immediate child of `C:\repos` — the convention this machine's own
+`AGENTS.md`/`CLAUDE.md` already commit to for where a checkout lives. Each candidate is asked once
+per whole plan (`git -C <dir> remote get-url origin`, 5s timeout, cached by directory) rather than
+once per session, since the same directories are checked against every session that still needs a
+repo match. A session with no repo named at all, or whose repo matches no candidate, is skipped and
+named in the report (`no repository named on the session`, or `no local checkout for <owner/repo>`)
+rather than guessed at — the same "prove it, don't guess" rule the rest of this codebase follows for
+a filesystem match.
+
+**Already pulled, and why an import stays fosterable**: a session the ledger already shows as
+`conversation_imported` is skipped as `already pulled` only while the card that pull wrote is still
+on disk (`imported`'s `cardPath`). The ledger keys a pull on the cloud id alone, not on the account it
+went into, and the ordinary sweep is what carries the pulled card to the next account the user
+switches to — so a card that is gone is pulled again instead of being skipped forever. For the same
+reason a card `import-codex` or `cloud pull` fabricated (`_fosterImport`) is deliberately **not**
+`already-a-copy` (`unfosterableReasons`, `domain/fostering.ts`): it is the only card its conversation
+has anywhere. A first cut of this pass marked it a copy to stop it being "copied onward as the
+original"; review (26/09/2026) caught that this stranded every Codex import and every cloud pull in
+the account it was imported into — the next switch never brought it.
+**Apply**: for each planned item, `applyCloudSweep` re-reads the credential (a local file, not a
+network call) and calls the same `fetchCloudSession`/`fetchTeleportEvents`/`pullCloudSession` triple
+`foster cloud pull --yes` uses by hand, one session at a time — a failure on one session (network
+blip, a session deleted since the plan was read) is reported and does not abort the rest of the run,
+the same "per session, never fatal" convention `foster sweep`'s own passes already follow. The ledger
+is re-read fresh before every write, since an earlier item in the same apply may have just appended
+to it.
+
+**Real read-only run, this machine, 26/09/2026** (`FOSTER_HOME` pointed at a scratch copy of the real
+`ledger.jsonl`, `sweep --cloud --json`, no `--yes`): 12 sessions planned from the one client with a
+usable credential (`~/.claude` — matching the earlier-recorded fact that `~/.claude-frota`'s token was
+expired), 94 skipped for naming no repository, 19 skipped as archived in the cloud, zero accounts
+needing login and zero account errors in this run. Every session that did name a repository matched a
+local checkout — no `no local checkout for <owner/repo>` gaps surfaced this run, so that skip reason
+is exercised only by the test suite's synthetic fixtures (`tests/cloudSweep.test.ts`), not by this
+measurement. Session titles and repository names are personal data and are not reproduced here.
+
+## Archived state follows the account last used
+
+Added alongside the sweep's existing marking passes: a card's archived flag should read the
+same way in every account as it does wherever the conversation was most recently active — a
+copy of an archived conversation reopened where it came from, or a native card archived in one
+account while work went on in another, otherwise stays out of step for as long as foster runs.
+`src/engine/archiveSync.ts` (`planArchiveSync`/`applyArchiveSync`) is the pass, modelled on
+`titleSync.ts`: plan read-only, apply through `retitle.ts`'s own writer (`writeFileAtomic`), no
+closed-app guard, for the same reason a retitle needs none — a lost write costs a re-decided
+flag the next sweep round writes again, never a silent divergence, since the plan is always
+built fresh from what is on disk. It runs by default (`--no-archive-sync` opts out), unlike
+`--sync-titles`/`--dates`, on the view that a mismatched archived flag reads as lost or
+unfinished work — a sharper cost than a stale title.
+
+"Most recently active" is `domain/filter.ts`'s own `activityOf`/`byRecency`, asked across every
+card sharing a `cliSessionId` in every account but the target.
+
+**Only a source that moved on after this row was last used here is ever followed — for every
+row, copy or native, ledger record or not.** The source's `lastActivityAt` has to be strictly
+greater than this row's own, or the row is left alone (`used-here-last`). This is the rule that
+keeps an on-purpose change safe, not an optimisation: the house's own archive ritual archives a
+session in the account it ran in, which gives that account the higher activity, and leaves every
+other account's card on the same conversation unarchived and — because nothing has touched it
+since — older. A first cut of this pass asked only "does foster own this card's flag" and, for an
+old copy with no ledger record at all, defaulted to "yes, safe to sync" without ever checking
+which side had actually moved more recently — which meant a sweep into the account holding that
+older, untouched, unarchived card would undo the archive the ritual had just made on purpose. The
+recency gate is now unconditional rather than only asked for a native card, precisely to close
+that hole.
+
+**Local change wins, once the recency gate above is already cleared.** A target card whose
+current flag is not the one _foster itself_ last set is left alone (`changed-by-hand`) — read
+from the ledger via `lastForsterArchiveWrite` (`ledger/project.ts`), the later of an
+`archive_synced` write (the new ledger event this pass adds) or a `card_retitled` carrying
+`toArchived` (the branch/second-file passes' own writer), never guessed from the strings on disk.
+A card neither writer has ever touched has no such record and is simply followed, once recency has
+already cleared it — except a copy the branch pass archived on purpose (`FosteredEvent.archived`/
+`ActiveFostering.archivedByFoster`), which is that pass's own decision to own, the same as a title
+mark, and is left alone here too (`foster-marked`).
+
+A tie in recency between two sources that disagree on the flag settles nothing — a spawned or
+never-opened card's `lastActivityAt` is a placeholder rather than a real moment, and picking one
+side would be an array-order accident — so the card is left alone (`tied-sources`) rather than
+guessed at. A row carrying a mark this ledger has ever seen foster write (the same
+`templatesSeen`/`stripMarks` set `titleSync.ts` reads), or one the branch/second-file pass marked
+earlier in this very sweep round (`markedThisRound` — no `card_retitled` for it has reached the
+ledger's fold yet), is never touched either.
+
+`engine/marksBack.ts`'s `planArchiveMarksBack` is `planMarksBack`'s own rule for this new event: a
+card whose last archive-touching write this ledger recorded is an `archive_synced`, now showing
+that write's own `from` again, is written back the moment the app is closed — `engine/layout.ts`
+carries it as `LayoutPlan.archiveMarks`/`ApplyLayoutResult.archiveMarksBack`, alongside `marks`/
+`marksBack`, and `engine/verify.ts` reports one the app has since undone as `VerifyArchiveMarks`.
+Kept as its own event and its own marks-back pass rather than folded into `card_retitled`: the two
+writers touch disjoint fields (a title versus a bare flag), and `card_retitled`'s own `toArchived`
+half is already `planMarksBack`'s to catch up when a mark carries one.
+
+Not yet measured against a real store, unlike most of this file's other claims: this pass has only
+been exercised against synthetic fixtures (`tests/archiveSync.test.ts`) and a read-only dry run
+(`foster sweep --json`, no `--yes`) against a scratch copy of the real ledger — see the PR that
+added this section for that run's counts.
 
 ## Before pushing
 

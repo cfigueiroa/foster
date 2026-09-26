@@ -1,11 +1,20 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Ledger } from '../src/ledger/log.js';
-import { planPinMoves } from '../src/engine/pinMoves.js';
-import type { PinState } from '../src/store/pinstate.js';
-import { makeStore, NEW_ACCOUNT, session, writeSession } from './helpers/store.js';
+import { applyPinMoves, planPinMoves } from '../src/engine/pinMoves.js';
+import { planPinParity } from '../src/engine/pinParity.js';
+import {
+  PIN_STATE_KEY,
+  indexedDbDir,
+  readPinState,
+  recordKey,
+  type PinState,
+} from '../src/store/pinstate.js';
+import { encodeBatch, encodeVarint32, frameRecords } from '../src/store/format/leveldb.js';
+import type { StoreLayout } from '../src/domain/types.js';
+import { makeStore, NEW_ACCOUNT, OLD_ACCOUNT, session, writeSession } from './helpers/store.js';
 
 /**
  * `planPinMoves` resolving a deferred move whose named row is no longer
@@ -383,5 +392,126 @@ describe('resolving a deferred pin move whose target row is gone', () => {
       fakePinState([`local_${VISIBLE_SIBLING}`]),
     );
     expect(second).toEqual({ moves: [], settled: [] });
+  });
+});
+
+/**
+ * Blink's envelope, byte for byte as the installed app writes it — copied from
+ * `tests/pinstate.test.ts`, which explains why: foster never constructs this
+ * in production, so a fixture has to start from the app's own real bytes.
+ */
+const ENVELOPE = Buffer.from([
+  0xff, 0x15, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0x0f, 0x22,
+]);
+const LOG_NUMBER = 4;
+
+function pinValue(version: number, ids: string[]): Buffer {
+  const payload = Buffer.from(
+    JSON.stringify({ state: { starredIds: ids }, version: 0, updatedAt: 1 }),
+    'latin1',
+  );
+  return Buffer.concat([
+    encodeVarint32(version),
+    ENVELOPE,
+    encodeVarint32(payload.length),
+    payload,
+  ]);
+}
+
+function encodeExistsVersion(version: number): Buffer {
+  const bytes: number[] = [];
+  let rest = version;
+  do {
+    bytes.push(rest & 0xff);
+    rest = Math.floor(rest / 256);
+  } while (rest > 0);
+  return Buffer.from(bytes);
+}
+
+/** A minimal, writable synthetic IndexedDB pin database, holding `ids`. */
+function makePinDatabase(store: StoreLayout, ids: string[]): void {
+  const dir = indexedDbDir(store);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'CURRENT'), 'MANIFEST-000001\n');
+
+  const edit = Buffer.concat([
+    encodeVarint32(1),
+    encodeVarint32(8),
+    Buffer.from('idb_cmp1'),
+    encodeVarint32(2),
+    encodeVarint32(LOG_NUMBER),
+  ]);
+  writeFileSync(path.join(dir, 'MANIFEST-000001'), frameRecords(edit, 0));
+
+  const logPath = path.join(dir, `${String(LOG_NUMBER).padStart(6, '0')}.log`);
+  writeFileSync(
+    logPath,
+    frameRecords(
+      encodeBatch(1n, [
+        { key: recordKey(1, PIN_STATE_KEY, 1), value: pinValue(1, ids) },
+        { key: recordKey(2, PIN_STATE_KEY, 1), value: encodeExistsVersion(1) },
+      ]),
+      0,
+    ),
+  );
+}
+
+describe('applyPinMoves — combined with cross-account pin parity in one batch', () => {
+  it('writes a pin-move and a parity pin/unpin together, in one append, with both ledger events', () => {
+    const store = makeStore();
+    const dir = mkdtempSync(path.join(tmpdir(), 'foster-pinmoves-apply-'));
+    const ledger = new Ledger(path.join(dir, 'l.jsonl'));
+
+    // A deferred move (stale -> clean), plus a parity source card that is
+    // pinned in the other account and a target row foster had pinned before
+    // that is no longer wanted.
+    makePinDatabase(store, [`local_${STALE_CARD}`, 'local_src1', 'local_old_pin']);
+
+    ledger.append({
+      kind: 'pins_synced',
+      account: NEW_ACCOUNT,
+      pinned: ['local_old_pin'],
+      unpinned: [],
+    });
+
+    writeSession(
+      store,
+      OLD_ACCOUNT,
+      session({ sessionId: 'src1', cliSessionId: 'conv-parity', lastActivityAt: 2_000 }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'tgt1', cliSessionId: 'conv-parity', lastActivityAt: 1_000 }),
+    );
+    writeSession(
+      store,
+      NEW_ACCOUNT,
+      session({ sessionId: 'old_pin', cliSessionId: 'conv-no-longer-wanted' }),
+    );
+
+    const movePlan = planPinMoves(store, [], NEW_ACCOUNT, () =>
+      fakePinState([`local_${STALE_CARD}`, 'local_src1', 'local_old_pin']),
+    );
+    // No target row for STALE_CARD's conversation exists, so the move settles
+    // rather than writes — the point of this test is the parity half.
+    void movePlan;
+
+    const parityPlan = planPinParity(store, NEW_ACCOUNT, ledger.read(), readPinState);
+    expect(parityPlan.toPin.map((i) => i.cardId)).toEqual(['local_tgt1']);
+    expect(parityPlan.toUnpin.map((i) => i.cardId)).toEqual(['local_old_pin']);
+
+    const result = applyPinMoves(store, ledger, { moves: [], settled: [] }, {}, parityPlan);
+    expect(result.pinned).toBe(1);
+    expect(result.unpinned).toBe(1);
+
+    const after = readPinState(store)!;
+    expect(after.ids).toContain('local_tgt1');
+    expect(after.ids).not.toContain('local_old_pin');
+
+    const events = ledger.read();
+    const synced = events.filter((e) => e.kind === 'pins_synced');
+    expect(synced).toHaveLength(2);
+    expect(synced[1]).toMatchObject({ pinned: ['local_tgt1'], unpinned: ['local_old_pin'] });
   });
 });

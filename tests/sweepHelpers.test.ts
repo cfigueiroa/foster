@@ -21,6 +21,7 @@ describe('sweepMarked', () => {
       sweepMarked({
         branches: { retitled: [retitled('skipped')] } as never,
         files: { retitled: [] } as never,
+        archiveSync: { outcomes: [] } as never,
       }),
     ).toBe(false);
   });
@@ -30,6 +31,7 @@ describe('sweepMarked', () => {
       sweepMarked({
         branches: { retitled: [retitled('retitled')] } as never,
         files: { retitled: [] } as never,
+        archiveSync: { outcomes: [] } as never,
       }),
     ).toBe(true);
   });
@@ -42,6 +44,7 @@ describe('sweepMarked', () => {
       sweepMarked({
         branches: { retitled: [] } as never,
         files: { retitled: [retitled('retitled')] } as never,
+        archiveSync: { outcomes: [] } as never,
       }),
     ).toBe(true);
   });
@@ -81,6 +84,12 @@ describe('sweepFailedCount', () => {
       restored: { outcomes: [], ...phase } as never,
       files: { retitled: [], plans: [], archived: 0, otherFileTemplate: '' } as never,
       worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
+      archiveSync: {
+        items: [],
+        skipped: [],
+        outcomes: [],
+        counts: { written: 0, skipped: 0, failed: 0 },
+      },
       archived: 0,
       liveWriters: [],
       neverComes: { fosterable: [], restorable: [] } as never,
@@ -93,6 +102,7 @@ describe('sweepFailedCount', () => {
         viewKeysCarried: 0,
       },
       rounds: 1,
+      unreadableCards: [],
       ...overrides,
     } as SweepReport;
   }
@@ -118,9 +128,15 @@ describe('sweepFailedCount', () => {
         outcomes: [],
         counts: { advanced: 0, native: 0, skipped: 0, failed: 5 },
       } as never,
+      archiveSync: {
+        items: [],
+        skipped: [],
+        outcomes: [],
+        counts: { written: 0, skipped: 0, failed: 6 },
+      },
     });
 
-    expect(sweepFailedCount(report)).toBe(2 + 1 + 3 + 1 + 4 + 5);
+    expect(sweepFailedCount(report)).toBe(2 + 1 + 3 + 1 + 4 + 5 + 6);
   });
 
   // The gap review found: `branches.counts.failed` is `summariseOutcomes`

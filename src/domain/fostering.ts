@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { VERSION } from '../version.js';
 import { SESSION_ID_PREFIX } from './naming.js';
 import { samePath } from './paths.js';
@@ -104,6 +105,11 @@ export function unfosterableReasons(data: CodeSessionData, knownCopy = false): U
   // session back through a fixed list of fields, so a copy it has loaded and
   // saved comes back without `_foster`. The caller passes what the ledger knows.
   if (data._foster || knownCopy) reasons.push('already-a-copy');
+  // A card `import-codex`/`foster cloud pull` fabricated (`_fosterImport`) is
+  // deliberately NOT a copy here: it is the only card its conversation has
+  // anywhere, so the ordinary sweep is what carries it to the next account the
+  // user switches to. Refusing it as a source stranded every import in the
+  // account it was imported into.
   return reasons;
 }
 
@@ -226,15 +232,36 @@ export interface WorktreeReach {
  * made before #41. "More" is whatever the caller counted: the file's size, or
  * what a copy there would open that the destination cannot — the count that
  * keeps a night's work in the smaller file from being skipped as already here.
+ *
+ * A genuine tie — the two counts measured equal, or neither could be measured
+ * at all — used to fall through to `cwdTo` unconditionally, the same as before
+ * this comparison existed: a copy of work actually done in the worktree opened
+ * in the main checkout whenever the two sides simply agreed, or agreed on
+ * nothing. `exists` (injected so this stays testable without touching a real
+ * disk; `existsSync` in production) breaks that tie toward the worktree `cwd`
+ * when its directory is still there to open — existence is not proof the
+ * transcript itself is current, only that sending the copy there is not
+ * strictly worse than the repository root it would otherwise land in. A card
+ * whose `cwd` genuinely reaches fewer records than `originCwd` is untouched by
+ * this: that is not a tie, and `cwdTo` is still the right answer for it.
  */
-function fullerOf(card: CodeSessionData, cwdTo: string, reach: WorktreeReach | undefined): string {
+function fullerOf(
+  card: CodeSessionData,
+  cwdTo: string,
+  reach: WorktreeReach | undefined,
+  exists: (path: string) => boolean = existsSync,
+): string {
   if (reach && card.cwd !== undefined) {
     const { atCwd, atOriginCwd } = reach;
     // A measured count beats an unmeasurable one, and a higher count beats a
-    // lower one. Equal, or neither measurable, changes nothing — `cwdTo` is
-    // exactly what shipped before this comparison existed, and measured right
-    // on this store for 27 of the 93 cards it applies to.
+    // lower one.
     if (atCwd !== undefined && (atOriginCwd === undefined || atCwd > atOriginCwd)) {
+      return card.cwd;
+    }
+    // Equal counts, or neither measurable (`undefined === undefined`): a tie,
+    // which used to mean `cwdTo` unconditionally — see this function's own
+    // doc comment above.
+    if (atCwd === atOriginCwd && exists(card.cwd)) {
       return card.cwd;
     }
   }
@@ -259,11 +286,19 @@ function fullerOf(card: CodeSessionData, cwdTo: string, reach: WorktreeReach | u
  * worktree card's copy to `originCwd` without looking left 32 rows open less of
  * their conversation than they could, and 13 open nothing at all — the
  * worktree's own file was the fuller one, or the only one.
+ *
+ * `exists` is the same test seam `fullerOf` takes, for a tie between the two
+ * counts (or neither being measurable) — see its own doc comment. Left out
+ * entirely by every caller in this codebase, which gets `existsSync` for free.
  */
-export function copyCwd(card: CodeSessionData, reach?: WorktreeReach): string | undefined {
+export function copyCwd(
+  card: CodeSessionData,
+  reach?: WorktreeReach,
+  exists?: (path: string) => boolean,
+): string | undefined {
   const cwdTo = worktreeClaim(card)?.cwdTo;
   if (cwdTo === undefined) return card.cwd;
-  return fullerOf(card, cwdTo, reach);
+  return fullerOf(card, cwdTo, reach, exists);
 }
 
 export interface BuildCopyOptions {

@@ -96,6 +96,7 @@ import {
 import { applyPointer, planPointer } from '../engine/pointer.js';
 import { applySeed, planSeed } from '../engine/seed.js';
 import { formatLaunchCommand, openTerminalTab, planLaunch } from '../engine/launch.js';
+import { scrubbedEnv } from '../engine/launchEnv.js';
 import { buildFragment } from '../engine/fragment.js';
 import { applyProfile, planForget, planProfile } from '../engine/installations.js';
 import { listAll, vaultOutsideProfile, vaultRoot } from '../engine/vault.js';
@@ -256,13 +257,22 @@ import {
   runSweep,
   sweepFailedCount,
   sweepMarked,
+  type ArchiveSyncPhase,
   type BranchesPhase,
   type FileCardsPhase,
   type SweepReport,
   type TitleSyncPhase,
   type WorktreeClaimsPhase,
 } from '../ops/sweep.js';
-import { restartAround, type RestartAroundResult } from '../ops/restart.js';
+import { restartAround, restartFailed, type RestartAroundResult } from '../ops/restart.js';
+import {
+  applyCloudSweep,
+  cloudSweepJson,
+  cloudSweepSummary,
+  planCloudSweep,
+  type CloudSweepApplyResult,
+  type CloudSweepPlan,
+} from '../ops/cloudSweep.js';
 import {
   DEFAULT_DIVERGED_TEMPLATE,
   DEFAULT_OTHER_FILE_TEMPLATE,
@@ -296,6 +306,7 @@ import {
   planViewCopy,
   planViewSet,
   readViewState,
+  recordSignedInViewSighting,
   SORT_STORED_TO_WORD,
   SORT_WORDS,
   STATUS_WORDS,
@@ -407,7 +418,6 @@ const NAMES_ACCOUNTS = new Set([
   'accounts',
   'clients',
   'doctor',
-  'installations',
   'labels',
   'live',
   'scan',
@@ -1119,6 +1129,11 @@ program
     'rewrite copies whose original has been renamed since; leaves a copy you renamed yourself alone',
   )
   .option(
+    '--no-archive-sync',
+    "leave a card's archived flag alone instead of bringing it into step with the account " +
+      'most recently active on the same conversation (on by default)',
+  )
+  .option(
     '--dates',
     "advance a card's date to its transcript's last answer, so a row stops sinking in the sidebar",
   )
@@ -1144,6 +1159,12 @@ program
     'after planning, independently check every conversation is fully reachable from this account ' +
       '(exit 1 on any gap) — see `foster verify` for the layout-groups half of the same question',
   )
+  .option(
+    '--cloud',
+    'also bring in every cloud session (code.claude.com) any other signed-in CLI credential on ' +
+      'this machine can see, into a matching local git checkout — off by default; see `foster cloud`',
+  )
+  .option('--cloud-archived', 'with --cloud, also bring a session the cloud itself has archived')
   .option('--json', 'machine-readable output')
   .option('--yes', 'actually write; without it nothing is written')
   .addOption(new Option('--dry-run', 'show what would happen and write nothing').conflicts('yes'))
@@ -1158,6 +1179,7 @@ program
       branchPrefix: string;
       otherFilePrefix: string;
       syncTitles?: boolean;
+      archiveSync?: boolean;
       dates?: boolean;
       undoRetitles?: boolean;
       restart?: boolean;
@@ -1165,6 +1187,8 @@ program
       detachDelay?: string;
       detachEvenWithLive?: boolean;
       prove?: boolean;
+      cloud?: boolean;
+      cloudArchived?: boolean;
       json?: boolean;
       yes?: boolean;
       dryRun?: boolean;
@@ -1218,11 +1242,14 @@ async function runSweepCommand(
     branchPrefix: string;
     otherFilePrefix: string;
     syncTitles?: boolean;
+    archiveSync?: boolean;
     dates?: boolean;
     restart?: boolean;
     detach?: boolean;
     detachEvenWithLive?: boolean;
     prove?: boolean;
+    cloud?: boolean;
+    cloudArchived?: boolean;
     json?: boolean;
     configDir?: string[];
   },
@@ -1231,6 +1258,13 @@ async function runSweepCommand(
   cache: FosterCache | undefined,
   restartCarry: SweepRestartCarry,
 ): Promise<void> {
+  // Read-only, and taken before anything else here: a sighting of whichever
+  // account the store is actually signed into right now, for the filter
+  // menu's machine-wide half (`groupBy`/`sort`) to carry into another
+  // account later — see `engine/view.ts`'s `recordSignedInViewSighting`.
+  // Silent when nothing is signed in yet.
+  recordSignedInViewSighting(store, ledger);
+
   // Filled by `runSweep` itself, the moment its own `Lineage` and whole-store
   // scan exist — before any pass has written a thing. Only asked for when
   // `--prove` is, so an ordinary sweep pays nothing for it.
@@ -1245,6 +1279,7 @@ async function runSweepCommand(
     divergedTemplate: opts.branchPrefix,
     otherFileTemplate: opts.otherFilePrefix,
     syncTitles: Boolean(opts.syncTitles),
+    syncArchive: opts.archiveSync !== false,
     dates: Boolean(opts.dates),
     dryRun,
     configDirs: opts.configDir ?? [],
@@ -1287,6 +1322,28 @@ async function runSweepCommand(
       )
     : undefined;
 
+  // `--cloud` runs after the four in-process passes above, not folded into
+  // `runSweep` itself — see `ops/cloudSweep.ts`'s own module comment for why.
+  // A dry run only plans; `--yes` plans and then writes, same as every other
+  // pass. A cloud-pull failure counts toward the exit code the same way a
+  // failed write anywhere else in this command does.
+  let cloudFailedCount = 0;
+  const cloudResult: CloudSweepPlan | CloudSweepApplyResult | undefined = opts.cloud
+    ? await (async (): Promise<CloudSweepPlan | CloudSweepApplyResult> => {
+        const plan = await planCloudSweep({
+          store,
+          ledger,
+          target,
+          includeArchived: Boolean(opts.cloudArchived),
+        });
+        if (dryRun) return plan;
+        const applied = await applyCloudSweep({ store, ledger, target, plan });
+        cloudFailedCount = applied.failed;
+        return applied;
+      })()
+    : undefined;
+  if (!dryRun && cloudFailedCount > 0) process.exitCode = 1;
+
   // Named here, not in `sweepRestart` itself: a layout is planned but never
   // applied by the sweep, so the command handed over on a restart has to be
   // the one that actually finishes the job — `foster layout` restarts the
@@ -1315,6 +1372,7 @@ async function runSweepCommand(
       print({
         ...sweepJson(report),
         ...(proveReport ? { prove: proveReport } : {}),
+        ...(cloudResult ? { cloud: cloudSweepJson(cloudResult) } : {}),
         detach:
           outcome.ok && outcome.plan && outcome.launch
             ? {
@@ -1340,8 +1398,13 @@ async function runSweepCommand(
       restartCommand,
       deferredSweepGap(store, ledger, target, report),
     );
-    print({ ...sweepJson(report), ...(proveReport ? { prove: proveReport } : {}), restart });
-    if (proveReport && !proveReport.complete) process.exitCode = 1;
+    print({
+      ...sweepJson(report),
+      ...(proveReport ? { prove: proveReport } : {}),
+      ...(cloudResult ? { cloud: cloudSweepJson(cloudResult) } : {}),
+      restart,
+    });
+    if ((proveReport && !proveReport.complete) || restartFailed(restart)) process.exitCode = 1;
     return;
   }
 
@@ -1356,9 +1419,15 @@ async function runSweepCommand(
   printPhase('Restoring what the app deleted', report.restored.outcomes);
   printWorktreeClaims(report.worktreeClaims, dryRun);
   if (report.titleSync) printTitleSync(report.titleSync, dryRun);
+  printArchiveSync(report.archiveSync, dryRun);
 
   console.log('');
   for (const line of sweepSummary(report)) console.log(line);
+
+  if (cloudResult) {
+    console.log('');
+    for (const line of cloudSweepSummary(cloudResult, dryRun)) console.log(line);
+  }
 
   if (proveReport) printProve(proveReport);
 
@@ -1584,6 +1653,40 @@ function titleSyncLine(from: string, to: string): string {
   return `  ${pc.cyan('~')} ${from} ${pc.dim('->')} ${to}`;
 }
 
+function printArchiveSync(phase: ArchiveSyncPhase, dryRun: boolean): void {
+  const usedHereLast = phase.skipped.filter((skip) => skip.reason === 'used-here-last').length;
+  if (phase.items.length === 0 && usedHereLast === 0) return;
+  console.log(pc.bold('\nArchived flag out of step with the account last used'));
+  if (phase.items.length === 0) {
+    console.log(pc.dim('  nothing to do'));
+  } else if (dryRun) {
+    for (const item of phase.items) {
+      console.log(
+        `  ${pc.cyan('~')} ${item.to ? 'archive' : 'unarchive'} ${shortId(item.sessionId)}`,
+      );
+    }
+  } else {
+    for (const outcome of phase.outcomes) {
+      console.log(
+        outcome.status === 'written'
+          ? `  ${pc.cyan('~')} ${outcome.to ? 'archived' : 'unarchived'} ${shortId(outcome.sessionId)}`
+          : `  ${pc.red('!')} ${shortId(outcome.sessionId)}  ${pc.dim(outcome.detail ?? outcome.status)}`,
+      );
+    }
+  }
+  // Named on its own, the way `printTitleSync` calls out a rename left alone:
+  // this is the count that proves the recency gate is doing its job, not a
+  // failure — a row used here more recently than the account that would set
+  // the flag is exactly the case that must never be overwritten.
+  if (usedHereLast > 0) {
+    console.log(
+      pc.dim(
+        `  ${usedHereLast} left alone: used here more recently than the account that would set the flag.`,
+      ),
+    );
+  }
+}
+
 /**
  * `--prove`'s report: sets `process.exitCode` itself, the way a command that
  * finishes past its own `return` cannot otherwise leave a failure behind.
@@ -1673,6 +1776,12 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
           },
         }
       : {}),
+    archiveSync: {
+      counts: report.archiveSync.counts,
+      items: report.archiveSync.items,
+      skipped: report.archiveSync.skipped,
+      outcomes: report.archiveSync.outcomes,
+    },
     ...(report.dates
       ? {
           dates: {
@@ -1687,6 +1796,7 @@ function sweepJson(report: SweepReport): Record<string, unknown> {
     neverComes: report.neverComes,
     layout: report.layout,
     rounds: report.rounds ?? 1,
+    unreadableCards: report.unreadableCards,
     ...(report.confirmation ? { confirmation: report.confirmation } : {}),
   };
 }
@@ -1915,6 +2025,10 @@ function reportSweepRestart(restart: SweepRestart): void {
   if (restart.reason) {
     console.log(pc.yellow(`\n${restart.reason}`));
     console.log(`  ${restart.command}`);
+    // Same predicate `layout`/`view set`/`view copy` use at their own
+    // `if (!restart.done)`: a restart this run asked for (`--restart`) but
+    // that did not finish is a failed run, not a clean one with a note.
+    if (restartFailed(restart)) process.exitCode = 1;
     return;
   }
   console.log(
@@ -3133,6 +3247,12 @@ addDetachOptions(layoutCmd)
       return p;
     };
 
+    // Read-only, taken once up front — never repeated inside the closed-app
+    // gap `--restart` re-plans in below, where the Local Storage record would
+    // already reflect whichever account is signed in *before* the restart,
+    // not `target`. See `engine/view.ts`'s `recordSignedInViewSighting`.
+    recordSignedInViewSighting(store, ledger);
+
     const plan = applyFlags(planLayout({ store, target, ledgerEvents: ledger.read() }));
 
     // A fact about the target's groups file as it stands right now, not about
@@ -3353,6 +3473,7 @@ const view = program
         showPrStatus: state.account.showPrStatus ?? true,
         activityDays: state.account.activityDays ?? null,
         legacy: state.legacy,
+        unknownAccountKeys: state.unknownAccountKeys,
       });
       return;
     }
@@ -3395,6 +3516,14 @@ const view = program
       console.log(
         pc.dim(
           `\n${state.legacy.length} legacy key(s) still on disk, unread by the app: ${state.legacy.join(', ')}`,
+        ),
+      );
+    }
+    if (state.unknownAccountKeys.length > 0) {
+      console.log(
+        pc.dim(
+          `${state.unknownAccountKeys.length} unrecognised account-suffixed key(s) in ` +
+            `epitaxyPrefs: ${state.unknownAccountKeys.join(', ')}`,
         ),
       );
     }
@@ -5499,7 +5628,7 @@ program
     }
 
     const startedAt = Date.now();
-    const results = grepTranscripts(store, pattern, {
+    const { conversations: results, unreadable } = grepTranscripts(store, pattern, {
       ...(accountUuid !== undefined ? { accountUuid } : {}),
       ...(since !== undefined ? { since } : {}),
       ...(opts.cwd !== undefined ? { cwd: opts.cwd } : {}),
@@ -5524,8 +5653,17 @@ program
             isArchived: card.isArchived,
           })),
         })),
+        unreadable,
       });
       return;
+    }
+
+    if (unreadable.length > 0) {
+      console.log(
+        pc.yellow(
+          `${unreadable.length} file(s) could not be read and were skipped: ${unreadable.slice(0, 3).join(', ')}${unreadable.length > 3 ? ', …' : ''}`,
+        ),
+      );
     }
 
     if (results.length === 0) {
@@ -6098,21 +6236,24 @@ program
 program
   .command('revive')
   .helpGroup('Live sessions:')
-  .summary('sessions a usage limit stopped, for the /retoma skill to carry on')
+  .summary('sessions a usage limit stopped or a restart cut off, for /retoma to carry on')
   .description(
     'List the sessions in the account signed in now whose conversation ended on the\n' +
       'app\'s own "You\'ve hit your limit" line — work cut off mid-task when its old\n' +
-      'account ran out, and brought here by `sweep` exactly where it stopped. This is\n' +
-      'what to run after a sweep: the quota here is fresh, and each of these is one\n' +
-      'message away from carrying on.\n\n' +
+      'account ran out, and brought here by `sweep` exactly where it stopped — or in\n' +
+      "the middle of a turn: a tool result, a background task's notification or a\n" +
+      'prompt nothing answered, because the app was quit, restarted or switched\n' +
+      'account under it. This is what to run after a sweep and its restart: the quota\n' +
+      'here is fresh, and each of these is one message away from carrying on.\n\n' +
       'Nothing here sends that message. Only Claude Desktop can deliver a turn to a\n' +
       'session and keep its card attached — `claude --resume` runs the turn and leaves\n' +
       'the row showing the stop — so the list is the work for the /retoma skill, run\n' +
       'inside the app. One row per conversation and per git branch, the most recent\n' +
       'stop kept: two agents on one branch would commit over each other. Sessions a\n' +
-      'live claude is writing are left out and named.',
+      'live claude is writing, and sessions whose folder is gone (the app refuses to\n' +
+      'deliver to those), are left out and named.',
   )
-  .option('--since <age>', 'how long ago the limit may have been hit', '24h')
+  .option('--since <age>', 'how long ago the session may have stopped', '24h')
   .option('--archived', 'include sessions you archived — put away on purpose, so opt-in')
   .option('--json', 'machine-readable output')
   .action(function (this: Command) {
@@ -6137,14 +6278,17 @@ program
     }
 
     if (stopped.length === 0) {
-      console.log(`Nothing stopped on a usage limit in the last ${opts.since}.`);
+      console.log(
+        `Nothing stopped on a usage limit or cut off mid-turn in the last ${opts.since}.`,
+      );
     }
     for (const row of stopped) {
       console.log(
         `  ${formatAge(row.stoppedAt).padStart(8)}  ${row.title ?? pc.dim('(untitled)')}` +
           (row.branch ? pc.dim(`  (${row.branch})`) : ''),
       );
-      if (row.limit) console.log(pc.dim(`           ${row.limit}`));
+      const detail = row.why === 'cut-off' ? 'cut off mid-turn' : row.limit;
+      if (detail) console.log(pc.dim(`           ${detail}`));
     }
     for (const row of passedOver) {
       const why =
@@ -6152,11 +6296,19 @@ program
           ? 'a live claude is writing it'
           : row.reason === 'same-conversation'
             ? 'another row of the same conversation is on the list'
-            : 'another conversation on the same branch is on the list';
+            : row.reason === 'same-branch'
+              ? 'another conversation on the same branch is on the list'
+              : `its folder is gone (${row.cwd ?? '?'}), and the app will not deliver there`;
       console.log(pc.dim(`  left out: ${row.title ?? '(untitled)'} — ${why}`));
     }
     if (stopped.length === 0) return;
-    console.log(pc.bold(`\n${stopped.length} session(s) stopped on a usage limit.`));
+    const limits = stopped.filter((row) => row.why === 'limit').length;
+    console.log(
+      pc.bold(
+        `\n${stopped.length} session(s) to carry on: ${limits} stopped on a usage limit, ` +
+          `${stopped.length - limits} cut off mid-turn.`,
+      ),
+    );
     console.log(
       pc.dim(
         'Run /retoma inside Claude Desktop to tell each one the quota is back and to\n' +
@@ -6631,6 +6783,19 @@ function printVerify(report: VerifyReport): void {
     }
   }
 
+  if (report.archiveMarks.pending.length === 0) {
+    console.log(pc.dim('  archived flags (archive sync): every write foster made still stands.'));
+  } else {
+    console.log(
+      pc.red(
+        `  archived flags (archive sync): ${report.archiveMarks.pending.length} reverted by the app:`,
+      ),
+    );
+    for (const item of report.archiveMarks.pending) {
+      console.log(pc.dim(`      ${item.path}  -> ${item.to ? 'archived' : 'unarchived'}`));
+    }
+  }
+
   if (report.pins.unreadable) {
     console.log(pc.yellow(`  pins: could not be read — ${report.pins.unreadable}`));
   } else if (report.pins.pending.length === 0) {
@@ -6680,6 +6845,44 @@ function printVerify(report: VerifyReport): void {
     );
   } else {
     console.log(pc.dim(`  routines: ${report.routines.nowCount} now, nothing pending.`));
+  }
+
+  if (report.pinParity.undone.length === 0) {
+    console.log(pc.dim('  pins from other accounts: every pin foster added still stands.'));
+  } else {
+    console.log(
+      pc.red(`  pins from other accounts: ${report.pinParity.undone.length} no longer pinned.`),
+    );
+  }
+
+  if (report.groupAssignments.undone.length === 0) {
+    console.log(pc.dim('  group filings: every row foster filed is still in its group.'));
+  } else {
+    console.log(
+      pc.red(
+        `  group filings: ${report.groupAssignments.undone.length} no longer where foster filed them:`,
+      ),
+    );
+    for (const entry of report.groupAssignments.undone) {
+      console.log(pc.dim(`      ${entry.cardId}  -> ${entry.groupName}`));
+    }
+  }
+
+  if (report.viewCarried.undone.length === 0) {
+    console.log(pc.dim('  sidebar settings: every value foster carried still stands.'));
+  } else {
+    console.log(
+      pc.red(
+        `  sidebar settings: ${report.viewCarried.undone.length} changed since foster carried them:`,
+      ),
+    );
+    for (const entry of report.viewCarried.undone) {
+      console.log(
+        pc.dim(
+          `      ${entry.key}: expected ${JSON.stringify(entry.expected)}, now ${JSON.stringify(entry.actual)}`,
+        ),
+      );
+    }
   }
 
   console.log('');
@@ -7031,7 +7234,17 @@ program
           unreadable++;
           continue;
         }
-        const thread = parseCodexRollout(readRolloutRecords(file));
+        let records: ReturnType<typeof readRolloutRecords>;
+        try {
+          records = readRolloutRecords(file);
+        } catch {
+          // A real read failure, not the vanished-file case that already
+          // reads as empty — counted the same way an unparseable `meta`
+          // already is above, rather than listed as an empty thread.
+          unreadable++;
+          continue;
+        }
+        const thread = parseCodexRollout(records);
         entries.push(inventoryEntry(meta, thread));
       }
       entries.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -7412,6 +7625,19 @@ cloud
     }
 
     const target = resolveDestination(store, listAccountDirs(store), opts);
+    // The transcript goes under the CLI's *default* `projects/` root
+    // (`~/.claude/projects`, `claudeProjectsDir`'s own fallback), never
+    // `--client`'s config directory. `--client` only names which credential
+    // fetches the session; the Desktop app reads a card's transcript from the
+    // one CLI root every account's existing cards already live under, and a
+    // build that instead pointed `CLAUDE_CONFIG_DIR` at the source client
+    // wrote the transcript somewhere the app's own session index never scans
+    // — the card would exist but "cannot reach your computer" the same way a
+    // stranded card does. `scrubbedEnv` — the same helper a launched
+    // Claude.exe gets, see `engine/launchEnv.ts` — strips any `CLAUDE_CONFIG_DIR`
+    // (and every other `CLAUDE*` variable) this process itself inherited, so a
+    // `foster cloud pull` run from inside a hosted or non-default session does
+    // not silently write there either.
     const outcome: CloudPullOutcome = pullCloudSession(resolvedId, detail, events, {
       store,
       ledger,
@@ -7419,7 +7645,7 @@ cloud
       target,
       cwd,
       dryRun,
-      env: { ...process.env, CLAUDE_CONFIG_DIR: client.configDir },
+      env: scrubbedEnv(process.env),
     });
 
     if (outcome.status === 'failed') {

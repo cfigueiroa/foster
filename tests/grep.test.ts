@@ -67,7 +67,9 @@ describe('grepTranscripts', () => {
       [OTHER]: [record('user', 'totally unrelated work', '2026-09-01T00:00:00.000Z')],
     });
 
-    const results = grepTranscripts(store, /frobnicator/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /frobnicator/, {
+      projectsDirs: dirs,
+    });
 
     expect(results).toHaveLength(1);
     expect(results[0]!.cliSessionId).toBe(CONVERSATION);
@@ -84,7 +86,9 @@ describe('grepTranscripts', () => {
       ],
     });
 
-    const results = grepTranscripts(store, /\berror code \d{4}\b/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /\berror code \d{4}\b/, {
+      projectsDirs: dirs,
+    });
     expect(results).toHaveLength(1);
   });
 
@@ -101,7 +105,9 @@ describe('grepTranscripts', () => {
       ],
     });
 
-    const results = grepTranscripts(store, /frobnicator/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /frobnicator/, {
+      projectsDirs: dirs,
+    });
     expect(results).toHaveLength(0);
   });
 
@@ -120,7 +126,9 @@ describe('grepTranscripts', () => {
       ],
     });
 
-    const results = grepTranscripts(store, /"connection refused"/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /"connection refused"/, {
+      projectsDirs: dirs,
+    });
     expect(results).toHaveLength(1);
     expect(results[0]!.hits[0]!.snippet).toContain('connection refused');
   });
@@ -142,7 +150,7 @@ describe('grepTranscripts', () => {
     });
 
     const pattern = /C:\\repos\\widget-service\\bin\\tarefas-invisiveis\\vigia\.vbs/;
-    const results = grepTranscripts(store, pattern, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, pattern, { projectsDirs: dirs });
     expect(results).toHaveLength(1);
   });
 
@@ -157,7 +165,7 @@ describe('grepTranscripts', () => {
     // the literal fast path (no regex-meta character in it).
     // eslint-disable-next-line no-control-regex -- the raw tab is the point of this test
     const pattern = new RegExp('columns:\tvalue');
-    const results = grepTranscripts(store, pattern, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, pattern, { projectsDirs: dirs });
     expect(results).toHaveLength(1);
   });
 
@@ -169,7 +177,7 @@ describe('grepTranscripts', () => {
       ],
     });
 
-    const results = grepTranscripts(store, /revisão/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /revisão/, { projectsDirs: dirs });
     expect(results).toHaveLength(1);
     expect(results[0]!.hits[0]!.snippet).toContain('revisão');
   });
@@ -183,7 +191,7 @@ describe('grepTranscripts', () => {
       ],
     });
 
-    const onlyAssistant = grepTranscripts(store, /gizmo/, {
+    const { conversations: onlyAssistant } = grepTranscripts(store, /gizmo/, {
       projectsDirs: dirs,
       role: 'assistant',
     });
@@ -200,7 +208,7 @@ describe('grepTranscripts', () => {
     const old = new Date('2020-01-01T00:00:00.000Z');
     utimesSync(file, old, old);
 
-    const results = grepTranscripts(store, /widget/, {
+    const { conversations: results } = grepTranscripts(store, /widget/, {
       projectsDirs: dirs,
       since: Date.now() - 24 * 60 * 60 * 1000,
     });
@@ -219,7 +227,7 @@ describe('grepTranscripts', () => {
       'utf8',
     );
 
-    const results = grepTranscripts(store, /widget/, {
+    const { conversations: results } = grepTranscripts(store, /widget/, {
       projectsDirs: [path.join(config, 'projects')],
       cwd: 'widget-service',
     });
@@ -252,7 +260,7 @@ describe('grepTranscripts', () => {
       [CONVERSATION]: [record('user', 'mentions gadget here', '2026-09-01T00:00:00.000Z')],
     });
 
-    const results = grepTranscripts(store, /gadget/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /gadget/, { projectsDirs: dirs });
     expect(results[0]!.cards).toHaveLength(2);
     expect(results[0]!.cards.some((card) => card.isArchived)).toBe(true);
   });
@@ -272,7 +280,7 @@ describe('grepTranscripts', () => {
       [OTHER]: [record('user', 'also mentions widget here', '2026-09-01T00:00:00.000Z')],
     });
 
-    const results = grepTranscripts(store, /widget/, {
+    const { conversations: results } = grepTranscripts(store, /widget/, {
       projectsDirs: dirs,
       accountUuid: OLD_ACCOUNT.accountUuid,
     });
@@ -286,8 +294,34 @@ describe('grepTranscripts', () => {
       [CONVERSATION]: [record('user', 'mentions sprocket here', '2026-09-01T00:00:00.000Z')],
     });
 
-    const results = grepTranscripts(store, /sprocket/, { projectsDirs: dirs });
+    const { conversations: results } = grepTranscripts(store, /sprocket/, { projectsDirs: dirs });
     expect(results[0]!.cards).toHaveLength(0);
+  });
+
+  it('reports a file it could not open as unreadable, rather than as no match', () => {
+    const store = makeStore();
+    const config = mkdtempSync(path.join(tmpdir(), 'foster-grep-'));
+    const dir = path.join(config, 'projects', '-workspace-project');
+    mkdirSync(dir, { recursive: true });
+    // A directory sitting where a transcript file is expected: `indexAllTranscripts`
+    // only checks the `.jsonl` suffix, so this is treated as a candidate file, and
+    // `readFileSync` on it throws EISDIR rather than ENOENT.
+    mkdirSync(path.join(dir, `${CONVERSATION}.jsonl`));
+    writeFileSync(
+      path.join(dir, `${OTHER}.jsonl`),
+      `${record('user', 'widget everywhere', '2026-09-01T00:00:00.000Z')}\n`,
+      'utf8',
+    );
+
+    const { conversations: results, unreadable } = grepTranscripts(store, /widget/, {
+      projectsDirs: [path.join(config, 'projects')],
+    });
+
+    expect(unreadable).toEqual([path.join(dir, `${CONVERSATION}.jsonl`)]);
+    // The readable sibling still matches — one unreadable file must not sink
+    // the whole search.
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliSessionId).toBe(OTHER);
   });
 
   it('stops at --limit conversations', () => {
@@ -297,7 +331,10 @@ describe('grepTranscripts', () => {
       [OTHER]: [record('user', 'widget two', '2026-09-01T00:00:00.000Z')],
     });
 
-    const results = grepTranscripts(store, /widget/, { projectsDirs: dirs, limit: 1 });
+    const { conversations: results } = grepTranscripts(store, /widget/, {
+      projectsDirs: dirs,
+      limit: 1,
+    });
     expect(results).toHaveLength(1);
   });
 });

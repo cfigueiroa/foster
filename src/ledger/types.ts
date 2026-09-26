@@ -31,7 +31,12 @@ export type LedgerEvent =
   | ConversationImportUndoneEvent
   | LayoutAppliedEvent
   | PinMoveDeferredEvent
-  | PinsMovedEvent;
+  | PinsMovedEvent
+  | ArchiveSyncedEvent
+  | PinsSyncedEvent
+  | LayoutAssignedEvent
+  | ViewCarriedEvent
+  | ViewSeenEvent;
 
 interface BaseEvent {
   /** Schema version, so old logs stay readable as the tool evolves. */
@@ -669,6 +674,106 @@ export interface PinsMovedEvent extends BaseEvent {
 }
 
 /**
+ * A card's archived flag brought into step with the account another card of
+ * the same conversation was most recently active in — see `engine/archiveSync.ts`.
+ *
+ * Deliberately as thin as `CardDatedEvent`: the flag before and after, and
+ * nothing about the source card beyond its session id — no title, no account,
+ * no content. `sourceSessionId` is kept only so a report can say which row this
+ * followed, not to let anything be read back from it; `fold`'s own state (the
+ * `archiveSynced` map) never carries it forward across writes.
+ *
+ * A card_retitled event with `toArchived` set already changes this same flag,
+ * for the branch and second-file marking passes — this is the third writer of
+ * it, alongside those and the fostering that first sets it. Kept as its own
+ * kind rather than folded into `card_retitled` because nothing here ever
+ * touches the title, and a reader asking "does foster still own this card's
+ * archived flag" needs both writers' timestamps to find the latest.
+ */
+export interface ArchiveSyncedEvent extends BaseEvent {
+  kind: 'archive_synced';
+  /** The card's own session id, which the write does not change. */
+  sessionId: string;
+  /** The account directory it sits in. */
+  target: AccountRef;
+  path: string;
+  /** The archived flag it wore before. */
+  from: boolean;
+  /** The archived flag it wears now. */
+  to: boolean;
+  /** True when the app made this card rather than foster — see `CardRepointedEvent`. */
+  native: boolean;
+  /** The card whose account was most recently active — named for the report, never read back. */
+  sourceSessionId?: string;
+}
+
+/**
+ * Cross-account pin parity, written by `foster layout` — see
+ * `engine/pinParity.ts`. The pin list (`store/pinstate.ts`) is one list per
+ * Desktop installation, holding card ids from every account at once, so a
+ * card newly minted for a copy always arrives unpinned; this event is what
+ * lets a later run tell "foster pinned this" from "the user pinned this" for
+ * the ids it unpins later — `pinned` is the full set of ids this write left
+ * pinned that foster itself is responsible for, so the fold only needs the
+ * latest event per account rather than replaying every write.
+ */
+export interface PinsSyncedEvent extends BaseEvent {
+  kind: 'pins_synced';
+  account: AccountRef;
+  /** Card ids in `account` that this run pinned, or found already pinned by foster. */
+  pinned: string[];
+  /** Card ids this run unpinned — always ids `pinned` named in an earlier event. */
+  unpinned: string[];
+}
+
+/**
+ * One card filed into one group by `applyLayout`, kept apart from the
+ * summary counts `LayoutAppliedEvent` already carries so a later run can tell
+ * whether the *current* group a target card sits in is one foster itself put
+ * it in — the "local change wins" rule for moving a card between groups (see
+ * AGENTS.md, "Groups and routines"). Folded to the latest assignment per
+ * card, since a card can only ever be in one group at a time.
+ */
+export interface LayoutAssignedEvent extends BaseEvent {
+  kind: 'layout_assigned';
+  account: AccountRef;
+  assignments: { cardId: string; groupName: string }[];
+}
+
+/**
+ * One sidebar filter-menu, per-account key (`store/viewPrefs.ts`) carried by
+ * `foster layout` from another account into the target — see
+ * `engine/view.ts`'s carry rule. Recorded per key so a later run can tell
+ * whether the target's *current* value for that key is still the one foster
+ * wrote, which is what makes a second carry safe: it only overwrites a value
+ * it owns, never a value the user set by hand afterwards.
+ */
+export interface ViewCarriedEvent extends BaseEvent {
+  kind: 'view_carried';
+  account: AccountRef;
+  key: string;
+  value: unknown;
+}
+
+/**
+ * A sighting of the machine-wide sidebar filter menu's `groupBy`/`sort`
+ * (`store/localStorage.ts`'s `dframe-store` record) for one account, taken
+ * whenever `foster sweep` or `foster layout` reads the store. The record
+ * itself is one list for the whole installation, and the page re-syncs it
+ * from the server for whichever account is signed in at startup — so the
+ * only way to know what a *different* account last showed is to have written
+ * it down while that account was the one signed in. Only appended when it
+ * differs from the latest sighting already on file for this account, so an
+ * unchanged value does not spam the ledger on every run.
+ */
+export interface ViewSeenEvent extends BaseEvent {
+  kind: 'view_seen';
+  account: AccountRef;
+  groupBy?: string;
+  sortBy: string;
+}
+
+/**
  * An event as supplied by a caller, before the log stamps schema version, time
  * and tool version onto it.
  *
@@ -703,7 +808,12 @@ export type LedgerEventInput =
   | Draft<ConversationImportUndoneEvent>
   | Draft<LayoutAppliedEvent>
   | Draft<PinMoveDeferredEvent>
-  | Draft<PinsMovedEvent>;
+  | Draft<PinsMovedEvent>
+  | Draft<ArchiveSyncedEvent>
+  | Draft<PinsSyncedEvent>
+  | Draft<LayoutAssignedEvent>
+  | Draft<ViewCarriedEvent>
+  | Draft<ViewSeenEvent>;
 
 /**
  * A card whose title, or archived flag, is not what the app last had.
@@ -820,6 +930,28 @@ export interface ImportedConversation {
   sessionId: string;
   title?: string;
   importedAt: number;
+}
+
+/**
+ * A card whose archived flag foster's own `archive_synced` write last set,
+ * keyed by session id — the folded projection of `ArchiveSyncedEvent`.
+ *
+ * Unlike `RetitledCard`, `from` here is the *most recent* write's own `from`,
+ * not the original value carried forward: `engine/archiveSync.ts` only ever
+ * needs "what did this write set the flag to, and when", to decide whether a
+ * later disagreement is the user overriding foster or foster catching up with
+ * a source that moved on again. `card_retitled`'s own `toArchived` is a
+ * second, independent source of the same fact and is read alongside this one
+ * rather than merged into it — see `lastForsterArchiveWrite`.
+ */
+export interface ArchiveSyncedCard {
+  sessionId: string;
+  path: string;
+  target: AccountRef;
+  from: boolean;
+  to: boolean;
+  native: boolean;
+  syncedAt: number;
 }
 
 /** A fostering that is currently in place, derived by folding the log. */

@@ -100,18 +100,32 @@ export function layoutPlanLines(
   const lines: string[] = [];
 
   lines.push(pc.bold(`Groups (from ${sourceWord(groups.sources)})`));
+  if (groups.configUnreadable) {
+    // A genuine read failure on claude_desktop_config.json, not the ordinary
+    // "nothing has ever grouped here" case — see `GroupsPlan.configUnreadable`.
+    // "nothing to do" below would otherwise read as a clean plan over a file
+    // this run could not even open.
+    lines.push(pc.yellow(`  could not read the config file: ${groups.configUnreadable}`));
+  }
   if (groups.items.length === 0) {
     lines.push(pc.dim('  nothing to do'));
   } else {
     for (const item of groups.items) {
       if (item.created || item.assign.length > 0) {
         const rows = item.assign.length;
+        const moved = item.assign.filter((entry) => entry.movedFrom !== undefined).length;
         lines.push(
-          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}`,
+          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}` +
+            (moved > 0 ? pc.dim(` (${moved} moved from another group)`) : ''),
         );
       }
       for (const skip of item.skipped) {
-        const reason = skip.reason === 'archived' ? 'archived here' : 'no matching card here';
+        const reason =
+          skip.reason === 'archived'
+            ? 'archived here'
+            : skip.reason === 'filed-by-hand'
+              ? `filed by hand in "${skip.currentGroup ?? '?'}", left alone`
+              : 'no matching card here';
         lines.push(`  ${pc.dim('·')} ${skip.title} — ${reason}`);
       }
     }
@@ -183,11 +197,52 @@ export function layoutPlanLines(
     }
   }
 
+  const machine = plan.machineViewPrefs;
+  if (machine && (machine.groupBy !== undefined || machine.sortBy !== undefined)) {
+    const parts = [
+      ...(machine.groupBy !== undefined ? [`group by ${machine.groupBy}`] : []),
+      ...(machine.sortBy !== undefined ? [`sort by ${machine.sortBy}`] : []),
+    ];
+    lines.push(
+      pc.dim(
+        `\nAlso carrying the sidebar's ${parts.join(', ')}${machine.from ? ` from ${shortId(machine.from.accountUuid)}` : ''}.`,
+      ),
+    );
+  }
+
+  const accountPrefs = Object.keys(plan.accountPrefsCarry?.changes ?? {}).length;
+  if (accountPrefs > 0) {
+    lines.push(
+      pc.dim(`\nAlso carrying ${accountPrefs} per-account app setting(s) from another account.`),
+    );
+  }
+
+  // Cross-account pin parity — said only when there is something to do.
+  const parity = plan.pinsParity;
+  if (parity && (parity.toPin.length > 0 || parity.toUnpin.length > 0 || parity.unreadable)) {
+    lines.push(pc.bold('\nPins (from the account last used on each conversation)'));
+    for (const item of parity.toPin) lines.push(`  ${pc.green('+')} ${item.title}`);
+    for (const item of parity.toUnpin) lines.push(`  ${pc.red('-')} ${item.title}`);
+    if (parity.unreadable) {
+      lines.push(pc.yellow(`  could not read the pin list: ${parity.unreadable}`));
+    }
+  }
+
   // The same restraint: said only when the running app saved over a mark.
   const marks = plan.marks ?? [];
   if (marks.length > 0) {
     lines.push(pc.bold('\nMarks (the app saved these rows back over a sweep while it was open)'));
     for (const request of marks) lines.push(`  ${pc.cyan('~')} ${request.title}`);
+  }
+
+  const archiveMarks = plan.archiveMarks ?? [];
+  if (archiveMarks.length > 0) {
+    lines.push(
+      pc.bold('\nArchived flags (the app saved these rows back over a sweep while it was open)'),
+    );
+    for (const item of archiveMarks) {
+      lines.push(`  ${pc.cyan('~')} ${item.sessionId} -> ${item.to ? 'archived' : 'unarchived'}`);
+    }
   }
 
   return lines;
@@ -207,7 +262,12 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
       `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
         `${result.viewPrefsCarried ? ', filter menu carried' : ''}` +
         `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}` +
-        `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}.`,
+        `${result.pinsPinned ? `, ${result.pinsPinned} pin(s) added` : ''}` +
+        `${result.pinsUnpinned ? `, ${result.pinsUnpinned} pin(s) removed` : ''}` +
+        `${result.machineViewKeysCarried ? `, ${result.machineViewKeysCarried} sidebar setting(s) carried` : ''}` +
+        `${result.accountPrefsCarried ? `, ${result.accountPrefsCarried} app setting(s) carried` : ''}` +
+        `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}` +
+        `${result.archiveMarksBack ? `, ${result.archiveMarksBack} archived flag(s) written again` : ''}.`,
     ),
   ];
   if (result.written.length > 0) {
@@ -308,7 +368,12 @@ export function layoutPendingCountsChanged(
     before.routinesBrought !== after.routinesBrought ||
     before.viewKeysCarried !== after.viewKeysCarried ||
     (before.pinsMoved ?? 0) !== (after.pinsMoved ?? 0) ||
-    (before.marksBack ?? 0) !== (after.marksBack ?? 0)
+    (before.marksBack ?? 0) !== (after.marksBack ?? 0) ||
+    (before.archiveMarksBack ?? 0) !== (after.archiveMarksBack ?? 0) ||
+    (before.pinsToPin ?? 0) !== (after.pinsToPin ?? 0) ||
+    (before.pinsToUnpin ?? 0) !== (after.pinsToUnpin ?? 0) ||
+    (before.machineViewKeysCarried ?? 0) !== (after.machineViewKeysCarried ?? 0) ||
+    (before.accountPrefsCarried ?? 0) !== (after.accountPrefsCarried ?? 0)
   );
 }
 
@@ -981,6 +1046,30 @@ export function sweepSummary(report: SweepReport): string[] {
     );
   }
 
+  // Archived-flag-only writes: same reasoning as the worktree and title lines
+  // above, a card repaired rather than a row brought.
+  const archives = report.archiveSync;
+  if (archives.items.length > 0) {
+    const one = archives.items.length === 1;
+    lines.push(
+      report.dryRun
+        ? `${archives.items.length} archived flag${one ? '' : 's'} out of step with the account last used.`
+        : `${archives.counts.written} archived flag${archives.counts.written === 1 ? '' : 's'} brought into step` +
+            (archives.counts.skipped + archives.counts.failed > 0
+              ? ` (${archives.counts.skipped} skipped, ${archives.counts.failed} failed)`
+              : '') +
+            '.',
+    );
+  }
+  // Called out on its own: this is the recency gate protecting an on-purpose
+  // change, not a failure — see `engine/archiveSync.ts`'s own module doc.
+  const usedHereLast = archives.skipped.filter((skip) => skip.reason === 'used-here-last').length;
+  if (usedHereLast > 0) {
+    lines.push(
+      `${usedHereLast} archived flag(s) left alone: used here more recently than the account that would set the flag.`,
+    );
+  }
+
   const confirmation = report.confirmation;
   if (confirmation) {
     lines.push(
@@ -988,9 +1077,11 @@ export function sweepSummary(report: SweepReport): string[] {
         ? pc.green(
             'Nothing is left to sweep: a second run would foster 0, add or mark 0 rows for branches, ' +
               'mark 0 second files, restore 0, and release 0 worktree claims' +
-              (confirmation.titlesOutOfStep === undefined
-                ? '.'
-                : ', and bring 0 titles into step.'),
+              (confirmation.titlesOutOfStep === undefined ? '' : ', bring 0 titles into step') +
+              (confirmation.archivesOutOfStep === undefined
+                ? ''
+                : ', and bring 0 archived flags into step') +
+              '.',
           )
         : pc.yellow(
             `Not finished: ${confirmation.fosterable} still to foster, ` +
@@ -1000,6 +1091,9 @@ export function sweepSummary(report: SweepReport): string[] {
               `${confirmation.worktreeClaims} worktree claim(s) still to release` +
               (confirmation.titlesOutOfStep
                 ? `, ${confirmation.titlesOutOfStep} title(s) still out of step`
+                : '') +
+              (confirmation.archivesOutOfStep
+                ? `, ${confirmation.archivesOutOfStep} archived flag(s) still out of step`
                 : '') +
               '. Run it again.',
           ),
@@ -1043,6 +1137,22 @@ export function sweepSummary(report: SweepReport): string[] {
     if (layout.pinsMoved) parts.push(`${layout.pinsMoved} pin${layout.pinsMoved === 1 ? '' : 's'}`);
     if (layout.marksBack)
       parts.push(`${layout.marksBack} mark${layout.marksBack === 1 ? '' : 's'} the app undid`);
+    if (layout.archiveMarksBack)
+      parts.push(
+        `${layout.archiveMarksBack} archived flag${layout.archiveMarksBack === 1 ? '' : 's'} the app undid`,
+      );
+    if (layout.pinsToPin)
+      parts.push(`${layout.pinsToPin} pin${layout.pinsToPin === 1 ? '' : 's'} from other accounts`);
+    if (layout.pinsToUnpin)
+      parts.push(`${layout.pinsToUnpin} pin${layout.pinsToUnpin === 1 ? '' : 's'} to remove`);
+    if (layout.machineViewKeysCarried)
+      parts.push(
+        `${layout.machineViewKeysCarried} sidebar setting${layout.machineViewKeysCarried === 1 ? '' : 's'}`,
+      );
+    if (layout.accountPrefsCarried)
+      parts.push(
+        `${layout.accountPrefsCarried} app setting${layout.accountPrefsCarried === 1 ? '' : 's'}`,
+      );
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
     lines.push(`Layout: ${parts.join(', ')} to bring — foster layout --yes --restart`);
@@ -1050,6 +1160,20 @@ export function sweepSummary(report: SweepReport): string[] {
 
   const never = neverComesLine(report.neverComes);
   if (never) lines.push(pc.dim(never));
+
+  // Cards the initial scan could not even read — see `ScanOptions.unreadable`.
+  // Left out of every count above, silently, unless said here: a store that
+  // genuinely holds one fewer readable card than it used to must not read as
+  // a clean run that happened to find less to do.
+  if (report.unreadableCards.length > 0) {
+    const n = report.unreadableCards.length;
+    lines.push(
+      pc.yellow(
+        `${n} card${n === 1 ? '' : 's'} could not be read and ${n === 1 ? 'was' : 'were'} left out: ` +
+          `${report.unreadableCards.slice(0, 3).join(', ')}${n > 3 ? ', …' : ''}`,
+      ),
+    );
+  }
 
   if (branches.forks.length > 0) {
     const forks = branches.forks.length;

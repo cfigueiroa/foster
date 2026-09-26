@@ -242,6 +242,12 @@ describe('sweepSummary', () => {
       otherFileTemplate: '(other file, stopped {when}) ',
     },
     worktreeClaims: { items: [], outcomes: [], counts: { released: 0, skipped: 0, failed: 0 } },
+    archiveSync: {
+      items: [],
+      skipped: [],
+      outcomes: [],
+      counts: { written: 0, skipped: 0, failed: 0 },
+    },
     archived: 0,
     liveWriters: [],
     neverComes: { total: 0, byReason: {}, sessions: [] },
@@ -253,7 +259,21 @@ describe('sweepSummary', () => {
       routinesBrought: 0,
       viewKeysCarried: 0,
     },
+    unreadableCards: [],
     ...overrides,
+  });
+
+  it('names the cards a scan could not read, rather than only a smaller count', () => {
+    const lines = sweepSummary(
+      report({ unreadableCards: ['C:\\store\\accounts\\a\\local_broken.json'] }),
+    );
+    expect(lines.some((line) => line.includes('1 card could not be read'))).toBe(true);
+    expect(lines.some((line) => line.includes('local_broken.json'))).toBe(true);
+  });
+
+  it('says nothing about unreadable cards when there are none', () => {
+    const lines = sweepSummary(report());
+    expect(lines.some((line) => line.includes('could not be read'))).toBe(false);
   });
 
   it('says one row per branch, and never that the app has to be closed', () => {

@@ -201,8 +201,16 @@ export function readRolloutRecords(file: string): CodexRecord[] {
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
-  } catch {
-    return [];
+  } catch (error) {
+    // ENOENT — vanished since it was found — is the only "no records" case.
+    // Anything else (a file past V8's string-length ceiling, EACCES, ...)
+    // must reach the caller: importing that rollout as empty, or listing it
+    // as an empty thread, would be reporting a read failure as if it were a
+    // conversation with nothing in it.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw new Error(`could not read rollout ${file}: ${(error as Error).message}`, {
+      cause: error,
+    });
   }
 
   const records: CodexRecord[] = [];

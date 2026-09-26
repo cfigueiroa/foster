@@ -141,6 +141,14 @@ before fostering learned not to hand one out — see
 [Copies that still claim a worktree](#copies-that-still-claim-a-worktree). It runs last, against
 whatever the first three passes just wrote, and is counted in the same "nothing is left" check.
 
+The archived flag follows the account last used on each conversation, on by default
+(`--no-archive-sync` turns it off): a row is archived or unarchived to match whichever other account
+was most recently active on it — never a row changed here by hand since foster last wrote it, never
+one used here more recently than anywhere else, and never on a tie between two sources that
+disagree. `--cloud` adds a source no local pass can see: every cloud session (code.claude.com) any
+other signed-in CLI credential on this machine can reach, pulled into a local row in the checkout
+whose git remote matches the session's repository. Those continue locally, not in the cloud.
+
 A fifth pass, `--sync-titles`, brings a copy's title back into step with the original's. A copy
 carries the name of the instant it was made, and every later sweep sees it as already fostered and
 walks past — so a conversation renamed where it came from keeps the old name in every other account
@@ -321,15 +329,17 @@ in the model's place, `isApiErrorMessage: true` with `error: "rate_limit"`, and 
 lists the sessions whose conversation ends that way:
 
 ```bash
-foster revive                 # stopped on a limit in the last 24 hours
+foster revive                 # stopped on a limit, or cut off mid-turn, in the last 24 hours
 foster revive --since 3d      # a longer window; sessions you archived need --archived
 foster revive --json          # the work list the /retoma skill reads
 ```
 
 It reads the file each card actually opens, keeps one row per conversation and one per git
 branch of a repository — the most recent stop, since two agents on one branch would commit over
-each other — and names what it left out: a session a live `claude` is writing, or a second row
-of work already on the list.
+each other — and names what it left out: a session a live `claude` is writing, a second row
+of work already on the list, or a row whose folder is gone (the app refuses a message to it).
+A session a restart cut off mid-turn — its transcript ends on a tool result or a prompt nothing
+answered — is listed too, as `why: "cut-off"` beside `why: "limit"`.
 
 Nothing here sends the message that revives them. Only Claude Desktop can deliver a turn to a
 session and keep its card attached; a headless `claude --resume` runs the turn and leaves the
@@ -773,7 +783,15 @@ A group is matched **by name**: an existing target group of that name is reused,
 only when none matches. A routine is matched by its own **id**. Either way, bringing the same thing
 twice is a no-op, not a duplicate — and a target the user has already filed or already has, however it
 got there, is left exactly as it is. That is the same "the user's own choice wins" rule the sweep
-keeps for a copy's title.
+keeps for a copy's title. The one exception is a row foster itself filed earlier: when the source
+has since moved it to another group, it moves too. New groups arrive in the most recently active
+source's own order.
+
+The same run brings the rest of what makes two accounts look alike: the **pins** the most recently
+active other account shows on each conversation (and removes only a pin foster itself added), the
+sidebar's group-by and sort as that account last showed them, and per-account app settings the
+target has no entry for yet. Everything is under the same rule — a value changed here by hand is
+never overwritten — and `foster verify` reads all of it back after the restart.
 
 A routine that is a one-shot (`fireAt`, no `cronExpression`) and already overdue is not brought at
 all: the app runs an overdue task the moment it next launches, and a stale one firing unasked in an
@@ -1290,6 +1308,9 @@ foster clients --fragment # print a Windows Terminal fragment (JSON), one profil
 foster sweep     # the whole job: every account, archived and deleted included
 foster sweep --sync-titles # also re-title copies whose original has been renamed since
 foster sweep --prove # after planning, independently check every conversation is fully reachable
+foster sweep --cloud # also pull every other signed-in account's cloud sessions into local rows
+foster sweep --no-archive-sync # leave archived flags alone (on by default: they follow the
+                 #   account last used on each conversation)
 foster scan      # read-only inventory of accounts, organizations and sessions
 foster list      # sessions from other accounts that are available to foster
 foster foster    # create the copies
