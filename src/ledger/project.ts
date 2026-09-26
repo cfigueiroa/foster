@@ -504,12 +504,20 @@ function foldEvents(events: LedgerEvent[]): LedgerState {
       case 'layout_applied':
       case 'pin_move_deferred':
       case 'pins_moved':
+      case 'pins_synced':
+      case 'layout_assigned':
+      case 'view_carried':
+      case 'view_seen':
         // History, not state. A switch, a purge, a failure and a layout run are
         // recorded so the log can say what happened; none of them change the
         // fold — the app owns both files a layout run writes, so there is
         // nothing here for a later command to read back as current state.
         // Deferred pin moves are read straight off the events by
-        // `pendingPinMoves` (`engine/pinMoves.ts`), not through the fold.
+        // `pendingPinMoves` (`engine/pinMoves.ts`), not through the fold; the
+        // cross-account parity events added alongside pins (`pins_synced`,
+        // `layout_assigned`, `view_carried`, `view_seen`) are read the same
+        // direct way by `engine/pinParity.ts`, `engine/layout.ts` and
+        // `engine/view.ts`.
         break;
     }
   }

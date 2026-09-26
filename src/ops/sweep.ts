@@ -25,7 +25,7 @@ import { applyFileCards, planFileCards, type FileCardsResult } from '../engine/f
 import { inspectDesktopFor, readProcesses, type ProcessLister } from '../engine/desktop.js';
 import { pendingLayoutCounts, planLayout, type LayoutPendingCounts } from '../engine/layout.js';
 import { applyPinMoves, planPinMoves, type PinMove } from '../engine/pinMoves.js';
-import { planMarksBack } from '../engine/marksBack.js';
+import { planArchiveMarksBack, planMarksBack } from '../engine/marksBack.js';
 import {
   fosterSessions,
   summariseOutcomes,
@@ -897,6 +897,11 @@ export function deferredSweepGap(
     // One card at a time and never throwing: `retitleCards` records a failure
     // rather than raising it, and the next `foster layout` looks again.
     retitleCards(planMarksBack(ledger.read(), target, store), { ledger });
+    // The archive-sync pass's flag-only writes, the same way — see
+    // `planArchiveMarksBack`. `applyArchiveSync` records a failure per card
+    // rather than raising it, so this never fails the restart either.
+    const archiveMarks = planArchiveMarksBack(ledger.read(), target, store);
+    if (archiveMarks.length > 0) applyArchiveSync(archiveMarks, { ledger });
   };
 }
 

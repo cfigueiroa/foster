@@ -169,3 +169,81 @@ describe('planVerify — pins', () => {
     expect(report.pins.unreadable).toBeDefined();
   });
 });
+
+describe('planVerify — cross-account pin parity', () => {
+  it('flags a foster-pinned id that is no longer pinned, with no pin database at all', () => {
+    // No pin database on disk — `readPinState` answers `undefined`, so a
+    // foster-owned id has nothing to be found pinned in.
+    const { store, ledger } = fixture();
+    ledger.append({
+      kind: 'pins_synced',
+      account: NEW_ACCOUNT,
+      pinned: ['local_x'],
+      unpinned: [],
+    });
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.pinParity.undone).toEqual([]);
+    expect(report.undone).toBe(false);
+  });
+
+  it('is empty once the ledger says the id was unpinned again', () => {
+    const { store, ledger } = fixture();
+    ledger.append({ kind: 'pins_synced', account: NEW_ACCOUNT, pinned: ['local_x'], unpinned: [] });
+    ledger.append({ kind: 'pins_synced', account: NEW_ACCOUNT, pinned: [], unpinned: ['local_x'] });
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.pinParity.undone).toEqual([]);
+  });
+});
+
+describe('planVerify — view carried', () => {
+  it('says nothing pending when nothing was ever carried', () => {
+    const { store, ledger } = fixture();
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.viewCarried.undone).toEqual([]);
+  });
+
+  it('flags a carried value the store no longer shows', () => {
+    const { store, ledger } = fixture();
+    ledger.append({ kind: 'view_carried', account: NEW_ACCOUNT, key: 'groupBy', value: 'custom' });
+    // No Local Storage database on disk at all — `readViewState`'s `groupBy`
+    // comes back `undefined`, which disagrees with the carried `'custom'`.
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.viewCarried.undone).toEqual([
+      { key: 'groupBy', expected: 'custom', actual: undefined },
+    ]);
+    expect(report.undone).toBe(true);
+  });
+});
+
+describe('planVerify — group assignments (including moves)', () => {
+  it('flags a card the ledger says foster filed, no longer filed there', () => {
+    const { store, ledger } = fixture();
+    ledger.append({
+      kind: 'layout_assigned',
+      account: NEW_ACCOUNT,
+      assignments: [{ cardId: 'code:local_x', groupName: 'Work' }],
+    });
+    // No group scope on disk at all for this account.
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.groupAssignments.undone).toEqual([{ cardId: 'code:local_x', groupName: 'Work' }]);
+    expect(report.undone).toBe(true);
+  });
+
+  it('says nothing pending once the scope still agrees', () => {
+    const { store, ledger } = fixture();
+    ledger.append({
+      kind: 'layout_assigned',
+      account: NEW_ACCOUNT,
+      assignments: [{ cardId: 'code:local_x', groupName: 'Work' }],
+    });
+    writeFileSync(store.desktopConfigFile, JSON.stringify({}), 'utf8');
+    writeGroupScope(
+      store,
+      NEW_ACCOUNT,
+      { groups: [{ id: 'g1', name: 'Work' }], assignments: { 'code:local_x': 'g1' } },
+      { env: { FOSTER_HOME: path.join(store.root, '.foster-home') } },
+    );
+    const report = planVerify(store, NEW_ACCOUNT, ledger.read());
+    expect(report.groupAssignments.undone).toEqual([]);
+  });
+});

@@ -2,10 +2,13 @@ import { sameAccount } from '../domain/paths.js';
 import type { AccountRef, StoreLayout } from '../domain/types.js';
 import type { LedgerEvent } from '../ledger/types.js';
 import type { ArchiveSyncItem } from './archiveSync.js';
-import { planLayout, type LayoutPlan } from './layout.js';
+import { layoutAssignedByCard, planLayout, type LayoutPlan } from './layout.js';
 import type { PinMove } from './pinMoves.js';
+import { fosterOwnedPins } from './pinParity.js';
 import type { RetitleRequest } from './retitle.js';
+import { readViewState, viewCarriedFor } from './view.js';
 import { readGroupScopes, scopeKey } from '../store/groupScopes.js';
+import { readPinState } from '../store/pinstate.js';
 import { readScheduledTasks } from '../store/routines.js';
 
 /**
@@ -85,6 +88,21 @@ export interface VerifyRoutines {
   reset: boolean;
 }
 
+/** Cross-account pins foster synced that are no longer pinned. */
+export interface VerifyPinParity {
+  undone: string[];
+}
+
+/** Machine-wide/per-account filter-menu values foster carried that no longer match. */
+export interface VerifyViewCarried {
+  undone: { key: string; expected: unknown; actual: unknown }[];
+}
+
+/** Group filings foster wrote (moves included) that no longer hold. */
+export interface VerifyGroupAssignments {
+  undone: { cardId: string; groupName: string }[];
+}
+
 export interface VerifyReport {
   target: AccountRef;
   marks: VerifyMarks;
@@ -92,6 +110,12 @@ export interface VerifyReport {
   pins: VerifyPins;
   groups: VerifyGroups;
   routines: VerifyRoutines;
+  /** Cross-account pin parity — see `engine/pinParity.ts`. */
+  pinParity: VerifyPinParity;
+  /** Sidebar filter-menu values foster carried — see `engine/view.ts`. */
+  viewCarried: VerifyViewCarried;
+  /** Group filings (including moves) foster wrote — see `engine/layout.ts`. */
+  groupAssignments: VerifyGroupAssignments;
   /** True when anything above found the app had undone a write. */
   undone: boolean;
 }
@@ -159,14 +183,68 @@ export function verifyFromPlan(
     reset: routinesEverApplied && nowCount === 0 && pendingBring > 0,
   };
 
+  // Cross-account pin parity: every id foster itself pinned (folded from
+  // `pins_synced`) should still be pinned, unless a later `pins_synced`
+  // already unpinned it — `fosterOwnedPins` already drops those.
+  const owned = fosterOwnedPins(events, target);
+  let pinnedIds: Set<string> | undefined;
+  try {
+    pinnedIds = new Set(readPinState(store)?.ids ?? []);
+  } catch {
+    pinnedIds = undefined; // unreadable — nothing to compare against, reported as no findings
+  }
+  const pinParity: VerifyPinParity = {
+    undone: pinnedIds ? [...owned].filter((id) => !pinnedIds!.has(id)) : [],
+  };
+
+  // Sidebar filter-menu values foster carried: the machine-wide groupBy/sort,
+  // plus the per-account keys `planLayoutViewCarry` may have written before.
+  const currentView = readViewState(store, target);
+  const viewCarriedUndone: VerifyViewCarried['undone'] = [];
+  for (const key of ['groupBy', 'sortBy'] as const) {
+    const expected = viewCarriedFor(events, target, key);
+    if (expected === undefined) continue;
+    const actual = key === 'groupBy' ? currentView.groupBy : currentView.sort;
+    if (actual !== expected) viewCarriedUndone.push({ key, expected, actual });
+  }
+  const viewCarried: VerifyViewCarried = { undone: viewCarriedUndone };
+
+  // Group filings foster wrote (including a move away from an earlier
+  // group): the card should still be filed in the group the ledger names.
+  const fosterFiled = layoutAssignedByCard(events, target);
+  const groupIdByName = new Map((scope?.groups ?? []).map((g) => [g.name, g.id]));
+  const groupAssignmentsUndone: VerifyGroupAssignments['undone'] = [];
+  for (const [cardId, groupName] of fosterFiled) {
+    const expectedGroupId = groupIdByName.get(groupName);
+    const actualGroupId = scope?.assignments[cardId];
+    if (expectedGroupId === undefined || actualGroupId !== expectedGroupId) {
+      groupAssignmentsUndone.push({ cardId, groupName });
+    }
+  }
+  const groupAssignments: VerifyGroupAssignments = { undone: groupAssignmentsUndone };
+
   const undone =
     marks.pending.length > 0 ||
     archiveMarks.pending.length > 0 ||
     pins.pending.length > 0 ||
     groups.reset ||
-    routines.reset;
+    routines.reset ||
+    pinParity.undone.length > 0 ||
+    viewCarried.undone.length > 0 ||
+    groupAssignments.undone.length > 0;
 
-  return { target, marks, archiveMarks, pins, groups, routines, undone };
+  return {
+    target,
+    marks,
+    archiveMarks,
+    pins,
+    groups,
+    routines,
+    pinParity,
+    viewCarried,
+    groupAssignments,
+    undone,
+  };
 }
 
 export function planVerify(

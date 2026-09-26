@@ -113,12 +113,19 @@ export function layoutPlanLines(
     for (const item of groups.items) {
       if (item.created || item.assign.length > 0) {
         const rows = item.assign.length;
+        const moved = item.assign.filter((entry) => entry.movedFrom !== undefined).length;
         lines.push(
-          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}`,
+          `  ${pc.green('+')} ${item.name}${item.created ? pc.dim(' (new)') : ''}: ${rows} row${rows === 1 ? '' : 's'}` +
+            (moved > 0 ? pc.dim(` (${moved} moved from another group)`) : ''),
         );
       }
       for (const skip of item.skipped) {
-        const reason = skip.reason === 'archived' ? 'archived here' : 'no matching card here';
+        const reason =
+          skip.reason === 'archived'
+            ? 'archived here'
+            : skip.reason === 'filed-by-hand'
+              ? `filed by hand in "${skip.currentGroup ?? '?'}", left alone`
+              : 'no matching card here';
         lines.push(`  ${pc.dim('·')} ${skip.title} — ${reason}`);
       }
     }
@@ -190,11 +197,52 @@ export function layoutPlanLines(
     }
   }
 
+  const machine = plan.machineViewPrefs;
+  if (machine && (machine.groupBy !== undefined || machine.sortBy !== undefined)) {
+    const parts = [
+      ...(machine.groupBy !== undefined ? [`group by ${machine.groupBy}`] : []),
+      ...(machine.sortBy !== undefined ? [`sort by ${machine.sortBy}`] : []),
+    ];
+    lines.push(
+      pc.dim(
+        `\nAlso carrying the sidebar's ${parts.join(', ')}${machine.from ? ` from ${shortId(machine.from.accountUuid)}` : ''}.`,
+      ),
+    );
+  }
+
+  const accountPrefs = Object.keys(plan.accountPrefsCarry?.changes ?? {}).length;
+  if (accountPrefs > 0) {
+    lines.push(
+      pc.dim(`\nAlso carrying ${accountPrefs} per-account app setting(s) from another account.`),
+    );
+  }
+
+  // Cross-account pin parity — said only when there is something to do.
+  const parity = plan.pinsParity;
+  if (parity && (parity.toPin.length > 0 || parity.toUnpin.length > 0 || parity.unreadable)) {
+    lines.push(pc.bold('\nPins (from the account last used on each conversation)'));
+    for (const item of parity.toPin) lines.push(`  ${pc.green('+')} ${item.title}`);
+    for (const item of parity.toUnpin) lines.push(`  ${pc.red('-')} ${item.title}`);
+    if (parity.unreadable) {
+      lines.push(pc.yellow(`  could not read the pin list: ${parity.unreadable}`));
+    }
+  }
+
   // The same restraint: said only when the running app saved over a mark.
   const marks = plan.marks ?? [];
   if (marks.length > 0) {
     lines.push(pc.bold('\nMarks (the app saved these rows back over a sweep while it was open)'));
     for (const request of marks) lines.push(`  ${pc.cyan('~')} ${request.title}`);
+  }
+
+  const archiveMarks = plan.archiveMarks ?? [];
+  if (archiveMarks.length > 0) {
+    lines.push(
+      pc.bold('\nArchived flags (the app saved these rows back over a sweep while it was open)'),
+    );
+    for (const item of archiveMarks) {
+      lines.push(`  ${pc.cyan('~')} ${item.sessionId} -> ${item.to ? 'archived' : 'unarchived'}`);
+    }
   }
 
   return lines;
@@ -214,7 +262,12 @@ export function layoutResultLines(result: ApplyLayoutResult): string[] {
       `\n${result.cardsAssigned} row(s) grouped, ${result.routinesBrought} routine(s) brought` +
         `${result.viewPrefsCarried ? ', filter menu carried' : ''}` +
         `${result.pinsMoved ? `, ${result.pinsMoved} pin(s) moved` : ''}` +
-        `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}.`,
+        `${result.pinsPinned ? `, ${result.pinsPinned} pin(s) added` : ''}` +
+        `${result.pinsUnpinned ? `, ${result.pinsUnpinned} pin(s) removed` : ''}` +
+        `${result.machineViewKeysCarried ? `, ${result.machineViewKeysCarried} sidebar setting(s) carried` : ''}` +
+        `${result.accountPrefsCarried ? `, ${result.accountPrefsCarried} app setting(s) carried` : ''}` +
+        `${result.marksBack ? `, ${result.marksBack} mark(s) written again` : ''}` +
+        `${result.archiveMarksBack ? `, ${result.archiveMarksBack} archived flag(s) written again` : ''}.`,
     ),
   ];
   if (result.written.length > 0) {
@@ -315,7 +368,12 @@ export function layoutPendingCountsChanged(
     before.routinesBrought !== after.routinesBrought ||
     before.viewKeysCarried !== after.viewKeysCarried ||
     (before.pinsMoved ?? 0) !== (after.pinsMoved ?? 0) ||
-    (before.marksBack ?? 0) !== (after.marksBack ?? 0)
+    (before.marksBack ?? 0) !== (after.marksBack ?? 0) ||
+    (before.archiveMarksBack ?? 0) !== (after.archiveMarksBack ?? 0) ||
+    (before.pinsToPin ?? 0) !== (after.pinsToPin ?? 0) ||
+    (before.pinsToUnpin ?? 0) !== (after.pinsToUnpin ?? 0) ||
+    (before.machineViewKeysCarried ?? 0) !== (after.machineViewKeysCarried ?? 0) ||
+    (before.accountPrefsCarried ?? 0) !== (after.accountPrefsCarried ?? 0)
   );
 }
 
@@ -1079,6 +1137,22 @@ export function sweepSummary(report: SweepReport): string[] {
     if (layout.pinsMoved) parts.push(`${layout.pinsMoved} pin${layout.pinsMoved === 1 ? '' : 's'}`);
     if (layout.marksBack)
       parts.push(`${layout.marksBack} mark${layout.marksBack === 1 ? '' : 's'} the app undid`);
+    if (layout.archiveMarksBack)
+      parts.push(
+        `${layout.archiveMarksBack} archived flag${layout.archiveMarksBack === 1 ? '' : 's'} the app undid`,
+      );
+    if (layout.pinsToPin)
+      parts.push(`${layout.pinsToPin} pin${layout.pinsToPin === 1 ? '' : 's'} from other accounts`);
+    if (layout.pinsToUnpin)
+      parts.push(`${layout.pinsToUnpin} pin${layout.pinsToUnpin === 1 ? '' : 's'} to remove`);
+    if (layout.machineViewKeysCarried)
+      parts.push(
+        `${layout.machineViewKeysCarried} sidebar setting${layout.machineViewKeysCarried === 1 ? '' : 's'}`,
+      );
+    if (layout.accountPrefsCarried)
+      parts.push(
+        `${layout.accountPrefsCarried} app setting${layout.accountPrefsCarried === 1 ? '' : 's'}`,
+      );
     // Never written by the sweep itself — see `SweepReport.layout` — so this is
     // always phrased as waiting, dry run or not.
     lines.push(`Layout: ${parts.join(', ')} to bring — foster layout --yes --restart`);

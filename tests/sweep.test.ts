@@ -428,6 +428,10 @@ describe('runSweep — layout preview agrees with what layout --yes would do (fi
       archiveMarksBack: 0,
       routinesBrought: 1,
       viewKeysCarried: 0,
+      pinsToPin: 0,
+      pinsToUnpin: 0,
+      machineViewKeysCarried: 0,
+      accountPrefsCarried: 0,
     });
   });
 });
